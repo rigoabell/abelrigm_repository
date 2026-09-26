@@ -309,9 +309,6 @@ code {
 .dash-sub { color: #cdd5df; margin: 0 0 12px; font-size: 15px; }
 .dash-sub a { color: var(--orange); font-weight: 700; }
 .dash-blurb { color: #d5dbe3; max-width: 620px; margin: 0 0 16px; }
-.url-chip { display: inline-block; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.18); color: #fff; padding: 8px 14px; border-radius: 999px; font-size: 13px; font-family: ui-monospace, Menlo, monospace; }
-.url-chip:hover { background: rgba(255,153,0,0.18); border-color: var(--orange); text-decoration: none; color: #fff; }
-
 /* Quick numbers */
 .quicknums { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 16px; }
 .qn { background: #fff; border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow); text-align: center; }
