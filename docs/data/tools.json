@@ -1,0 +1,473 @@
+{
+  "generatedBy": "dev-setup/build_catalog.py",
+  "count": 30,
+  "categories": [
+    "Core CLI",
+    "Languages & Runtimes",
+    "JS Tooling",
+    "Containers & Cloud",
+    "Databases",
+    "Editors"
+  ],
+  "tools": [
+    {
+      "id": "git",
+      "name": "Git",
+      "category": "Core CLI",
+      "icon": "🔀",
+      "description": "Distributed version control. The foundation of everything.",
+      "check": "git",
+      "install": {
+        "apt": "{{SUDO}} DEBIAN_FRONTEND=noninteractive apt-get install -y git",
+        "dnf": "{{SUDO}} dnf install -y git",
+        "pacman": "{{SUDO}} pacman -Sy --noconfirm git",
+        "zypper": "{{SUDO}} zypper install -y git",
+        "brew": "brew install git",
+        "winget": "winget install --id Git.Git -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install git -y"
+      }
+    },
+    {
+      "id": "curl",
+      "name": "curl",
+      "category": "Core CLI",
+      "icon": "🌐",
+      "description": "Transfer data over the network. Used by most install scripts.",
+      "check": "curl",
+      "install": {
+        "apt": "{{SUDO}} DEBIAN_FRONTEND=noninteractive apt-get install -y curl",
+        "dnf": "{{SUDO}} dnf install -y curl",
+        "pacman": "{{SUDO}} pacman -Sy --noconfirm curl",
+        "zypper": "{{SUDO}} zypper install -y curl",
+        "brew": "brew install curl",
+        "winget": "winget install --id cURL.cURL -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install curl -y"
+      }
+    },
+    {
+      "id": "wget",
+      "name": "wget",
+      "category": "Core CLI",
+      "icon": "📥",
+      "description": "Retrieve files from the web from the command line.",
+      "check": "wget",
+      "install": {
+        "apt": "{{SUDO}} DEBIAN_FRONTEND=noninteractive apt-get install -y wget",
+        "dnf": "{{SUDO}} dnf install -y wget",
+        "pacman": "{{SUDO}} pacman -Sy --noconfirm wget",
+        "zypper": "{{SUDO}} zypper install -y wget",
+        "brew": "brew install wget",
+        "choco": "choco install wget -y"
+      }
+    },
+    {
+      "id": "jq",
+      "name": "jq",
+      "category": "Core CLI",
+      "icon": "🧩",
+      "description": "Command-line JSON processor.",
+      "check": "jq",
+      "install": {
+        "apt": "{{SUDO}} DEBIAN_FRONTEND=noninteractive apt-get install -y jq",
+        "dnf": "{{SUDO}} dnf install -y jq",
+        "pacman": "{{SUDO}} pacman -Sy --noconfirm jq",
+        "zypper": "{{SUDO}} zypper install -y jq",
+        "brew": "brew install jq",
+        "winget": "winget install --id jqlang.jq -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install jq -y"
+      }
+    },
+    {
+      "id": "gh",
+      "name": "GitHub CLI",
+      "category": "Core CLI",
+      "icon": "🐙",
+      "description": "GitHub from the terminal: PRs, issues, repos, auth.",
+      "check": "gh",
+      "install": {
+        "apt": "(type -p wget >/dev/null || {{SUDO}} apt-get install -y wget) && {{SUDO}} mkdir -p -m 755 /etc/apt/keyrings && wget -nv -O- https://cli.github.com/packages/githubcli-archive-keyring.gpg | {{SUDO}} tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null && {{SUDO}} chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\" | {{SUDO}} tee /etc/apt/sources.list.d/github-cli.list >/dev/null && {{SUDO}} apt-get update && {{SUDO}} apt-get install -y gh",
+        "dnf": "{{SUDO}} dnf install -y gh",
+        "pacman": "{{SUDO}} pacman -Sy --noconfirm github-cli",
+        "brew": "brew install gh",
+        "winget": "winget install --id GitHub.cli -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install gh -y"
+      }
+    },
+    {
+      "id": "build-essential",
+      "name": "C/C++ Build Tools",
+      "category": "Core CLI",
+      "icon": "🔨",
+      "description": "Compilers and make (gcc/g++, make). Needed to build native code.",
+      "check": "gcc",
+      "install": {
+        "apt": "{{SUDO}} DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential",
+        "dnf": "{{SUDO}} dnf groupinstall -y 'Development Tools'",
+        "pacman": "{{SUDO}} pacman -Sy --noconfirm base-devel",
+        "zypper": "{{SUDO}} zypper install -y -t pattern devel_basis",
+        "brew": "xcode-select --install || true",
+        "choco": "choco install visualstudio2022buildtools -y"
+      }
+    },
+    {
+      "id": "ripgrep",
+      "name": "ripgrep",
+      "category": "Core CLI",
+      "icon": "🔍",
+      "description": "Blazing-fast recursive code/text search (rg).",
+      "check": "rg",
+      "install": {
+        "apt": "{{SUDO}} DEBIAN_FRONTEND=noninteractive apt-get install -y ripgrep",
+        "dnf": "{{SUDO}} dnf install -y ripgrep",
+        "pacman": "{{SUDO}} pacman -Sy --noconfirm ripgrep",
+        "zypper": "{{SUDO}} zypper install -y ripgrep",
+        "brew": "brew install ripgrep",
+        "winget": "winget install --id BurntSushi.ripgrep.MSVC -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install ripgrep -y"
+      }
+    },
+    {
+      "id": "cmake",
+      "name": "CMake",
+      "category": "Core CLI",
+      "icon": "🧰",
+      "description": "Cross-platform build system generator.",
+      "check": "cmake",
+      "install": {
+        "apt": "{{SUDO}} DEBIAN_FRONTEND=noninteractive apt-get install -y cmake",
+        "dnf": "{{SUDO}} dnf install -y cmake",
+        "pacman": "{{SUDO}} pacman -Sy --noconfirm cmake",
+        "zypper": "{{SUDO}} zypper install -y cmake",
+        "brew": "brew install cmake",
+        "winget": "winget install --id Kitware.CMake -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install cmake -y"
+      }
+    },
+    {
+      "id": "python",
+      "name": "Python 3",
+      "category": "Languages & Runtimes",
+      "icon": "🐍",
+      "description": "Python interpreter, pip and venv.",
+      "check": "python3",
+      "install": {
+        "apt": "{{SUDO}} DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-pip python3-venv",
+        "dnf": "{{SUDO}} dnf install -y python3 python3-pip",
+        "pacman": "{{SUDO}} pacman -Sy --noconfirm python python-pip",
+        "zypper": "{{SUDO}} zypper install -y python3 python3-pip",
+        "brew": "brew install python",
+        "winget": "winget install --id Python.Python.3.12 -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install python -y"
+      }
+    },
+    {
+      "id": "node",
+      "name": "Node.js",
+      "category": "Languages & Runtimes",
+      "icon": "🟩",
+      "description": "JavaScript runtime (includes npm). LTS release.",
+      "check": "node",
+      "install": {
+        "apt": "curl -fsSL https://deb.nodesource.com/setup_lts.x | {{SUDO}} -E bash - && {{SUDO}} apt-get install -y nodejs",
+        "dnf": "curl -fsSL https://rpm.nodesource.com/setup_lts.x | {{SUDO}} -E bash - && {{SUDO}} dnf install -y nodejs",
+        "pacman": "{{SUDO}} pacman -Sy --noconfirm nodejs npm",
+        "brew": "brew install node",
+        "winget": "winget install --id OpenJS.NodeJS.LTS -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install nodejs-lts -y"
+      }
+    },
+    {
+      "id": "go",
+      "name": "Go",
+      "category": "Languages & Runtimes",
+      "icon": "🐹",
+      "description": "The Go programming language toolchain.",
+      "check": "go",
+      "install": {
+        "apt": "{{SUDO}} DEBIAN_FRONTEND=noninteractive apt-get install -y golang-go",
+        "dnf": "{{SUDO}} dnf install -y golang",
+        "pacman": "{{SUDO}} pacman -Sy --noconfirm go",
+        "zypper": "{{SUDO}} zypper install -y go",
+        "brew": "brew install go",
+        "winget": "winget install --id GoLang.Go -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install golang -y"
+      }
+    },
+    {
+      "id": "rust",
+      "name": "Rust",
+      "category": "Languages & Runtimes",
+      "icon": "🦀",
+      "description": "Rust toolchain via rustup (rustc, cargo).",
+      "check": "cargo",
+      "install": {
+        "unix_script": "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
+        "brew": "brew install rustup-init && rustup-init -y",
+        "winget": "winget install --id Rustlang.Rustup -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install rustup.install -y"
+      }
+    },
+    {
+      "id": "java",
+      "name": "Java (OpenJDK)",
+      "category": "Languages & Runtimes",
+      "icon": "☕",
+      "description": "OpenJDK Java Development Kit.",
+      "check": "java",
+      "install": {
+        "apt": "{{SUDO}} DEBIAN_FRONTEND=noninteractive apt-get install -y default-jdk",
+        "dnf": "{{SUDO}} dnf install -y java-latest-openjdk-devel",
+        "pacman": "{{SUDO}} pacman -Sy --noconfirm jdk-openjdk",
+        "zypper": "{{SUDO}} zypper install -y java-openjdk-devel",
+        "brew": "brew install openjdk",
+        "winget": "winget install --id EclipseAdoptium.Temurin.21.JDK -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install temurin -y"
+      }
+    },
+    {
+      "id": "ruby",
+      "name": "Ruby",
+      "category": "Languages & Runtimes",
+      "icon": "💎",
+      "description": "The Ruby programming language.",
+      "check": "ruby",
+      "install": {
+        "apt": "{{SUDO}} DEBIAN_FRONTEND=noninteractive apt-get install -y ruby-full",
+        "dnf": "{{SUDO}} dnf install -y ruby",
+        "pacman": "{{SUDO}} pacman -Sy --noconfirm ruby",
+        "zypper": "{{SUDO}} zypper install -y ruby",
+        "brew": "brew install ruby",
+        "winget": "winget install --id RubyInstallerTeam.Ruby.3.3 -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install ruby -y"
+      }
+    },
+    {
+      "id": "php",
+      "name": "PHP",
+      "category": "Languages & Runtimes",
+      "icon": "🐘",
+      "description": "PHP command-line interpreter.",
+      "check": "php",
+      "install": {
+        "apt": "{{SUDO}} DEBIAN_FRONTEND=noninteractive apt-get install -y php-cli",
+        "dnf": "{{SUDO}} dnf install -y php-cli",
+        "pacman": "{{SUDO}} pacman -Sy --noconfirm php",
+        "zypper": "{{SUDO}} zypper install -y php8",
+        "brew": "brew install php",
+        "choco": "choco install php -y"
+      }
+    },
+    {
+      "id": "dotnet",
+      "name": ".NET SDK",
+      "category": "Languages & Runtimes",
+      "icon": "🟪",
+      "description": "Build C#/F# apps with the .NET SDK.",
+      "check": "dotnet",
+      "install": {
+        "apt": "{{SUDO}} DEBIAN_FRONTEND=noninteractive apt-get install -y dotnet-sdk-8.0",
+        "dnf": "{{SUDO}} dnf install -y dotnet-sdk-8.0",
+        "brew": "brew install --cask dotnet-sdk",
+        "winget": "winget install --id Microsoft.DotNet.SDK.8 -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install dotnet-sdk -y"
+      }
+    },
+    {
+      "id": "deno",
+      "name": "Deno",
+      "category": "Languages & Runtimes",
+      "icon": "🦕",
+      "description": "Secure runtime for JavaScript and TypeScript.",
+      "check": "deno",
+      "install": {
+        "unix_script": "curl -fsSL https://deno.land/install.sh | sh",
+        "brew": "brew install deno",
+        "winget": "winget install --id DenoLand.Deno -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install deno -y"
+      }
+    },
+    {
+      "id": "bun",
+      "name": "Bun",
+      "category": "Languages & Runtimes",
+      "icon": "🍞",
+      "description": "Fast all-in-one JavaScript runtime & toolkit.",
+      "check": "bun",
+      "install": {
+        "unix_script": "curl -fsSL https://bun.sh/install | bash",
+        "npm": "npm install -g bun",
+        "winget": "winget install --id Oven-sh.Bun -e --accept-source-agreements --accept-package-agreements"
+      }
+    },
+    {
+      "id": "yarn",
+      "name": "Yarn",
+      "category": "JS Tooling",
+      "icon": "🧶",
+      "description": "Fast, reliable JavaScript package manager.",
+      "check": "yarn",
+      "install": {
+        "npm": "npm install -g yarn",
+        "brew": "brew install yarn",
+        "winget": "winget install --id Yarn.Yarn -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install yarn -y"
+      }
+    },
+    {
+      "id": "pnpm",
+      "name": "pnpm",
+      "category": "JS Tooling",
+      "icon": "📦",
+      "description": "Fast, disk space efficient package manager.",
+      "check": "pnpm",
+      "install": {
+        "npm": "npm install -g pnpm",
+        "unix_script": "curl -fsSL https://get.pnpm.io/install.sh | sh -",
+        "brew": "brew install pnpm",
+        "winget": "winget install --id pnpm.pnpm -e --accept-source-agreements --accept-package-agreements"
+      }
+    },
+    {
+      "id": "typescript",
+      "name": "TypeScript",
+      "category": "JS Tooling",
+      "icon": "📘",
+      "description": "TypeScript compiler (tsc), installed globally via npm.",
+      "check": "tsc",
+      "install": {
+        "npm": "npm install -g typescript"
+      }
+    },
+    {
+      "id": "vercel",
+      "name": "Vercel CLI",
+      "category": "JS Tooling",
+      "icon": "▲",
+      "description": "Deploy front-end projects to Vercel from the CLI.",
+      "check": "vercel",
+      "install": {
+        "npm": "npm install -g vercel"
+      }
+    },
+    {
+      "id": "docker",
+      "name": "Docker",
+      "category": "Containers & Cloud",
+      "icon": "🐳",
+      "description": "Build and run containers. Uses the official convenience script on Linux.",
+      "check": "docker",
+      "install": {
+        "apt": "curl -fsSL https://get.docker.com | {{SUDO}} sh",
+        "dnf": "curl -fsSL https://get.docker.com | {{SUDO}} sh",
+        "brew": "brew install --cask docker",
+        "winget": "winget install --id Docker.DockerDesktop -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install docker-desktop -y"
+      }
+    },
+    {
+      "id": "kubectl",
+      "name": "kubectl",
+      "category": "Containers & Cloud",
+      "icon": "☸",
+      "description": "The Kubernetes command-line tool.",
+      "check": "kubectl",
+      "install": {
+        "apt": "curl -LO \"https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl\" && {{SUDO}} install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && rm -f kubectl",
+        "dnf": "curl -LO \"https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl\" && {{SUDO}} install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && rm -f kubectl",
+        "brew": "brew install kubectl",
+        "winget": "winget install --id Kubernetes.kubectl -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install kubernetes-cli -y"
+      }
+    },
+    {
+      "id": "terraform",
+      "name": "Terraform",
+      "category": "Containers & Cloud",
+      "icon": "🌍",
+      "description": "Infrastructure as code by HashiCorp.",
+      "check": "terraform",
+      "install": {
+        "apt": "wget -O- https://apt.releases.hashicorp.com/gpg | {{SUDO}} gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && echo \"deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main\" | {{SUDO}} tee /etc/apt/sources.list.d/hashicorp.list && {{SUDO}} apt-get update && {{SUDO}} apt-get install -y terraform",
+        "brew": "brew tap hashicorp/tap && brew install hashicorp/tap/terraform",
+        "winget": "winget install --id Hashicorp.Terraform -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install terraform -y"
+      }
+    },
+    {
+      "id": "awscli",
+      "name": "AWS CLI",
+      "category": "Containers & Cloud",
+      "icon": "☁",
+      "description": "Command-line interface for Amazon Web Services.",
+      "check": "aws",
+      "install": {
+        "unix_script": "(command -v unzip >/dev/null || {{SUDO}} apt-get install -y unzip) && curl -sSL \"https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip\" -o /tmp/awscliv2.zip && unzip -q -o /tmp/awscliv2.zip -d /tmp && {{SUDO}} /tmp/aws/install --update && rm -rf /tmp/aws /tmp/awscliv2.zip",
+        "brew": "brew install awscli",
+        "winget": "winget install --id Amazon.AWSCLI -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install awscli -y"
+      }
+    },
+    {
+      "id": "gcloud",
+      "name": "Google Cloud CLI",
+      "category": "Containers & Cloud",
+      "icon": "☁",
+      "description": "Manage Google Cloud resources from the CLI.",
+      "check": "gcloud",
+      "install": {
+        "unix_script": "curl -fsSL https://sdk.cloud.google.com | bash -s -- --disable-prompts",
+        "brew": "brew install --cask google-cloud-sdk",
+        "winget": "winget install --id Google.CloudSDK -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install gcloudsdk -y"
+      }
+    },
+    {
+      "id": "postgres-client",
+      "name": "PostgreSQL Client",
+      "category": "Databases",
+      "icon": "🐘",
+      "description": "psql and libpq client tools for PostgreSQL.",
+      "check": "psql",
+      "install": {
+        "apt": "{{SUDO}} DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client",
+        "dnf": "{{SUDO}} dnf install -y postgresql",
+        "pacman": "{{SUDO}} pacman -Sy --noconfirm postgresql-libs",
+        "zypper": "{{SUDO}} zypper install -y postgresql",
+        "brew": "brew install libpq",
+        "winget": "winget install --id PostgreSQL.PostgreSQL -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install postgresql -y"
+      }
+    },
+    {
+      "id": "sqlite",
+      "name": "SQLite",
+      "category": "Databases",
+      "icon": "🗄",
+      "description": "Self-contained, serverless SQL database engine.",
+      "check": "sqlite3",
+      "install": {
+        "apt": "{{SUDO}} DEBIAN_FRONTEND=noninteractive apt-get install -y sqlite3",
+        "dnf": "{{SUDO}} dnf install -y sqlite",
+        "pacman": "{{SUDO}} pacman -Sy --noconfirm sqlite",
+        "zypper": "{{SUDO}} zypper install -y sqlite3",
+        "brew": "brew install sqlite",
+        "winget": "winget install --id SQLite.SQLite -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install sqlite -y"
+      }
+    },
+    {
+      "id": "vscode",
+      "name": "Visual Studio Code",
+      "category": "Editors",
+      "icon": "📝",
+      "description": "Popular code editor (great companion to Cursor).",
+      "check": "code",
+      "install": {
+        "apt": "wget -qO- https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /tmp/packages.microsoft.gpg && {{SUDO}} install -D -o root -g root -m 644 /tmp/packages.microsoft.gpg /etc/apt/keyrings/packages.microsoft.gpg && echo \"deb [arch=amd64,arm64,armhf signed-by=/etc/apt/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main\" | {{SUDO}} tee /etc/apt/sources.list.d/vscode.list > /dev/null && rm -f /tmp/packages.microsoft.gpg && {{SUDO}} apt-get update && {{SUDO}} apt-get install -y code",
+        "brew": "brew install --cask visual-studio-code",
+        "winget": "winget install --id Microsoft.VisualStudioCode -e --accept-source-agreements --accept-package-agreements",
+        "choco": "choco install vscode -y"
+      }
+    }
+  ]
+}

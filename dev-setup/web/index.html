@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rig Setup &middot; New Machine Bootstrapper</title>
+  <link rel="stylesheet" href="/web/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">&#128295;</span>
+      <div>
+        <h1>Rig Setup</h1>
+        <p class="tagline">Bootstrap a fresh machine for development</p>
+      </div>
+    </div>
+    <div id="system" class="system-card">
+      <div class="sys-loading">Detecting system&hellip;</div>
+    </div>
+  </header>
+
+  <div id="priv-banner" class="priv-banner hidden"></div>
+
+  <section class="controls">
+    <input id="search" type="search" placeholder="Search tools&hellip;" autocomplete="off" />
+    <select id="filter">
+      <option value="all">All tools</option>
+      <option value="missing">Missing only</option>
+      <option value="installed">Installed only</option>
+    </select>
+    <div class="spacer"></div>
+    <button id="select-missing" class="btn">Select all missing</button>
+    <button id="refresh" class="btn">Refresh</button>
+    <button id="install" class="btn btn-primary" disabled>Install selected (0)</button>
+  </section>
+
+  <main id="catalog" class="catalog">
+    <div class="loading">Loading tool catalog&hellip;</div>
+  </main>
+
+  <section id="console" class="console hidden">
+    <div class="console-head">
+      <span id="console-title">Installation log</span>
+      <button id="console-close" class="btn btn-ghost">Hide</button>
+    </div>
+    <pre id="console-body" class="console-body"></pre>
+  </section>
+
+  <footer class="footer">
+    <span>Standard-library Python app &middot; installs the right way for your OS &middot; nothing runs until you click Install.</span>
+  </footer>
+
+  <script src="/web/app.js"></script>
+</body>
+</html>

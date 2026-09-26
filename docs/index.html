@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dev Hub &middot; Home for all developments</title>
+  <meta name="description" content="A central hub for my development projects, with a one-click machine setup script builder." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="assets/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%97%86%3C/text%3E%3C/svg%3E" />
+</head>
+<body>
+  <header class="nav">
+    <a class="brand" href="#top">
+      <span class="brand-mark">&#9670;</span>
+      <span class="brand-name">Dev&nbsp;Hub</span>
+    </a>
+    <nav class="nav-links">
+      <a href="#projects">Projects</a>
+      <a href="#setup">Machine Setup</a>
+      <a href="#about">About</a>
+      <a class="nav-cta" id="repo-link" href="https://github.com/rigoabell/abelrigm_repository" target="_blank" rel="noopener">GitHub &#8599;</a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <!-- HERO -->
+    <section class="hero">
+      <div class="hero-inner">
+        <p class="eyebrow">Central command for all my developments</p>
+        <h1>Build. Ship. <span class="grad">Repeat.</span></h1>
+        <p class="lede">
+          One place for every project I'm working on &mdash; and a one-click way to
+          turn any fresh machine into a fully-loaded dev environment.
+        </p>
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="#projects">Explore projects</a>
+          <a class="btn" href="#setup">Build my setup script</a>
+        </div>
+        <div class="hero-stats">
+          <div><strong id="stat-tools">30</strong><span>dev tools</span></div>
+          <div><strong>3</strong><span>platforms</span></div>
+          <div><strong>0</strong><span>admin assumptions</span></div>
+        </div>
+      </div>
+      <div class="hero-glow" aria-hidden="true"></div>
+    </section>
+
+    <!-- PROJECTS -->
+    <section id="projects" class="section">
+      <div class="section-head">
+        <h2>Projects</h2>
+        <p>Things I'm building. The hub grows as new projects land here.</p>
+      </div>
+      <div class="project-grid">
+        <article class="project-card featured">
+          <div class="project-top">
+            <span class="project-icon">&#128295;</span>
+            <span class="tag tag-live">Live</span>
+          </div>
+          <h3>Rig Setup</h3>
+          <p>New-machine bootstrapper. Detects your OS and installs the developer
+             tools you need &mdash; without ever assuming you're an admin.</p>
+          <ul class="chips">
+            <li>Python</li><li>Cross-platform</li><li>No-admin aware</li>
+          </ul>
+          <div class="project-actions">
+            <a class="btn btn-sm btn-primary" href="#setup">Get set up</a>
+            <a class="btn btn-sm" href="https://github.com/rigoabell/abelrigm_repository/tree/main/dev-setup" target="_blank" rel="noopener">Source</a>
+          </div>
+        </article>
+
+        <article class="project-card placeholder">
+          <div class="project-top"><span class="project-icon">&#128300;</span><span class="tag">Planned</span></div>
+          <h3>Next project</h3>
+          <p>Reserved slot &mdash; this hub is wired to showcase whatever you build next.</p>
+          <ul class="chips"><li>Coming soon</li></ul>
+        </article>
+
+        <article class="project-card placeholder">
+          <div class="project-top"><span class="project-icon">&#127760;</span><span class="tag">Planned</span></div>
+          <h3>Another idea</h3>
+          <p>Drop a new card in <code>docs/index.html</code> and it shows up here.</p>
+          <ul class="chips"><li>Coming soon</li></ul>
+        </article>
+      </div>
+    </section>
+
+    <!-- MACHINE SETUP / DOWNLOADS -->
+    <section id="setup" class="section">
+      <div class="section-head">
+        <h2>Machine Setup</h2>
+        <p>
+          Pick your platform and the tools you want, then download a ready-to-run
+          setup script. It only elevates when it can and skips admin-only tools
+          with instructions instead of failing.
+        </p>
+      </div>
+
+      <div class="setup">
+        <div class="setup-controls">
+          <div class="os-toggle" role="tablist" aria-label="Target operating system">
+            <button class="os-btn" data-os="auto">Auto-detect</button>
+            <button class="os-btn" data-os="linux">Linux</button>
+            <button class="os-btn" data-os="macos">macOS</button>
+            <button class="os-btn" data-os="windows">Windows</button>
+          </div>
+          <div class="setup-search">
+            <input id="tool-search" type="search" placeholder="Search tools&hellip;" autocomplete="off" />
+          </div>
+          <div class="setup-buttons">
+            <button id="select-all" class="btn btn-sm">Select all</button>
+            <button id="select-none" class="btn btn-sm">Clear</button>
+            <button id="select-essential" class="btn btn-sm">Essentials</button>
+          </div>
+        </div>
+        <p id="os-note" class="os-note"></p>
+
+        <div id="tool-catalog" class="tool-catalog">
+          <div class="loading">Loading catalog&hellip;</div>
+        </div>
+
+        <div class="output">
+          <div class="output-head">
+            <div>
+              <h3 id="output-title">Your setup script</h3>
+              <p id="output-sub" class="output-sub">Select some tools to generate a script.</p>
+            </div>
+            <div class="output-actions">
+              <button id="copy-script" class="btn btn-sm" disabled>Copy</button>
+              <button id="download-script" class="btn btn-sm btn-primary" disabled>Download script</button>
+            </div>
+          </div>
+          <pre id="script-preview" class="script-preview">// Choose a platform and tools above.</pre>
+          <div class="output-foot">
+            <p>Prefer the full app (live UI with install status)?
+              <a id="zip-link" href="https://github.com/rigoabell/abelrigm_repository/archive/refs/heads/main.zip">Download the repo ZIP</a>,
+              then run <code>dev-setup/start.sh</code> (or <code>start.ps1</code>).</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ABOUT -->
+    <section id="about" class="section about">
+      <div class="section-head"><h2>About</h2></div>
+      <p>
+        This is a static site (safe to host on GitHub Pages) that acts as the front
+        door to my projects. The Machine Setup builder runs entirely in your
+        browser &mdash; it never uploads anything and simply generates a script you
+        run locally. The tool catalog is shared with the
+        <a href="https://github.com/rigoabell/abelrigm_repository/tree/main/dev-setup" target="_blank" rel="noopener">Rig Setup</a> app.
+      </p>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>&#9670; Dev Hub</span>
+    <span>Built as a static site for GitHub Pages &middot; setup runs client-side.</span>
+  </footer>
+
+  <script src="assets/app.js"></script>
+</body>
+</html>
