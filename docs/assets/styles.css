@@ -154,7 +154,8 @@ code {
   font-family: var(--font); font-weight: 800; font-size: 14px; cursor: pointer;
 }
 .project-tab:hover { color: var(--text); }
-.project-tab.active { background: #fff; border-color: var(--line); color: var(--ink); }
+.project-tab.active { background: #fff; border-color: var(--line); color: var(--ink); box-shadow: 0 1px 0 #fff; }
+.project-sheet { scroll-margin-top: 76px; }
 .project-stage, #panel-projects, .project-detail {
   background: #fff; border: 1px solid var(--line); border-top: none;
   border-radius: 0 0 12px 12px; padding: 16px; margin-top: 0;

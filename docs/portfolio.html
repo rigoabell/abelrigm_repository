@@ -40,7 +40,7 @@
         <div class="project-sheet">
         <div class="project-tabs" role="tablist" aria-label="Open projects">
           <button type="button" class="project-tab active" data-tab="projects" role="tab" aria-selected="true">Projects</button>
-          <button type="button" class="project-tab hidden" data-tab="rig-setup" id="tab-rig-setup" role="tab" aria-selected="false">Rig Setup</button>
+          <button type="button" class="project-tab hidden" data-tab="rig-setup" id="rig-setup" role="tab" aria-selected="false" aria-controls="project-rig-setup">Rig Setup</button>
         </div>
 
         <div id="panel-projects">
@@ -57,7 +57,7 @@
           </div>
         </div>
 
-        <div id="rig-setup" class="project-detail hidden" role="tabpanel">
+        <div id="project-rig-setup" class="project-detail hidden" role="tabpanel" aria-labelledby="rig-setup">
           <header class="project-doc-head">
             <div>
               <h2>Rig Setup</h2>
@@ -140,11 +140,12 @@
   <script>
     (function () {
       var projectsPanel = document.getElementById("panel-projects");
+      var sheet = document.querySelector(".project-sheet");
       function showTab(id) {
         var project = id && id !== "projects";
-        if (projectsPanel) projectsPanel.classList.toggle("hidden", project);
+        if (projectsPanel) projectsPanel.classList.toggle("hidden", !!project);
         document.querySelectorAll(".project-detail").forEach(function (panel) {
-          panel.classList.toggle("hidden", panel.id !== id);
+          panel.classList.toggle("hidden", panel.getAttribute("aria-labelledby") !== id);
         });
         document.querySelectorAll(".project-tab").forEach(function (tab) {
           var on = tab.getAttribute("data-tab") === (project ? id : "projects");
@@ -155,12 +156,12 @@
         document.querySelectorAll(".project-row").forEach(function (row) {
           row.classList.toggle("selected", row.getAttribute("data-project") === id);
         });
-        var next = project ? "#" + id : location.pathname + location.search;
         if (project) {
           if (location.hash !== "#" + id) history.replaceState(null, "", "#" + id);
         } else if (location.hash) {
-          history.replaceState(null, "", next);
+          history.replaceState(null, "", location.pathname + location.search);
         }
+        if (sheet) sheet.scrollIntoView({ block: "start" });
       }
       document.querySelectorAll(".project-row").forEach(function (row) {
         row.addEventListener("click", function () {
@@ -173,7 +174,7 @@
         });
       });
       var hash = location.hash.replace("#", "");
-      if (hash && document.getElementById(hash)) showTab(hash);
+      if (hash && document.querySelector('.project-tab[data-tab="' + hash + '"]')) showTab(hash);
     })();
   </script>
 </body>
