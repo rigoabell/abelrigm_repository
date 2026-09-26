@@ -323,10 +323,13 @@ function updateInstallerHint() {
   const os = resolvedOs();
   const n = fullIds(os).size;
   buttons.forEach((btn) => { btn.disabled = n === 0; });
-  const html = os === "windows"
-    ? `Then double-click <code>rig-setup.bat</code> in Downloads. It installs all ${n} tools.`
-    : `Then run <code>bash ~/Downloads/rig-setup.sh</code>. It installs all ${n} tools.`;
-  steps.forEach((step) => { step.innerHTML = html; });
+  const label = os === "windows"
+    ? "In Downloads, double-click this file"
+    : "In Terminal, run this command";
+  const command = os === "windows" ? "rig-setup.bat" : "bash ~/Downloads/rig-setup.sh";
+  document.querySelectorAll(".run-label").forEach((el) => { el.textContent = label; });
+  document.querySelectorAll("[data-tool-count]").forEach((el) => { el.textContent = String(n); });
+  steps.forEach((step) => { step.textContent = command; });
 }
 
 function updateOutput() {

@@ -143,11 +143,24 @@ code {
 .port-tab { border: 0; background: transparent; color: var(--muted); padding: 8px 16px; border-radius: 999px; font-weight: 700; font-size: 14px; cursor: pointer; font-family: var(--font); }
 .port-tab:hover { color: var(--text); }
 .port-tab.active { background: var(--ink); color: #fff; }
-.rig-download { max-width: 720px; padding: 28px; }
-.rig-download h2 { margin: 0 0 8px; }
-.rig-download p { margin: 0 0 16px; color: var(--muted); }
-.rig-download .run-step { margin: 14px 0 0; color: var(--ink); font-size: 16px; font-weight: 700; }
-.rig-download .run-step code { background: var(--band-2); color: var(--ink); }
+.rig-panel {
+  display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr);
+  gap: 32px; align-items: center; padding: 32px 36px; width: 100%;
+}
+.rig-panel h2 { margin: 0 0 8px; font-size: 32px; }
+.rig-lead { margin: 0; color: var(--muted); font-size: 16px; max-width: 420px; }
+.rig-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 16px; }
+.rig-next { width: 100%; }
+.rig-next-label {
+  display: block; margin-bottom: 8px; color: var(--muted-2);
+  font-size: 12px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase;
+}
+.rig-command {
+  display: block; margin: 0; background: var(--ink); color: #fff;
+  border-radius: 10px; padding: 14px 16px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 15px; font-weight: 600; line-height: 1.4;
+}
 .setup-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .os-toggle { display: inline-flex; background: var(--band); border: 1px solid var(--line); border-radius: 999px; padding: 4px; gap: 4px; }
 .os-btn { border: 0; background: transparent; color: var(--muted); padding: 8px 15px; border-radius: 999px; font-weight: 700; font-size: 13px; cursor: pointer; font-family: var(--font); }
@@ -285,6 +298,8 @@ code {
 
 @media (max-width: 780px) {
   .topnav-links { display: none; }
+  .rig-panel { grid-template-columns: 1fr; padding: 22px; gap: 20px; }
+  .rig-panel h2 { font-size: 26px; }
   .hero-metrics { grid-template-columns: repeat(2, 1fr); }
   .quicknums { grid-template-columns: repeat(2, 1fr); }
   .footer-inner { flex-direction: column; align-items: flex-start; }
