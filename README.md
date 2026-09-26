@@ -10,9 +10,10 @@ Central hub for my developments, plus tooling to set up a fresh machine.
 ## Contents
 
 - **`docs/` — Dev Hub website** (static, GitHub Pages ready). A landing page for
-  my projects with a **Machine Setup** installer: one download sets up every
-  tool (`bash ~/Downloads/rig-setup.sh` on Mac/Linux, double-click
-  `rig-setup.bat` on Windows). A picker can still build a smaller script.
+  my projects. The full **Rig Setup** download lives on the Portfolio page,
+  under the Rig Setup tab (`bash ~/Downloads/rig-setup.sh` on Mac/Linux,
+  double-click `rig-setup.bat` on Windows). The Toolkit page can still build
+  a smaller script.
   Everything runs in your browser; nothing is uploaded.
 - **`dev-setup/` — Rig Setup app.** A dependency-free (Python standard library)
   local web app that detects your OS and installs the developer tools you need,
