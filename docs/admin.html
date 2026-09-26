@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Admin &middot; Dev Hub</title>
+  <meta name="robots" content="noindex" />
+  <link rel="stylesheet" href="assets/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='18' fill='%23232F3E'/%3E%3Ctext x='50' y='68' font-size='58' text-anchor='middle' fill='%23FF9900' font-family='Arial'%3ED%3C/text%3E%3C/svg%3E" />
+</head>
+<body data-page="admin">
+  <header class="topnav">
+    <div class="topnav-inner">
+      <a class="brand" href="index.html"><span class="brand-badge">D</span><span class="brand-text">Dev&nbsp;Hub</span></a>
+      <nav class="topnav-links" aria-label="Primary">
+        <a data-nav="index" href="index.html">Dashboard</a>
+        <a data-nav="portfolio" href="portfolio.html">Portfolio</a>
+        <a data-nav="toolkit" href="toolkit.html">Toolkit</a>
+        <a data-nav="admin" href="admin.html">Admin</a>
+      </nav>
+      <a class="identity" id="identity-link" href="#" target="_blank" rel="noopener">
+        <img class="id-avatar" data-avatar alt="" />
+        <span class="id-meta"><span id="id-name" class="id-name"></span><span id="id-login" class="id-login"></span></span>
+      </a>
+    </div>
+  </header>
+
+  <section class="page-hero">
+    <div class="container">
+      <p class="eyebrow">Admin</p>
+      <h1>Private control panel</h1>
+      <p class="page-hero-sub">For <span data-text="name"></span> (<span data-text="login"></span>) only.</p>
+    </div>
+  </section>
+
+  <main>
+    <section class="section">
+      <div class="container">
+
+        <!-- Gate -->
+        <div id="admin-gate" class="admin-gate card">
+          <span class="lock-emoji">&#128274;</span>
+          <h2>Enter passphrase</h2>
+          <form id="admin-form" autocomplete="off">
+            <input id="admin-pass" type="password" placeholder="Passphrase" autocomplete="current-password" />
+            <button type="submit" class="btn btn-primary">Unlock</button>
+          </form>
+          <p id="admin-error" class="admin-error"></p>
+          <p class="admin-warning">
+            Heads up: this is a <strong>soft gate</strong> on a public site &mdash; it deters casual
+            snooping only. Anything shown after unlocking is technically visible in the page
+            source, so nothing secret is stored here.
+          </p>
+        </div>
+
+        <!-- Panel (revealed after unlock) -->
+        <div id="admin-panel" class="admin-panel hidden">
+          <div class="admin-bar">
+            <span class="admin-ok">&#9989; Unlocked</span>
+            <button id="admin-lock" class="btn btn-outline btn-sm">Lock again</button>
+          </div>
+
+          <div class="admin-grid">
+            <a class="admin-tile" data-admin-link="repo" target="_blank" rel="noopener"><span>&#128193;</span>Repository</a>
+            <a class="admin-tile" data-admin-link="actions" target="_blank" rel="noopener"><span>&#9881;&#65039;</span>Actions / Deploys</a>
+            <a class="admin-tile" data-admin-link="pages" target="_blank" rel="noopener"><span>&#127760;</span>Pages settings</a>
+            <a class="admin-tile" data-admin-link="readme" target="_blank" rel="noopener"><span>&#128221;</span>Edit README</a>
+            <a class="admin-tile" data-admin-link="newissue" target="_blank" rel="noopener"><span>&#128295;</span>New issue</a>
+            <a class="admin-tile" data-admin-link="pageslive" target="_blank" rel="noopener"><span>&#128640;</span>Live site</a>
+          </div>
+
+          <div class="admin-notes card">
+            <div class="admin-notes-head">
+              <h3>Private notes</h3>
+              <span id="notes-status" class="notes-status"></span>
+            </div>
+            <p class="notes-hint">Saved only in this browser (localStorage). Never uploaded or committed.</p>
+            <textarea id="admin-notes" rows="8" placeholder="Jot ideas, TODOs, links&hellip;"></textarea>
+          </div>
+
+          <p class="admin-warning">
+            Reminder: to keep something truly private, don't put it on this public
+            page. Use a private repo or an auth-gated host instead.
+          </p>
+        </div>
+
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container footer-inner">
+      <span class="brand small"><span class="brand-badge">D</span> Dev Hub</span>
+      <span class="footer-note">&copy; <span id="year"></span> <span data-text="name"></span> (<span data-text="login"></span>)</span>
+    </div>
+  </footer>
+
+  <script src="assets/config.js"></script>
+  <script src="assets/site.js"></script>
+  <script src="assets/admin.js"></script>
+</body>
+</html>

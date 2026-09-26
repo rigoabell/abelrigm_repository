@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Portfolio &middot; Dev Hub</title>
+  <link rel="stylesheet" href="assets/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='18' fill='%23232F3E'/%3E%3Ctext x='50' y='68' font-size='58' text-anchor='middle' fill='%23FF9900' font-family='Arial'%3ED%3C/text%3E%3C/svg%3E" />
+</head>
+<body data-page="portfolio">
+  <header class="topnav">
+    <div class="topnav-inner">
+      <a class="brand" href="index.html"><span class="brand-badge">D</span><span class="brand-text">Dev&nbsp;Hub</span></a>
+      <nav class="topnav-links" aria-label="Primary">
+        <a data-nav="index" href="index.html">Dashboard</a>
+        <a data-nav="portfolio" href="portfolio.html">Portfolio</a>
+        <a data-nav="toolkit" href="toolkit.html">Toolkit</a>
+        <a data-nav="admin" href="admin.html">Admin</a>
+      </nav>
+      <a class="identity" id="identity-link" href="#" target="_blank" rel="noopener">
+        <img class="id-avatar" data-avatar alt="" />
+        <span class="id-meta"><span id="id-name" class="id-name"></span><span id="id-login" class="id-login"></span></span>
+      </a>
+    </div>
+  </header>
+
+  <section class="page-hero">
+    <div class="container">
+      <p class="eyebrow">Portfolio</p>
+      <h1>Selected work &amp; current progress</h1>
+      <p class="page-hero-sub">
+        What <span data-text="name"></span> (<span data-text="login"></span>) is building &mdash; with status and impact.
+      </p>
+    </div>
+  </section>
+
+  <main>
+    <section class="section">
+      <div class="container">
+        <div class="project-grid">
+          <article class="project-card featured">
+            <div class="project-head">
+              <span class="project-icon">&#128295;</span>
+              <span class="status status-live">Live</span>
+            </div>
+            <h3>Rig Setup</h3>
+            <p class="project-desc">
+              A new-machine bootstrapper: detects your OS and installs the developer
+              tools you need &mdash; without ever assuming you're an administrator.
+            </p>
+            <ul class="impact">
+              <li><strong>30 tools</strong> across 6 categories</li>
+              <li><strong>3 platforms</strong>: Linux, macOS, Windows</li>
+              <li><strong>Zero-prereq</strong>: runs on a bare machine</li>
+            </ul>
+            <div class="project-actions">
+              <a class="btn btn-primary btn-sm" href="toolkit.html">Use it now</a>
+              <a class="btn btn-outline btn-sm" data-href="repo" target="_blank" rel="noopener">Source</a>
+            </div>
+          </article>
+
+          <article class="project-card">
+            <div class="project-head"><span class="project-icon">&#128300;</span><span class="status status-progress">In progress</span></div>
+            <h3>Next initiative</h3>
+            <p class="project-desc">Reserved slot &mdash; this hub is wired to showcase the next project as it lands.</p>
+            <ul class="impact"><li>Scoping &amp; design</li></ul>
+          </article>
+
+          <article class="project-card">
+            <div class="project-head"><span class="project-icon">&#127760;</span><span class="status status-planned">Planned</span></div>
+            <h3>Future project</h3>
+            <p class="project-desc">Add a card in <code>docs/portfolio.html</code> and it appears here.</p>
+            <ul class="impact"><li>Backlog</li></ul>
+          </article>
+        </div>
+
+        <div class="milestones">
+          <h3>Recent milestones</h3>
+          <ol class="timeline">
+            <li><span class="tl-dot"></span><div><strong>Rig Setup shipped</strong><p>Cross-platform installer with a live web UI and privilege-aware, no-admin installs.</p></div></li>
+            <li><span class="tl-dot"></span><div><strong>Team Toolkit went live</strong><p>Self-serve setup-script builder published to the web for the whole team.</p></div></li>
+            <li><span class="tl-dot"></span><div><strong>Dev Hub launched</strong><p>One front door for the portfolio and the tools.</p></div></li>
+          </ol>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container footer-inner">
+      <span class="brand small"><span class="brand-badge">D</span> Dev Hub</span>
+      <span class="footer-note">&copy; <span id="year"></span> <span data-text="name"></span> (<span data-text="login"></span>)</span>
+    </div>
+  </footer>
+
+  <script src="assets/config.js"></script>
+  <script src="assets/site.js"></script>
+</body>
+</html>

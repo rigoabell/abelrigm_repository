@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Toolkit &middot; Dev Hub</title>
+  <link rel="stylesheet" href="assets/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='18' fill='%23232F3E'/%3E%3Ctext x='50' y='68' font-size='58' text-anchor='middle' fill='%23FF9900' font-family='Arial'%3ED%3C/text%3E%3C/svg%3E" />
+</head>
+<body data-page="toolkit">
+  <header class="topnav">
+    <div class="topnav-inner">
+      <a class="brand" href="index.html"><span class="brand-badge">D</span><span class="brand-text">Dev&nbsp;Hub</span></a>
+      <nav class="topnav-links" aria-label="Primary">
+        <a data-nav="index" href="index.html">Dashboard</a>
+        <a data-nav="portfolio" href="portfolio.html">Portfolio</a>
+        <a data-nav="toolkit" href="toolkit.html">Toolkit</a>
+        <a data-nav="admin" href="admin.html">Admin</a>
+      </nav>
+      <a class="identity" id="identity-link" href="#" target="_blank" rel="noopener">
+        <img class="id-avatar" data-avatar alt="" />
+        <span class="id-meta"><span id="id-name" class="id-name"></span><span id="id-login" class="id-login"></span></span>
+      </a>
+    </div>
+  </header>
+
+  <section class="page-hero">
+    <div class="container">
+      <p class="eyebrow">Team Toolkit</p>
+      <h1>Set up your machine in minutes</h1>
+      <p class="page-hero-sub">
+        Pick your platform and the tools you need, then download a ready-to-run
+        setup script. It runs in your browser &mdash; nothing is uploaded &mdash;
+        only elevates when it can, and skips admin-only tools with instructions.
+      </p>
+    </div>
+  </section>
+
+  <main>
+    <section class="section">
+      <div class="container">
+        <div class="setup card">
+          <div class="setup-controls">
+            <div class="os-toggle" role="tablist" aria-label="Target operating system">
+              <button class="os-btn" data-os="auto">Auto-detect</button>
+              <button class="os-btn" data-os="linux">Linux</button>
+              <button class="os-btn" data-os="macos">macOS</button>
+              <button class="os-btn" data-os="windows">Windows</button>
+            </div>
+            <div class="setup-search">
+              <input id="tool-search" type="search" placeholder="Search tools&hellip;" autocomplete="off" />
+            </div>
+            <div class="setup-buttons">
+              <button id="select-essential" class="btn btn-outline btn-sm">Essentials</button>
+              <button id="select-all" class="btn btn-outline btn-sm">Select all</button>
+              <button id="select-none" class="btn btn-outline btn-sm">Clear</button>
+            </div>
+          </div>
+          <p id="os-note" class="os-note"></p>
+
+          <div id="tool-catalog" class="tool-catalog">
+            <div class="loading">Loading catalog&hellip;</div>
+          </div>
+
+          <div class="output">
+            <div class="output-head">
+              <div>
+                <h3 id="output-title">Your setup script</h3>
+                <p id="output-sub" class="output-sub">Select some tools to generate a script.</p>
+              </div>
+              <div class="output-actions">
+                <button id="copy-script" class="btn btn-outline btn-sm" disabled>Copy</button>
+                <button id="download-script" class="btn btn-primary btn-sm" disabled>Download script</button>
+              </div>
+            </div>
+            <pre id="script-preview" class="script-preview">// Choose a platform and tools above.</pre>
+            <div class="output-foot">
+              <p>Prefer the full app (live UI with install status)?
+                <a id="zip-link" data-href="repo" href="#">Download the repo ZIP</a>,
+                then run <code>dev-setup/start.sh</code> (or <code>start.ps1</code>).</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container footer-inner">
+      <span class="brand small"><span class="brand-badge">D</span> Dev Hub</span>
+      <span class="footer-note">&copy; <span id="year"></span> <span data-text="name"></span> (<span data-text="login"></span>)</span>
+    </div>
+  </footer>
+
+  <script src="assets/config.js"></script>
+  <script src="assets/site.js"></script>
+  <script src="assets/app.js"></script>
+</body>
+</html>

@@ -354,11 +354,14 @@ function wire() {
 }
 
 async function init() {
+  // Only run on pages that actually host the toolkit builder.
+  if (!document.getElementById("tool-catalog")) return;
   wire();
   try {
     const res = await fetch("data/tools.json", { cache: "no-store" });
     state.data = await res.json();
-    $("#stat-tools").textContent = state.data.count;
+    const stat = $("#stat-tools");
+    if (stat) stat.textContent = state.data.count;
     setOs("auto");
   } catch (err) {
     $("#tool-catalog").innerHTML =
