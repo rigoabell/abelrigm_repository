@@ -3,101 +3,160 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Dev Hub &middot; Home for all developments</title>
-  <meta name="description" content="A central hub for my development projects, with a one-click machine setup script builder." />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <title>Dev Hub &middot; Engineering Portfolio &amp; Team Toolkit</title>
+  <meta name="description" content="Engineering portfolio and self-serve developer toolkit: browse projects and download a one-click machine setup script." />
   <link rel="stylesheet" href="assets/styles.css" />
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%97%86%3C/text%3E%3C/svg%3E" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='18' fill='%23232F3E'/%3E%3Ctext x='50' y='68' font-size='58' text-anchor='middle' fill='%23FF9900' font-family='Arial'%3ED%3C/text%3E%3C/svg%3E" />
 </head>
-<body>
-  <header class="nav">
-    <a class="brand" href="#top">
-      <span class="brand-mark">&#9670;</span>
-      <span class="brand-name">Dev&nbsp;Hub</span>
-    </a>
-    <nav class="nav-links">
-      <a href="#projects">Projects</a>
-      <a href="#setup">Machine Setup</a>
-      <a href="#about">About</a>
-      <a class="nav-cta" id="repo-link" href="https://github.com/rigoabell/abelrigm_repository" target="_blank" rel="noopener">GitHub &#8599;</a>
-    </nav>
+<body id="top">
+  <!-- Top corporate nav -->
+  <header class="topnav">
+    <div class="topnav-inner">
+      <a class="brand" href="#top">
+        <span class="brand-badge">D</span>
+        <span class="brand-text">Dev&nbsp;Hub</span>
+      </a>
+      <nav class="topnav-links" aria-label="Primary">
+        <a href="#audiences">Overview</a>
+        <a href="#projects">Portfolio</a>
+        <a href="#setup">Toolkit</a>
+        <a href="#about">About</a>
+      </nav>
+      <div class="topnav-actions">
+        <a id="repo-link" class="link-muted" href="https://github.com/rigoabell/abelrigm_repository" target="_blank" rel="noopener">GitHub</a>
+        <a class="btn btn-primary btn-sm" href="#setup">Open toolkit</a>
+      </div>
+    </div>
   </header>
 
-  <main id="top">
-    <!-- HERO -->
-    <section class="hero">
-      <div class="hero-inner">
-        <p class="eyebrow">Central command for all my developments</p>
-        <h1>Build. Ship. <span class="grad">Repeat.</span></h1>
-        <p class="lede">
-          One place for every project I'm working on &mdash; and a one-click way to
-          turn any fresh machine into a fully-loaded dev environment.
-        </p>
-        <div class="hero-actions">
-          <a class="btn btn-primary" href="#projects">Explore projects</a>
-          <a class="btn" href="#setup">Build my setup script</a>
-        </div>
-        <div class="hero-stats">
-          <div><strong id="stat-tools">30</strong><span>dev tools</span></div>
-          <div><strong>3</strong><span>platforms</span></div>
-          <div><strong>0</strong><span>admin assumptions</span></div>
-        </div>
+  <!-- Hero -->
+  <section class="hero">
+    <div class="hero-inner">
+      <p class="eyebrow">Engineering Portfolio &amp; Team Toolkit</p>
+      <h1>Everything I'm building, in one place.</h1>
+      <p class="lede">
+        A single home for my engineering work &mdash; a portfolio that shows
+        progress and impact for leadership, and a self-serve toolkit where the
+        team can grab and set up the tools I build.
+      </p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="#projects">View the portfolio</a>
+        <a class="btn btn-secondary" href="#setup">Get set up in minutes</a>
       </div>
-      <div class="hero-glow" aria-hidden="true"></div>
-    </section>
+      <dl class="hero-metrics">
+        <div><dt id="stat-tools">30</dt><dd>Developer tools</dd></div>
+        <div><dt>3</dt><dd>Platforms supported</dd></div>
+        <div><dt>1&#43;</dt><dd>Projects shipped</dd></div>
+        <div><dt>100%</dt><dd>Self-serve</dd></div>
+      </dl>
+    </div>
+  </section>
 
-    <!-- PROJECTS -->
-    <section id="projects" class="section">
-      <div class="section-head">
-        <h2>Projects</h2>
-        <p>Things I'm building. The hub grows as new projects land here.</p>
+  <!-- Audience triad -->
+  <section id="audiences" class="band">
+    <div class="container">
+      <div class="section-head center">
+        <h2>Built for how you'll use it</h2>
+        <p>Three ways in, depending on who you are.</p>
       </div>
+      <div class="audience-grid">
+        <article class="audience-card">
+          <span class="au-icon">&#128200;</span>
+          <h3>Leadership</h3>
+          <p>See what's shipping and where it's headed. Track progress, impact,
+             and status at a glance.</p>
+          <a class="link-cta" href="#projects">See the portfolio &rarr;</a>
+        </article>
+        <article class="audience-card">
+          <span class="au-icon">&#128736;</span>
+          <h3>Teammates</h3>
+          <p>Self-serve the tools I've built. Pick your OS, choose what you need,
+             and download a ready-to-run setup script.</p>
+          <a class="link-cta" href="#setup">Get the tools &rarr;</a>
+        </article>
+        <article class="audience-card">
+          <span class="au-icon">&#9889;</span>
+          <h3>Me</h3>
+          <p>Central command for everything I'm developing &mdash; and a fast way
+             to rebuild a machine from scratch.</p>
+          <a class="link-cta" href="#setup">Open command center &rarr;</a>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- Portfolio -->
+  <section id="projects" class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="kicker">Portfolio</span>
+        <h2>Selected work &amp; current progress</h2>
+        <p>What I'm building, with status and impact. Updated as new work lands.</p>
+      </div>
+
       <div class="project-grid">
         <article class="project-card featured">
-          <div class="project-top">
+          <div class="project-head">
             <span class="project-icon">&#128295;</span>
-            <span class="tag tag-live">Live</span>
+            <span class="status status-live">Live</span>
           </div>
           <h3>Rig Setup</h3>
-          <p>New-machine bootstrapper. Detects your OS and installs the developer
-             tools you need &mdash; without ever assuming you're an admin.</p>
-          <ul class="chips">
-            <li>Python</li><li>Cross-platform</li><li>No-admin aware</li>
+          <p class="project-desc">
+            A new-machine bootstrapper: detects your OS and installs the developer
+            tools you need &mdash; without ever assuming you're an administrator.
+          </p>
+          <ul class="impact">
+            <li><strong>30 tools</strong> across 6 categories</li>
+            <li><strong>3 platforms</strong>: Linux, macOS, Windows</li>
+            <li><strong>Zero-prereq</strong>: runs on a bare machine</li>
           </ul>
           <div class="project-actions">
-            <a class="btn btn-sm btn-primary" href="#setup">Get set up</a>
-            <a class="btn btn-sm" href="https://github.com/rigoabell/abelrigm_repository/tree/main/dev-setup" target="_blank" rel="noopener">Source</a>
+            <a class="btn btn-primary btn-sm" href="#setup">Use it now</a>
+            <a class="btn btn-outline btn-sm" href="https://github.com/rigoabell/abelrigm_repository/tree/main/dev-setup" target="_blank" rel="noopener">Source</a>
           </div>
         </article>
 
-        <article class="project-card placeholder">
-          <div class="project-top"><span class="project-icon">&#128300;</span><span class="tag">Planned</span></div>
-          <h3>Next project</h3>
-          <p>Reserved slot &mdash; this hub is wired to showcase whatever you build next.</p>
-          <ul class="chips"><li>Coming soon</li></ul>
+        <article class="project-card">
+          <div class="project-head"><span class="project-icon">&#128300;</span><span class="status status-progress">In progress</span></div>
+          <h3>Next initiative</h3>
+          <p class="project-desc">Reserved slot &mdash; this hub is wired to showcase the next project as it lands.</p>
+          <ul class="impact"><li>Scoping &amp; design</li></ul>
         </article>
 
-        <article class="project-card placeholder">
-          <div class="project-top"><span class="project-icon">&#127760;</span><span class="tag">Planned</span></div>
-          <h3>Another idea</h3>
-          <p>Drop a new card in <code>docs/index.html</code> and it shows up here.</p>
-          <ul class="chips"><li>Coming soon</li></ul>
+        <article class="project-card">
+          <div class="project-head"><span class="project-icon">&#127760;</span><span class="status status-planned">Planned</span></div>
+          <h3>Future project</h3>
+          <p class="project-desc">Add a card in <code>docs/index.html</code> and it appears here automatically.</p>
+          <ul class="impact"><li>Backlog</li></ul>
         </article>
       </div>
-    </section>
 
-    <!-- MACHINE SETUP / DOWNLOADS -->
-    <section id="setup" class="section">
+      <div class="milestones">
+        <h3>Recent milestones</h3>
+        <ol class="timeline">
+          <li><span class="tl-dot"></span><div><strong>Rig Setup shipped</strong><p>Cross-platform installer with a live web UI and privilege-aware, no-admin installs.</p></div></li>
+          <li><span class="tl-dot"></span><div><strong>Team Toolkit went live</strong><p>Self-serve setup-script builder published to the web for the whole team.</p></div></li>
+          <li><span class="tl-dot"></span><div><strong>Dev Hub launched</strong><p>One front door for the portfolio and the tools.</p></div></li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- Toolkit / setup builder -->
+  <section id="setup" class="band">
+    <div class="container">
       <div class="section-head">
-        <h2>Machine Setup</h2>
+        <span class="kicker">Team Toolkit</span>
+        <h2>Set up your machine in minutes</h2>
         <p>
-          Pick your platform and the tools you want, then download a ready-to-run
-          setup script. It only elevates when it can and skips admin-only tools
-          with instructions instead of failing.
+          Pick your platform and the tools you need, then download a ready-to-run
+          setup script. It runs in your browser &mdash; nothing is uploaded &mdash;
+          only elevates when it can, and skips admin-only tools with instructions
+          instead of failing.
         </p>
       </div>
 
-      <div class="setup">
+      <div class="setup card">
         <div class="setup-controls">
           <div class="os-toggle" role="tablist" aria-label="Target operating system">
             <button class="os-btn" data-os="auto">Auto-detect</button>
@@ -109,9 +168,9 @@
             <input id="tool-search" type="search" placeholder="Search tools&hellip;" autocomplete="off" />
           </div>
           <div class="setup-buttons">
-            <button id="select-all" class="btn btn-sm">Select all</button>
-            <button id="select-none" class="btn btn-sm">Clear</button>
-            <button id="select-essential" class="btn btn-sm">Essentials</button>
+            <button id="select-essential" class="btn btn-outline btn-sm">Essentials</button>
+            <button id="select-all" class="btn btn-outline btn-sm">Select all</button>
+            <button id="select-none" class="btn btn-outline btn-sm">Clear</button>
           </div>
         </div>
         <p id="os-note" class="os-note"></p>
@@ -127,8 +186,8 @@
               <p id="output-sub" class="output-sub">Select some tools to generate a script.</p>
             </div>
             <div class="output-actions">
-              <button id="copy-script" class="btn btn-sm" disabled>Copy</button>
-              <button id="download-script" class="btn btn-sm btn-primary" disabled>Download script</button>
+              <button id="copy-script" class="btn btn-outline btn-sm" disabled>Copy</button>
+              <button id="download-script" class="btn btn-primary btn-sm" disabled>Download script</button>
             </div>
           </div>
           <pre id="script-preview" class="script-preview">// Choose a platform and tools above.</pre>
@@ -139,24 +198,33 @@
           </div>
         </div>
       </div>
-    </section>
+    </div>
+  </section>
 
-    <!-- ABOUT -->
-    <section id="about" class="section about">
-      <div class="section-head"><h2>About</h2></div>
+  <!-- About -->
+  <section id="about" class="section">
+    <div class="container about">
+      <div class="section-head">
+        <span class="kicker">About</span>
+        <h2>About this hub</h2>
+      </div>
       <p>
-        This is a static site (safe to host on GitHub Pages) that acts as the front
-        door to my projects. The Machine Setup builder runs entirely in your
-        browser &mdash; it never uploads anything and simply generates a script you
-        run locally. The tool catalog is shared with the
+        This is a static site (hosted on GitHub Pages) that serves as the front
+        door to my engineering work. The portfolio tracks what's shipping for
+        leadership; the toolkit lets teammates self-serve the tools I build. The
+        setup builder runs entirely in your browser &mdash; it never uploads
+        anything and simply generates a script you run locally. Its catalog is
+        shared with the
         <a href="https://github.com/rigoabell/abelrigm_repository/tree/main/dev-setup" target="_blank" rel="noopener">Rig Setup</a> app.
       </p>
-    </section>
-  </main>
+    </div>
+  </section>
 
   <footer class="footer">
-    <span>&#9670; Dev Hub</span>
-    <span>Built as a static site for GitHub Pages &middot; setup runs client-side.</span>
+    <div class="container footer-inner">
+      <span class="brand small"><span class="brand-badge">D</span> Dev Hub</span>
+      <span class="footer-note">Engineering portfolio &amp; team toolkit &middot; static site on GitHub Pages &middot; setup runs client-side.</span>
+    </div>
   </footer>
 
   <script src="assets/app.js"></script>
