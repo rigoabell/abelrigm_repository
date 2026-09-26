@@ -3,6 +3,7 @@ window.SITE = {
   // Your display name (GitHub has no name set, so edit this to taste).
   name: "Rigo Abell",
   login: "abelrigm",
+  loginUrl: "https://atoz.amazon.work/phonetool/users/abelrigm",
   avatar: "https://avatars.githubusercontent.com/u/159498581?v=4",
   profileUrl: "https://github.com/rigoabell",
   role: "Tier 3 Quality Process Assistant",

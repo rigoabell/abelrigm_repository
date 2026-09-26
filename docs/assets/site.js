@@ -13,15 +13,28 @@
     if (S.avatar) { el.src = S.avatar; el.alt = S.name || S.login || ""; }
   });
   set("id-name", function (el) { el.textContent = S.name || S.login || ""; });
-  set("id-login", function (el) { el.textContent = S.login ? "@" + S.login : ""; });
-  set("identity-link", function (el) { if (S.profileUrl) el.href = S.profileUrl; });
+  set("id-login", function (el) {
+    el.textContent = S.login ? "@" + S.login : "";
+    if (S.loginUrl && el.tagName === "A") el.href = S.loginUrl;
+  });
 
   // Any element that wants the profile/repo/pages URLs.
   document.querySelectorAll("[data-href='repo']").forEach(function (a) { a.href = S.repoUrl; });
   document.querySelectorAll("[data-href='profile']").forEach(function (a) { a.href = S.profileUrl; });
+  document.querySelectorAll("[data-href='login']").forEach(function (a) { if (S.loginUrl) a.href = S.loginUrl; });
   document.querySelectorAll("[data-href='pages']").forEach(function (a) { a.href = S.pagesUrl; });
   document.querySelectorAll("[data-text='name']").forEach(function (e) { e.textContent = S.name || S.login || ""; });
-  document.querySelectorAll("[data-text='login']").forEach(function (e) { e.textContent = S.login ? "@" + S.login : ""; });
+  document.querySelectorAll("[data-text='login']").forEach(function (e) {
+    var label = S.login ? "@" + S.login : "";
+    e.textContent = label;
+    if (!S.loginUrl || !label || e.closest("a")) return;
+    var a = document.createElement("a");
+    a.href = S.loginUrl;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.textContent = label;
+    e.replaceWith(a);
+  });
   document.querySelectorAll("[data-text='role']").forEach(function (e) { e.textContent = S.role || ""; });
 
   // Active nav item based on <body data-page="...">.

@@ -203,6 +203,9 @@ code {
 .id-meta { display: flex; flex-direction: column; line-height: 1.15; }
 .id-name { font-weight: 700; font-size: 14px; color: #fff; }
 .id-login { font-size: 12px; color: var(--orange); }
+.id-login:hover { color: #ffc14d; }
+.page-hero a, .footer-note a { color: var(--orange); }
+.page-hero a:hover, .footer-note a:hover { color: #ffc14d; }
 
 .hidden { display: none !important; }
 .eyebrow { color: var(--orange); font-weight: 700; text-transform: uppercase; letter-spacing: 1.4px; font-size: 12.5px; margin: 0 0 12px; }
