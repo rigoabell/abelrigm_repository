@@ -17,6 +17,7 @@
         <a data-nav="toolkit" href="toolkit.html">Toolkit</a>
         <a data-nav="admin" href="admin.html">Admin</a>
       </nav>
+      <button type="button" class="btn btn-primary btn-sm nav-download" data-download="all" disabled>Download Rig Setup</button>
       <div class="identity">
         <img class="id-avatar" data-avatar alt="" />
         <span class="id-meta"><span id="id-name" class="id-name"></span><a id="id-login" class="id-login" href="#" target="_blank" rel="noopener"></a></span>
@@ -26,12 +27,13 @@
 
   <section class="page-hero">
     <div class="container">
-      <p class="eyebrow">Team Toolkit</p>
-      <h1>Set up your machine in minutes</h1>
-      <p class="page-hero-sub">
-        Download one installer. It sets up every tool in the catalog.
-        On Mac or Linux that is a single <code>bash</code> command. On Windows, double-click the file.
-      </p>
+      <p class="eyebrow">Rig Setup</p>
+      <h1>Download Rig Setup</h1>
+      <p class="page-hero-sub">One file. It installs every developer tool.</p>
+      <div class="hero-cta">
+        <button type="button" class="btn btn-primary btn-lg" data-download="all" disabled>Download Rig Setup</button>
+        <p class="hero-run run-step">Loading the one-step command&hellip;</p>
+      </div>
     </div>
   </section>
 
@@ -39,15 +41,7 @@
     <section class="section">
       <div class="container">
         <div class="setup card">
-          <div class="install-all">
-            <div>
-              <h2>Install every tool</h2>
-              <p id="run-step" class="run-step">Loading the installer&hellip;</p>
-            </div>
-            <button id="download-all" class="btn btn-primary" disabled>Download installer</button>
-          </div>
-
-          <p class="install-optional">Optional: choose a smaller set below, then download only those.</p>
+          <p class="install-optional">Optional: choose a smaller set, then download only those.</p>
 
           <div class="setup-controls">
             <div class="os-toggle" role="tablist" aria-label="Target operating system">

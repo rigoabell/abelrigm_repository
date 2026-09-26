@@ -312,22 +312,21 @@ function wrapWindowsBat(ps1) {
 }
 
 function updateInstallerHint() {
-  const step = $("#run-step");
-  const btn = $("#download-all");
-  if (!step || !btn) return;
+  const steps = document.querySelectorAll(".run-step");
+  const buttons = document.querySelectorAll("[data-download='all']");
+  if (!steps.length && !buttons.length) return;
   if (!state.data) {
-    step.textContent = "Loading the installer\u2026";
-    btn.disabled = true;
+    steps.forEach((step) => { step.textContent = "Loading the installer\u2026"; });
+    buttons.forEach((btn) => { btn.disabled = true; });
     return;
   }
   const os = resolvedOs();
   const n = fullIds(os).size;
-  btn.disabled = n === 0;
-  if (os === "windows") {
-    step.innerHTML = `Downloads <code>rig-setup.bat</code> (${n} tools). Double-click it in Downloads. Nothing else to set up.`;
-  } else {
-    step.innerHTML = `Downloads <code>rig-setup.sh</code> (${n} tools). Then run <code>bash ~/Downloads/rig-setup.sh</code>`;
-  }
+  buttons.forEach((btn) => { btn.disabled = n === 0; });
+  const html = os === "windows"
+    ? `Then double-click <code>rig-setup.bat</code> in Downloads. It installs all ${n} tools.`
+    : `Then run <code>bash ~/Downloads/rig-setup.sh</code>. It installs all ${n} tools.`;
+  steps.forEach((step) => { step.innerHTML = html; });
 }
 
 function updateOutput() {
@@ -373,26 +372,35 @@ function toast(msg) {
 // ---- Wire up ---------------------------------------------------------------
 function wire() {
   $$(".os-btn").forEach((b) => b.addEventListener("click", () => setOs(b.getAttribute("data-os"))));
-  $("#tool-search").addEventListener("input", (e) => { state.query = e.target.value; renderCatalog(); });
+  const search = $("#tool-search");
+  if (search) search.addEventListener("input", (e) => { state.query = e.target.value; renderCatalog(); });
 
-  $("#select-all").addEventListener("click", () => {
-    const os = resolvedOs();
-    for (const t of state.data.tools) if (isAvailable(t, os)) state.selected.add(t.id);
-    renderCatalog(); updateOutput();
-  });
-  $("#select-none").addEventListener("click", () => {
-    state.selected.clear(); renderCatalog(); updateOutput();
-  });
-  $("#select-essential").addEventListener("click", () => {
-    const os = resolvedOs();
-    state.selected.clear();
-    for (const t of state.data.tools) if (ESSENTIALS.has(t.id) && isAvailable(t, os)) state.selected.add(t.id);
-    renderCatalog(); updateOutput();
-  });
+  const selectAll = $("#select-all");
+  if (selectAll) {
+    selectAll.addEventListener("click", () => {
+      const os = resolvedOs();
+      for (const t of state.data.tools) if (isAvailable(t, os)) state.selected.add(t.id);
+      renderCatalog(); updateOutput();
+    });
+  }
+  const selectNone = $("#select-none");
+  if (selectNone) {
+    selectNone.addEventListener("click", () => {
+      state.selected.clear(); renderCatalog(); updateOutput();
+    });
+  }
+  const selectEssential = $("#select-essential");
+  if (selectEssential) {
+    selectEssential.addEventListener("click", () => {
+      const os = resolvedOs();
+      state.selected.clear();
+      for (const t of state.data.tools) if (ESSENTIALS.has(t.id) && isAvailable(t, os)) state.selected.add(t.id);
+      renderCatalog(); updateOutput();
+    });
+  }
 
-  const downloadAll = $("#download-all");
-  if (downloadAll) {
-    downloadAll.addEventListener("click", () => {
+  $$("[data-download='all']").forEach((btn) => {
+    btn.addEventListener("click", () => {
       if (!state.data) return;
       const os = resolvedOs();
       const fname = installerName(os);
@@ -401,9 +409,11 @@ function wire() {
         ? "Downloaded rig-setup.bat \u2014 double-click it"
         : "Downloaded rig-setup.sh \u2014 run: bash ~/Downloads/rig-setup.sh");
     });
-  }
+  });
 
-  $("#download-script").addEventListener("click", () => {
+  const downloadSelected = $("#download-script");
+  if (!downloadSelected) return;
+  downloadSelected.addEventListener("click", () => {
     const os = resolvedOs();
     const fname = os === "windows" ? "setup.bat" : "setup.sh";
     download(fname, currentScript());
@@ -425,18 +435,25 @@ function wire() {
 }
 
 async function init() {
-  // Only run on pages that actually host the toolkit builder.
-  if (!document.getElementById("tool-catalog")) return;
+  const hasBuilder = !!document.getElementById("tool-catalog");
+  const hasDownload = !!document.querySelector("[data-download='all']");
+  if (!hasBuilder && !hasDownload) return;
   wire();
   try {
     const res = await fetch("data/tools.json", { cache: "no-store" });
     state.data = await res.json();
     const stat = $("#stat-tools");
     if (stat) stat.textContent = state.data.count;
-    setOs("auto");
+    if (hasBuilder) setOs("auto");
+    else updateInstallerHint();
   } catch (err) {
-    $("#tool-catalog").innerHTML =
-      `<div class="loading">Failed to load catalog: ${escapeHtml(err.message)}</div>`;
+    const catalog = $("#tool-catalog");
+    if (catalog) {
+      catalog.innerHTML = `<div class="loading">Failed to load catalog: ${escapeHtml(err.message)}</div>`;
+    }
+    document.querySelectorAll(".run-step").forEach((el) => {
+      el.textContent = "Could not load the installer.";
+    });
   }
 }
 
