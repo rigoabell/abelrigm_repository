@@ -254,7 +254,6 @@ code {
 #admin-pass { flex: 1; min-width: 220px; background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 11px 12px; font-size: 15px; font-family: var(--font); }
 #admin-pass:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px rgba(35,47,62,0.08); outline: none; }
 .admin-error { color: #c7511f; font-weight: 700; min-height: 20px; margin: 12px 0 0; }
-.admin-warning { color: var(--muted); font-size: 13px; background: var(--orange-050); border: 1px solid #ffd699; border-radius: 10px; padding: 12px 14px; margin: 16px 0 0; }
 .admin-panel { }
 .admin-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
 .admin-ok { color: #1b8a4b; font-weight: 800; }
