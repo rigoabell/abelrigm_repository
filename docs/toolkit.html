@@ -17,22 +17,23 @@
         <a data-nav="toolkit" href="toolkit.html">Toolkit</a>
         <a data-nav="admin" href="admin.html">Admin</a>
       </nav>
-      <a class="identity" id="identity-link" href="#" target="_blank" rel="noopener">
+      <button type="button" class="btn btn-primary btn-sm nav-download" data-download="all" disabled>Download Rig Setup</button>
+      <div class="identity">
         <img class="id-avatar" data-avatar alt="" />
-        <span class="id-meta"><span id="id-name" class="id-name"></span><span id="id-login" class="id-login"></span></span>
-      </a>
+        <span class="id-meta"><span id="id-name" class="id-name"></span><a id="id-login" class="id-login" href="#" target="_blank" rel="noopener"></a></span>
+      </div>
     </div>
   </header>
 
   <section class="page-hero">
     <div class="container">
-      <p class="eyebrow">Team Toolkit</p>
-      <h1>Set up your machine in minutes</h1>
-      <p class="page-hero-sub">
-        Pick your platform and the tools you need, then download a ready-to-run
-        setup script. It runs in your browser &mdash; nothing is uploaded &mdash;
-        only elevates when it can, and skips admin-only tools with instructions.
-      </p>
+      <p class="eyebrow">Rig Setup</p>
+      <h1>Download Rig Setup</h1>
+      <p class="page-hero-sub">One file. It installs every developer tool.</p>
+      <div class="hero-cta">
+        <button type="button" class="btn btn-primary btn-lg" data-download="all" disabled>Download Rig Setup</button>
+        <p class="hero-run run-step">Loading the one-step command&hellip;</p>
+      </div>
     </div>
   </section>
 
@@ -40,6 +41,8 @@
     <section class="section">
       <div class="container">
         <div class="setup card">
+          <p class="install-optional">Optional: choose a smaller set, then download only those.</p>
+
           <div class="setup-controls">
             <div class="os-toggle" role="tablist" aria-label="Target operating system">
               <button class="os-btn" data-os="auto">Auto-detect</button>
@@ -70,7 +73,7 @@
               </div>
               <div class="output-actions">
                 <button id="copy-script" class="btn btn-outline btn-sm" disabled>Copy</button>
-                <button id="download-script" class="btn btn-primary btn-sm" disabled>Download script</button>
+                <button id="download-script" class="btn btn-outline btn-sm" disabled>Download selected</button>
               </div>
             </div>
             <pre id="script-preview" class="script-preview">// Choose a platform and tools above.</pre>
