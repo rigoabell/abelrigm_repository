@@ -22,7 +22,6 @@
   document.querySelectorAll("[data-href='repo']").forEach(function (a) { a.href = S.repoUrl; });
   document.querySelectorAll("[data-href='profile']").forEach(function (a) { a.href = S.profileUrl; });
   document.querySelectorAll("[data-href='login']").forEach(function (a) { if (S.loginUrl) a.href = S.loginUrl; });
-  document.querySelectorAll("[data-href='pages']").forEach(function (a) { a.href = S.pagesUrl; });
   document.querySelectorAll("[data-text='name']").forEach(function (e) { e.textContent = S.name || S.login || ""; });
   document.querySelectorAll("[data-text='login']").forEach(function (e) {
     var label = S.login ? "@" + S.login : "";
