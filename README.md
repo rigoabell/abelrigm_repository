@@ -29,7 +29,7 @@ python3 -m http.server 8080 --directory docs
 2. In the repo: **Settings → Pages → Build and deployment → Source: GitHub Actions**.
 3. The workflow in [`.github/workflows/pages.yml`](.github/workflows/pages.yml)
    deploys `docs/` on every push to `main` (and via **Run workflow**).
-4. The site publishes at `https://rigoabell.github.io/abelrigm_respository/`.
+4. The site publishes at `https://rigoabell.github.io/abelrigm_repository/`.
 
 ## Run the Rig Setup app
 

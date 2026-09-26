@@ -1,7 +1,7 @@
 "use strict";
 
 // Repo coordinates used for ZIP/source links. Update BRANCH after merging to main.
-const REPO = "rigoabell/abelrigm_respository";
+const REPO = "rigoabell/abelrigm_repository";
 const BRANCH = "main";
 
 const ESSENTIALS = new Set([
