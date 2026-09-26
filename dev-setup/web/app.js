@@ -25,13 +25,25 @@ function statusBadge(tool) {
     if (s === "installing") return `<span class="badge installing">Installing&hellip;</span>`;
     if (s === "installed") return `<span class="badge installed">Installed</span>`;
     if (s === "failed") return `<span class="badge failed">Failed</span>`;
+    if (s === "needs_admin") return `<span class="badge admin">Needs admin</span>`;
     if (s === "unsupported") return `<span class="badge unsupported">Unsupported</span>`;
     if (s === "queued") return `<span class="badge installing">Queued</span>`;
   }
   if (tool.installed) return `<span class="badge installed">Installed</span>`;
   if (!tool.installable) return `<span class="badge unsupported">No installer</span>`;
-  return `<span class="badge missing">Not installed</span>`;
+  const adminTag = (tool.needs_admin && state.system && !state.system.can_elevate)
+    ? `<span class="badge admin" title="Requires administrator rights on this machine">Admin</span>`
+    : "";
+  return `<span class="badge missing">Not installed</span>${adminTag}`;
 }
+
+const ELEVATION_LABELS = {
+  root: "root (full access)",
+  admin: "administrator",
+  sudo: "standard user + sudo",
+  "sudo-password": "standard user (sudo needs password)",
+  none: "standard user (no admin)",
+};
 
 function renderSystem() {
   const s = state.system;
@@ -39,13 +51,26 @@ function renderSystem() {
   const pms = s.package_managers_available.length
     ? s.package_managers_available.join(", ")
     : "none";
+  const elevLabel = ELEVATION_LABELS[s.elevation] || s.elevation || "unknown";
+  const privClass = s.can_elevate ? "priv-ok" : "priv-limited";
   $("#system").innerHTML = `
     <div class="kv"><span class="k">OS</span><span class="v">${escapeHtml(s.os_pretty)}</span></div>
     <div class="kv"><span class="k">Arch</span><span class="v">${escapeHtml(s.arch)}</span></div>
+    <div class="kv"><span class="k">User</span><span class="v">${escapeHtml(s.user || "?")}</span></div>
+    <div class="kv"><span class="k">Privileges</span><span class="v ${privClass}">${escapeHtml(elevLabel)}</span></div>
     <div class="kv"><span class="k">Package mgr</span><span class="v">${escapeHtml(s.package_manager || "none")}</span></div>
-    <div class="kv"><span class="k">Available</span><span class="v">${escapeHtml(pms)}</span></div>
     <div class="kv"><span class="k">Python</span><span class="v">${escapeHtml(s.python)}</span></div>
   `;
+  const banner = $("#priv-banner");
+  if (!s.can_elevate) {
+    banner.classList.remove("hidden");
+    banner.textContent =
+      "You're not an administrator on this machine. Tools that can install " +
+      "without admin rights are ready to go; tools marked \u201cAdmin\u201d need " +
+      "elevation (sudo/root) and will be skipped with instructions instead of failing.";
+  } else {
+    banner.classList.add("hidden");
+  }
 }
 
 function escapeHtml(str) {

@@ -43,7 +43,7 @@ WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 #            Methods: apt, dnf, pacman, zypper, brew, winget, choco,
 #                     unix_script, npm  (chosen automatically at install time)
 
-APT = "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y"
+APT = "{{SUDO}} DEBIAN_FRONTEND=noninteractive apt-get install -y"
 
 CATALOG = [
     # ---- Core CLI ----------------------------------------------------------
@@ -52,8 +52,8 @@ CATALOG = [
         "description": "Distributed version control. The foundation of everything.",
         "check": "git", "version": ["git", "--version"],
         "install": {
-            "apt": f"{APT} git", "dnf": "sudo dnf install -y git",
-            "pacman": "sudo pacman -Sy --noconfirm git", "zypper": "sudo zypper install -y git",
+            "apt": f"{APT} git", "dnf": "{{SUDO}} dnf install -y git",
+            "pacman": "{{SUDO}} pacman -Sy --noconfirm git", "zypper": "{{SUDO}} zypper install -y git",
             "brew": "brew install git",
             "winget": "winget install --id Git.Git -e --accept-source-agreements --accept-package-agreements",
             "choco": "choco install git -y",
@@ -64,8 +64,8 @@ CATALOG = [
         "description": "Transfer data over the network. Used by most install scripts.",
         "check": "curl", "version": ["curl", "--version"],
         "install": {
-            "apt": f"{APT} curl", "dnf": "sudo dnf install -y curl",
-            "pacman": "sudo pacman -Sy --noconfirm curl", "zypper": "sudo zypper install -y curl",
+            "apt": f"{APT} curl", "dnf": "{{SUDO}} dnf install -y curl",
+            "pacman": "{{SUDO}} pacman -Sy --noconfirm curl", "zypper": "{{SUDO}} zypper install -y curl",
             "brew": "brew install curl",
             "winget": "winget install --id cURL.cURL -e --accept-source-agreements --accept-package-agreements",
             "choco": "choco install curl -y",
@@ -76,8 +76,8 @@ CATALOG = [
         "description": "Retrieve files from the web from the command line.",
         "check": "wget", "version": ["wget", "--version"],
         "install": {
-            "apt": f"{APT} wget", "dnf": "sudo dnf install -y wget",
-            "pacman": "sudo pacman -Sy --noconfirm wget", "zypper": "sudo zypper install -y wget",
+            "apt": f"{APT} wget", "dnf": "{{SUDO}} dnf install -y wget",
+            "pacman": "{{SUDO}} pacman -Sy --noconfirm wget", "zypper": "{{SUDO}} zypper install -y wget",
             "brew": "brew install wget", "choco": "choco install wget -y",
         },
     },
@@ -86,8 +86,8 @@ CATALOG = [
         "description": "Command-line JSON processor.",
         "check": "jq", "version": ["jq", "--version"],
         "install": {
-            "apt": f"{APT} jq", "dnf": "sudo dnf install -y jq",
-            "pacman": "sudo pacman -Sy --noconfirm jq", "zypper": "sudo zypper install -y jq",
+            "apt": f"{APT} jq", "dnf": "{{SUDO}} dnf install -y jq",
+            "pacman": "{{SUDO}} pacman -Sy --noconfirm jq", "zypper": "{{SUDO}} zypper install -y jq",
             "brew": "brew install jq",
             "winget": "winget install --id jqlang.jq -e --accept-source-agreements --accept-package-agreements",
             "choco": "choco install jq -y",
@@ -98,16 +98,16 @@ CATALOG = [
         "description": "GitHub from the terminal: PRs, issues, repos, auth.",
         "check": "gh", "version": ["gh", "--version"],
         "install": {
-            "apt": ("(type -p wget >/dev/null || sudo apt-get install -y wget) "
-                    "&& sudo mkdir -p -m 755 /etc/apt/keyrings "
+            "apt": ("(type -p wget >/dev/null || {{SUDO}} apt-get install -y wget) "
+                    "&& {{SUDO}} mkdir -p -m 755 /etc/apt/keyrings "
                     "&& wget -nv -O- https://cli.github.com/packages/githubcli-archive-keyring.gpg "
-                    "| sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null "
-                    "&& sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg "
+                    "| {{SUDO}} tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null "
+                    "&& {{SUDO}} chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg "
                     "&& echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] "
                     "https://cli.github.com/packages stable main\" "
-                    "| sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null "
-                    "&& sudo apt-get update && sudo apt-get install -y gh"),
-            "dnf": "sudo dnf install -y gh", "pacman": "sudo pacman -Sy --noconfirm github-cli",
+                    "| {{SUDO}} tee /etc/apt/sources.list.d/github-cli.list >/dev/null "
+                    "&& {{SUDO}} apt-get update && {{SUDO}} apt-get install -y gh"),
+            "dnf": "{{SUDO}} dnf install -y gh", "pacman": "{{SUDO}} pacman -Sy --noconfirm github-cli",
             "brew": "brew install gh",
             "winget": "winget install --id GitHub.cli -e --accept-source-agreements --accept-package-agreements",
             "choco": "choco install gh -y",
@@ -119,9 +119,9 @@ CATALOG = [
         "check": "gcc", "version": ["gcc", "--version"],
         "install": {
             "apt": f"{APT} build-essential",
-            "dnf": "sudo dnf groupinstall -y 'Development Tools'",
-            "pacman": "sudo pacman -Sy --noconfirm base-devel",
-            "zypper": "sudo zypper install -y -t pattern devel_basis",
+            "dnf": "{{SUDO}} dnf groupinstall -y 'Development Tools'",
+            "pacman": "{{SUDO}} pacman -Sy --noconfirm base-devel",
+            "zypper": "{{SUDO}} zypper install -y -t pattern devel_basis",
             "brew": "xcode-select --install || true",
             "choco": "choco install visualstudio2022buildtools -y",
         },
@@ -131,8 +131,8 @@ CATALOG = [
         "description": "Blazing-fast recursive code/text search (rg).",
         "check": "rg", "version": ["rg", "--version"],
         "install": {
-            "apt": f"{APT} ripgrep", "dnf": "sudo dnf install -y ripgrep",
-            "pacman": "sudo pacman -Sy --noconfirm ripgrep", "zypper": "sudo zypper install -y ripgrep",
+            "apt": f"{APT} ripgrep", "dnf": "{{SUDO}} dnf install -y ripgrep",
+            "pacman": "{{SUDO}} pacman -Sy --noconfirm ripgrep", "zypper": "{{SUDO}} zypper install -y ripgrep",
             "brew": "brew install ripgrep",
             "winget": "winget install --id BurntSushi.ripgrep.MSVC -e --accept-source-agreements --accept-package-agreements",
             "choco": "choco install ripgrep -y",
@@ -143,8 +143,8 @@ CATALOG = [
         "description": "Cross-platform build system generator.",
         "check": "cmake", "version": ["cmake", "--version"],
         "install": {
-            "apt": f"{APT} cmake", "dnf": "sudo dnf install -y cmake",
-            "pacman": "sudo pacman -Sy --noconfirm cmake", "zypper": "sudo zypper install -y cmake",
+            "apt": f"{APT} cmake", "dnf": "{{SUDO}} dnf install -y cmake",
+            "pacman": "{{SUDO}} pacman -Sy --noconfirm cmake", "zypper": "{{SUDO}} zypper install -y cmake",
             "brew": "brew install cmake",
             "winget": "winget install --id Kitware.CMake -e --accept-source-agreements --accept-package-agreements",
             "choco": "choco install cmake -y",
@@ -158,9 +158,9 @@ CATALOG = [
         "check": "python3", "version": ["python3", "--version"],
         "install": {
             "apt": f"{APT} python3 python3-pip python3-venv",
-            "dnf": "sudo dnf install -y python3 python3-pip",
-            "pacman": "sudo pacman -Sy --noconfirm python python-pip",
-            "zypper": "sudo zypper install -y python3 python3-pip",
+            "dnf": "{{SUDO}} dnf install -y python3 python3-pip",
+            "pacman": "{{SUDO}} pacman -Sy --noconfirm python python-pip",
+            "zypper": "{{SUDO}} zypper install -y python3 python3-pip",
             "brew": "brew install python",
             "winget": "winget install --id Python.Python.3.12 -e --accept-source-agreements --accept-package-agreements",
             "choco": "choco install python -y",
@@ -171,9 +171,9 @@ CATALOG = [
         "description": "JavaScript runtime (includes npm). LTS release.",
         "check": "node", "version": ["node", "--version"],
         "install": {
-            "apt": "curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && sudo apt-get install -y nodejs",
-            "dnf": "curl -fsSL https://rpm.nodesource.com/setup_lts.x | sudo -E bash - && sudo dnf install -y nodejs",
-            "pacman": "sudo pacman -Sy --noconfirm nodejs npm",
+            "apt": "curl -fsSL https://deb.nodesource.com/setup_lts.x | {{SUDO}} -E bash - && {{SUDO}} apt-get install -y nodejs",
+            "dnf": "curl -fsSL https://rpm.nodesource.com/setup_lts.x | {{SUDO}} -E bash - && {{SUDO}} dnf install -y nodejs",
+            "pacman": "{{SUDO}} pacman -Sy --noconfirm nodejs npm",
             "brew": "brew install node",
             "winget": "winget install --id OpenJS.NodeJS.LTS -e --accept-source-agreements --accept-package-agreements",
             "choco": "choco install nodejs-lts -y",
@@ -184,8 +184,8 @@ CATALOG = [
         "description": "The Go programming language toolchain.",
         "check": "go", "version": ["go", "version"],
         "install": {
-            "apt": f"{APT} golang-go", "dnf": "sudo dnf install -y golang",
-            "pacman": "sudo pacman -Sy --noconfirm go", "zypper": "sudo zypper install -y go",
+            "apt": f"{APT} golang-go", "dnf": "{{SUDO}} dnf install -y golang",
+            "pacman": "{{SUDO}} pacman -Sy --noconfirm go", "zypper": "{{SUDO}} zypper install -y go",
             "brew": "brew install go",
             "winget": "winget install --id GoLang.Go -e --accept-source-agreements --accept-package-agreements",
             "choco": "choco install golang -y",
@@ -207,8 +207,8 @@ CATALOG = [
         "description": "OpenJDK Java Development Kit.",
         "check": "java", "version": ["java", "-version"],
         "install": {
-            "apt": f"{APT} default-jdk", "dnf": "sudo dnf install -y java-latest-openjdk-devel",
-            "pacman": "sudo pacman -Sy --noconfirm jdk-openjdk", "zypper": "sudo zypper install -y java-openjdk-devel",
+            "apt": f"{APT} default-jdk", "dnf": "{{SUDO}} dnf install -y java-latest-openjdk-devel",
+            "pacman": "{{SUDO}} pacman -Sy --noconfirm jdk-openjdk", "zypper": "{{SUDO}} zypper install -y java-openjdk-devel",
             "brew": "brew install openjdk",
             "winget": "winget install --id EclipseAdoptium.Temurin.21.JDK -e --accept-source-agreements --accept-package-agreements",
             "choco": "choco install temurin -y",
@@ -219,8 +219,8 @@ CATALOG = [
         "description": "The Ruby programming language.",
         "check": "ruby", "version": ["ruby", "--version"],
         "install": {
-            "apt": f"{APT} ruby-full", "dnf": "sudo dnf install -y ruby",
-            "pacman": "sudo pacman -Sy --noconfirm ruby", "zypper": "sudo zypper install -y ruby",
+            "apt": f"{APT} ruby-full", "dnf": "{{SUDO}} dnf install -y ruby",
+            "pacman": "{{SUDO}} pacman -Sy --noconfirm ruby", "zypper": "{{SUDO}} zypper install -y ruby",
             "brew": "brew install ruby",
             "winget": "winget install --id RubyInstallerTeam.Ruby.3.3 -e --accept-source-agreements --accept-package-agreements",
             "choco": "choco install ruby -y",
@@ -231,8 +231,8 @@ CATALOG = [
         "description": "PHP command-line interpreter.",
         "check": "php", "version": ["php", "--version"],
         "install": {
-            "apt": f"{APT} php-cli", "dnf": "sudo dnf install -y php-cli",
-            "pacman": "sudo pacman -Sy --noconfirm php", "zypper": "sudo zypper install -y php8",
+            "apt": f"{APT} php-cli", "dnf": "{{SUDO}} dnf install -y php-cli",
+            "pacman": "{{SUDO}} pacman -Sy --noconfirm php", "zypper": "{{SUDO}} zypper install -y php8",
             "brew": "brew install php", "choco": "choco install php -y",
         },
     },
@@ -241,7 +241,7 @@ CATALOG = [
         "description": "Build C#/F# apps with the .NET SDK.",
         "check": "dotnet", "version": ["dotnet", "--version"],
         "install": {
-            "apt": f"{APT} dotnet-sdk-8.0", "dnf": "sudo dnf install -y dotnet-sdk-8.0",
+            "apt": f"{APT} dotnet-sdk-8.0", "dnf": "{{SUDO}} dnf install -y dotnet-sdk-8.0",
             "brew": "brew install --cask dotnet-sdk",
             "winget": "winget install --id Microsoft.DotNet.SDK.8 -e --accept-source-agreements --accept-package-agreements",
             "choco": "choco install dotnet-sdk -y",
@@ -310,8 +310,8 @@ CATALOG = [
         "description": "Build and run containers. Uses the official convenience script on Linux.",
         "check": "docker", "version": ["docker", "--version"],
         "install": {
-            "apt": "curl -fsSL https://get.docker.com | sudo sh",
-            "dnf": "curl -fsSL https://get.docker.com | sudo sh",
+            "apt": "curl -fsSL https://get.docker.com | {{SUDO}} sh",
+            "dnf": "curl -fsSL https://get.docker.com | {{SUDO}} sh",
             "brew": "brew install --cask docker",
             "winget": "winget install --id Docker.DockerDesktop -e --accept-source-agreements --accept-package-agreements",
             "choco": "choco install docker-desktop -y",
@@ -323,9 +323,9 @@ CATALOG = [
         "check": "kubectl", "version": ["kubectl", "version", "--client"],
         "install": {
             "apt": ('curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" '
-                    "&& sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && rm -f kubectl"),
+                    "&& {{SUDO}} install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && rm -f kubectl"),
             "dnf": ('curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" '
-                    "&& sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && rm -f kubectl"),
+                    "&& {{SUDO}} install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && rm -f kubectl"),
             "brew": "brew install kubectl",
             "winget": "winget install --id Kubernetes.kubectl -e --accept-source-agreements --accept-package-agreements",
             "choco": "choco install kubernetes-cli -y",
@@ -337,11 +337,11 @@ CATALOG = [
         "check": "terraform", "version": ["terraform", "--version"],
         "install": {
             "apt": ("wget -O- https://apt.releases.hashicorp.com/gpg "
-                    "| sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg "
+                    "| {{SUDO}} gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg "
                     "&& echo \"deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] "
                     "https://apt.releases.hashicorp.com $(lsb_release -cs) main\" "
-                    "| sudo tee /etc/apt/sources.list.d/hashicorp.list "
-                    "&& sudo apt-get update && sudo apt-get install -y terraform"),
+                    "| {{SUDO}} tee /etc/apt/sources.list.d/hashicorp.list "
+                    "&& {{SUDO}} apt-get update && {{SUDO}} apt-get install -y terraform"),
             "brew": "brew tap hashicorp/tap && brew install hashicorp/tap/terraform",
             "winget": "winget install --id Hashicorp.Terraform -e --accept-source-agreements --accept-package-agreements",
             "choco": "choco install terraform -y",
@@ -352,9 +352,9 @@ CATALOG = [
         "description": "Command-line interface for Amazon Web Services.",
         "check": "aws", "version": ["aws", "--version"],
         "install": {
-            "unix_script": ('(command -v unzip >/dev/null || sudo apt-get install -y unzip) '
+            "unix_script": ('(command -v unzip >/dev/null || {{SUDO}} apt-get install -y unzip) '
                             '&& curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip '
-                            "&& unzip -q -o /tmp/awscliv2.zip -d /tmp && sudo /tmp/aws/install --update "
+                            "&& unzip -q -o /tmp/awscliv2.zip -d /tmp && {{SUDO}} /tmp/aws/install --update "
                             "&& rm -rf /tmp/aws /tmp/awscliv2.zip"),
             "brew": "brew install awscli",
             "winget": "winget install --id Amazon.AWSCLI -e --accept-source-agreements --accept-package-agreements",
@@ -379,8 +379,8 @@ CATALOG = [
         "description": "psql and libpq client tools for PostgreSQL.",
         "check": "psql", "version": ["psql", "--version"],
         "install": {
-            "apt": f"{APT} postgresql-client", "dnf": "sudo dnf install -y postgresql",
-            "pacman": "sudo pacman -Sy --noconfirm postgresql-libs", "zypper": "sudo zypper install -y postgresql",
+            "apt": f"{APT} postgresql-client", "dnf": "{{SUDO}} dnf install -y postgresql",
+            "pacman": "{{SUDO}} pacman -Sy --noconfirm postgresql-libs", "zypper": "{{SUDO}} zypper install -y postgresql",
             "brew": "brew install libpq",
             "winget": "winget install --id PostgreSQL.PostgreSQL -e --accept-source-agreements --accept-package-agreements",
             "choco": "choco install postgresql -y",
@@ -391,8 +391,8 @@ CATALOG = [
         "description": "Self-contained, serverless SQL database engine.",
         "check": "sqlite3", "version": ["sqlite3", "--version"],
         "install": {
-            "apt": f"{APT} sqlite3", "dnf": "sudo dnf install -y sqlite",
-            "pacman": "sudo pacman -Sy --noconfirm sqlite", "zypper": "sudo zypper install -y sqlite3",
+            "apt": f"{APT} sqlite3", "dnf": "{{SUDO}} dnf install -y sqlite",
+            "pacman": "{{SUDO}} pacman -Sy --noconfirm sqlite", "zypper": "{{SUDO}} zypper install -y sqlite3",
             "brew": "brew install sqlite",
             "winget": "winget install --id SQLite.SQLite -e --accept-source-agreements --accept-package-agreements",
             "choco": "choco install sqlite -y",
@@ -406,11 +406,11 @@ CATALOG = [
         "check": "code", "version": ["code", "--version"],
         "install": {
             "apt": ("wget -qO- https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /tmp/packages.microsoft.gpg "
-                    "&& sudo install -D -o root -g root -m 644 /tmp/packages.microsoft.gpg /etc/apt/keyrings/packages.microsoft.gpg "
+                    "&& {{SUDO}} install -D -o root -g root -m 644 /tmp/packages.microsoft.gpg /etc/apt/keyrings/packages.microsoft.gpg "
                     "&& echo \"deb [arch=amd64,arm64,armhf signed-by=/etc/apt/keyrings/packages.microsoft.gpg] "
                     "https://packages.microsoft.com/repos/code stable main\" "
-                    "| sudo tee /etc/apt/sources.list.d/vscode.list > /dev/null "
-                    "&& rm -f /tmp/packages.microsoft.gpg && sudo apt-get update && sudo apt-get install -y code"),
+                    "| {{SUDO}} tee /etc/apt/sources.list.d/vscode.list > /dev/null "
+                    "&& rm -f /tmp/packages.microsoft.gpg && {{SUDO}} apt-get update && {{SUDO}} apt-get install -y code"),
             "brew": "brew install --cask visual-studio-code",
             "winget": "winget install --id Microsoft.VisualStudioCode -e --accept-source-agreements --accept-package-agreements",
             "choco": "choco install vscode -y",
@@ -476,33 +476,179 @@ def primary_package_manager():
     return available.pop() if available else None
 
 
+# Package managers that always require administrator/root privileges to install
+# into system locations. brew, winget, npm and per-user install scripts operate
+# in user space (or prompt for their own elevation) and are preferred for
+# non-admin accounts.
+SYSTEM_PACKAGE_MANAGERS = {"apt", "dnf", "pacman", "zypper", "choco"}
+
+# Placeholder embedded in every command that would need elevation. It is
+# resolved at run time based on the *detected* privileges of the current user
+# so the app never simply assumes it is running as an administrator.
+SUDO_TOKEN = "{{SUDO}} "
+
+
+def _is_windows_admin():
+    try:
+        import ctypes  # noqa: WPS433 (import inside function is intentional)
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())  # type: ignore[attr-defined]
+    except Exception:
+        return False
+
+
+def _compute_privileges():
+    """Detect what elevation is genuinely available. Never assume admin."""
+    os_id = detect_os()
+    if os_id == "windows":
+        is_admin = _is_windows_admin()
+        return {
+            "is_root": is_admin,
+            "sudo_available": False,
+            "sudo_nopasswd": is_admin,
+            "elevation": "admin" if is_admin else "none",
+        }
+
+    is_root = hasattr(os, "geteuid") and os.geteuid() == 0
+    sudo_available = shutil.which("sudo") is not None
+    sudo_nopasswd = False
+    if not is_root and sudo_available:
+        try:
+            proc = subprocess.run(
+                ["sudo", "-n", "true"], capture_output=True, timeout=5,
+            )
+            sudo_nopasswd = proc.returncode == 0
+        except Exception:
+            sudo_nopasswd = False
+
+    if is_root:
+        elevation = "root"
+    elif sudo_nopasswd:
+        elevation = "sudo"           # can elevate right now without a password
+    elif sudo_available:
+        elevation = "sudo-password"  # sudo exists but would need a password
+    else:
+        elevation = "none"           # ordinary user, no way to elevate
+    return {
+        "is_root": is_root,
+        "sudo_available": sudo_available,
+        "sudo_nopasswd": sudo_nopasswd,
+        "elevation": elevation,
+    }
+
+
+_PRIV_CACHE = None
+_PRIV_LOCK = threading.Lock()
+
+
+def privilege_info(refresh=False):
+    global _PRIV_CACHE
+    with _PRIV_LOCK:
+        if _PRIV_CACHE is None or refresh:
+            _PRIV_CACHE = _compute_privileges()
+        return dict(_PRIV_CACHE)
+
+
+def can_elevate_noninteractive():
+    """True only when we can actually run privileged commands unattended."""
+    priv = privilege_info()
+    return priv["is_root"] or priv["sudo_nopasswd"]
+
+
+def render_command(command):
+    """Resolve the {{SUDO}} placeholder for the current privilege level."""
+    priv = privilege_info()
+    if priv["is_root"]:
+        return command.replace(SUDO_TOKEN, "")
+    return command.replace(SUDO_TOKEN, "sudo ")
+
+
+def method_requires_root(method, command):
+    if SUDO_TOKEN.strip() in command:
+        return True
+    return method in SYSTEM_PACKAGE_MANAGERS
+
+
 def choose_install_command(tool):
-    """Pick the best install command for this host, or (None, reason)."""
+    """Pick the best install command for this host.
+
+    Returns (command, method, needs_admin). When the current account cannot
+    elevate, user-space methods (install scripts, npm, Homebrew, winget) are
+    preferred over system package managers so we never assume admin rights.
+    Returns (None, None, False) when nothing is applicable.
+    """
     installers = tool.get("install", {})
     os_id = detect_os()
     pm = primary_package_manager()
 
-    if pm and pm in installers:
-        return installers[pm], pm
-    if os_id in ("linux", "macos") and "unix_script" in installers:
-        return installers["unix_script"], "unix_script"
+    # Candidate methods in default preference order (package manager first).
+    candidates = []
     if os_id == "windows" and "windows_script" in installers:
-        return installers["windows_script"], "windows_script"
+        candidates.append(("windows_script", installers["windows_script"]))
+    if pm and pm in installers:
+        candidates.append((pm, installers[pm]))
+    if os_id in ("linux", "macos") and "unix_script" in installers:
+        candidates.append(("unix_script", installers["unix_script"]))
     if "npm" in installers and shutil.which("npm"):
-        return installers["npm"], "npm"
+        candidates.append(("npm", installers["npm"]))
     if "brew" in installers and shutil.which("brew"):
-        return installers["brew"], "brew"
-    return None, None
+        candidates.append(("brew", installers["brew"]))
+
+    seen, ordered = set(), []
+    for method, command in candidates:
+        if method in seen:
+            continue
+        seen.add(method)
+        ordered.append((method, command))
+
+    if not ordered:
+        return None, None, False
+
+    no_root = [(m, c) for m, c in ordered if not method_requires_root(m, c)]
+    root_req = [(m, c) for m, c in ordered if method_requires_root(m, c)]
+
+    if can_elevate_noninteractive():
+        method, command = ordered[0]
+        return command, method, method_requires_root(method, command)
+
+    # Not an admin: prefer anything that works without elevation.
+    if no_root:
+        method, command = no_root[0]
+        return command, method, False
+    method, command = root_req[0]
+    return command, method, True
+
+
+def _augmented_path():
+    """PATH plus the per-user bin dirs where no-admin installers place binaries."""
+    home = os.path.expanduser("~")
+    extra = [
+        os.path.join(home, ".local", "bin"),
+        os.path.join(home, "bin"),
+        os.path.join(home, ".cargo", "bin"),
+        os.path.join(home, ".deno", "bin"),
+        os.path.join(home, ".bun", "bin"),
+        os.path.join(home, "go", "bin"),
+        os.path.join(home, ".npm-global", "bin"),
+        os.path.join(home, "AppData", "Local", "Microsoft", "WindowsApps"),
+        "/usr/local/bin", "/opt/homebrew/bin", "/snap/bin",
+    ]
+    parts = (os.environ.get("PATH", "") or "").split(os.pathsep)
+    for entry in extra:
+        if entry and entry not in parts:
+            parts.append(entry)
+    return os.pathsep.join(p for p in parts if p)
 
 
 def detect_tool(tool):
     binary = tool["check"]
-    path = shutil.which(binary)
+    path = shutil.which(binary, path=_augmented_path())
     version = None
     if path and tool.get("version"):
         try:
+            argv = list(tool["version"])
+            argv[0] = path  # run the resolved binary even if it's not on PATH
             proc = subprocess.run(
-                tool["version"], capture_output=True, text=True, timeout=8,
+                argv, capture_output=True, text=True, timeout=8,
             )
             output = (proc.stdout or "") + (proc.stderr or "")
             for line in output.splitlines():
@@ -511,12 +657,12 @@ def detect_tool(tool):
                     break
         except Exception:
             version = None
-    cmd, method = choose_install_command(tool)
+    cmd, method, needs_admin = choose_install_command(tool)
     return {
         "id": tool["id"], "name": tool["name"], "category": tool["category"],
         "icon": tool.get("icon", ""), "description": tool["description"],
         "installed": bool(path), "path": path, "version": version,
-        "installable": bool(cmd), "method": method,
+        "installable": bool(cmd), "method": method, "needs_admin": needs_admin,
     }
 
 
@@ -525,6 +671,7 @@ def catalog_status():
 
 
 def system_info():
+    priv = privilege_info()
     return {
         "os": detect_os(),
         "os_pretty": _os_pretty(),
@@ -533,7 +680,22 @@ def system_info():
         "python": platform.python_version(),
         "package_manager": primary_package_manager(),
         "package_managers_available": available_package_managers(),
+        "user": _current_user(),
+        "elevation": priv["elevation"],
+        "is_admin": priv["is_root"],
+        "can_elevate": can_elevate_noninteractive(),
     }
+
+
+def _current_user():
+    for key in ("USER", "USERNAME", "LOGNAME"):
+        if os.environ.get(key):
+            return os.environ[key]
+    try:
+        import getpass
+        return getpass.getuser()
+    except Exception:
+        return "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -608,24 +770,50 @@ def _run_job(job):
             job.log(f"{tool['name']} already installed ({current['version'] or 'ok'}).", level="ok")
             continue
 
-        command, method = choose_install_command(tool)
+        command, method, needs_admin = choose_install_command(tool)
         if not command:
             with job.lock:
                 job.statuses[tool_id] = "unsupported"
             job.log(f"No install method for {tool['name']} on this system.", level="error")
             continue
 
+        # Never assume admin rights: if the only available method needs
+        # elevation and we cannot elevate unattended, stop and explain instead
+        # of blindly running sudo (which would fail or hang without a TTY).
+        if needs_admin and not can_elevate_noninteractive():
+            priv = privilege_info()
+            with job.lock:
+                job.statuses[tool_id] = "needs_admin"
+            hint = (
+                "no sudo/root available on this account"
+                if priv["elevation"] == "none"
+                else "sudo would require a password, which can't be entered here"
+            )
+            job.log(
+                f"[ADMIN NEEDED] {tool['name']} can only be installed with "
+                f"administrator rights ({hint}).",
+                level="error",
+            )
+            job.log(
+                f"  To install it, re-run with elevation, e.g.:  sudo {method} ...  "
+                f"or ask an administrator. Command that would run:",
+                level="info",
+            )
+            job.log(f"  {render_command(command)}", level="cmd")
+            continue
+
         # Refresh the package index once per job so installs work on a fresh
         # machine with a stale/empty cache.
         if method == "apt" and "apt" not in job.prepared:
             job.log("Refreshing apt package index...", level="step")
-            _stream_command(job, "sudo apt-get update")
+            _stream_command(job, render_command("{{SUDO}} apt-get update"))
             job.prepared.add("apt")
 
         with job.lock:
             job.statuses[tool_id] = "installing"
-        job.log(f"Installing {tool['name']} via {method}...", level="step")
-        rc = _stream_command(job, command)
+        note = " (elevated)" if needs_admin else ""
+        job.log(f"Installing {tool['name']} via {method}{note}...", level="step")
+        rc = _stream_command(job, render_command(command))
 
         # Re-detect to confirm success regardless of exit code quirks.
         after = detect_tool(tool)
