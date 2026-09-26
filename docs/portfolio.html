@@ -37,21 +37,26 @@
   <main>
     <section class="section">
       <div class="container">
-        <div class="project-rows" role="list">
-          <button type="button" class="project-row" data-project="rig-setup" role="listitem" aria-expanded="false">
-            <span class="project-icon" aria-hidden="true">&#128295;</span>
-            <span class="project-row-body">
-              <span class="project-row-name">Rig Setup</span>
-              <span class="project-row-desc">Install Python, Node, Git, and the other dependencies, then follow the steps.</span>
-            </span>
-            <span class="status status-live">Live</span>
-            <span class="project-row-go" aria-hidden="true">&rarr;</span>
-          </button>
+        <div class="project-tabs" role="tablist" aria-label="Open projects">
+          <button type="button" class="project-tab active" data-tab="projects" role="tab" aria-selected="true">Projects</button>
+          <button type="button" class="project-tab hidden" data-tab="rig-setup" id="tab-rig-setup" role="tab" aria-selected="false">Rig Setup</button>
         </div>
 
-        <p id="project-empty" class="project-empty">Select a project to read it and download what it includes.</p>
+        <div id="panel-projects">
+          <div class="project-rows" role="list">
+            <button type="button" class="project-row" data-project="rig-setup" role="listitem">
+              <span class="project-icon" aria-hidden="true">&#128295;</span>
+              <span class="project-row-body">
+                <span class="project-row-name">Rig Setup</span>
+                <span class="project-row-desc">Install Python, Node, Git, and the other dependencies, then follow the steps.</span>
+              </span>
+              <span class="status status-live">Live</span>
+              <span class="project-row-go" aria-hidden="true">&rarr;</span>
+            </button>
+          </div>
+        </div>
 
-        <div id="rig-setup" class="project-detail hidden">
+        <div id="rig-setup" class="project-detail hidden" role="tabpanel">
           <article class="project-card featured">
             <div class="project-head">
               <span class="project-icon">&#128295;</span>
@@ -136,26 +141,41 @@
   <script src="assets/app.js"></script>
   <script>
     (function () {
-      var empty = document.getElementById("project-empty");
-      function openProject(id) {
+      var projectsPanel = document.getElementById("panel-projects");
+      function showTab(id) {
+        var project = id && id !== "projects";
+        if (projectsPanel) projectsPanel.classList.toggle("hidden", project);
         document.querySelectorAll(".project-detail").forEach(function (panel) {
           panel.classList.toggle("hidden", panel.id !== id);
         });
-        document.querySelectorAll(".project-row").forEach(function (row) {
-          var on = row.getAttribute("data-project") === id;
-          row.classList.toggle("selected", on);
-          row.setAttribute("aria-expanded", on ? "true" : "false");
+        document.querySelectorAll(".project-tab").forEach(function (tab) {
+          var on = tab.getAttribute("data-tab") === (project ? id : "projects");
+          tab.classList.toggle("active", on);
+          tab.setAttribute("aria-selected", on ? "true" : "false");
+          if (tab.getAttribute("data-tab") === id) tab.classList.remove("hidden");
         });
-        if (empty) empty.classList.toggle("hidden", !!id);
-        if (id && location.hash !== "#" + id) history.replaceState(null, "", "#" + id);
+        document.querySelectorAll(".project-row").forEach(function (row) {
+          row.classList.toggle("selected", row.getAttribute("data-project") === id);
+        });
+        var next = project ? "#" + id : location.pathname + location.search;
+        if (project) {
+          if (location.hash !== "#" + id) history.replaceState(null, "", "#" + id);
+        } else if (location.hash) {
+          history.replaceState(null, "", next);
+        }
       }
       document.querySelectorAll(".project-row").forEach(function (row) {
         row.addEventListener("click", function () {
-          openProject(row.getAttribute("data-project"));
+          showTab(row.getAttribute("data-project"));
+        });
+      });
+      document.querySelectorAll(".project-tab").forEach(function (tab) {
+        tab.addEventListener("click", function () {
+          showTab(tab.getAttribute("data-tab"));
         });
       });
       var hash = location.hash.replace("#", "");
-      if (hash && document.getElementById(hash)) openProject(hash);
+      if (hash && document.getElementById(hash)) showTab(hash);
     })();
   </script>
 </body>

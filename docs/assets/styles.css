@@ -141,6 +141,17 @@ code {
 .install-optional { color: var(--muted); font-size: 13px; margin: 0 2px 8px; }
 .work-block { margin-bottom: 32px; }
 .project-detail .rig-panel, .project-detail .setup { margin-top: 16px; }
+.project-tabs {
+  display: flex; gap: 6px; align-items: flex-end;
+  border-bottom: 1px solid var(--line); margin: 0 0 16px;
+}
+.project-tab {
+  border: 1px solid transparent; border-bottom: none; background: transparent;
+  color: var(--muted); padding: 10px 16px; border-radius: 10px 10px 0 0;
+  font-family: var(--font); font-weight: 800; font-size: 14px; cursor: pointer;
+}
+.project-tab:hover { color: var(--text); }
+.project-tab.active { background: #fff; border-color: var(--line); color: var(--ink); margin-bottom: -1px; }
 .project-rows { display: flex; flex-direction: column; gap: 10px; }
 .project-row {
   display: flex; align-items: center; gap: 16px; width: 100%; text-align: left;
