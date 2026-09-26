@@ -29,9 +29,8 @@
       <p class="eyebrow">Team Toolkit</p>
       <h1>Set up your machine in minutes</h1>
       <p class="page-hero-sub">
-        Pick your platform and the tools you need, then download a ready-to-run
-        setup script. It runs in your browser &mdash; nothing is uploaded &mdash;
-        only elevates when it can, and skips admin-only tools with instructions.
+        Download one installer. It sets up every tool in the catalog.
+        On Mac or Linux that is a single <code>bash</code> command. On Windows, double-click the file.
       </p>
     </div>
   </section>
@@ -40,6 +39,16 @@
     <section class="section">
       <div class="container">
         <div class="setup card">
+          <div class="install-all">
+            <div>
+              <h2>Install every tool</h2>
+              <p id="run-step" class="run-step">Loading the installer&hellip;</p>
+            </div>
+            <button id="download-all" class="btn btn-primary" disabled>Download installer</button>
+          </div>
+
+          <p class="install-optional">Optional: choose a smaller set below, then download only those.</p>
+
           <div class="setup-controls">
             <div class="os-toggle" role="tablist" aria-label="Target operating system">
               <button class="os-btn" data-os="auto">Auto-detect</button>
@@ -70,7 +79,7 @@
               </div>
               <div class="output-actions">
                 <button id="copy-script" class="btn btn-outline btn-sm" disabled>Copy</button>
-                <button id="download-script" class="btn btn-primary btn-sm" disabled>Download script</button>
+                <button id="download-script" class="btn btn-outline btn-sm" disabled>Download selected</button>
               </div>
             </div>
             <pre id="script-preview" class="script-preview">// Choose a platform and tools above.</pre>

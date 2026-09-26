@@ -137,6 +137,14 @@ code {
 /* Setup builder */
 .card { background: #fff; border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
 .setup { padding: 20px; }
+.install-all {
+  display: flex; align-items: center; justify-content: space-between; gap: 18px; flex-wrap: wrap;
+  background: var(--orange-050); border: 1px solid #ffd699; border-radius: 12px; padding: 16px 18px;
+}
+.install-all h2 { margin: 0 0 4px; font-size: 20px; }
+.run-step { margin: 0; color: var(--ink-2); font-size: 14.5px; max-width: 640px; }
+.run-step code { background: #fff; }
+.install-optional { color: var(--muted); font-size: 13px; margin: 16px 2px 8px; }
 .setup-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .os-toggle { display: inline-flex; background: var(--band); border: 1px solid var(--line); border-radius: 999px; padding: 4px; gap: 4px; }
 .os-btn { border: 0; background: transparent; color: var(--muted); padding: 8px 15px; border-radius: 999px; font-weight: 700; font-size: 13px; cursor: pointer; font-family: var(--font); }
