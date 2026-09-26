@@ -26,11 +26,11 @@
 
   <section class="page-hero">
     <div class="container">
-      <p class="eyebrow">Team Toolkit</p>
-      <h1>Build a smaller setup script</h1>
+      <p class="eyebrow">Toolkit</p>
+      <h1>Tools I built</h1>
       <p class="page-hero-sub">
-        Pick only the tools you want. The full Rig Setup download is on
-        <a href="portfolio.html#rig-setup">Portfolio &rarr; Rig Setup</a>.
+        Software ready to download and use. These are my tools, not a list of
+        Python, Node, or other machine dependencies.
       </p>
     </div>
   </section>
@@ -38,49 +38,26 @@
   <main>
     <section class="section">
       <div class="container">
-        <div class="setup card">
-          <p class="install-optional">Optional: choose a smaller set, then download only those.</p>
-
-          <div class="setup-controls">
-            <div class="os-toggle" role="tablist" aria-label="Target operating system">
-              <button class="os-btn" data-os="auto">Auto-detect</button>
-              <button class="os-btn" data-os="linux">Linux</button>
-              <button class="os-btn" data-os="macos">macOS</button>
-              <button class="os-btn" data-os="windows">Windows</button>
+        <div class="project-grid">
+          <article class="project-card featured">
+            <div class="project-head">
+              <span class="project-icon">&#128295;</span>
+              <span class="status status-live">Ready</span>
             </div>
-            <div class="setup-search">
-              <input id="tool-search" type="search" placeholder="Search tools&hellip;" autocomplete="off" />
+            <h3>Rig Setup</h3>
+            <p class="project-desc">
+              Installs the languages and command-line tools a new machine needs,
+              then tells you the one step to run the file.
+            </p>
+            <ul class="impact">
+              <li>Python, Node, Git, and the rest of that catalog</li>
+              <li>Linux, macOS, and Windows</li>
+              <li>Lives in the portfolio as a project</li>
+            </ul>
+            <div class="project-actions">
+              <a class="btn btn-primary btn-sm" href="portfolio.html#rig-setup">Open in portfolio</a>
             </div>
-            <div class="setup-buttons">
-              <button id="select-essential" class="btn btn-outline btn-sm">Essentials</button>
-              <button id="select-all" class="btn btn-outline btn-sm">Select all</button>
-              <button id="select-none" class="btn btn-outline btn-sm">Clear</button>
-            </div>
-          </div>
-          <p id="os-note" class="os-note"></p>
-
-          <div id="tool-catalog" class="tool-catalog">
-            <div class="loading">Loading catalog&hellip;</div>
-          </div>
-
-          <div class="output">
-            <div class="output-head">
-              <div>
-                <h3 id="output-title">Your setup script</h3>
-                <p id="output-sub" class="output-sub">Select some tools to generate a script.</p>
-              </div>
-              <div class="output-actions">
-                <button id="copy-script" class="btn btn-outline btn-sm" disabled>Copy</button>
-                <button id="download-script" class="btn btn-outline btn-sm" disabled>Download selected</button>
-              </div>
-            </div>
-            <pre id="script-preview" class="script-preview">// Choose a platform and tools above.</pre>
-            <div class="output-foot">
-              <p>Prefer the full app (live UI with install status)?
-                <a id="zip-link" data-href="repo" href="#">Download the repo ZIP</a>,
-                then run <code>dev-setup/start.sh</code> (or <code>start.ps1</code>).</p>
-            </div>
-          </div>
+          </article>
         </div>
       </div>
     </section>
@@ -95,6 +72,5 @@
 
   <script src="assets/config.js"></script>
   <script src="assets/site.js"></script>
-  <script src="assets/app.js"></script>
 </body>
 </html>

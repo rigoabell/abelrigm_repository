@@ -27,9 +27,10 @@
   <section class="page-hero">
     <div class="container">
       <p class="eyebrow">Portfolio</p>
-      <h1>Selected work &amp; current progress</h1>
+      <h1>Work</h1>
       <p class="page-hero-sub">
-        What <span data-text="name"></span> (<span data-text="login"></span>) is building &mdash; with status and impact.
+        What <span data-text="name"></span> (<span data-text="login"></span>) does at Amazon,
+        the tools built along the way, and other work worth keeping in one place.
       </p>
     </div>
   </section>
@@ -37,13 +38,25 @@
   <main>
     <section class="section">
       <div class="container">
-        <div class="port-tabs" role="tablist" aria-label="Portfolio sections">
-          <button type="button" class="port-tab active" data-port-tab="projects" role="tab" aria-selected="true">Projects</button>
-          <button type="button" class="port-tab" data-port-tab="rig" role="tab" aria-selected="false">Rig Setup</button>
+        <div class="work-block">
+          <h2>At Amazon</h2>
+          <p class="work-lead"><span data-text="role"></span>. This is the record of that role: process and quality work, not a software catalog.</p>
+          <article class="project-card featured">
+            <div class="project-head">
+              <span class="project-icon">&#127970;</span>
+              <span class="status status-live">Current</span>
+            </div>
+            <h3 data-text="role"></h3>
+            <p class="project-desc">
+              Quality process work at Amazon. Programs, reviews, and results from
+              the role belong in this section as they are ready to share.
+            </p>
+          </article>
         </div>
 
-        <div id="port-projects">
-        <div class="project-grid">
+        <div class="work-block" id="rig-setup">
+          <h2>Tools developed</h2>
+          <p class="work-lead">Software built to support the work. Rig Setup is a project here, on this page.</p>
           <article class="project-card featured">
             <div class="project-head">
               <span class="project-icon">&#128295;</span>
@@ -51,60 +64,82 @@
             </div>
             <h3>Rig Setup</h3>
             <p class="project-desc">
-              A new-machine bootstrapper: detects your OS and installs the developer
-              tools you need &mdash; without ever assuming you're an administrator.
+              Installs Python, Node, Git, and the other dependencies listed below.
+              Download the file, then run the step beside the button.
             </p>
-            <ul class="impact">
-              <li><strong>30 tools</strong> across 6 categories</li>
-              <li><strong>3 platforms</strong>: Linux, macOS, Windows</li>
-              <li><strong>Zero-prereq</strong>: runs on a bare machine</li>
-            </ul>
-            <div class="project-actions">
-              <button type="button" class="btn btn-primary btn-sm" data-open-tab="rig">Open Rig Setup</button>
-              <a class="btn btn-outline btn-sm" data-href="repo" target="_blank" rel="noopener">Source</a>
-            </div>
           </article>
 
-          <article class="project-card">
-            <div class="project-head"><span class="project-icon">&#128300;</span><span class="status status-progress">In progress</span></div>
-            <h3>Next initiative</h3>
-            <p class="project-desc">Reserved slot &mdash; this hub is wired to showcase the next project as it lands.</p>
-            <ul class="impact"><li>Scoping &amp; design</li></ul>
-          </article>
-
-          <article class="project-card">
-            <div class="project-head"><span class="project-icon">&#127760;</span><span class="status status-planned">Planned</span></div>
-            <h3>Future project</h3>
-            <p class="project-desc">Add a card in <code>docs/portfolio.html</code> and it appears here.</p>
-            <ul class="impact"><li>Backlog</li></ul>
-          </article>
-        </div>
-
-        <div class="milestones">
-          <h3>Recent milestones</h3>
-          <ol class="timeline">
-            <li><span class="tl-dot"></span><div><strong>Rig Setup shipped</strong><p>Cross-platform installer with a live web UI and privilege-aware, no-admin installs.</p></div></li>
-            <li><span class="tl-dot"></span><div><strong>Team Toolkit went live</strong><p>Self-serve setup-script builder published to the web for the whole team.</p></div></li>
-            <li><span class="tl-dot"></span><div><strong>Dev Hub launched</strong><p>One front door for the portfolio and the tools.</p></div></li>
-          </ol>
-        </div>
-        </div>
-
-        <div id="port-rig" class="hidden">
           <section class="rig-panel card">
             <div>
-              <p class="eyebrow">One file</p>
-              <h2>Install every developer tool</h2>
-              <p class="rig-lead">Covers all <span data-tool-count>30</span> tools and skips anything already installed.</p>
+              <p class="eyebrow">How to use it</p>
+              <h2>Get the dependencies</h2>
+              <ol class="rig-howto">
+                <li>Download the installer. It already includes every dependency below.</li>
+                <li>Run that one file. It skips anything already installed.</li>
+                <li>Open a new terminal so the new tools are on your PATH.</li>
+              </ol>
             </div>
             <div class="rig-actions">
-              <button type="button" class="btn btn-primary btn-lg" data-download="all" disabled>Download Rig Setup</button>
+              <button type="button" class="btn btn-primary btn-lg" data-download="all" disabled>Download installer</button>
               <div class="rig-next">
                 <span class="rig-next-label run-label">After it downloads</span>
                 <code class="rig-command run-step">Loading&hellip;</code>
               </div>
             </div>
           </section>
+
+          <div class="setup card">
+            <p class="install-optional">Need fewer dependencies? Pick them here and download only those.</p>
+            <div class="setup-controls">
+              <div class="os-toggle" role="tablist" aria-label="Target operating system">
+                <button class="os-btn" data-os="auto">Auto-detect</button>
+                <button class="os-btn" data-os="linux">Linux</button>
+                <button class="os-btn" data-os="macos">macOS</button>
+                <button class="os-btn" data-os="windows">Windows</button>
+              </div>
+              <div class="setup-search">
+                <input id="tool-search" type="search" placeholder="Search dependencies&hellip;" autocomplete="off" />
+              </div>
+              <div class="setup-buttons">
+                <button id="select-essential" class="btn btn-outline btn-sm">Essentials</button>
+                <button id="select-all" class="btn btn-outline btn-sm">Select all</button>
+                <button id="select-none" class="btn btn-outline btn-sm">Clear</button>
+              </div>
+            </div>
+            <p id="os-note" class="os-note"></p>
+            <div id="tool-catalog" class="tool-catalog">
+              <div class="loading">Loading dependencies&hellip;</div>
+            </div>
+            <div class="output">
+              <div class="output-head">
+                <div>
+                  <h3 id="output-title">Smaller installer</h3>
+                  <p id="output-sub" class="output-sub">Select dependencies to generate a smaller file.</p>
+                </div>
+                <div class="output-actions">
+                  <button id="copy-script" class="btn btn-outline btn-sm" disabled>Copy</button>
+                  <button id="download-script" class="btn btn-outline btn-sm" disabled>Download selected</button>
+                </div>
+              </div>
+              <pre id="script-preview" class="script-preview">// Choose a platform and dependencies above.</pre>
+            </div>
+          </div>
+        </div>
+
+        <div class="work-block">
+          <h2>Other work</h2>
+          <p class="work-lead">Projects that are not Amazon process work and not a downloadable tool.</p>
+          <article class="project-card">
+            <div class="project-head">
+              <span class="project-icon">&#127760;</span>
+              <span class="status status-live">Live</span>
+            </div>
+            <h3>Dev Hub</h3>
+            <p class="project-desc">
+              This site. A public home for the portfolio, the tools, and notes that
+              should sit next to the Amazon work.
+            </p>
+          </article>
         </div>
       </div>
     </section>
@@ -120,31 +155,5 @@
   <script src="assets/config.js"></script>
   <script src="assets/site.js"></script>
   <script src="assets/app.js"></script>
-  <script>
-    (function () {
-      function show(name) {
-        var projects = document.getElementById("port-projects");
-        var rig = document.getElementById("port-rig");
-        if (!projects || !rig) return;
-        projects.classList.toggle("hidden", name !== "projects");
-        rig.classList.toggle("hidden", name !== "rig");
-        document.querySelectorAll("[data-port-tab]").forEach(function (btn) {
-          var on = btn.getAttribute("data-port-tab") === name;
-          btn.classList.toggle("active", on);
-          btn.setAttribute("aria-selected", on ? "true" : "false");
-        });
-        var next = name === "rig" ? "#rig-setup" : location.pathname + location.search;
-        if (location.hash !== next && !(name === "projects" && !location.hash)) {
-          history.replaceState(null, "", next);
-        }
-      }
-      document.querySelectorAll("[data-port-tab], [data-open-tab]").forEach(function (btn) {
-        btn.addEventListener("click", function () {
-          show(btn.getAttribute("data-port-tab") || btn.getAttribute("data-open-tab"));
-        });
-      });
-      if (location.hash === "#rig-setup") show("rig");
-    })();
-  </script>
 </body>
 </html>

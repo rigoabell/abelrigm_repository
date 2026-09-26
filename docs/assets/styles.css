@@ -139,6 +139,12 @@ code {
 .card { background: #fff; border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
 .setup { padding: 20px; }
 .install-optional { color: var(--muted); font-size: 13px; margin: 0 2px 8px; }
+.work-block { margin-bottom: 32px; }
+.work-block .rig-panel, .work-block .setup { margin-top: 16px; }
+.work-block h2 { margin: 0 0 6px; font-size: 22px; }
+.work-lead { margin: 0 0 14px; color: var(--muted); max-width: 720px; }
+.rig-howto { margin: 8px 0 0; padding-left: 18px; color: var(--text); }
+.rig-howto li { margin: 0 0 8px; }
 .port-tabs { display: inline-flex; background: var(--band); border: 1px solid var(--line); border-radius: 999px; padding: 4px; gap: 4px; margin: 0 0 18px; }
 .port-tab { border: 0; background: transparent; color: var(--muted); padding: 8px 16px; border-radius: 999px; font-weight: 700; font-size: 14px; cursor: pointer; font-family: var(--font); }
 .port-tab:hover { color: var(--text); }
