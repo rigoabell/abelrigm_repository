@@ -44,9 +44,30 @@ python3 app.py            # add --no-browser to skip auto-opening the browser
 4. **Re-verifies** — after each install it re-detects the tool to confirm it
    actually landed.
 
-Nothing is installed until you explicitly click Install. Installs that need
-elevated privileges use `sudo` on macOS/Linux (you may be prompted for your
-password in the terminal).
+Nothing is installed until you explicitly click Install.
+
+## It never assumes you're an administrator
+
+The app detects your actual privilege level at runtime — root, a standard user
+with passwordless `sudo`, a user who *has* `sudo` but would need a password, or a
+plain user with no elevation at all — and adapts:
+
+- **Prefers no-admin installs.** When you can't elevate, it automatically picks
+  user-space install methods (rustup, Deno, Bun, pnpm scripts, `npm -g`,
+  Homebrew, `winget`) that drop binaries under your home directory
+  (`~/.cargo/bin`, `~/.deno/bin`, `~/.bun/bin`, `~/.local/bin`, …) — no `sudo`
+  required. Detection also searches those directories so the tool is recognized
+  afterward.
+- **Elevates only when it truly can.** `sudo` is added to a command *only* when
+  you're root or have passwordless `sudo`. It is never assumed.
+- **Flags admin-only tools.** Tools that can only be installed with a system
+  package manager show an amber **Admin** tag. If you can't elevate, clicking
+  Install does **not** blindly run `sudo` (which would fail or hang without a
+  terminal) — it marks the tool **Needs admin** and prints the exact command an
+  administrator would run, so you can hand it off or re-run elevated.
+
+To install admin-only tools yourself, run the launcher with elevation, e.g.
+`sudo ./start.sh` on Linux, or run it from an elevated PowerShell on Windows.
 
 ## Tool catalog (30 tools)
 
