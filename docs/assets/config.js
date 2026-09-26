@@ -2,10 +2,10 @@
 window.SITE = {
   // Your display name (GitHub has no name set, so edit this to taste).
   name: "Rigo Abell",
-  login: "rigoabell",
+  login: "abelrigm",
   avatar: "https://avatars.githubusercontent.com/u/159498581?v=4",
   profileUrl: "https://github.com/rigoabell",
-  role: "Software Engineer",
+  role: "Tier 3 Quality Process Assistant",
   repo: "rigoabell/abelrigm_repository",
   repoUrl: "https://github.com/rigoabell/abelrigm_repository",
   pagesUrl: "https://rigoabell.github.io/abelrigm_repository/",
