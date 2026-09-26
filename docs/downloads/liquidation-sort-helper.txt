@@ -1,0 +1,5092 @@
+// ==UserScript==
+// @name         Liquidation Sort Helper
+// @namespace    https://github.com/liquidation-sort
+// @version      1.11.8
+// @description  Workflow trace in Copy Debug; fix loops (stale sort label vs source scan).
+// @author       You
+// @match        https://us-creturns-web.aka.amazon.com/*
+// @grant        GM_setClipboard
+// @grant        GM_addStyle
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @run-at       document-end
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const SORT_TYPE_VALUE = 'WDSorting';
+  const SORT_TYPE_SELECTOR = '#sort-type-textfield';
+  const SOURCE_CONTAINER_SELECTOR = '#source-container-textfield';
+  const BARCODE_SELECTOR = '#barcode-scan-textfield';
+  const SORT_CODE_SELECTOR = '#sort-code-id';
+  const UPDATE_SORT_TYPE_SELECTOR = '#change-sort-type';
+  const EXCEPTION_BTN_SELECTOR = '#exception-btn';
+  const EXCEPTION_CONTEXT_SELECTOR = '#exception-context';
+  const SORT_CODE_EXCEPTION = '__AMAZON_EXCEPTION__';
+  const SCAN_TOTE_SELECTOR = '#scan-tote-textfield';
+  const PANEL_ID = 'ls-helper-panel';
+  const STORAGE_KEY_MAPPING = 'ls-container-lpn-mapping';
+  const STORAGE_KEY_SORT_SLOTS = 'ls-sort-code-slots';
+  const STORAGE_KEY_STATE = 'ls-session-state';
+  const TOTE_MAX_UNITS = 399;
+  const SORT_SLOT_COUNT = 5;
+  const KEY_DELAY_MS = 0;
+  const PRE_ENTER_MS = 25;
+  const STEP_SETTLE_MS = 200;
+  const STEP_VERIFY_TIMEOUT_MS = 12000;
+  const STEP_VERIFY_POLL_MS = 80;
+  const MOVE_VERIFY_TIMEOUT_MS = 15000;
+  const PAGE_RESET_WAIT_MS = 10000;
+  const SORT_CODE_WAIT_MS = 10000;
+  const SORT_CODE_POLL_MS = 50;
+  const POST_UPDATE_WAIT_MS = 400;
+  const AUTO_CLOSE_ERROR_MS = 500;
+  const WORKFLOW_POLL_MS = 120;
+  const FIELD_POLL_MS = 80;
+  const MAPPING_SYNC_DEBOUNCE_MS = 350;
+  const SCRIPT_VERSION = '1.11.8';
+  const WORKFLOW_TRACE_MAX = 200;
+  /** @type {Record<string, unknown>[]} */
+  let workflowTrace = [];
+  let lastWatchTraceKey = '';
+
+  const DEFAULT_CONTAINER_LPN_TEXT = `tsLIQ924688\tLPNNB6GDK8MX6
+tsLIQ924796\tLPNNC6DFWNVJ3
+tsLIQ930647\tLPNNC68ZYWNKN
+tsLIQ93117\tLPNND6MWBTY2D
+tsLIQ932322\tLPNNE6NCCRVRQ
+tsLIQ939117\tLPNNC67CG6DV8
+tsLIQ94265\tLPNNC6R9CCC9X
+tsLIQ9436\tLPNND62NLZPM4
+tsLIQ943845\tLPNND6JXLH4FD`;
+
+  const DEFAULT_SORT_SLOTS = Array.from({ length: SORT_SLOT_COUNT }, () => ({
+    sortCode: '',
+    toteIds: [],
+  }));
+
+  const STEPS = {
+    sortType: {
+      selector: SORT_TYPE_SELECTOR,
+      enterParentIds: ['sort-type-scan', 'sort-type-component'],
+      placeholder: 'Scan Sort Type',
+    },
+    sourceContainer: {
+      selector: SOURCE_CONTAINER_SELECTOR,
+      enterParentIds: ['source-container-scan', 'source-container-component'],
+      placeholder: 'Scan Source Container',
+    },
+    barcode: {
+      selector: BARCODE_SELECTOR,
+      enterParentIds: ['barcode-scan', 'scan-barcode-component'],
+      placeholder: 'Scan Barcode',
+    },
+    scanTote: {
+      selector: SCAN_TOTE_SELECTOR,
+      enterParentIds: ['scan-tote', 'scan-tote-component'],
+      placeholder: 'Scan Tote',
+    },
+  };
+
+  /** @type {HTMLTextAreaElement | null} */
+  let mappingInput = null;
+  /** @type {HTMLElement | null} */
+  let queueListEl = null;
+  /** @type {HTMLInputElement[]} */
+  let slotSortInputs = [];
+  /** @type {HTMLTextAreaElement[]} */
+  let slotToteInputs = [];
+  /** @type {HTMLElement[]} */
+  let slotCountEls = [];
+  /** @type {{ container: string, lpn: string, sortCode: string, tote: string, toteUnits: string }[]} */
+  let sortCodeResults = [];
+  /** @type {Record<string, number>} */
+  let toteCounts = {};
+  /** @type {Record<string, 'pending' | 'active' | 'complete' | 'error'>} */
+  let rowStatuses = {};
+  /** @type {boolean} */
+  let running = false;
+  let runningSince = 0;
+  let pageResetInProgress = false;
+  let jobStartupInProgress = false;
+  let lastStaleRecoverAt = 0;
+  const RUNNING_STUCK_MS = 90000;
+  const STALE_RECOVER_COOLDOWN_MS = 2500;
+  /** @type {boolean} */
+  let sessionArmed = false;
+  /** @type {boolean} */
+  let sourceContainerDone = false;
+  /** @type {boolean} */
+  let barcodeDone = false;
+  /** @type {string | null} */
+  let pendingLpn = null;
+  /** @type {boolean} */
+  let barcodeBlocked = false;
+  /** @type {number} */
+  let queueIndex = 0;
+  /** @type {boolean} */
+  let postBarcodeHandled = false;
+  /** @type {string | null} */
+  let lastSubmittedLpn = null;
+  /** @type {string} */
+  let lastExceptionKey = '';
+  let exceptionFlowActive = false;
+  /** @type {boolean} */
+  let onStartActive = false;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let saveStateTimer = null;
+  /** @type {HTMLElement | null} */
+  let progressBarFillEl = null;
+  /** @type {HTMLElement | null} */
+  let progressPctEl = null;
+  /** @type {HTMLElement | null} */
+  let progressDetailEl = null;
+  /** @type {HTMLElement | null} */
+  let etaClockEl = null;
+  /** @type {HTMLElement | null} */
+  let countdownEl = null;
+  /** @type {ReturnType<typeof setInterval> | null} */
+  let progressTicker = null;
+  /** @type {number | null} */
+  let sessionStartedAt = null;
+  /** @type {number} */
+  let timingPausedMs = 0;
+  /** @type {number | null} */
+  let pauseStartedAt = null;
+  /** @type {number | null} */
+  let frozenCountdownMs = null;
+  /** @type {number} */
+  let automationHoldDepth = 0;
+  /** @type {(() => void)[]} */
+  let automationUnblockWaiters = [];
+  /** @type {boolean} */
+  let errorHaltActive = false;
+  /** @type {boolean} */
+  let autoCloseErrors = false;
+  /** @type {HTMLButtonElement | null} */
+  let autoCloseToggleBtn = null;
+  /** @type {HTMLButtonElement | null} */
+  let forgetErrorLpnsBtn = null;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let blockerAutoCloseTimer = null;
+  /** @type {Set<string>} */
+  let acknowledgedFullTotes = new Set();
+  /** @type {Map<string, number>} */
+  let movedCountByContainerKey = new Map();
+  /** @type {{ container: string, lpn: string }[] | null} */
+  let cachedMappingList = null;
+  /** @type {string} */
+  let cachedMappingText = '';
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let mappingSyncTimer = null;
+  /** @type {number | null} */
+  let renderQueueListRaf = null;
+  /** @type {number} */
+  let rowStatusVersion = 0;
+  /** @type {ReturnType<typeof getProgressStats> | null} */
+  let progressStatsCache = null;
+  /** @type {number} */
+  let progressStatsCacheVersion = -1;
+
+  function scheduleSaveState() {
+    if (saveStateTimer) clearTimeout(saveStateTimer);
+    saveStateTimer = setTimeout(() => {
+      saveStateTimer = null;
+      savePersistedState();
+    }, 250);
+  }
+
+  /**
+   * @param {string} event
+   * @param {Record<string, unknown>} [data]
+   */
+  function traceWorkflow(event, data = {}) {
+    const entry = {
+      t: Date.now(),
+      at: new Date().toISOString().slice(11, 23),
+      event,
+      queueIndex,
+      queueLabel: formatQueueLabel(),
+      container: getContainerValue() || null,
+      lpn: getCurrentLpn() || null,
+      sessionArmed,
+      running,
+      pageResetInProgress,
+      jobStartupInProgress,
+      sourceContainerDone,
+      barcodeDone,
+      postBarcodeHandled,
+      sortTypeVal: readFieldValue(SORT_TYPE_SELECTOR).slice(0, 40),
+      sortCodeText: readSortCodeText().slice(0, 40) || null,
+      ...data,
+    };
+    workflowTrace.push(entry);
+    if (workflowTrace.length > WORKFLOW_TRACE_MAX) {
+      workflowTrace.splice(0, workflowTrace.length - WORKFLOW_TRACE_MAX);
+    }
+    console.log('[LS Trace]', event, data);
+  }
+
+  function log(line) {
+    console.log('[Liquidation Sort]', line);
+    traceWorkflow('log', { msg: String(line).slice(0, 240) });
+  }
+
+  /**
+   * @param {string} decision
+   * @param {Record<string, unknown>} [detail]
+   */
+  function traceWatch(decision, detail = {}) {
+    const key = decision + '|' + JSON.stringify(detail);
+    if (key === lastWatchTraceKey) return;
+    lastWatchTraceKey = key;
+    traceWorkflow('watch.' + decision, detail);
+  }
+
+  function decodeAmazonFieldText(value) {
+    const raw = String(value ?? '').trim();
+    if (!raw) return '';
+    try {
+      return decodeURIComponent(raw.replace(/\+/g, ' ')).trim();
+    } catch {
+      return raw;
+    }
+  }
+
+  function isAmazonPlaceholderValue(value) {
+    const text = decodeAmazonFieldText(value).toLowerCase();
+    if (!text) return true;
+    for (const step of Object.values(STEPS)) {
+      if (text === step.placeholder.toLowerCase()) return true;
+    }
+    return /^scan\s/.test(text);
+  }
+
+  function isValidSourceContainerId(value) {
+    const id = decodeAmazonFieldText(value);
+    if (!id || isAmazonPlaceholderValue(id)) return false;
+    return /^ts[a-z0-9]+$/i.test(id);
+  }
+
+  function isValidLpn(value) {
+    const lpn = decodeAmazonFieldText(value);
+    if (!lpn || isAmazonPlaceholderValue(lpn)) return false;
+    return /^lpn[a-z0-9]+$/i.test(lpn);
+  }
+
+  function holdAutomation() {
+    automationHoldDepth += 1;
+  }
+
+  function releaseAutomation() {
+    automationHoldDepth = Math.max(0, automationHoldDepth - 1);
+    if (automationHoldDepth === 0) {
+      const waiters = automationUnblockWaiters.splice(0);
+      waiters.forEach((w) => w());
+    }
+  }
+
+  function releaseAllAutomationHolds() {
+    automationHoldDepth = 0;
+    const waiters = automationUnblockWaiters.splice(0);
+    waiters.forEach((w) => w());
+  }
+
+  function setRunningFlag(active) {
+    running = active;
+    runningSince = active ? Date.now() : 0;
+  }
+
+  function clearStuckRunningIfNeeded() {
+    if (!running || !runningSince) return false;
+    if (Date.now() - runningSince < RUNNING_STUCK_MS) return false;
+    log('[Watch] Cleared stuck running flag (timeout).');
+    setRunningFlag(false);
+    pageResetInProgress = false;
+    jobStartupInProgress = false;
+    return true;
+  }
+
+  function resetStuckAutomationFlags() {
+    forceCloseBlockerOverlay();
+    setErrorHalt(false);
+    exceptionFlowActive = false;
+    pageResetInProgress = false;
+    jobStartupInProgress = false;
+    releaseAllAutomationHolds();
+    if (running) {
+      log('[Reset] Cleared stuck running flag.');
+      setRunningFlag(false);
+    }
+  }
+
+  function isAutomationBlocked() {
+    return automationHoldDepth > 0;
+  }
+
+  function shouldStopOnError() {
+    return !autoCloseErrors;
+  }
+
+  function canRunAutomation() {
+    return sessionArmed && !errorHaltActive && !isAutomationBlocked();
+  }
+
+  /** Amazon exception modal — auto-close works even after Stop if toggle is on. */
+  function canAutoHandleExceptions() {
+    return (sessionArmed || autoCloseErrors) && !isAutomationBlocked();
+  }
+
+  function setErrorHalt(active) {
+    errorHaltActive = active;
+  }
+
+  function countDistinctErrorLpns() {
+    const keys = new Set();
+    for (const r of getErrorResults()) {
+      if (r.container || r.lpn) keys.add(rowKey(r.container, r.lpn));
+    }
+    return keys.size;
+  }
+
+  function updateResetErrorStatusesBtn() {
+    if (!forgetErrorLpnsBtn) return;
+    const n = countDistinctErrorLpns();
+    forgetErrorLpnsBtn.disabled = n === 0;
+    forgetErrorLpnsBtn.title =
+      n > 0
+        ? `Reset ${n} error LPN(s) to Not Done so automation can retry them`
+        : 'No error LPNs recorded this session';
+  }
+
+  /** Reset every Container→LPN that errored back to pending (Not Done). */
+  function forgetErrorLpns() {
+    const keysForgotten = new Set();
+    for (const r of getErrorResults()) {
+      keysForgotten.add(rowKey(r.container, r.lpn));
+    }
+
+    if (!keysForgotten.size) {
+      log('No error LPNs to reset.');
+      updateResetErrorStatusesBtn();
+      return 0;
+    }
+
+    for (const key of keysForgotten) {
+      rowStatuses[key] = 'pending';
+    }
+
+    sortCodeResults = sortCodeResults.filter((r) => {
+      const key = rowKey(r.container, r.lpn);
+      if (!keysForgotten.has(key)) return true;
+      return !isErrorResult(r);
+    });
+
+    rebuildMovedCountByContainer();
+    bumpRowStatusVersion();
+    scheduleRenderQueueList();
+    lastExceptionKey = '';
+    setErrorHalt(false);
+    scheduleSaveState();
+    updateResetErrorStatusesBtn();
+
+    log(
+      `Reset error status on ${keysForgotten.size} LPN(s) — marked Not Done. ` +
+        'They will be retried when automation reaches them.'
+    );
+    return keysForgotten.size;
+  }
+
+  function updateAutoCloseToggleBtn() {
+    if (!autoCloseToggleBtn) return;
+    autoCloseToggleBtn.classList.toggle('ls-toggle-on', autoCloseErrors);
+    autoCloseToggleBtn.setAttribute('aria-pressed', autoCloseErrors ? 'true' : 'false');
+    autoCloseToggleBtn.title = autoCloseErrors
+      ? 'ON: errors auto-close; automation keeps running'
+      : 'OFF: errors stop automation until you click OK';
+  }
+
+  function waitForAutomationUnblocked() {
+    if (!isAutomationBlocked()) return Promise.resolve();
+    return new Promise((resolve) => automationUnblockWaiters.push(resolve));
+  }
+
+  function copyTextToClipboard(text, successLog) {
+    if (!text) return;
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(text, { type: 'text', mimetype: 'text/plain' });
+      if (successLog) log(successLog);
+      return;
+    }
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        if (successLog) log(successLog);
+      })
+      .catch(() => log('Copy failed.'));
+  }
+
+  function makeMiniCopyButton(label, getText) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ls-mini-copy';
+    btn.textContent = label;
+    btn.title = `Copy ${label}`;
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      copyTextToClipboard(getText(), `Copied ${label}.`);
+    });
+    return btn;
+  }
+
+  function getBlockerContext() {
+    const pair = getCurrentPair();
+    return {
+      container: pair?.container || getContainerValue() || '(unknown)',
+      lpn: pendingLpn || lastSubmittedLpn || pair?.lpn || '(unknown)',
+      queueLabel: formatQueueLabel(),
+    };
+  }
+
+  /**
+   * @param {string} _alertKey
+   * @param {string} title
+   * @param {string} body
+   * @param {{ container?: string, lpn?: string } | undefined} [errorCtx]
+   * @param {boolean} [recoverAfterAutoClose]
+   */
+  async function alertLpnBlocked(
+    _alertKey,
+    title,
+    body,
+    errorCtx,
+    recoverAfterAutoClose = false,
+    forceManualDismiss = false
+  ) {
+    const ctx = errorCtx || getBlockerContext();
+
+    if (shouldStopOnError()) {
+      setErrorHalt(true);
+    }
+
+    while (document.getElementById('ls-blocker-overlay')) {
+      await sleep(50);
+    }
+
+    log(`[Blocked] ${title} — ${body.replace(/\s+/g, ' ').slice(0, 200)}`);
+    try {
+      await new Promise((resolve) => {
+        showBlockerPopup(title, body, ctx, resolve, recoverAfterAutoClose, 'error', forceManualDismiss);
+      });
+    } finally {
+      if (shouldStopOnError()) {
+        setErrorHalt(false);
+      }
+    }
+  }
+
+  /**
+   * @param {string} title
+   * @param {string} body
+   * @param {{ container?: string, lpn?: string }} errorCtx
+   * @param {(() => void) | undefined} onDismiss
+   * @param {boolean} [recoverAfterAutoClose]
+   */
+  /**
+   * @param {string} title
+   * @param {string} body
+   * @param {{ container?: string, lpn?: string }} errorCtx
+   * @param {(() => void) | undefined} onDismiss
+   * @param {boolean} [recoverAfterAutoClose]
+   * @param {'error' | 'confirm'} [mode]
+   * @param {boolean} [forceManualDismiss] — never auto-close (Amazon exceptions)
+   */
+  function showBlockerPopup(
+    title,
+    body,
+    errorCtx,
+    onDismiss,
+    recoverAfterAutoClose = false,
+    mode = 'error',
+    forceManualDismiss = false
+  ) {
+    if (blockerAutoCloseTimer) {
+      clearTimeout(blockerAutoCloseTimer);
+      blockerAutoCloseTimer = null;
+    }
+
+    const overlay = document.createElement('div');
+    overlay.id = 'ls-blocker-overlay';
+    overlay.setAttribute('role', 'alertdialog');
+    overlay.setAttribute('aria-modal', 'true');
+
+    const card = document.createElement('div');
+    card.className =
+      mode === 'confirm' ? 'ls-blocker-card ls-blocker-confirm' : 'ls-blocker-card';
+
+    const h = document.createElement('h2');
+    h.className = 'ls-blocker-title';
+    h.textContent = title;
+
+    const pairLine = document.createElement('div');
+    pairLine.className = 'ls-blocker-pair';
+    pairLine.textContent = `Container: ${errorCtx.container || '—'}\nLPN: ${errorCtx.lpn || '—'}`;
+
+    const p = document.createElement('p');
+    p.className = 'ls-blocker-body';
+    p.textContent = body;
+
+    const actions = document.createElement('div');
+    actions.className = 'ls-blocker-actions';
+
+    const copyPairBtn = document.createElement('button');
+    copyPairBtn.type = 'button';
+    copyPairBtn.className = 'ls-blocker-secondary';
+    copyPairBtn.textContent = 'Copy container + LPN';
+    copyPairBtn.addEventListener('click', () => {
+      copyTextToClipboard(
+        `${errorCtx.container || ''}\t${errorCtx.lpn || ''}`,
+        'Copied container + LPN.'
+      );
+    });
+
+    const ok = document.createElement('button');
+    ok.type = 'button';
+    ok.className = mode === 'confirm' ? 'ls-blocker-ok ls-confirm-ok' : 'ls-blocker-ok';
+    ok.textContent = 'OK';
+
+    let dismissed = false;
+    const dismiss = () => {
+      if (dismissed || !overlay.isConnected) return;
+      dismissed = true;
+      if (blockerAutoCloseTimer) {
+        clearTimeout(blockerAutoCloseTimer);
+        blockerAutoCloseTimer = null;
+      }
+      overlay.remove();
+      releaseAutomation();
+      onDismiss?.();
+      if (mode === 'error' && (autoCloseErrors || recoverAfterAutoClose)) {
+        if (sessionArmed) {
+          void skipToNextJobAfterAutoCloseError();
+        } else if (autoCloseErrors) {
+          void dismissAmazonExceptionModal('[Auto-close]');
+        }
+      }
+    };
+
+    ok.addEventListener('click', dismiss);
+
+    const stopProgramBtn = document.createElement('button');
+    stopProgramBtn.type = 'button';
+    stopProgramBtn.className = 'ls-blocker-stop';
+    stopProgramBtn.textContent = 'STOP PROGRAM';
+    stopProgramBtn.title = 'Halt automation (same as Stop on the panel)';
+    stopProgramBtn.addEventListener('click', () => {
+      if (dismissed || !overlay.isConnected) return;
+      dismissed = true;
+      if (blockerAutoCloseTimer) {
+        clearTimeout(blockerAutoCloseTimer);
+        blockerAutoCloseTimer = null;
+      }
+      overlay.remove();
+      releaseAutomation();
+      onDismiss?.();
+      void onStop();
+    });
+
+    actions.append(copyPairBtn, stopProgramBtn, ok);
+
+    if (mode === 'error' && autoCloseErrors && !forceManualDismiss) {
+      const hint = document.createElement('div');
+      hint.className = 'ls-blocker-autoclose-hint';
+      hint.textContent = 'Auto-clicking OK — then Continue / Update / next LPN';
+      card.append(h, pairLine, p, hint, actions);
+      blockerAutoCloseTimer = setTimeout(dismiss, AUTO_CLOSE_ERROR_MS);
+    } else {
+      card.append(h, pairLine, p, actions);
+    }
+
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+    holdAutomation();
+    ok.focus();
+  }
+
+  /**
+   * Yellow confirmation — always waits for OK; does not auto-close.
+   * @param {string} title
+   * @param {string} body
+   * @param {{ container?: string, lpn?: string } | undefined} [errorCtx]
+   */
+  async function alertUserConfirm(title, body, errorCtx) {
+    const ctx = errorCtx || getBlockerContext();
+    setErrorHalt(true);
+    while (document.getElementById('ls-blocker-overlay')) {
+      await sleep(50);
+    }
+    log(`[Confirm] ${title}`);
+    try {
+      await new Promise((resolve) => {
+        showBlockerPopup(title, body, ctx, resolve, false, 'confirm');
+      });
+    } finally {
+      setErrorHalt(false);
+    }
+  }
+
+  function getActiveFillContainer() {
+    return (getCurrentPair()?.container || getContainerValue() || '').trim();
+  }
+
+  function rebuildMovedCountByContainer() {
+    const next = new Map();
+    for (const r of sortCodeResults) {
+      if (jobRowStatus(r.sortCode) === 'Error') continue;
+      const key = (r.container || '').trim().toLowerCase();
+      if (!key) continue;
+      next.set(key, (next.get(key) || 0) + 1);
+    }
+    movedCountByContainerKey = next;
+  }
+
+  function countLpnsMovedIntoContainer(container) {
+    const key = (container || '').trim().toLowerCase();
+    if (!key) return 0;
+    return movedCountByContainerKey.get(key) || 0;
+  }
+
+  function invalidateMappingListCache() {
+    cachedMappingList = null;
+    cachedMappingText = '';
+  }
+
+  function jobRowStatus(sortCode) {
+    return String(sortCode).startsWith('EXCEPTION') ? 'Error' : 'Moved';
+  }
+
+  function parseExceptionReason(sortCode) {
+    const s = String(sortCode || '').trim();
+    if (!s.startsWith('EXCEPTION')) return '';
+    if (s.startsWith('EXCEPTION: ')) return s.slice('EXCEPTION: '.length);
+    return s.replace(/^EXCEPTION:?\s*/i, '').trim();
+  }
+
+  function isErrorResult(r) {
+    if (jobRowStatus(r.sortCode) === 'Error') return true;
+    return rowStatuses[rowKey(r.container, r.lpn)] === 'error';
+  }
+
+  function getErrorDisplayReason(r) {
+    if (jobRowStatus(r.sortCode) === 'Error') {
+      return parseExceptionReason(r.sortCode) || 'Exception';
+    }
+    const parts = [];
+    if (r.sortCode) parts.push(String(r.sortCode));
+    const units = String(r.toteUnits || '');
+    if (units.includes('FULL')) parts.push('Destination tote full');
+    else if (r.tote) parts.push(`Tote: ${r.tote}`);
+    return parts.join(' · ') || 'Error';
+  }
+
+  function getErrorResults() {
+    return sortCodeResults.filter((r) => isErrorResult(r));
+  }
+
+  function buildErrorsListCopyTsv() {
+    const rows = getErrorResults().map(
+      (r) => `${r.container || ''}\t${r.lpn || ''}\t${getErrorDisplayReason(r)}`
+    );
+    return ['container\tlpn\treason', ...rows].join('\n');
+  }
+
+  /**
+   * @param {HTMLElement} containerEl
+   */
+  function renderDashboardErrorsList(containerEl) {
+    const errors = getErrorResults();
+    containerEl.innerHTML = '';
+    if (!errors.length) {
+      const empty = document.createElement('p');
+      empty.className = 'ls-dashboard-empty';
+      empty.textContent = 'No errors recorded this session.';
+      containerEl.appendChild(empty);
+      return;
+    }
+
+    const table = document.createElement('table');
+    table.className = 'ls-dashboard-table';
+
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    for (const label of ['Source container', 'LPN', 'Reason', '']) {
+      const th = document.createElement('th');
+      th.textContent = label;
+      headRow.appendChild(th);
+    }
+    thead.appendChild(headRow);
+    table.append(thead);
+
+    const tbody = document.createElement('tbody');
+    for (const r of errors) {
+      const reason = getErrorDisplayReason(r);
+      const tr = document.createElement('tr');
+      tr.className = 'ls-dash-row-error';
+
+      const tdContainer = document.createElement('td');
+      tdContainer.className = 'ls-dash-val';
+      tdContainer.textContent = r.container || '—';
+
+      const tdLpn = document.createElement('td');
+      tdLpn.className = 'ls-dash-val';
+      tdLpn.textContent = r.lpn || '—';
+
+      const tdReason = document.createElement('td');
+      tdReason.className = 'ls-dash-val ls-dash-reason';
+      tdReason.textContent = reason || '—';
+
+      const tdCopy = document.createElement('td');
+      tdCopy.className = 'ls-dash-copycell';
+      const copyRowBtn = document.createElement('button');
+      copyRowBtn.type = 'button';
+      copyRowBtn.className = 'ls-mini-copy';
+      copyRowBtn.textContent = 'Copy';
+      copyRowBtn.title = 'Copy container, LPN, and reason';
+      copyRowBtn.addEventListener('click', () => {
+        copyTextToClipboard(
+          `${r.container || ''}\t${r.lpn || ''}\t${reason}`,
+          'Copied error row.'
+        );
+      });
+      tdCopy.appendChild(copyRowBtn);
+
+      tr.append(tdContainer, tdLpn, tdReason, tdCopy);
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    containerEl.appendChild(table);
+  }
+
+  function isValidDashboardSortCode(sortCode) {
+    const s = String(sortCode || '').trim();
+    if (!s) return false;
+    if (s === '(not read)') return false;
+    if (isAmazonPlaceholderValue(s)) return false;
+    if (s.startsWith('EXCEPTION')) return false;
+    return true;
+  }
+
+  /**
+   * Always 5 routes from the panel, merged with session LPN counts per destination tote.
+   * @returns {{
+   *   routeIndex: number,
+   *   routeLabel: string,
+   *   sortCode: string,
+   *   sortCodeDisplay: string,
+   *   totalLpns: number,
+   *   destinations: { toteId: string, lpnCount: number, units: number }[]
+   * }[]}
+   */
+  function buildSortCodeDestinationDashboard() {
+    /** @type {Map<string, { displayName: string, totes: Map<string, { displayName: string, lpnCount: number }> }>} */
+    const fromResults = new Map();
+
+    for (const r of sortCodeResults) {
+      if (jobRowStatus(r.sortCode) === 'Error') continue;
+      const sc = String(r.sortCode || '').trim();
+      if (!isValidDashboardSortCode(sc)) continue;
+      const tote = String(r.tote || '').trim();
+      if (!tote || !isValidSourceContainerId(tote)) continue;
+
+      const sk = sc.toLowerCase();
+      if (!fromResults.has(sk)) {
+        fromResults.set(sk, { displayName: sc, totes: new Map() });
+      }
+      const g = fromResults.get(sk);
+      const tk = tote.toLowerCase();
+      if (!g.totes.has(tk)) {
+        g.totes.set(tk, { displayName: tote, lpnCount: 0 });
+      }
+      g.totes.get(tk).lpnCount += 1;
+    }
+
+    const slots = getSortSlotsFromInputs();
+    const routes = [];
+
+    for (let i = 0; i < SORT_SLOT_COUNT; i++) {
+      const slot = slots[i] || { sortCode: '', toteIds: [] };
+      const sortCode = String(slot.sortCode || '').trim();
+      /** @type {Map<string, { displayName: string, lpnCount: number }>} */
+      const toteMap = new Map();
+
+      for (const id of slot.toteIds || []) {
+        const tid = String(id).trim();
+        if (!tid || !isValidSourceContainerId(tid)) continue;
+        toteMap.set(tid.toLowerCase(), { displayName: tid, lpnCount: 0 });
+      }
+
+      if (isValidDashboardSortCode(sortCode)) {
+        const rg = fromResults.get(sortCode.toLowerCase());
+        if (rg) {
+          for (const [tk, t] of rg.totes) {
+            if (toteMap.has(tk)) {
+              toteMap.get(tk).lpnCount = t.lpnCount;
+            } else {
+              toteMap.set(tk, { displayName: t.displayName, lpnCount: t.lpnCount });
+            }
+          }
+        }
+      }
+
+      const destinations = [...toteMap.values()]
+        .map((t) => ({
+          toteId: t.displayName,
+          lpnCount: t.lpnCount,
+          units: getToteCount(t.displayName),
+        }))
+        .sort((a, b) => a.toteId.localeCompare(b.toteId));
+
+      const totalLpns = destinations.reduce((n, d) => n + d.lpnCount, 0);
+
+      routes.push({
+        routeIndex: i + 1,
+        routeLabel: `Route ${i + 1}`,
+        sortCode,
+        sortCodeDisplay: sortCode || 'Not set',
+        destinations,
+        totalLpns,
+      });
+    }
+
+    return routes;
+  }
+
+  function buildDestinationDashboardTsv() {
+    const rows = [];
+    for (const route of buildSortCodeDestinationDashboard()) {
+      const sc = route.sortCode || route.sortCodeDisplay;
+      for (const dest of route.destinations) {
+        rows.push(
+          `${route.routeLabel}\t${sc}\t${dest.toteId}\t${dest.lpnCount}\t${dest.units}/${TOTE_MAX_UNITS}`
+        );
+      }
+    }
+    return ['route\tsort_code\tdestination_container\tlpns_moved\tunits', ...rows].join('\n');
+  }
+
+  /**
+   * @param {HTMLElement} containerEl
+   */
+  function renderDashboardDestinationsList(containerEl) {
+    const routes = buildSortCodeDestinationDashboard();
+    containerEl.innerHTML = '';
+
+    const grid = document.createElement('div');
+    grid.className = 'ls-dash-routes-grid';
+
+    for (const route of routes) {
+      const card = document.createElement('article');
+      card.className = 'ls-dash-route-card';
+      if (route.totalLpns > 0) card.classList.add('ls-dash-route-has-lpns');
+      if (!route.sortCode) card.classList.add('ls-dash-route-unconfigured');
+
+      const badge = document.createElement('span');
+      badge.className = 'ls-dash-route-badge';
+      badge.textContent = route.routeLabel;
+
+      const sortTitle = document.createElement('h3');
+      sortTitle.className = 'ls-dash-route-sort';
+      sortTitle.textContent = route.sortCodeDisplay;
+      sortTitle.title = route.sortCode || 'Set sort code on the right panel';
+
+      const lpnBig = document.createElement('div');
+      lpnBig.className = 'ls-dash-route-lpn-big';
+      lpnBig.textContent = String(route.totalLpns);
+
+      const lpnLabel = document.createElement('div');
+      lpnLabel.className = 'ls-dash-route-lpn-label';
+      lpnLabel.textContent = route.totalLpns === 1 ? 'LPN in destinations' : 'LPNs in destinations';
+
+      const destList = document.createElement('ul');
+      destList.className = 'ls-dash-route-dests';
+
+      if (!route.destinations.length) {
+        const empty = document.createElement('li');
+        empty.className = 'ls-dash-route-dest-empty';
+        empty.textContent = 'No destination container IDs';
+        destList.appendChild(empty);
+      }
+
+      for (const dest of route.destinations) {
+        const row = document.createElement('li');
+        row.className = 'ls-dash-route-dest-item';
+
+        const idEl = document.createElement('span');
+        idEl.className = 'ls-dash-route-dest-id';
+        idEl.textContent = dest.toteId;
+        idEl.title = dest.toteId;
+
+        const meta = document.createElement('span');
+        meta.className = 'ls-dash-route-dest-meta';
+        const full = dest.units >= TOTE_MAX_UNITS;
+        meta.textContent = `${dest.lpnCount} LPN${dest.lpnCount === 1 ? '' : 's'}`;
+        if (full) meta.classList.add('ls-dash-dest-full');
+
+        const units = document.createElement('span');
+        units.className = 'ls-dash-route-dest-units';
+        units.textContent = `${dest.units}/${TOTE_MAX_UNITS}`;
+        if (full) units.classList.add('ls-dash-dest-full');
+
+        row.append(idEl, meta, units);
+        destList.appendChild(row);
+      }
+
+      card.append(badge, sortTitle, lpnBig, lpnLabel, destList);
+      grid.appendChild(card);
+    }
+
+    containerEl.appendChild(grid);
+  }
+
+  /**
+   * After an error: Continue (C) if shown, Update if shown, advance queue, resume page steps.
+   * @param {string} [logPrefix]
+   */
+  async function recoverAndAdvanceToNextLpn(logPrefix = '[Recover]') {
+    if (!sessionArmed) return false;
+
+    postBarcodeHandled = false;
+    barcodeDone = false;
+
+    if (isAmazonExceptionShown()) {
+      log(`${logPrefix} Clicking Amazon Continue (C)…`);
+      const cont = await clickExceptionContinue();
+      if (!cont) {
+        log(`${logPrefix} Continue (#exception-btn) not clicked — fix page manually.`);
+        return false;
+      }
+      await sleep(POST_UPDATE_WAIT_MS);
+    }
+
+    if (shouldClickUpdateToFinishJob()) {
+      const updated = await finishJobWithUpdate(logPrefix);
+      if (!updated) {
+        log(`${logPrefix} Update not clicked — fix page manually.`);
+        postBarcodeHandled = false;
+        barcodeDone = false;
+        return false;
+      }
+    } else {
+      log(`${logPrefix} No completed scan to close — advancing queue without Update.`);
+    }
+
+    postBarcodeHandled = false;
+    barcodeDone = false;
+    const hasMore = advanceToNextContainer();
+    resetStepFlagsForCurrentItem();
+    lastSubmittedLpn = null;
+
+    if (!hasMore) {
+      log(`${logPrefix} Queue finished.`);
+      return true;
+    }
+
+    if (isStaleBarcodeOnPage()) {
+      await resetPageWorkflowState(logPrefix, { light: true });
+    }
+
+    await waitForPageReadyForNextLpn();
+
+    setRowStatusByIndex(queueIndex, 'active');
+    await continueWorkflowAfterLpnFinished();
+    return true;
+  }
+
+  async function ensurePageMatchesQueueContainer() {
+    const expected = getContainerValue();
+    const onPage = readDisplayedSourceContainer();
+    if (!expected || !onPage) return true;
+    if (onPage.toUpperCase() === expected.toUpperCase()) return true;
+
+    log(
+      `[Workflow] Page container ${onPage} ≠ queue ${expected} — clicking Update to reset.`
+    );
+    await clickPageResetUpdates();
+    sourceContainerDone = false;
+    barcodeDone = false;
+    postBarcodeHandled = false;
+    lastSubmittedLpn = null;
+    await sleep(STEP_SETTLE_MS);
+    syncStepFlagsFromPageState();
+    return (
+      !readDisplayedSourceContainer() ||
+      readDisplayedSourceContainer().toUpperCase() === expected.toUpperCase() ||
+      isFieldStepActive(SOURCE_CONTAINER_SELECTOR)
+    );
+  }
+
+  /**
+   * @param {{ betweenJobs?: boolean, allowWhileRunning?: boolean, skipSortType?: boolean }} [opts]
+   */
+  async function resumeWorkflowFromPageState(opts = {}) {
+    const allowWhileRunning = Boolean(opts.allowWhileRunning);
+    const skipSortType = Boolean(opts.skipSortType);
+    traceWorkflow('resume.enter', { ...opts, allowWhileRunning, skipSortType });
+    if (!canRunAutomation()) {
+      traceWorkflow('resume.abort', { reason: 'cannot-run' });
+      return;
+    }
+    if (pageResetInProgress) {
+      const start = Date.now();
+      while (pageResetInProgress && Date.now() - start < PAGE_RESET_WAIT_MS) {
+        await sleep(STEP_VERIFY_POLL_MS);
+      }
+      if (pageResetInProgress) return;
+    }
+
+    const clean = await ensureCleanPageBeforeWork('[Workflow]', {
+      betweenJobs: Boolean(opts.betweenJobs),
+    });
+    if (!clean) {
+      log('[Workflow] Paused — fix the page or press Start again.');
+      return;
+    }
+
+    if (isStaleBarcodeOnPage()) {
+      traceWorkflow('resume.staleBarcode', { onPage: readBarcodeOnPage() });
+      log(
+        `[Workflow] Page barcode ${readBarcodeOnPage()} ≠ queue ${getCurrentLpn()} — resetting page.`
+      );
+      await resetPageWorkflowState('[Workflow]', { light: opts.betweenJobs });
+    } else if (!opts.betweenJobs && isBarcodeBeforeSourceStep()) {
+      traceWorkflow('resume.barcodeBeforeSource', {});
+      log(
+        '[Workflow] LPN on page before source container — clicking Update to reset steps.'
+      );
+      await resetPageWorkflowState('[Workflow]');
+    }
+
+    syncStepFlagsFromPageState();
+
+    const pageContainer = readDisplayedSourceContainer();
+    const mappingContainer = getContainerValue();
+    const containerMismatch =
+      pageContainer &&
+      mappingContainer &&
+      pageContainer.toUpperCase() !== mappingContainer.toUpperCase();
+
+    tryMarkSourceContainerDoneFromPage();
+
+    if (containerMismatch && !isAwaitingSourceContainerScan()) {
+      if (opts.betweenJobs) {
+        traceWorkflow('resume.containerMismatch.betweenJobs', { pageContainer, mappingContainer });
+        log(
+          `[Job] Next container ${mappingContainer}` +
+            (pageContainer ? ` (page label still shows ${pageContainer})` : '') +
+            ' — scanning source container, not Update.'
+        );
+        sourceContainerDone = false;
+        barcodeDone = false;
+        postBarcodeHandled = false;
+        lastSubmittedLpn = null;
+      } else {
+        const ok = await ensurePageMatchesQueueContainer();
+        if (!ok) {
+          log(
+            `[Workflow] Still on container ${readDisplayedSourceContainer() || '?'} — ` +
+              `queue expects ${mappingContainer}. Click Update on the page, then Start.`
+          );
+          return;
+        }
+      }
+    } else if (containerMismatch && isAwaitingSourceContainerScan()) {
+      sourceContainerDone = false;
+      barcodeDone = false;
+    }
+
+    if (!skipSortType && needsSortTypeEntry()) {
+      log('[Workflow] Sort type step — entering WDSorting.');
+      const result = await runSortTypeStep();
+      if (result.reason === 'exception' || isAmazonExceptionShown()) {
+        await processAmazonException();
+        return;
+      }
+      if (!result.advanced) {
+        log('[Workflow] Sort type not accepted — click Update on the page if needed, then Start again.');
+        return;
+      }
+      await sleep(STEP_SETTLE_MS);
+      syncStepFlagsFromPageState();
+    } else if (isSortTypeSatisfiedOnPage()) {
+      log('[Workflow] Sort type already set on page — skipping scan.');
+    }
+
+    if (!canRunAutomation()) return;
+
+    syncStepFlagsFromPageState();
+
+    if (!sourceContainerDone) {
+      const srcPlaceholder = isAmazonPlaceholderValue(readFieldValue(SOURCE_CONTAINER_SELECTOR));
+      if (isFieldStepActive(SOURCE_CONTAINER_SELECTOR) || (isFieldVisible(SOURCE_CONTAINER_SELECTOR) && srcPlaceholder)) {
+        if (!isFieldStepActive(SOURCE_CONTAINER_SELECTOR) && srcPlaceholder) {
+          log('[Source container] Field visible — submitting container.');
+        }
+        await tryAutoSourceContainerForced(allowWhileRunning);
+      }
+    }
+
+    if (!canRunAutomation()) return;
+
+    syncStepFlagsFromPageState();
+
+    if (
+      isBarcodeEmptyErrorOnPage() &&
+      isBarcodeFieldAwaitingLpn() &&
+      getCurrentLpn()
+    ) {
+      log('[Workflow] "Barcode is empty" on page — submitting queue LPN.');
+    }
+
+    if (
+      !barcodeDone &&
+      getCurrentLpn() &&
+      (canSubmitBarcodeNow() || isBarcodeFieldAwaitingLpn())
+    ) {
+      resolvePendingLpn({ forceLog: true });
+      await tryAutoBarcode(allowWhileRunning);
+    } else if (!barcodeDone && getCurrentLpn() && !sourceContainerDone) {
+      log(
+        '[Workflow] Waiting for source container — complete that step on the page or press Start again.'
+      );
+    } else if (!barcodeDone && getCurrentLpn() && isStaleBarcodeOnPage()) {
+      log(
+        `[Workflow] Stale barcode ${readBarcodeOnPage()} on page — press Start again after Update clears it.`
+      );
+    }
+  }
+
+  /**
+   * One job = WDSorting through Update. Call after Update to begin the next queue row.
+   * @param {boolean} [allowWhileRunning] — finish path runs inside handlePostBarcode (running=true)
+   */
+  async function startNextJob(allowWhileRunning = false) {
+    if (!sessionArmed) return false;
+    if (jobStartupInProgress) return false;
+
+    jobStartupInProgress = true;
+    try {
+      return await runStartNextJobSteps(allowWhileRunning);
+    } finally {
+      jobStartupInProgress = false;
+    }
+  }
+
+  async function runStartNextJobSteps(allowWhileRunning = false) {
+    traceWorkflow('job.start', { allowWhileRunning });
+    if (needsSortTypeEntry()) {
+      log('[Job] Start — scanning WDSorting.');
+      const result = await runSortTypeStep();
+      if (result.reason === 'exception' || isAmazonExceptionShown()) {
+        await processAmazonException();
+        return false;
+      }
+      if (!result.advanced) {
+        log('[Job] WDSorting not accepted — click Update on the page if needed.');
+        return false;
+      }
+      await sleep(STEP_SETTLE_MS);
+      syncStepFlagsFromPageState();
+      log('[Job] WDSorting accepted — container → LPN.');
+    } else if (isSortTypeSatisfiedOnPage()) {
+      log('[Job] Start — sort type already set; continuing.');
+    }
+
+    tryMarkSourceContainerDoneFromPage();
+    syncStepFlagsFromPageState();
+
+    if (!canRunAutomation()) return false;
+    await resumeWorkflowFromPageState({
+      betweenJobs: true,
+      allowWhileRunning,
+      skipSortType: true,
+    });
+    return true;
+  }
+
+  /** After Update on a finished LPN: advance queue and run startNextJob. */
+  async function continueWorkflowAfterLpnFinished() {
+    if (!sessionArmed) return;
+    await sleep(POST_UPDATE_WAIT_MS);
+    if (!sessionArmed) return;
+    await startNextJob(true);
+  }
+
+  async function skipToNextJobAfterAutoCloseError() {
+    if (!sessionArmed) return;
+    if (running) {
+      log('[Recover] Auto-close skipped — another step is running.');
+      return;
+    }
+    setRunningFlag(true);
+    try {
+      log('[Recover] Auto-close — same as OK: Continue/Update if needed, then next LPN.');
+      await recoverAndAdvanceToNextLpn('[Recover]');
+    } catch (err) {
+      log('Recover error: ' + (err instanceof Error ? err.message : String(err)));
+      console.error('[Liquidation Sort]', err);
+    } finally {
+      setRunningFlag(false);
+    }
+  }
+
+  function openJobsDashboard() {
+    if (document.getElementById('ls-dashboard-overlay')) return;
+
+    const overlay = document.createElement('div');
+    overlay.id = 'ls-dashboard-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+
+    const card = document.createElement('div');
+    card.className = 'ls-dashboard-card ls-dashboard-card-fill';
+
+    const header = document.createElement('div');
+    header.className = 'ls-dashboard-header';
+
+    const title = document.createElement('h2');
+    title.className = 'ls-dashboard-title';
+    title.textContent = 'Sort destinations';
+
+    const toolbar = document.createElement('div');
+    toolbar.className = 'ls-dashboard-toolbar';
+
+    const copyDestBtn = document.createElement('button');
+    copyDestBtn.type = 'button';
+    copyDestBtn.className = 'ls-dash-btn';
+    copyDestBtn.textContent = 'Copy destinations';
+    copyDestBtn.addEventListener('click', () => {
+      copyTextToClipboard(buildDestinationDashboardTsv(), 'Copied sort codes + destinations (TSV).');
+    });
+
+    const copyAllErrorsBtn = document.createElement('button');
+    copyAllErrorsBtn.type = 'button';
+    copyAllErrorsBtn.className = 'ls-dash-btn';
+    copyAllErrorsBtn.textContent = 'Copy all errors';
+    copyAllErrorsBtn.disabled = true;
+    copyAllErrorsBtn.addEventListener('click', () => {
+      const tsv = buildErrorsListCopyTsv();
+      const lines = Math.max(0, tsv.split('\n').length - 1);
+      copyTextToClipboard(
+        tsv,
+        lines > 0 ? `Copied ${lines} error row(s).` : 'No errors to copy.'
+      );
+    });
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'ls-dash-btn ls-dash-close';
+    closeBtn.textContent = 'Close';
+
+    toolbar.append(copyDestBtn, copyAllErrorsBtn, closeBtn);
+    header.append(title, toolbar);
+
+    const main = document.createElement('div');
+    main.className = 'ls-dash-main';
+
+    const destSection = document.createElement('section');
+    destSection.className = 'ls-dash-dest-section';
+
+    const destHeader = document.createElement('div');
+    destHeader.className = 'ls-dash-dest-header';
+    const destTitle = document.createElement('p');
+    destTitle.className = 'ls-dash-dest-subtitle';
+    destTitle.textContent = 'Five routes — LPNs moved into destination containers (not source queue containers)';
+    destHeader.appendChild(destTitle);
+
+    const destScroll = document.createElement('div');
+    destScroll.className = 'ls-dashboard-scroll ls-dash-dest-scroll';
+
+    destSection.append(destHeader, destScroll);
+
+    const errorsSection = document.createElement('section');
+    errorsSection.className = 'ls-dash-errors-section';
+
+    const errorsHeader = document.createElement('div');
+    errorsHeader.className = 'ls-dash-errors-header';
+
+    const errorsTitle = document.createElement('h3');
+    errorsTitle.className = 'ls-dash-errors-title';
+    errorsTitle.textContent = 'Errors';
+
+    const errorsCountBadge = document.createElement('span');
+    errorsCountBadge.className = 'ls-dash-errors-count';
+
+    const errorsHeaderCopyBtn = document.createElement('button');
+    errorsHeaderCopyBtn.type = 'button';
+    errorsHeaderCopyBtn.className = 'ls-dash-btn ls-dash-errors-copy';
+    errorsHeaderCopyBtn.textContent = 'Copy all';
+    errorsHeaderCopyBtn.disabled = true;
+    errorsHeaderCopyBtn.addEventListener('click', () => {
+      const tsv = buildErrorsListCopyTsv();
+      const lines = Math.max(0, tsv.split('\n').length - 1);
+      copyTextToClipboard(
+        tsv,
+        lines > 0 ? `Copied ${lines} error row(s).` : 'No errors to copy.'
+      );
+    });
+
+    errorsHeader.append(errorsTitle, errorsCountBadge, errorsHeaderCopyBtn);
+
+    const errorsScroll = document.createElement('div');
+    errorsScroll.className = 'ls-dashboard-scroll ls-dash-errors-list';
+
+    errorsSection.append(errorsHeader, errorsScroll);
+    main.append(destSection, errorsSection);
+
+    const closeDashboard = async () => {
+      overlay.remove();
+      releaseAutomation();
+      const clicked = await clickUpdateSortType();
+      log(
+        clicked
+          ? '[Jobs] Close — clicked Update (#change-sort-type).'
+          : '[Jobs] Close — Update link not found on page.'
+      );
+    };
+    closeBtn.addEventListener('click', () => {
+      void closeDashboard();
+    });
+
+    card.append(header, main);
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+    holdAutomation();
+    closeBtn.focus();
+
+    requestAnimationFrame(() => {
+      renderDashboardDestinationsList(destScroll);
+
+      const errorCount = getErrorResults().length;
+      errorsTitle.textContent = errorCount ? `Errors (${errorCount})` : 'Errors';
+      errorsCountBadge.textContent = errorCount
+        ? `${errorCount} row${errorCount === 1 ? '' : 's'}`
+        : 'None';
+      const hasErrors = errorCount > 0;
+      copyAllErrorsBtn.disabled = !hasErrors;
+      errorsHeaderCopyBtn.disabled = !hasErrors;
+      renderDashboardErrorsList(errorsScroll);
+    });
+  }
+
+  /**
+   * @param {string} text
+   * @returns {string[]}
+   */
+  function parseDestinationContainers(text) {
+    const ids = [];
+    const seen = new Set();
+    for (const line of String(text).split(/\r?\n/)) {
+      for (const part of line.split(/[\t,;]+/)) {
+        const id = part.trim();
+        if (!id) continue;
+        const key = id.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        ids.push(id);
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * @param {unknown} raw
+   * @returns {{ sortCode: string, toteIds: string[] }}
+   */
+  function normalizeSortSlot(raw) {
+    const sortCode = String(raw?.sortCode || '').trim();
+    let toteIds = [];
+    if (Array.isArray(raw?.toteIds)) {
+      toteIds = raw.toteIds.map((t) => String(t).trim()).filter(Boolean);
+    } else if (raw?.toteId) {
+      toteIds = parseDestinationContainers(String(raw.toteId));
+    }
+    return { sortCode, toteIds };
+  }
+
+  /**
+   * @param {string} reason
+   * @param {string} sortCode
+   * @param {string} tote
+   * @param {string[] | undefined} toteIds
+   */
+  function toteBlockerMessage(reason, sortCode, tote, toteIds) {
+    switch (reason) {
+      case 'no-mapping':
+        return (
+          `Sort code "${sortCode}" has no destination containers.\n\n` +
+          'Add this sort code and one or more destination container IDs (one per line) in a route on the right.'
+        );
+      case 'tote-full':
+        return (
+          `Destination "${tote}" is full (${TOTE_MAX_UNITS}/${TOTE_MAX_UNITS} units).\n\n` +
+          'Add another destination container on a new line in that route, or clear counts with Clear.'
+        );
+      case 'all-full': {
+        const list = (toteIds && toteIds.length ? toteIds : [tote]).filter(Boolean).join('\n');
+        return (
+          `Every destination container for sort code "${sortCode}" is full (${TOTE_MAX_UNITS} units each):\n\n` +
+          `${list}\n\n` +
+          'Add another container ID on a new line in that route, then retry.'
+        );
+      }
+      case 'field-missing':
+        return (
+          'The scan-tote field did not appear on the page.\n\n' +
+          'The LPN may not have been accepted, or the workflow is on an unexpected step.'
+        );
+      case 'submit-failed':
+        return (
+          `Could not submit destination tote "${tote}".\n\n` +
+          'Check the page for errors and that the tote ID is valid.'
+        );
+      default:
+        return `Could not move LPN into tote (reason: ${reason || 'unknown'}).`;
+    }
+  }
+
+  function rowKey(container, lpn) {
+    return `${String(container).trim().toLowerCase()}|${String(lpn).trim()}`;
+  }
+
+  function getRowStatus(container, lpn, index) {
+    const key = rowKey(container, lpn);
+    const saved = rowStatuses[key];
+    if (saved === 'complete' || saved === 'error') return saved;
+    if (sessionArmed && index === queueIndex) return 'active';
+    return saved || 'pending';
+  }
+
+  /** Row already finished successfully (green Done dot). */
+  function isRowDone(index) {
+    const pair = getMappingList()[index];
+    if (!pair) return false;
+    return rowStatuses[rowKey(pair.container, pair.lpn)] === 'complete';
+  }
+
+  /**
+   * Advance queueIndex past any rows already marked Done.
+   * @returns {boolean} true if a pending row remains
+   */
+  function skipDoneRowsFromCurrent() {
+    const list = getMappingList();
+    const start = queueIndex;
+    while (queueIndex < list.length && isRowDone(queueIndex)) {
+      queueIndex += 1;
+    }
+    if (queueIndex > start) {
+      log(`Skipped ${queueIndex - start} row(s) already marked Done.`);
+      scheduleRenderQueueList();
+      scheduleSaveState();
+    }
+    return queueIndex < list.length;
+  }
+
+  /** Skip Done rows; leave queueIndex on the next pending row. */
+  function ensureCurrentRowIsPending() {
+    if (!isRowDone(queueIndex)) return true;
+    if (!skipDoneRowsFromCurrent()) return false;
+    resetStepFlagsForCurrentItem();
+    setRowStatusByIndex(queueIndex, 'active');
+    return true;
+  }
+
+  function setRowStatusByIndex(index, status) {
+    const pair = getMappingList()[index];
+    if (!pair) return;
+    rowStatuses[rowKey(pair.container, pair.lpn)] = status;
+    bumpRowStatusVersion();
+    scheduleRenderQueueList();
+    scheduleSaveState();
+    if (status === 'error') updateResetErrorStatusesBtn();
+  }
+
+  function syncRowStatusesFromMapping() {
+    const list = getMappingList();
+    const next = {};
+    for (const pair of list) {
+      const key = rowKey(pair.container, pair.lpn);
+      next[key] = rowStatuses[key] || 'pending';
+    }
+    rowStatuses = next;
+    bumpRowStatusVersion();
+    scheduleRenderQueueList();
+    scheduleSaveState();
+  }
+
+  function appendQueueListRow(pair, index, frag) {
+    const status = getRowStatus(pair.container, pair.lpn, index);
+    const row = document.createElement('div');
+    row.className = 'ls-queue-row';
+    if (index === queueIndex) row.classList.add('ls-queue-row-current');
+    const dot = document.createElement('span');
+    dot.className = `ls-dot ls-dot-${status}`;
+    dot.title =
+      status === 'complete'
+        ? 'Complete'
+        : status === 'active'
+          ? 'In progress'
+          : status === 'error'
+            ? 'Error'
+            : 'Not started';
+    const text = document.createElement('span');
+    text.className = 'ls-queue-text';
+    text.textContent = `${pair.container}\t${pair.lpn}`;
+    row.append(dot, text);
+    frag.appendChild(row);
+  }
+
+  function bumpRowStatusVersion() {
+    rowStatusVersion++;
+    progressStatsCache = null;
+  }
+
+  function getProgressStats() {
+    if (progressStatsCache && progressStatsCacheVersion === rowStatusVersion) {
+      return progressStatsCache;
+    }
+    const list = getMappingList();
+    const total = list.length;
+    let moved = 0;
+    let error = 0;
+    for (const pair of list) {
+      const s = rowStatuses[rowKey(pair.container, pair.lpn)];
+      if (s === 'complete') moved++;
+      else if (s === 'error') error++;
+    }
+    const percent = total ? Math.round((moved / total) * 100) : 0;
+    progressStatsCache = {
+      total,
+      moved,
+      error,
+      remaining: Math.max(0, total - moved),
+      percent,
+    };
+    progressStatsCacheVersion = rowStatusVersion;
+    return progressStatsCache;
+  }
+
+  function getActiveElapsedMs() {
+    if (!sessionStartedAt) return 0;
+    let paused = timingPausedMs;
+    if (pauseStartedAt) paused += Date.now() - pauseStartedAt;
+    return Math.max(0, Date.now() - sessionStartedAt - paused);
+  }
+
+  function estimateRemainingMs(stats) {
+    const { total, moved } = stats;
+    const left = total - moved;
+    if (left <= 0) return 0;
+    if (!sessionStartedAt || moved === 0) return null;
+    const avg = getActiveElapsedMs() / moved;
+    return Math.round(avg * left);
+  }
+
+  function formatCountdown(ms) {
+    if (ms == null || !Number.isFinite(ms)) return '—:—:—';
+    const s = Math.max(0, Math.ceil(ms / 1000));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    if (h > 0) {
+      return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+    }
+    return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+  }
+
+  function formatEtaClock(deadlineMs) {
+    if (!deadlineMs || !Number.isFinite(deadlineMs)) return '—';
+    return new Date(deadlineMs).toLocaleTimeString([], {
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+  }
+
+  function resetProgressTiming() {
+    sessionStartedAt = null;
+    timingPausedMs = 0;
+    pauseStartedAt = null;
+    frozenCountdownMs = null;
+  }
+
+  function armProgressTiming() {
+    if (!sessionStartedAt) sessionStartedAt = Date.now();
+    if (pauseStartedAt) {
+      timingPausedMs += Date.now() - pauseStartedAt;
+      pauseStartedAt = null;
+      frozenCountdownMs = null;
+    }
+  }
+
+  function pauseProgressTiming() {
+    if (!sessionStartedAt || pauseStartedAt) return;
+    pauseStartedAt = Date.now();
+    const stats = getProgressStats();
+    const rem = estimateRemainingMs(stats);
+    if (rem != null) frozenCountdownMs = rem;
+  }
+
+  function updateProgressUI() {
+    if (!progressBarFillEl) return;
+    const stats = getProgressStats();
+    const done = stats.total > 0 && stats.moved >= stats.total;
+
+    progressBarFillEl.style.width = `${stats.percent}%`;
+    if (progressPctEl) progressPctEl.textContent = `${stats.percent}%`;
+    if (progressDetailEl) {
+      progressDetailEl.textContent =
+        stats.total > 0
+          ? `${stats.moved} / ${stats.total} moved${stats.error ? ` · ${stats.error} error` : ''}`
+          : 'Paste queue to begin';
+    }
+
+    if (!etaClockEl || !countdownEl) return;
+
+    if (done) {
+      etaClockEl.textContent = 'Done';
+      countdownEl.textContent = '00:00';
+      return;
+    }
+
+    if (pauseStartedAt) {
+      etaClockEl.textContent = 'Paused';
+      countdownEl.textContent = formatCountdown(frozenCountdownMs);
+      return;
+    }
+
+    if (!sessionStartedAt || stats.moved === 0) {
+      etaClockEl.textContent = 'ETA —';
+      countdownEl.textContent = '—:—:—';
+      return;
+    }
+
+    const remainingMs = estimateRemainingMs(stats);
+    if (remainingMs == null) {
+      etaClockEl.textContent = 'ETA —';
+      countdownEl.textContent = '—:—:—';
+      return;
+    }
+
+    frozenCountdownMs = remainingMs;
+    const deadline = Date.now() + remainingMs;
+    etaClockEl.textContent = `ETA ${formatEtaClock(deadline)}`;
+    countdownEl.textContent = formatCountdown(remainingMs);
+  }
+
+  function startProgressTicker() {
+    if (progressTicker) return;
+    progressTicker = setInterval(() => {
+      if (!pauseStartedAt && sessionStartedAt) {
+        const stats = getProgressStats();
+        if (stats.moved > 0 && stats.moved < stats.total) {
+          const rem = estimateRemainingMs(stats);
+          if (rem != null) frozenCountdownMs = rem;
+        }
+      }
+      updateProgressUI();
+    }, 1000);
+  }
+
+  function renderQueueList() {
+    if (!queueListEl) return;
+    const list = getMappingList();
+    queueListEl.innerHTML = '';
+    if (!list.length) {
+      queueListEl.innerHTML =
+        '<div class="ls-queue-empty">Paste container → LPN lines above</div>';
+      updateProgressUI();
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+    list.forEach((pair, index) => {
+      appendQueueListRow(pair, index, frag);
+    });
+    queueListEl.appendChild(frag);
+    updateProgressUI();
+  }
+
+  function getSortSlotsFromInputs() {
+    const slots = [];
+    for (let i = 0; i < SORT_SLOT_COUNT; i++) {
+      slots.push({
+        sortCode: (slotSortInputs[i]?.value || '').trim(),
+        toteIds: parseDestinationContainers(slotToteInputs[i]?.value || ''),
+      });
+    }
+    return slots;
+  }
+
+  function findSortCodeSlotIndex(sortCode) {
+    const key = (sortCode || '').trim().toLowerCase();
+    if (!key) return -1;
+    const slots = getSortSlotsFromInputs();
+    for (let i = 0; i < slots.length; i++) {
+      const slotKey = (slots[i].sortCode || '').trim().toLowerCase();
+      if (slotKey && slotKey === key) return i;
+    }
+    return -1;
+  }
+
+  function findFirstEmptySortCodeSlotIndex() {
+    const slots = getSortSlotsFromInputs();
+    for (let i = 0; i < slots.length; i++) {
+      if (!(slots[i].sortCode || '').trim()) return i;
+    }
+    return -1;
+  }
+
+  /**
+   * Puts an unknown sort code into the first empty route (1–5) after user confirms.
+   * @param {string} sortCode
+   * @returns {Promise<{ assigned: boolean, slotIndex: number }>}
+   */
+  async function ensureSortCodeAssignedToSlot(sortCode) {
+    const trimmed = (sortCode || '').trim();
+    if (!trimmed) return { assigned: false, slotIndex: -1 };
+
+    const existingIdx = findSortCodeSlotIndex(trimmed);
+    if (existingIdx >= 0) {
+      return { assigned: false, slotIndex: existingIdx };
+    }
+
+    const emptyIdx = findFirstEmptySortCodeSlotIndex();
+    if (emptyIdx < 0) {
+      log(`[Sort code] All ${SORT_SLOT_COUNT} routes have a sort code — cannot auto-assign "${trimmed}".`);
+      return { assigned: false, slotIndex: -1 };
+    }
+
+    await alertUserConfirm(
+      'New sort code — confirm route',
+      `Amazon showed sort code:\n"${trimmed}"\n\n` +
+        `Save it to Route ${emptyIdx + 1} on the right?\n\n` +
+        'After OK, add destination container ID(s) on that route if needed.',
+      getBlockerContext()
+    );
+
+    if (slotSortInputs[emptyIdx]) {
+      slotSortInputs[emptyIdx].value = trimmed;
+    }
+    log(`[Sort code] Assigned "${trimmed}" → Route ${emptyIdx + 1}.`);
+    void storageSetJson(STORAGE_KEY_SORT_SLOTS, getSortSlotsFromInputs());
+    scheduleSaveState();
+    renderSlotCounts();
+    return { assigned: true, slotIndex: emptyIdx };
+  }
+
+  /**
+   * @param {string} toteId
+   * @param {string} sortCode
+   * @param {number} count
+   */
+  async function confirmDestinationToteFull(toteId, sortCode, count) {
+    const key = (toteId || '').trim().toLowerCase();
+    if (!key || count < TOTE_MAX_UNITS) return;
+    if (acknowledgedFullTotes.has(key)) return;
+
+    await alertUserConfirm(
+      `Destination full (${TOTE_MAX_UNITS} units)`,
+      `Destination container:\n"${toteId}"\n` +
+        `Sort code: ${sortCode || '(unknown)'}\n\n` +
+        `This destination now has ${count}/${TOTE_MAX_UNITS} LPNs.\n\n` +
+        'Click OK when you are ready to use the next destination on that route ' +
+        '(add another ID on a new line on the right if needed).',
+      getBlockerContext()
+    );
+    acknowledgedFullTotes.add(key);
+  }
+
+  function renderSlotCounts() {
+    for (let i = 0; i < SORT_SLOT_COUNT; i++) {
+      const toteIds = parseDestinationContainers(slotToteInputs[i]?.value || '');
+      const el = slotCountEls[i];
+      if (!el) continue;
+      el.classList.remove('ls-count-full');
+      if (!toteIds.length) {
+        el.textContent = `Add destinations (one per line, max ${TOTE_MAX_UNITS} each)`;
+        continue;
+      }
+      const parts = toteIds.map((id) => {
+        const n = getToteCount(id);
+        const full = n >= TOTE_MAX_UNITS;
+        return `${id}: ${n}/${TOTE_MAX_UNITS}${full ? ' FULL' : ''}`;
+      });
+      el.textContent = parts.join(' · ');
+      el.classList.toggle('ls-count-full', toteIds.every((id) => getToteCount(id) >= TOTE_MAX_UNITS));
+    }
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function injectStyles(css) {
+    if (typeof GM_addStyle === 'function') {
+      GM_addStyle(css);
+      return;
+    }
+    const style = document.createElement('style');
+    style.textContent = css;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function setNativeInputValue(input, value) {
+    const proto =
+      input instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && desc.set) {
+      desc.set.call(input, value);
+    } else {
+      input.value = value;
+    }
+  }
+
+  function keyInitFor(ch, ctrl) {
+    let code = '';
+    if (/[a-zA-Z]/.test(ch)) code = 'Key' + ch.toUpperCase();
+    else if (/[0-9]/.test(ch)) code = 'Digit' + ch;
+    return {
+      key: ch,
+      code,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      ctrlKey: !!ctrl,
+      keyCode: ch.charCodeAt(0),
+      which: ch.charCodeAt(0),
+    };
+  }
+
+  function dispatchKey(target, type, init) {
+    target.dispatchEvent(new KeyboardEvent(type, init));
+  }
+
+  function isFieldStepActive(selector) {
+    const field = document.querySelector(selector);
+    if (!field) return false;
+    const style = getComputedStyle(field);
+    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
+      return false;
+    }
+    const rect = field.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    if (field.offsetParent === null && style.position !== 'fixed') return false;
+    return true;
+  }
+
+  function isFieldVisible(selector) {
+    const field = document.querySelector(selector);
+    if (!field) return false;
+    const style = getComputedStyle(field);
+    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
+      return false;
+    }
+    const rect = field.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function readFieldValue(selector) {
+    const field = document.querySelector(selector);
+    if (!field) return '';
+    return decodeAmazonFieldText(field.value);
+  }
+
+  function isElementClickable(el) {
+    if (!el) return false;
+    const style = getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
+      return false;
+    }
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  /** Source container shown in the page summary row (not only the hidden scan field). */
+  function readDisplayedSourceContainer() {
+    const fieldVal = readFieldValue(SOURCE_CONTAINER_SELECTOR);
+    if (isValidSourceContainerId(fieldVal)) return fieldVal;
+
+    for (const el of document.querySelectorAll('td, th, span, label, div, a')) {
+      const label = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!/^source\s*container$/i.test(label)) continue;
+      const row = el.closest('tr') || el.parentElement?.parentElement;
+      if (!row) continue;
+      for (const cell of row.querySelectorAll('td, span, div, a')) {
+        const id = decodeAmazonFieldText(cell.textContent || '');
+        if (isValidSourceContainerId(id)) return id;
+      }
+    }
+    return '';
+  }
+
+  function readBarcodeOnPage() {
+    const val = readFieldValue(BARCODE_SELECTOR);
+    return isValidLpn(val) ? val : '';
+  }
+
+  function isStaleBarcodeOnPage() {
+    const onPage = readBarcodeOnPage();
+    const expected = getCurrentLpn();
+    if (!onPage || !expected) return false;
+    return onPage.toUpperCase() !== expected.toUpperCase();
+  }
+
+  /** Sort code text still in #sort-code-id (may linger in DOM after Update). */
+  function isSortCodeElementPopulated() {
+    const text = readSortCodeText();
+    return Boolean(text && text.length > 2);
+  }
+
+  /**
+   * Both scan fields visible with placeholders — normal at workflow start on Amazon.
+   * Only treat as stuck after sort type was already accepted (WDSorting entered).
+   */
+  function hasConflictingScanSteps() {
+    const sortVal = readFieldValue(SORT_TYPE_SELECTOR);
+    const sortTypeEntered =
+      !isAmazonPlaceholderValue(sortVal) && /wdsorting/i.test(sortVal);
+    if (!sortTypeEntered) return false;
+    return (
+      isAmazonPlaceholderValue(readFieldValue(SOURCE_CONTAINER_SELECTOR)) &&
+      isBarcodeFieldAwaitingLpn() &&
+      !readDisplayedSourceContainer() &&
+      !isValidSourceContainerId(readFieldValue(SOURCE_CONTAINER_SELECTOR))
+    );
+  }
+
+  function needsSortTypeEntry() {
+    if (isSortTypeSatisfiedOnPage()) return false;
+    const sortVal = readFieldValue(SORT_TYPE_SELECTOR);
+    if (!isAmazonPlaceholderValue(sortVal) && /wdsorting/i.test(sortVal)) return false;
+    return isFieldVisible(SORT_TYPE_SELECTOR) || isFieldStepActive(SORT_TYPE_SELECTOR);
+  }
+
+  /**
+   * Prior LPN left sort code in #sort-code-id while barcode waits — only when mid-item,
+   * not after Update when sort-type step is back (old label often stays in DOM).
+   */
+  function isStaleSortCodeBeforeBarcode() {
+    if (!isSortCodeElementPopulated()) return false;
+    if (!isBarcodeFieldAwaitingLpn()) return false;
+    if (isFieldStepActive(SCAN_TOTE_SELECTOR)) return false;
+    const toteVal = readFieldValue(SCAN_TOTE_SELECTOR);
+    if (!isAmazonPlaceholderValue(toteVal) && /^ts[a-z0-9]+$/i.test(toteVal)) {
+      return false;
+    }
+    const sortTypeVal = readFieldValue(SORT_TYPE_SELECTOR);
+    if (
+      isFieldStepActive(SORT_TYPE_SELECTOR) ||
+      (isFieldVisible(SORT_TYPE_SELECTOR) && isAmazonPlaceholderValue(sortTypeVal))
+    ) {
+      return false;
+    }
+    if (!isAmazonPlaceholderValue(sortTypeVal) && /wdsorting/i.test(sortTypeVal)) {
+      return false;
+    }
+    return true;
+  }
+
+  function isSortTypeSatisfiedOnPage() {
+    if (isStaleBarcodeOnPage()) return false;
+    if (isStaleSortCodeBeforeBarcode()) return false;
+    if (isSortCodeReady()) return true;
+    const sortVal = readFieldValue(SORT_TYPE_SELECTOR);
+    if (!isAmazonPlaceholderValue(sortVal) && /wdsorting/i.test(sortVal)) return true;
+    if (readDisplayedSourceContainer()) return true;
+    const srcVal = readFieldValue(SOURCE_CONTAINER_SELECTOR);
+    if (isValidSourceContainerId(srcVal)) return true;
+    if (isFieldStepActive(SCAN_TOTE_SELECTOR)) return true;
+    return false;
+  }
+
+  async function waitForSortCodeCleared(timeoutMs = PAGE_RESET_WAIT_MS) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (!isSortCodeElementPopulated()) return true;
+      if (isFieldStepActive(SORT_TYPE_SELECTOR)) return true;
+      const sortTypeVal = readFieldValue(SORT_TYPE_SELECTOR);
+      if (isFieldVisible(SORT_TYPE_SELECTOR) && isAmazonPlaceholderValue(sortTypeVal)) {
+        return true;
+      }
+      await sleep(STEP_VERIFY_POLL_MS);
+    }
+    return !isSortCodeElementPopulated() || isFieldStepActive(SORT_TYPE_SELECTOR);
+  }
+
+  async function resetPageWorkflowState(logPrefix = '[Workflow]', opts = {}) {
+    const light = Boolean(opts.light);
+    const maxAttempts = light ? 1 : 3;
+    traceWorkflow('reset.begin', { logPrefix, light, maxAttempts });
+
+    if (pageResetInProgress) {
+      log(`${logPrefix} Page reset already in progress — waiting…`);
+      const start = Date.now();
+      while (pageResetInProgress && Date.now() - start < PAGE_RESET_WAIT_MS) {
+        await sleep(STEP_VERIFY_POLL_MS);
+      }
+      if (pageResetInProgress) return;
+    }
+    pageResetInProgress = true;
+    try {
+      log(`${logPrefix} Resetting page (Update)…`);
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        await clickPageResetUpdates();
+        await sleep(POST_UPDATE_WAIT_MS);
+        if (!isSortCodeElementPopulated()) break;
+        if (attempt < maxAttempts) {
+          log(`${logPrefix} Still stale after Update (${attempt}/${maxAttempts}) — retrying…`);
+        }
+      }
+      await waitForSortCodeCleared();
+      sourceContainerDone = false;
+      barcodeDone = false;
+      postBarcodeHandled = false;
+      lastSubmittedLpn = null;
+      syncStepFlagsFromPageState();
+      if (isStaleSortCodeBeforeBarcode()) {
+        log(
+          `${logPrefix} Page may still be stuck — click Update on Amazon once, then Start again.`
+        );
+      } else {
+        log(`${logPrefix} Page reset complete.`);
+      }
+    } finally {
+      pageResetInProgress = false;
+      traceWorkflow('reset.end', { logPrefix });
+    }
+  }
+
+  /**
+   * @param {string} [logPrefix]
+   * @param {{ betweenJobs?: boolean }} [opts] — betweenJobs: do not halt queue if sort-code label lingers in DOM
+   */
+  async function ensureCleanPageBeforeWork(logPrefix = '[Workflow]', opts = {}) {
+    const betweenJobs = Boolean(opts.betweenJobs);
+
+    if (isStaleBarcodeOnPage()) {
+      await resetPageWorkflowState(logPrefix);
+      if (isStaleBarcodeOnPage()) {
+        log(`${logPrefix} Wrong barcode still on page after reset — cannot continue.`);
+        return false;
+      }
+    }
+
+    if (!betweenJobs && isStaleSortCodeBeforeBarcode()) {
+      await resetPageWorkflowState(logPrefix);
+      if (isStaleSortCodeBeforeBarcode()) {
+        log(
+          `${logPrefix} Sort code still on screen — click Update on Amazon, then press Start again.`
+        );
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  /**
+   * Wrong order: a real LPN is on the page before the source container was accepted.
+   * Not the normal new-job layout (sort-type + barcode placeholders + lingering sort-code label).
+   */
+  function isBarcodeBeforeSourceStep() {
+    if (sourceContainerDone || isSortCodeReady()) return false;
+    if (needsSortTypeEntry()) return false;
+
+    const sortTypeVal = readFieldValue(SORT_TYPE_SELECTOR);
+    if (isFieldStepActive(SORT_TYPE_SELECTOR)) return false;
+    if (isFieldVisible(SORT_TYPE_SELECTOR) && isAmazonPlaceholderValue(sortTypeVal)) {
+      return false;
+    }
+
+    const barcodeVal = readFieldValue(BARCODE_SELECTOR);
+    if (!isValidLpn(barcodeVal)) return false;
+
+    const srcVal = readFieldValue(SOURCE_CONTAINER_SELECTOR);
+    if (isValidSourceContainerId(srcVal) || readDisplayedSourceContainer()) return false;
+    return true;
+  }
+
+  function isBarcodeEmptyErrorOnPage() {
+    const body = (document.body?.innerText || '').replace(/\s+/g, ' ');
+    return /barcode\s+is\s+empty/i.test(body);
+  }
+
+  /**
+   * Infer sourceContainerDone / barcodeDone from Amazon UI so Start does not
+   * blindly reset when the page is already mid-workflow.
+   */
+  function syncStepFlagsFromPageState() {
+    const pageContainer = readDisplayedSourceContainer();
+    const mappingContainer = getContainerValue();
+    const sortOnPage = isSortCodeElementPopulated();
+    const sortReady = isSortCodeReady();
+    const barcodeVal = readFieldValue(BARCODE_SELECTOR);
+    const awaitingBarcode = isBarcodeFieldAwaitingLpn();
+    const currentLpn = getCurrentLpn();
+
+    if (
+      pageContainer &&
+      mappingContainer &&
+      pageContainer.toUpperCase() !== mappingContainer.toUpperCase()
+    ) {
+      sourceContainerDone = false;
+      barcodeDone = false;
+      return;
+    }
+
+    if (isStaleBarcodeOnPage()) {
+      sourceContainerDone = false;
+      barcodeDone = false;
+      return;
+    }
+
+    if (sortOnPage && awaitingBarcode && !needsSortTypeEntry()) {
+      sourceContainerDone = false;
+      barcodeDone = false;
+      return;
+    }
+
+    if (sortReady) {
+      sourceContainerDone = true;
+      if (isValidLpn(barcodeVal) && currentLpn) {
+        barcodeDone = barcodeVal.toUpperCase() === currentLpn.toUpperCase();
+      } else if (!awaitingBarcode && !isFieldStepActive(BARCODE_SELECTOR)) {
+        barcodeDone = true;
+      } else {
+        barcodeDone = false;
+      }
+      return;
+    }
+
+    const srcFieldVal = readFieldValue(SOURCE_CONTAINER_SELECTOR);
+    if (isValidSourceContainerId(srcFieldVal)) {
+      sourceContainerDone = true;
+    } else if (pageContainer && isValidSourceContainerId(pageContainer)) {
+      sourceContainerDone = true;
+    } else if (sortReady) {
+      sourceContainerDone = true;
+    }
+
+    if (awaitingBarcode || isFieldStepActive(BARCODE_SELECTOR)) {
+      barcodeDone = false;
+    }
+  }
+
+  function isBarcodeFieldAwaitingLpn() {
+    if (!isFieldVisible(BARCODE_SELECTOR)) return false;
+    return isAmazonPlaceholderValue(readFieldValue(BARCODE_SELECTOR));
+  }
+
+  function canSubmitBarcodeNow() {
+    return isFieldStepActive(BARCODE_SELECTOR) || isBarcodeFieldAwaitingLpn();
+  }
+
+  /**
+   * @param {string} selector
+   * @param {string} placeholder
+   * @param {string} typedValue
+   */
+  async function waitForStepAdvanced(selector, placeholder, typedValue, label) {
+    const start = Date.now();
+    while (Date.now() - start < STEP_VERIFY_TIMEOUT_MS) {
+      if (isAmazonExceptionShown()) {
+        return { advanced: false, reason: 'exception' };
+      }
+      if (fieldStepAdvanced(selector, placeholder, typedValue)) {
+        log(`[${label}] Verified step advanced (${Date.now() - start}ms).`);
+        return { advanced: true };
+      }
+      await sleep(STEP_VERIFY_POLL_MS);
+    }
+    log(`[${label}] Step verify timed out after ${STEP_VERIFY_TIMEOUT_MS / 1000}s.`);
+    return {
+      advanced: fieldStepAdvanced(selector, placeholder, typedValue),
+      reason: 'verify-timeout',
+    };
+  }
+
+  async function verifySourceContainerAccepted(container) {
+    const expected = decodeAmazonFieldText(container).toUpperCase();
+    const start = Date.now();
+    while (Date.now() - start < STEP_VERIFY_TIMEOUT_MS) {
+      if (isAmazonExceptionShown()) return { ok: false, reason: 'exception' };
+      const srcVal = readFieldValue(SOURCE_CONTAINER_SELECTOR);
+      const onPage = readDisplayedSourceContainer();
+      const srcOk =
+        isValidSourceContainerId(srcVal) && srcVal.toUpperCase() === expected;
+      const pageOk = onPage && onPage.toUpperCase() === expected;
+      if ((srcOk || pageOk) && (isBarcodeFieldAwaitingLpn() || isFieldStepActive(BARCODE_SELECTOR))) {
+        log(`[Source container] Verified ${container} accepted (${Date.now() - start}ms).`);
+        return { ok: true };
+      }
+      if (
+        !isFieldStepActive(SOURCE_CONTAINER_SELECTOR) &&
+        (isBarcodeFieldAwaitingLpn() || isFieldStepActive(BARCODE_SELECTOR))
+      ) {
+        log(`[Source container] Barcode step open (${Date.now() - start}ms).`);
+        return { ok: true };
+      }
+      await sleep(STEP_VERIFY_POLL_MS);
+    }
+    return { ok: false, reason: 'verify-timeout' };
+  }
+
+  async function verifyBarcodeScanAccepted(lpn) {
+    const expected = decodeAmazonFieldText(lpn).toUpperCase();
+    const start = Date.now();
+    while (Date.now() - start < STEP_VERIFY_TIMEOUT_MS) {
+      if (isAmazonExceptionShown()) return { ok: false, reason: 'exception' };
+      if (isStaleSortCodeBeforeBarcode()) {
+        return { ok: false, reason: 'stale-sort-before-barcode' };
+      }
+      if (isSortCodeReady()) {
+        const fieldVal = readFieldValue(BARCODE_SELECTOR);
+        if (!isValidLpn(fieldVal) || fieldVal.toUpperCase() === expected) {
+          log(`[Barcode] Sort code ready (${Date.now() - start}ms): ${readSortCodeText()}`);
+          return { ok: true, sortCode: readSortCodeText() };
+        }
+      }
+      const fieldVal = readFieldValue(BARCODE_SELECTOR);
+      if (isValidLpn(fieldVal) && fieldVal.toUpperCase() === expected && isSortCodeReady()) {
+        return { ok: true, sortCode: readSortCodeText() };
+      }
+      await sleep(STEP_VERIFY_POLL_MS);
+    }
+    return { ok: false, reason: 'verify-timeout' };
+  }
+
+  async function verifyToteMoveOutcome() {
+    await sleep(STEP_SETTLE_MS);
+    const start = Date.now();
+    while (Date.now() - start < MOVE_VERIFY_TIMEOUT_MS) {
+      if (isAmazonExceptionShown()) {
+        await sleep(150);
+        if (isAmazonExceptionShown()) {
+          return { ok: false, reason: 'move-exception' };
+        }
+      }
+      const toteVal = readFieldValue(SCAN_TOTE_SELECTOR);
+      const toteStillActive =
+        isFieldStepActive(SCAN_TOTE_SELECTOR) && !isAmazonPlaceholderValue(toteVal);
+      if (!toteStillActive) {
+        log(`[Tote] Move settled (${Date.now() - start}ms).`);
+        return { ok: true };
+      }
+      await sleep(STEP_VERIFY_POLL_MS);
+    }
+    if (isAmazonExceptionShown()) return { ok: false, reason: 'move-exception' };
+    log('[Tote] Move verify timed out — tote field still active.');
+    return { ok: false, reason: 'move-timeout' };
+  }
+
+  async function waitForPageReadyForNextLpn() {
+    const start = Date.now();
+    while (Date.now() - start < PAGE_RESET_WAIT_MS) {
+      if (isAmazonExceptionShown()) return false;
+      if (isStaleSortCodeBeforeBarcode() || isStaleBarcodeOnPage()) {
+        await sleep(STEP_VERIFY_POLL_MS);
+        continue;
+      }
+      if (
+        isFieldStepActive(SORT_TYPE_SELECTOR) ||
+        isFieldStepActive(SOURCE_CONTAINER_SELECTOR) ||
+        (isBarcodeFieldAwaitingLpn() && !isSortCodeElementPopulated())
+      ) {
+        return true;
+      }
+      await sleep(STEP_VERIFY_POLL_MS);
+    }
+    return !isStaleSortCodeBeforeBarcode() && !isStaleBarcodeOnPage();
+  }
+
+  function fieldStepAdvanced(selector, placeholder, typedValue) {
+    const field = document.querySelector(selector);
+    const fieldVal = field ? decodeAmazonFieldText(field.value) : '';
+    const stillActive = isFieldStepActive(selector);
+    const typed = decodeAmazonFieldText(typedValue);
+
+    if (selector === BARCODE_SELECTOR) {
+      if (!isValidLpn(typed)) return false;
+      if (isAmazonPlaceholderValue(fieldVal)) {
+        return isSortCodeReady();
+      }
+      if (fieldVal.toUpperCase() === typed.toUpperCase()) return true;
+      if (!stillActive && isSortCodeReady() && !isAmazonPlaceholderValue(fieldVal)) return true;
+      return false;
+    }
+
+    return (
+      !stillActive ||
+      (fieldVal &&
+        fieldVal.toLowerCase() !== placeholder.toLowerCase() &&
+        !isAmazonPlaceholderValue(fieldVal))
+    );
+  }
+
+  function getMappingText() {
+    return (mappingInput?.value || '').trim();
+  }
+
+  /**
+   * Ordered container → LPN pairs (top line = first to process on Start).
+   * @param {string} [text]
+   * @returns {{ container: string, lpn: string }[]}
+   */
+  function parseContainerLpnList(text) {
+    const src = text !== undefined ? text : getMappingText();
+    const list = [];
+    for (const line of src.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const parts = trimmed.split(/[\t\s]+/).filter(Boolean);
+      if (parts.length >= 2) {
+        const container = decodeAmazonFieldText(parts[0]);
+        const lpn = decodeAmazonFieldText(parts[1]);
+        if (!isValidSourceContainerId(container) || !isValidLpn(lpn)) {
+          continue;
+        }
+        list.push({ container, lpn });
+      }
+    }
+    return list;
+  }
+
+  function getMappingList() {
+    const text = getMappingText();
+    if (cachedMappingList && text === cachedMappingText) {
+      return cachedMappingList;
+    }
+    cachedMappingText = text;
+    cachedMappingList = parseContainerLpnList(text);
+    return cachedMappingList;
+  }
+
+  function scheduleRenderQueueList() {
+    if (renderQueueListRaf != null) return;
+    renderQueueListRaf = requestAnimationFrame(() => {
+      renderQueueListRaf = null;
+      renderQueueList();
+    });
+  }
+
+  function scheduleSyncRowStatusesFromMapping() {
+    if (mappingSyncTimer) clearTimeout(mappingSyncTimer);
+    mappingSyncTimer = setTimeout(() => {
+      mappingSyncTimer = null;
+      syncRowStatusesFromMapping();
+    }, MAPPING_SYNC_DEBOUNCE_MS);
+  }
+
+  function getCurrentPair() {
+    const list = getMappingList();
+    return list[queueIndex] || null;
+  }
+
+  function getContainerValue() {
+    const c = getCurrentPair()?.container || '';
+    return isValidSourceContainerId(c) ? decodeAmazonFieldText(c) : '';
+  }
+
+  function getCurrentLpn() {
+    const lpn = getCurrentPair()?.lpn || '';
+    return isValidLpn(lpn) ? decodeAmazonFieldText(lpn) : null;
+  }
+
+  function formatQueueLabel() {
+    const list = getMappingList();
+    const pair = getCurrentPair();
+    if (!pair) return 'none';
+    return `${queueIndex + 1}/${list.length} ${pair.container} → ${pair.lpn}`;
+  }
+
+  function resolvePendingLpn(options = {}) {
+    const { quiet = false, forceLog = false } = options;
+    const pair = getCurrentPair();
+    pendingLpn = pair?.lpn || null;
+    barcodeBlocked = Boolean(pair && !pendingLpn);
+
+    if (!quiet) {
+      if (pendingLpn && pair) {
+        log(`[Barcode] LPN for "${pair.container}": ${pendingLpn}`);
+      } else if (pair && forceLog) {
+        log(`[Barcode] Row ${queueIndex + 1} has no LPN value.`);
+        if (sessionArmed) {
+          const ctx = getBlockerContext();
+          void alertLpnBlocked(
+            `no-lpn|${queueIndex}|${ctx.container}`,
+            'Cannot scan — missing LPN',
+            `Queue row ${queueIndex + 1} has container "${ctx.container}" but no LPN.\n\n` +
+              'Add a tab-separated LPN on that line in the mapping list.',
+            ctx
+          );
+        }
+      } else if (forceLog) {
+        log('[Barcode] No container at current queue index — check mapping list.');
+        if (sessionArmed) {
+          const ctx = getBlockerContext();
+          void alertLpnBlocked(
+            `no-queue|${queueIndex}`,
+            'Cannot scan — queue row missing',
+            `There is no container/LPN pair at queue index ${queueIndex + 1}.\n\n` +
+              'Check your mapping list or press Clear and paste again.',
+            ctx
+          );
+        }
+      }
+    }
+    return pendingLpn;
+  }
+
+  function clearBarcodeBlock() {
+    barcodeBlocked = false;
+    pendingLpn = null;
+  }
+
+  function resetStepFlagsForCurrentItem() {
+    sourceContainerDone = false;
+    barcodeDone = false;
+    postBarcodeHandled = false;
+    clearBarcodeBlock();
+    const lpn = getCurrentLpn();
+    if (lpn) pendingLpn = lpn;
+    syncStepFlagsFromPageState();
+  }
+
+  function readSortCodeText() {
+    const el = document.querySelector(SORT_CODE_SELECTOR);
+    if (!el) return null;
+    return (el.textContent || '').replace(/\s+/g, ' ').trim() || null;
+  }
+
+  function isSortCodeReady() {
+    if (!isSortCodeElementPopulated()) return false;
+    if (isBarcodeFieldAwaitingLpn()) return false;
+    const el = document.querySelector(SORT_CODE_SELECTOR);
+    if (el && el.classList.contains('scanned')) return true;
+    return true;
+  }
+
+  function readExceptionContextText() {
+    const el = document.querySelector(EXCEPTION_CONTEXT_SELECTOR);
+    if (!el) return '';
+    return (el.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function isAmazonExceptionShown() {
+    if (readExceptionContextText()) return true;
+    return isExceptionBtnVisible();
+  }
+
+  function readExceptionDetail() {
+    const ctxText = readExceptionContextText();
+    if (ctxText) return ctxText;
+    return readExceptionMessage();
+  }
+
+  function isUpdateSortTypeAvailable() {
+    const link = document.querySelector(UPDATE_SORT_TYPE_SELECTOR);
+    if (!link) return false;
+    const style = getComputedStyle(link);
+    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
+      return false;
+    }
+    const rect = link.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  /** Source container field is ready for the next scan (do not click Update over this). */
+  function isAwaitingSourceContainerScan() {
+    if (!isFieldVisible(SOURCE_CONTAINER_SELECTOR)) return false;
+    const srcVal = readFieldValue(SOURCE_CONTAINER_SELECTOR);
+    if (isValidSourceContainerId(srcVal)) return false;
+    return (
+      isFieldStepActive(SOURCE_CONTAINER_SELECTOR) || isAmazonPlaceholderValue(srcVal)
+    );
+  }
+
+  /** Same container on back-to-back queue rows — page may already show it. */
+  function tryMarkSourceContainerDoneFromPage() {
+    const expected = getContainerValue();
+    if (!expected) return false;
+    const srcVal = readFieldValue(SOURCE_CONTAINER_SELECTOR);
+    const displayed = readDisplayedSourceContainer();
+    if (
+      isValidSourceContainerId(srcVal) &&
+      srcVal.toUpperCase() === expected.toUpperCase()
+    ) {
+      sourceContainerDone = true;
+      traceWorkflow('source.alreadyOnPage', { from: 'field', srcVal });
+      return true;
+    }
+    if (displayed && displayed.toUpperCase() === expected.toUpperCase()) {
+      sourceContainerDone = true;
+      traceWorkflow('source.alreadyOnPage', { from: 'displayed', displayed });
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Update finishes the current LPN (after sort code / tote). Not for starting the next job.
+   */
+  function shouldClickUpdateToFinishJob() {
+    if (!isUpdateSortTypeAvailable()) return false;
+    if (needsSortTypeEntry() || isAwaitingSourceContainerScan()) return false;
+    if (isFieldStepActive(SCAN_TOTE_SELECTOR)) return true;
+    if (isSortCodeReady()) return true;
+    if (isSortCodeElementPopulated() && !isBarcodeFieldAwaitingLpn()) return true;
+    return false;
+  }
+
+  /**
+   * @param {string} [logPrefix]
+   */
+  async function finishJobWithUpdate(logPrefix = '[Job]') {
+    traceWorkflow('update.finishJob.attempt', { logPrefix });
+    if (!isUpdateSortTypeAvailable()) {
+      log(`${logPrefix} End — Update link not on page.`);
+      traceWorkflow('update.finishJob.skip', { reason: 'no-link' });
+      return false;
+    }
+    log(`${logPrefix} End — tote move done; clicking Update.`);
+    const clicked = await clickUpdateSortType('finishJob');
+    traceWorkflow('update.finishJob.done', { clicked });
+    if (clicked) await sleep(POST_UPDATE_WAIT_MS);
+    return clicked;
+  }
+
+  async function waitForSortCode() {
+    const start = Date.now();
+    while (Date.now() - start < SORT_CODE_WAIT_MS) {
+      if (isAmazonExceptionShown()) return SORT_CODE_EXCEPTION;
+      if (isSortCodeReady()) return readSortCodeText();
+      await sleep(SORT_CODE_POLL_MS);
+    }
+    if (isAmazonExceptionShown()) return SORT_CODE_EXCEPTION;
+    return readSortCodeText();
+  }
+
+  /**
+   * @param {string} sortCode
+   * @returns {{ tote: string | null, toteIds: string[], reason?: string }}
+   */
+  function pickDestinationToteForSortCode(sortCode) {
+    if (!sortCode) return { tote: null, toteIds: [] };
+    const key = sortCode.trim().toLowerCase();
+    for (const slot of getSortSlotsFromInputs()) {
+      if (!slot.sortCode || slot.sortCode.trim().toLowerCase() !== key) continue;
+      const toteIds = slot.toteIds || [];
+      if (!toteIds.length) return { tote: null, toteIds: [], reason: 'no-mapping' };
+      for (const id of toteIds) {
+        if (getToteCount(id) < TOTE_MAX_UNITS) {
+          return { tote: id, toteIds };
+        }
+      }
+      return { tote: null, toteIds, reason: 'all-full' };
+    }
+    return { tote: null, toteIds: [], reason: 'no-mapping' };
+  }
+
+  function getToteCount(toteId) {
+    if (!toteId) return 0;
+    return toteCounts[toteId] || 0;
+  }
+
+  function incrementToteCount(toteId) {
+    if (!toteId) return 0;
+    toteCounts[toteId] = getToteCount(toteId) + 1;
+    renderSlotCounts();
+    scheduleSaveState();
+    return toteCounts[toteId];
+  }
+
+  function formatToteCountsSummary() {
+    const entries = Object.entries(toteCounts);
+    if (!entries.length) return 'none';
+    return entries.map(([t, n]) => `${t}=${n}/${TOTE_MAX_UNITS}`).join(', ');
+  }
+
+  function buildResultsTsv() {
+    const header = 'container\tlpn\tsort_code\ttote\ttote_units';
+    const rows = sortCodeResults.map(
+      (r) => `${r.container}\t${r.lpn}\t${r.sortCode}\t${r.tote}\t${r.toteUnits}`
+    );
+    return [header, ...rows].join('\n');
+  }
+
+  /**
+   * @param {{ container: string, lpn: string }} pair
+   * @param {string} sortCode
+   * @param {{ tote?: string, toteUnits?: string | number, status?: 'complete' | 'error' }} [extra]
+   */
+  function recordSortCodeResult(pair, sortCode, extra = {}) {
+    const code = sortCode || '';
+    const last = sortCodeResults[sortCodeResults.length - 1];
+    const sameAsLast =
+      last &&
+      last.container === pair.container &&
+      last.lpn === pair.lpn &&
+      last.sortCode === code &&
+      jobRowStatus(code) !== 'Error' &&
+      jobRowStatus(last.sortCode) !== 'Error';
+
+    if (sameAsLast) {
+      last.tote = extra.tote ?? last.tote;
+      last.toteUnits = String(extra.toteUnits ?? last.toteUnits ?? '');
+    } else {
+      sortCodeResults.push({
+        container: pair.container,
+        lpn: pair.lpn,
+        sortCode: code,
+        tote: extra.tote ?? '',
+        toteUnits: String(extra.toteUnits ?? ''),
+      });
+    }
+    const st = extra.status || (String(sortCode).startsWith('EXCEPTION') ? 'error' : 'complete');
+    rowStatuses[rowKey(pair.container, pair.lpn)] = st;
+    rebuildMovedCountByContainer();
+    bumpRowStatusVersion();
+    scheduleRenderQueueList();
+    scheduleSaveState();
+    updateResetErrorStatusesBtn();
+  }
+
+  function getActiveLpnContext() {
+    const pair = getCurrentPair();
+    return {
+      container: pair?.container || getContainerValue() || '',
+      lpn: lastSubmittedLpn || pendingLpn || pair?.lpn || '',
+    };
+  }
+
+  function readExceptionMessage() {
+    const info = document.querySelector('#exception-info');
+    if (!info) return '';
+    const btn = info.querySelector(EXCEPTION_BTN_SELECTOR);
+    let text = (info.textContent || '').replace(/\s+/g, ' ').trim();
+    if (btn) {
+      text = text.replace((btn.textContent || '').replace(/\s+/g, ' ').trim(), '').trim();
+    }
+    return text;
+  }
+
+  function isExceptionBtnVisible() {
+    const btn = document.querySelector(EXCEPTION_BTN_SELECTOR);
+    if (!btn) return false;
+    const style = getComputedStyle(btn);
+    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
+      return false;
+    }
+    const rect = btn.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function recordExceptionResult(container, lpn, detail) {
+    const sortCode = detail ? `EXCEPTION: ${detail}` : 'EXCEPTION';
+    sortCodeResults.push({
+      container: container || '(unknown)',
+      lpn: lpn || '(unknown)',
+      sortCode,
+      tote: '',
+      toteUnits: '',
+    });
+    if (container && lpn) {
+      rowStatuses[rowKey(container, lpn)] = 'error';
+      rebuildMovedCountByContainer();
+      bumpRowStatusVersion();
+      scheduleRenderQueueList();
+    } else {
+      rebuildMovedCountByContainer();
+    }
+    scheduleSaveState();
+    updateResetErrorStatusesBtn();
+  }
+
+  async function waitForFieldActive(selector, timeoutMs = 10000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (isFieldStepActive(selector)) return true;
+      await sleep(FIELD_POLL_MS);
+    }
+    return isFieldStepActive(selector);
+  }
+
+  /**
+   * @param {string} sortCode
+   */
+  async function submitToteForSortCode(sortCode) {
+    const pick = pickDestinationToteForSortCode(sortCode);
+    if (!pick.tote) {
+      if (pick.reason === 'all-full') {
+        log(
+          `[Tote] All destinations full for "${sortCode}" — ` +
+            pick.toteIds.map((id) => `${id}=${getToteCount(id)}`).join(', ')
+        );
+        await alertUserConfirm(
+          'All destinations full',
+          `Every destination listed for sort code "${sortCode}" is at ${TOTE_MAX_UNITS} units:\n\n` +
+            pick.toteIds.join('\n') +
+            '\n\nAdd a new destination container on a new line in that route on the right, then OK.',
+          getBlockerContext()
+        );
+        return {
+          ok: false,
+          tote: pick.toteIds[0] || '',
+          reason: 'all-full',
+          count: TOTE_MAX_UNITS,
+          toteIds: pick.toteIds,
+        };
+      }
+      log(`[Tote] No mapping for sort code "${sortCode}" — fill a sort-code slot on the right.`);
+      return { ok: false, tote: '', reason: 'no-mapping', toteIds: pick.toteIds };
+    }
+
+    const tote = pick.tote;
+    const count = getToteCount(tote);
+    log(
+      `[Tote] Sort code "${sortCode}" → "${tote}" (${count}/${TOTE_MAX_UNITS}; ` +
+        `${pick.toteIds.length} destination(s) in route)`
+    );
+
+    const ready = await waitForFieldActive(SCAN_TOTE_SELECTOR, 10000);
+    if (!ready) {
+      log('[Tote] #scan-tote-textfield not visible yet.');
+      return { ok: false, tote, reason: 'field-missing', count };
+    }
+
+    const s = STEPS.scanTote;
+    const result = await runFieldStep({
+      selector: s.selector,
+      enterParentIds: s.enterParentIds,
+      value: tote,
+      label: 'Scan tote',
+      placeholder: s.placeholder,
+    });
+
+    if (!result.advanced) {
+      if (result.reason === 'exception' || isAmazonExceptionShown()) {
+        return { ok: false, tote, reason: 'move-exception', count };
+      }
+      return { ok: false, tote, reason: 'submit-failed', count };
+    }
+
+    const move = await verifyToteMoveOutcome();
+    if (!move.ok) {
+      log(
+        move.reason === 'move-exception'
+          ? '[Tote] Amazon move error (e.g. "Item could not be moved").'
+          : '[Tote] Move did not complete before timeout.'
+      );
+      return { ok: false, tote, reason: move.reason || 'move-failed', count };
+    }
+
+    const newCount = incrementToteCount(tote);
+    log(`[Tote] Submitted "${tote}" — now ${newCount}/${TOTE_MAX_UNITS} units.`);
+    if (newCount >= TOTE_MAX_UNITS) {
+      await confirmDestinationToteFull(tote, sortCode, newCount);
+    }
+    return { ok: true, tote, count: newCount };
+  }
+
+  /**
+   * @param {HTMLElement} el
+   * @param {string} logPrefix
+   */
+  async function clickElement(el, logPrefix) {
+    /** @param {string} label */
+    const tryClick = (label, fn) => {
+      try {
+        fn();
+        log(`${logPrefix} clicked (${label}).`);
+        return true;
+      } catch (err) {
+        log(`${logPrefix} ${label} failed: ${err instanceof Error ? err.message : String(err)}`);
+        return false;
+      }
+    };
+
+    if (tryClick('native .click', () => el.click())) {
+      await sleep(POST_UPDATE_WAIT_MS);
+      return true;
+    }
+
+    if (
+      tryClick('MouseEvent', () => {
+        el.dispatchEvent(
+          new MouseEvent('click', { bubbles: true, cancelable: true, composed: true })
+        );
+      })
+    ) {
+      await sleep(POST_UPDATE_WAIT_MS);
+      return true;
+    }
+
+    if (
+      tryClick('createEvent', () => {
+        const ev = document.createEvent('MouseEvents');
+        ev.initEvent('click', true, true);
+        el.dispatchEvent(ev);
+      })
+    ) {
+      await sleep(POST_UPDATE_WAIT_MS);
+      return true;
+    }
+
+    log(`${logPrefix} all click methods failed.`);
+    return false;
+  }
+
+  function findPageUpdateLinks() {
+    const seen = new Set();
+    /** @type {HTMLElement[]} */
+    const links = [];
+    const add = (el) => {
+      if (!el || seen.has(el) || !isElementClickable(el)) return;
+      seen.add(el);
+      links.push(el);
+    };
+
+    add(document.querySelector(UPDATE_SORT_TYPE_SELECTOR));
+    for (const el of document.querySelectorAll('a, button')) {
+      const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (/^update(\s*\([a-z]\))?$/i.test(t)) add(el);
+    }
+    return links;
+  }
+
+  async function clickPageResetUpdates(reason = 'reset') {
+    traceWorkflow('update.clickPageReset', { reason, linkCount: findPageUpdateLinks().length });
+    const links = findPageUpdateLinks();
+    if (!links.length) {
+      log('[Update] No Update link found on page.');
+      traceWorkflow('update.clickPageReset.miss', { reason });
+      return false;
+    }
+    let any = false;
+    for (const link of links) {
+      const ok = await clickElement(link, '[Update]');
+      if (ok) any = true;
+    }
+    traceWorkflow('update.clickPageReset.done', { reason, clicked: any });
+    return any;
+  }
+
+  async function clickUpdateSortType(reason = 'unspecified') {
+    traceWorkflow('update.clickSingle', { reason });
+    const links = findPageUpdateLinks();
+    if (!links.length) {
+      log('[Update] #change-sort-type not found.');
+      traceWorkflow('update.clickSingle.miss', { reason });
+      return false;
+    }
+    const ok = await clickElement(links[0], '[Update]');
+    traceWorkflow('update.clickSingle.done', { reason, clicked: ok });
+    return ok;
+  }
+
+  async function clickExceptionContinue() {
+    const btn = document.querySelector(EXCEPTION_BTN_SELECTOR);
+    if (!btn) {
+      log('[Exception] #exception-btn not found.');
+      return false;
+    }
+    return clickElement(btn, '[Exception] Continue');
+  }
+
+  async function dismissAmazonExceptionModal(logPrefix = '[Exception]') {
+    if (!isExceptionBtnVisible()) return true;
+    log(`${logPrefix} Clicking Amazon Continue (C)…`);
+    const clicked = await clickExceptionContinue();
+    if (clicked) await sleep(POST_UPDATE_WAIT_MS);
+    return clicked;
+  }
+
+  async function processAmazonException() {
+    if (!canAutoHandleExceptions() || exceptionFlowActive) return;
+    if (!isAmazonExceptionShown()) return;
+
+    const ctx = getActiveLpnContext();
+    const detail = readExceptionDetail();
+    const key = `${ctx.container}|${ctx.lpn}|${detail}`;
+    const isRepeat = lastExceptionKey === key;
+
+    if (isRepeat && !autoCloseErrors) return;
+    if (isRepeat && autoCloseErrors && !isExceptionBtnVisible()) return;
+
+    exceptionFlowActive = true;
+    setRunningFlag(true);
+    try {
+      postBarcodeHandled = false;
+
+      if (!isRepeat) {
+        log(`[Exception] ${(detail || 'Amazon exception').slice(0, 160)}`);
+        recordExceptionResult(ctx.container, ctx.lpn, detail);
+        setRowStatusByIndex(queueIndex, 'error');
+        lastExceptionKey = key;
+        updateResetErrorStatusesBtn();
+      } else {
+        log('[Exception] Same error still on page — retrying auto-close.');
+      }
+
+      if (autoCloseErrors) {
+        await dismissAmazonExceptionModal('[Exception]');
+        if (sessionArmed) {
+          await recoverAndAdvanceToNextLpn('[Exception]');
+        } else {
+          barcodeDone = false;
+          sourceContainerDone = false;
+          lastSubmittedLpn = null;
+          syncStepFlagsFromPageState();
+          log(
+            '[Exception] Continue clicked. Press Start to resume the queue (or Stop was active).'
+          );
+        }
+        return;
+      }
+
+      const autoHint =
+        '\n\nPress OK — the script will press Continue (C), Update if shown, then start the next LPN.';
+
+      await alertLpnBlocked(
+        `exception|${key}`,
+        'Amazon exception — cannot sort this LPN',
+        `Queue: ${formatQueueLabel()}\n\n${detail || 'Amazon reported an exception on this scan.'}${autoHint}`,
+        ctx,
+        false,
+        false
+      );
+
+      if (canRunAutomation()) {
+        await recoverAndAdvanceToNextLpn('[Exception]');
+      }
+    } catch (err) {
+      log('Error: ' + (err instanceof Error ? err.message : String(err)));
+      console.error('[Liquidation Sort]', err);
+    } finally {
+      exceptionFlowActive = false;
+      setRunningFlag(false);
+    }
+  }
+
+  async function tryAutoException() {
+    await processAmazonException();
+  }
+
+  async function handlePostBarcode() {
+    if (!canRunAutomation() || postBarcodeHandled) {
+      traceWorkflow('postBarcode.skip', {
+        canRun: canRunAutomation(),
+        postBarcodeHandled,
+      });
+      return;
+    }
+    postBarcodeHandled = true;
+    traceWorkflow('postBarcode.begin', {});
+
+    try {
+      const pair = getCurrentPair();
+      if (!pair) {
+        log('[Sort code] No active queue item.');
+        const ctx = getBlockerContext();
+        await alertLpnBlocked(
+          `no-pair-post|${queueIndex}`,
+          'Cannot finish LPN',
+          'No active queue row while processing the sort code after barcode scan.',
+          ctx,
+          true
+        );
+        if (shouldStopOnError()) postBarcodeHandled = false;
+        return;
+      }
+
+      const ctx = getBlockerContext();
+      log('[Sort code] Waiting for #sort-code-id…');
+      const sortCode = await waitForSortCode();
+      if (sortCode === SORT_CODE_EXCEPTION) {
+        log('[Sort code] Amazon exception detected — not waiting full timeout.');
+        await processAmazonException();
+        return;
+      }
+      const recorded = sortCode || '(not read)';
+
+      if (sortCode) {
+        const slotAssign = await ensureSortCodeAssignedToSlot(sortCode);
+        if (slotAssign.assigned) {
+          log(`[Sort code] Saved in Route ${slotAssign.slotIndex + 1}.`);
+        }
+      }
+
+      if (!sortCode) {
+        if (isAmazonExceptionShown()) {
+          await processAmazonException();
+          return;
+        }
+        recordSortCodeResult(pair, recorded, { status: 'error' });
+        await alertLpnBlocked(
+          `sort-code-timeout|${ctx.lpn}|${queueIndex}`,
+          'LPN stuck — no sort code',
+          `Queue: ${ctx.queueLabel}\n\n` +
+            `Amazon did not show a sort code within ${SORT_CODE_WAIT_MS / 1000} seconds after the LPN scan.\n\n` +
+            'The LPN may be invalid, the container may be wrong, or the page may need manual action.',
+          ctx,
+          true
+        );
+        if (shouldStopOnError()) {
+          postBarcodeHandled = false;
+          barcodeDone = false;
+        }
+        return;
+      }
+
+      let toteExtra = { tote: '', toteUnits: '' };
+      if (sortCode && sessionArmed) {
+        const toteResult = await submitToteForSortCode(sortCode);
+        toteExtra = {
+          tote: toteResult.tote || '',
+          toteUnits:
+            toteResult.count !== undefined
+              ? String(toteResult.count)
+              : toteResult.reason === 'tote-full' || toteResult.reason === 'all-full'
+                ? `${TOTE_MAX_UNITS}+FULL`
+                : '',
+        };
+        if (!toteResult.ok) {
+          if (toteResult.reason === 'move-exception' || isAmazonExceptionShown()) {
+            postBarcodeHandled = false;
+            await processAmazonException();
+            return;
+          }
+          recordSortCodeResult(pair, recorded, { ...toteExtra, status: 'error' });
+          await alertLpnBlocked(
+            `tote|${ctx.lpn}|${sortCode}|${toteResult.reason}`,
+            'LPN cannot move into destination tote',
+            `Queue: ${ctx.queueLabel}\nSort code: ${sortCode}\n\n` +
+              toteBlockerMessage(
+                toteResult.reason || 'unknown',
+                sortCode,
+                toteResult.tote || '',
+                toteResult.toteIds
+              ),
+            ctx,
+            true
+          );
+          if (shouldStopOnError()) {
+            postBarcodeHandled = false;
+            barcodeDone = false;
+          }
+          return;
+        }
+      }
+
+      recordSortCodeResult(pair, recorded, { ...toteExtra, status: 'complete' });
+
+      const clicked = await finishJobWithUpdate('[Job]');
+      if (!clicked) {
+        await alertLpnBlocked(
+          `update-failed|${ctx.lpn}|${queueIndex}`,
+          'LPN cannot move on — Update failed',
+          `Queue: ${ctx.queueLabel}\nSort code: ${recorded}\n\n` +
+            'The script could not click Update (#change-sort-type) after the tote move.\n\n' +
+            'Click Update on the page manually or check for a blocking error.',
+          ctx,
+          true
+        );
+        if (shouldStopOnError()) {
+          postBarcodeHandled = false;
+          barcodeDone = false;
+        }
+        return;
+      }
+
+      if (!sessionArmed) {
+        log('[Finish] Update clicked. Press Start to continue the queue.');
+        return;
+      }
+
+      if (!canRunAutomation()) return;
+
+      const hasMore = advanceToNextContainer();
+      resetStepFlagsForCurrentItem();
+
+      if (!hasMore) {
+        log('Queue finished — no pending rows left.');
+        return;
+      }
+
+      log(`[Queue] Next: ${formatQueueLabel()}`);
+      setRowStatusByIndex(queueIndex, 'active');
+      traceWorkflow('postBarcode.advance', { queueIndex });
+      await continueWorkflowAfterLpnFinished();
+      traceWorkflow('postBarcode.chainDone', {});
+    } catch (err) {
+      traceWorkflow('postBarcode.error', { err: err instanceof Error ? err.message : String(err) });
+      log('Error: ' + (err instanceof Error ? err.message : String(err)));
+      console.error('[Liquidation Sort]', err);
+      const ctx = getBlockerContext();
+      await alertLpnBlocked(
+        `post-barcode-error|${ctx.lpn}|${queueIndex}`,
+        'Error after LPN scan',
+        `Queue: ${ctx.queueLabel}\n\n` + (err instanceof Error ? err.message : String(err)),
+        ctx,
+        true
+      );
+      if (shouldStopOnError()) {
+        postBarcodeHandled = false;
+        barcodeDone = false;
+      }
+    }
+  }
+
+  function advanceToNextContainer() {
+    const list = getMappingList();
+    queueIndex += 1;
+    if (!skipDoneRowsFromCurrent()) {
+      log(`Batch complete — no pending rows left (${list.length} in mapping).`);
+      return false;
+    }
+    resetStepFlagsForCurrentItem();
+    log(`Next in queue: ${formatQueueLabel()}`);
+    return true;
+  }
+
+  async function storageGet(key, fallback) {
+    if (typeof GM_getValue === 'function') {
+      return GM_getValue(key, fallback);
+    }
+    try {
+      const v = localStorage.getItem(key);
+      return v !== null ? v : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  async function storageSet(key, value) {
+    if (typeof GM_setValue === 'function') {
+      GM_setValue(key, value);
+      return;
+    }
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function storageGetJson(key, fallback) {
+    const raw = await storageGet(key, null);
+    if (raw === null || raw === undefined) return fallback;
+    if (typeof raw === 'object') return raw;
+    try {
+      return JSON.parse(String(raw));
+    } catch {
+      return fallback;
+    }
+  }
+
+  async function storageSetJson(key, value) {
+    await storageSet(key, JSON.stringify(value));
+  }
+
+  function applySortSlotsToInputs(slots) {
+    const list = Array.isArray(slots) ? slots : DEFAULT_SORT_SLOTS;
+    for (let i = 0; i < SORT_SLOT_COUNT; i++) {
+      const s = normalizeSortSlot(list[i] || {});
+      if (slotSortInputs[i]) slotSortInputs[i].value = s.sortCode || '';
+      if (slotToteInputs[i]) slotToteInputs[i].value = s.toteIds.join('\n');
+    }
+    renderSlotCounts();
+  }
+
+  async function savePersistedState() {
+    await storageSet(STORAGE_KEY_MAPPING, getMappingText());
+    await storageSetJson(STORAGE_KEY_SORT_SLOTS, getSortSlotsFromInputs());
+    await storageSetJson(STORAGE_KEY_STATE, {
+      v: 7,
+      queueIndex,
+      sortCodeResults,
+      toteCounts,
+      rowStatuses,
+      sessionArmed,
+      sessionStartedAt,
+      timingPausedMs,
+      pauseStartedAt,
+      frozenCountdownMs,
+      autoCloseErrors,
+      acknowledgedFullTotes: [...acknowledgedFullTotes],
+    });
+  }
+
+  async function loadPersistedState() {
+    const state = await storageGetJson(STORAGE_KEY_STATE, null);
+    if (!state || typeof state !== 'object') return false;
+
+    if (typeof state.queueIndex === 'number' && state.queueIndex >= 0) {
+      queueIndex = state.queueIndex;
+    }
+    if (Array.isArray(state.sortCodeResults)) {
+      sortCodeResults = state.sortCodeResults.map((r) => ({
+        container: r.container || '',
+        lpn: r.lpn || '',
+        sortCode: r.sortCode || '',
+        tote: r.tote || '',
+        toteUnits: r.toteUnits ?? '',
+      }));
+    }
+    if (state.toteCounts && typeof state.toteCounts === 'object') {
+      toteCounts = state.toteCounts;
+    }
+    if (state.rowStatuses && typeof state.rowStatuses === 'object') {
+      rowStatuses = state.rowStatuses;
+    }
+    for (const r of sortCodeResults) {
+      const key = rowKey(r.container, r.lpn);
+      if (!rowStatuses[key]) {
+        rowStatuses[key] = String(r.sortCode).startsWith('EXCEPTION') ? 'error' : 'complete';
+      }
+    }
+    if (typeof state.sessionStartedAt === 'number') {
+      sessionStartedAt = state.sessionStartedAt;
+    }
+    if (typeof state.timingPausedMs === 'number') {
+      timingPausedMs = state.timingPausedMs;
+    }
+    if (typeof state.pauseStartedAt === 'number') {
+      pauseStartedAt = state.pauseStartedAt;
+    }
+    if (typeof state.frozenCountdownMs === 'number') {
+      frozenCountdownMs = state.frozenCountdownMs;
+    }
+    if (typeof state.autoCloseErrors === 'boolean') {
+      autoCloseErrors = state.autoCloseErrors;
+    }
+    if (typeof state.sessionArmed === 'boolean') {
+      sessionArmed = state.sessionArmed;
+    }
+    if (Array.isArray(state.acknowledgedFullTotes)) {
+      acknowledgedFullTotes = new Set(state.acknowledgedFullTotes.map((t) => String(t).toLowerCase()));
+    }
+    updateAutoCloseToggleBtn();
+    rebuildMovedCountByContainer();
+    bumpRowStatusVersion();
+    renderQueueList();
+    renderSlotCounts();
+    updateProgressUI();
+    updateResetErrorStatusesBtn();
+    if (sessionArmed) {
+      armProgressTiming();
+      log('Restored armed session — continuing queue.');
+    }
+    return true;
+  }
+
+  async function performType(target, value, enterParentIds, label) {
+    target.focus();
+
+    dispatchKey(target, 'keydown', {
+      key: 'Control',
+      code: 'ControlLeft',
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      ctrlKey: true,
+      location: 1,
+    });
+
+    for (const ch of value) {
+      const init = keyInitFor(ch, true);
+      dispatchKey(target, 'keydown', init);
+      dispatchKey(target, 'keypress', { ...init, charCode: ch.charCodeAt(0) });
+      dispatchKey(target, 'keyup', init);
+      if (KEY_DELAY_MS) await sleep(KEY_DELAY_MS);
+    }
+
+    dispatchKey(target, 'keyup', {
+      key: 'Control',
+      code: 'ControlLeft',
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      ctrlKey: false,
+      location: 1,
+    });
+
+    setNativeInputValue(target, value);
+    target.dispatchEvent(
+      new InputEvent('beforeinput', {
+        bubbles: true,
+        cancelable: true,
+        data: value,
+        inputType: 'insertText',
+      })
+    );
+    target.dispatchEvent(
+      new InputEvent('input', {
+        bubbles: true,
+        cancelable: true,
+        data: value,
+        inputType: 'insertText',
+      })
+    );
+    target.dispatchEvent(new Event('change', { bubbles: true }));
+
+    await sleep(PRE_ENTER_MS);
+
+    const enterInit = {
+      key: 'Enter',
+      code: 'Enter',
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      keyCode: 13,
+      which: 13,
+    };
+
+    const enterTargets = [
+      target,
+      ...enterParentIds.map((id) => document.getElementById(id)),
+      document,
+    ].filter(Boolean);
+
+    for (const el of enterTargets) {
+      dispatchKey(el, 'keydown', enterInit);
+      dispatchKey(el, 'keypress', enterInit);
+      dispatchKey(el, 'keyup', enterInit);
+    }
+
+    const form = target.form;
+    if (form) {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    }
+
+    log(`[${label}] Typed "${value}" and dispatched Enter.`);
+  }
+
+  async function runFieldStep(config) {
+    const { selector, enterParentIds, value, label, placeholder } = config;
+    const field = document.querySelector(selector);
+    if (!field) {
+      log(`[${label}] Field not found (${selector}).`);
+      return { ok: false, reason: 'missing-field', advanced: false, label };
+    }
+
+    if (!value) {
+      log(`[${label}] No value to type.`);
+      return { ok: false, reason: 'empty-value', advanced: false, label };
+    }
+
+    if (isAmazonPlaceholderValue(value)) {
+      log(`[${label}] Refusing to type Amazon placeholder text "${value}".`);
+      return { ok: false, reason: 'placeholder-value', advanced: false, label };
+    }
+
+    log(`[${label}] Typing into #${field.id} (was: "${field.value}")`);
+    field.focus();
+    field.click();
+    setNativeInputValue(field, '');
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    await sleep(10);
+
+    await performType(field, value, enterParentIds, label);
+
+    await sleep(STEP_SETTLE_MS);
+
+    const verify = await waitForStepAdvanced(selector, placeholder, value, label);
+    const advanced = verify.advanced;
+
+    if (!advanced) {
+      log(`[${label}] Step did not advance — ${verify.reason || 'check page or Copy Debug'}.`);
+      if (selector === BARCODE_SELECTOR && isAmazonPlaceholderValue(field.value)) {
+        log(`[${label}] Barcode field still shows placeholder — LPN was not accepted.`);
+      }
+    }
+
+    return {
+      ok: true,
+      advanced,
+      reason: advanced ? undefined : verify.reason || 'step-stuck',
+      label,
+    };
+  }
+
+  async function runSortTypeStep() {
+    const s = STEPS.sortType;
+    return runFieldStep({
+      selector: s.selector,
+      enterParentIds: s.enterParentIds,
+      value: SORT_TYPE_VALUE,
+      label: 'Sort type',
+      placeholder: s.placeholder,
+    });
+  }
+
+  async function runSourceContainerStep() {
+    const container = getContainerValue();
+    if (!container) {
+      log('[Source container] No container in mapping at current index.');
+      return { ok: false, reason: 'no-container', advanced: false };
+    }
+
+    const field = document.querySelector(SOURCE_CONTAINER_SELECTOR);
+    if (field) {
+      field.focus();
+      field.click();
+      await sleep(PRE_ENTER_MS);
+    }
+    traceWorkflow('source.type', { container });
+
+    const s = STEPS.sourceContainer;
+    return runFieldStep({
+      selector: s.selector,
+      enterParentIds: s.enterParentIds,
+      value: container,
+      label: 'Source container',
+      placeholder: s.placeholder,
+    });
+  }
+
+  async function runBarcodeStep(lpn) {
+    const clean = decodeAmazonFieldText(lpn);
+    if (!isValidLpn(clean)) {
+      log(`[Barcode/LPN] Refusing to submit invalid value: "${lpn}"`);
+      return { ok: false, reason: 'invalid-lpn', advanced: false };
+    }
+
+    const s = STEPS.barcode;
+    return runFieldStep({
+      selector: s.selector,
+      enterParentIds: s.enterParentIds,
+      value: clean,
+      label: 'Barcode/LPN',
+      placeholder: s.placeholder,
+    });
+  }
+
+  async function tryAutoSourceContainerForced(allowWhileRunning = false) {
+    if (!canRunAutomation() || sourceContainerDone) return;
+    if (running && !allowWhileRunning) return;
+    if (!ensureCurrentRowIsPending()) return;
+    const field = document.querySelector(SOURCE_CONTAINER_SELECTOR);
+    if (!field || !getContainerValue()) return;
+
+    const acquiredLock = !running;
+    if (acquiredLock) setRunningFlag(true);
+    try {
+      setRowStatusByIndex(queueIndex, 'active');
+      log(`[Source container] Submitting ${formatQueueLabel()}`);
+      const result = await runSourceContainerStep();
+      if (result.reason === 'exception' || isAmazonExceptionShown()) {
+        await processAmazonException();
+      } else if (result.advanced) {
+        const verified = await verifySourceContainerAccepted(getContainerValue());
+        if (verified.ok) {
+          sourceContainerDone = true;
+          clearBarcodeBlock();
+          resolvePendingLpn({ forceLog: true });
+          if (canRunAutomation()) await tryAutoBarcode(allowWhileRunning);
+        } else if (verified.reason === 'exception' || isAmazonExceptionShown()) {
+          await processAmazonException();
+        } else {
+          log('[Source container] Container typed but barcode step never opened.');
+        }
+      }
+    } finally {
+      if (acquiredLock) setRunningFlag(false);
+    }
+  }
+
+  async function tryAutoSourceContainer() {
+    if (!canRunAutomation() || sourceContainerDone || running) return;
+    if (!ensureCurrentRowIsPending()) return;
+
+    const srcPlaceholder = isAmazonPlaceholderValue(readFieldValue(SOURCE_CONTAINER_SELECTOR));
+    if (
+      !isFieldStepActive(SOURCE_CONTAINER_SELECTOR) &&
+      isFieldVisible(SOURCE_CONTAINER_SELECTOR) &&
+      srcPlaceholder &&
+      getContainerValue()
+    ) {
+      await tryAutoSourceContainerForced();
+      return;
+    }
+    if (!isFieldStepActive(SOURCE_CONTAINER_SELECTOR)) return;
+
+    const container = getContainerValue();
+    if (!container) {
+      log('[Source container] Step detected — add rows to the mapping list.');
+      const ctx = getBlockerContext();
+        await alertLpnBlocked(
+          `no-container|${queueIndex}`,
+          'Cannot load container',
+          `Queue row ${queueIndex + 1} has no container ID in the mapping list.\n\n` +
+            'Add container and LPN (tab-separated) before pressing Start.',
+        ctx,
+        true
+      );
+      return;
+    }
+
+    setRunningFlag(true);
+    try {
+      setRowStatusByIndex(queueIndex, 'active');
+      log(`[Source container] Submitting ${formatQueueLabel()}`);
+      const result = await runSourceContainerStep();
+      if (result.reason === 'exception' || isAmazonExceptionShown()) {
+        await processAmazonException();
+      } else if (result.advanced) {
+        const verified = await verifySourceContainerAccepted(container);
+        if (verified.ok) {
+          sourceContainerDone = true;
+          clearBarcodeBlock();
+          resolvePendingLpn({ forceLog: true });
+          if (canRunAutomation()) await tryAutoBarcode(false);
+        } else if (verified.reason === 'exception' || isAmazonExceptionShown()) {
+          await processAmazonException();
+        } else {
+          const ctx = getBlockerContext();
+          setRowStatusByIndex(queueIndex, 'error');
+          await alertLpnBlocked(
+            `source-verify|${container}|${queueIndex}`,
+            'Container not verified',
+            `Queue: ${ctx.queueLabel}\n\n` +
+              `Amazon did not open the barcode step after container "${container}".\n\n` +
+              'Press Update on the page and Start again.',
+            ctx,
+            true
+          );
+        }
+      } else if (result.reason === 'no-container') {
+        const ctx = getBlockerContext();
+        await alertLpnBlocked(
+          `source-empty|${queueIndex}`,
+          'Cannot load container',
+          'No container value for the current queue row.',
+          ctx,
+          true
+        );
+      } else if (!result.advanced) {
+        const ctx = getBlockerContext();
+        setRowStatusByIndex(queueIndex, 'error');
+        await alertLpnBlocked(
+          `source-stuck|${container}|${queueIndex}`,
+          'Container not accepted',
+          `Queue: ${ctx.queueLabel}\n\n` +
+            `Amazon did not accept source container "${container}".\n\n` +
+            'The LPN cannot be scanned until the container step clears. Check the page for errors.',
+          ctx,
+          true
+        );
+      }
+    } catch (err) {
+      log('Error: ' + (err instanceof Error ? err.message : String(err)));
+      console.error('[Liquidation Sort]', err);
+    } finally {
+      setRunningFlag(false);
+    }
+  }
+
+  async function tryAutoBarcode(allowWhileRunning = false) {
+    if (!canRunAutomation() || barcodeDone) return;
+    if (running && !allowWhileRunning) return;
+    if (isStaleSortCodeBeforeBarcode()) {
+      if (!sourceContainerDone && (isAwaitingSourceContainerScan() || needsSortTypeEntry())) {
+        traceWorkflow('barcode.deferStaleSort', {
+          sortCode: readSortCodeText(),
+          reason: 'need-source-first',
+        });
+        await tryAutoSourceContainerForced(allowWhileRunning);
+        return;
+      }
+      traceWorkflow('barcode.staleSortReset', { sortCode: readSortCodeText() });
+      log(
+        `[Barcode] Sort code "${readSortCodeText()}" still on page — resetting before scanning ${getCurrentLpn()}.`
+      );
+      await resetPageWorkflowState('[Barcode]', { light: true });
+      if (canRunAutomation()) {
+        await resumeWorkflowFromPageState({ betweenJobs: true, allowWhileRunning, skipSortType: true });
+      }
+      return;
+    }
+    if (isStaleBarcodeOnPage()) {
+      log(
+        `[Barcode] Page shows ${readBarcodeOnPage()} but queue expects ${getCurrentLpn()} — resetting.`
+      );
+      await resetPageWorkflowState('[Barcode]');
+      if (canRunAutomation()) await resumeWorkflowFromPageState();
+      return;
+    }
+    if (!sourceContainerDone) {
+      syncStepFlagsFromPageState();
+      if (!sourceContainerDone) {
+        return;
+      }
+    }
+    if (!ensureCurrentRowIsPending()) return;
+    if (!canSubmitBarcodeNow()) return;
+    if (barcodeBlocked) {
+      resolvePendingLpn({ forceLog: true });
+      return;
+    }
+
+    const lpn = decodeAmazonFieldText(pendingLpn || getCurrentLpn() || '');
+    if (!isValidLpn(lpn)) {
+      resolvePendingLpn({ forceLog: true });
+      return;
+    }
+    pendingLpn = lpn;
+    lastSubmittedLpn = lpn;
+
+    const acquiredLock = !running;
+    if (acquiredLock) setRunningFlag(true);
+    try {
+      if (isBarcodeFieldAwaitingLpn() && isSortCodeReady()) {
+        log(`[Barcode] Sort code visible but barcode still placeholder — submitting LPN ${lpn}`);
+      } else {
+        log(`[Barcode] Submitting LPN ${lpn} — ${formatQueueLabel()}`);
+      }
+      const result = await runBarcodeStep(lpn);
+      if (result.reason === 'exception' || isAmazonExceptionShown()) {
+        await processAmazonException();
+      } else if (result.advanced) {
+        const verified = await verifyBarcodeScanAccepted(lpn);
+        if (!verified.ok) {
+          if (verified.reason === 'exception' || isAmazonExceptionShown()) {
+            await processAmazonException();
+          } else if (verified.reason === 'stale-sort-before-barcode') {
+            log('[Barcode] Stale sort code before scan finished — resetting page.');
+            await resetPageWorkflowState('[Barcode]');
+            if (canRunAutomation()) await resumeWorkflowFromPageState();
+          } else {
+            const ctx = getBlockerContext();
+            setRowStatusByIndex(queueIndex, 'error');
+            await alertLpnBlocked(
+              `barcode-verify|${lpn}|${queueIndex}`,
+              'LPN not verified',
+              `Queue: ${ctx.queueLabel}\n\n` +
+                'Barcode was submitted but Amazon did not show a sort code in time.\n\n' +
+                'Check the page for errors or press Update and Start again.',
+              ctx,
+              true
+            );
+          }
+          return;
+        }
+        barcodeDone = true;
+        log(`[Barcode] Verified — ${formatQueueLabel()} → ${verified.sortCode || readSortCodeText()}`);
+        await handlePostBarcode();
+      } else if (isAmazonExceptionShown()) {
+        await processAmazonException();
+      } else {
+        const ctx = getBlockerContext();
+        setRowStatusByIndex(queueIndex, 'error');
+        await alertLpnBlocked(
+          `barcode-stuck|${lpn}|${queueIndex}`,
+          'LPN not accepted',
+          `Queue: ${ctx.queueLabel}\n\n` +
+            'Amazon kept the barcode scan step open after submitting this LPN.\n\n' +
+            'Common causes: wrong container, LPN not in this container, duplicate scan, or a page error above the scan field.',
+          ctx,
+          true
+        );
+      }
+    } catch (err) {
+      log('Error: ' + (err instanceof Error ? err.message : String(err)));
+      console.error('[Liquidation Sort]', err);
+      const ctx = getBlockerContext();
+      setRowStatusByIndex(queueIndex, 'error');
+      await alertLpnBlocked(
+        `barcode-error|${lpn}|${queueIndex}`,
+        'LPN scan error',
+        `An error occurred while submitting this LPN:\n\n` +
+          (err instanceof Error ? err.message : String(err)),
+        ctx,
+        true
+      );
+    } finally {
+      if (acquiredLock) setRunningFlag(false);
+    }
+  }
+
+  function watchWorkflowSteps() {
+    const check = () => {
+      clearStuckRunningIfNeeded();
+
+      if (
+        canAutoHandleExceptions() &&
+        isAmazonExceptionShown() &&
+        !exceptionFlowActive &&
+        !running
+      ) {
+        traceWatch('exception', {});
+        void processAmazonException();
+        return;
+      }
+
+      const staleSort = isStaleSortCodeBeforeBarcode();
+      const staleBc = isStaleBarcodeOnPage();
+      if (
+        staleSort &&
+        !sourceContainerDone &&
+        (needsSortTypeEntry() || isAwaitingSourceContainerScan())
+      ) {
+        traceWatch('staleSortNeedSource', {
+          sortCode: readSortCodeText(),
+          needsSortType: needsSortTypeEntry(),
+        });
+        if (canRunAutomation() && !running && !jobStartupInProgress) {
+          void tryAutoSourceContainer();
+        }
+      } else if (
+        canRunAutomation() &&
+        !running &&
+        !exceptionFlowActive &&
+        !pageResetInProgress &&
+        !jobStartupInProgress &&
+        (staleSort || staleBc)
+      ) {
+        const now = Date.now();
+        if (now - lastStaleRecoverAt < STALE_RECOVER_COOLDOWN_MS) {
+          traceWatch('staleRecoverCooldown', {});
+          return;
+        }
+        traceWatch('staleRecover', { staleSort, staleBc });
+        lastStaleRecoverAt = now;
+        setRunningFlag(true);
+        void resumeWorkflowFromPageState({
+          betweenJobs: true,
+          allowWhileRunning: true,
+          skipSortType: true,
+        }).finally(() => {
+          setRunningFlag(false);
+        });
+        return;
+      }
+
+      if (!canRunAutomation()) {
+        traceWatch('idleDisarmed', {});
+        return;
+      }
+      if (jobStartupInProgress) {
+        traceWatch('idleJobStartup', {});
+        return;
+      }
+      if (running) {
+        traceWatch('idleRunning', {});
+        return;
+      }
+
+      traceWatch('poll', {
+        srcDone: sourceContainerDone,
+        bcDone: barcodeDone,
+        needsSort: needsSortTypeEntry(),
+        awaitSrc: isAwaitingSourceContainerScan(),
+      });
+      tryAutoException();
+      tryAutoSourceContainer();
+      if (sourceContainerDone) {
+        tryAutoBarcode();
+      } else {
+        traceWatch('skipBarcodeNeedSource', {});
+      }
+      if (canRunAutomation() && !postBarcodeHandled && !running) {
+        if (
+          !barcodeDone &&
+          getCurrentLpn() &&
+          (canSubmitBarcodeNow() || isBarcodeFieldAwaitingLpn())
+        ) {
+          setRunningFlag(true);
+          tryAutoBarcode()
+            .catch((err) => console.error('[Liquidation Sort]', err))
+            .finally(() => {
+              setRunningFlag(false);
+            });
+          return;
+        }
+        if (barcodeDone) {
+          setRunningFlag(true);
+          handlePostBarcode()
+            .catch((err) => console.error('[Liquidation Sort]', err))
+            .finally(() => {
+              setRunningFlag(false);
+            });
+        }
+      }
+    };
+
+    const observer = new MutationObserver(check);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+
+    setInterval(check, WORKFLOW_POLL_MS);
+  }
+
+  function buildPanel() {
+    if (document.getElementById(PANEL_ID)) return;
+
+    injectStyles(`
+      #${PANEL_ID} {
+        position: fixed !important;
+        left: 0 !important;
+        right: 0 !important;
+        bottom: 0 !important;
+        height: 58vh !important;
+        z-index: 2147483647 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        background: #1a1d23 !important;
+        color: #e8eaed !important;
+        border-top: 3px solid #ff9900 !important;
+        box-shadow: 0 -4px 24px rgba(0,0,0,0.35) !important;
+        font-family: Arial, sans-serif !important;
+        font-size: 13px !important;
+        box-sizing: border-box !important;
+      }
+      #${PANEL_ID} .ls-header {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        background: #23272f;
+        border-bottom: 1px solid #3a3f4b;
+      }
+      #${PANEL_ID} .ls-title { font-weight: 700; margin-right: auto; }
+      #${PANEL_ID} button {
+        cursor: pointer;
+        border: 1px solid #5c6370;
+        background: #2d333b;
+        color: #e8eaed;
+        padding: 5px 12px;
+        border-radius: 4px;
+        font-size: 12px;
+      }
+      #${PANEL_ID} button:hover { background: #3d444d; }
+      #${PANEL_ID} button.ls-primary {
+        background: #ff9900;
+        border-color: #e88b00;
+        color: #111;
+        font-weight: 600;
+      }
+      #${PANEL_ID} button:disabled { opacity: 0.5; cursor: not-allowed; }
+      #${PANEL_ID} .ls-progress {
+        flex: 0 0 auto;
+        padding: 8px 12px 10px;
+        background: #1e2228;
+        border-bottom: 1px solid #3a3f4b;
+      }
+      #${PANEL_ID} .ls-progress-top {
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+        margin-bottom: 6px;
+        flex-wrap: wrap;
+      }
+      #${PANEL_ID} .ls-progress-pct {
+        font-size: 18px;
+        font-weight: 700;
+        color: #ff9900;
+        min-width: 3.5em;
+      }
+      #${PANEL_ID} .ls-progress-detail {
+        font-size: 11px;
+        color: #9aa0a6;
+        flex: 1;
+        min-width: 120px;
+      }
+      #${PANEL_ID} .ls-progress-timing {
+        font-size: 11px;
+        color: #c9d1d9;
+        margin-left: auto;
+        text-align: right;
+      }
+      #${PANEL_ID} .ls-progress-timing strong {
+        color: #e8eaed;
+        font-weight: 600;
+      }
+      #${PANEL_ID} .ls-progress-countdown {
+        font-family: Consolas, monospace;
+        font-size: 14px;
+        color: #3fb950;
+        letter-spacing: 0.02em;
+      }
+      #${PANEL_ID} .ls-progress-bar {
+        height: 8px;
+        border-radius: 4px;
+        background: #0d1117;
+        border: 1px solid #3a3f4b;
+        overflow: hidden;
+      }
+      #${PANEL_ID} .ls-progress-bar-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #e88b00, #ff9900);
+        border-radius: 3px;
+        transition: width 0.35s ease;
+      }
+      #${PANEL_ID} .ls-split {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex !important;
+        flex-direction: row !important;
+      }
+      #${PANEL_ID} .ls-left,
+      #${PANEL_ID} .ls-right {
+        flex: 1 1 50%;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        padding: 8px 10px;
+        box-sizing: border-box;
+      }
+      #${PANEL_ID} .ls-left {
+        border-right: 1px solid #3a3f4b;
+      }
+      #${PANEL_ID} .ls-pane-label {
+        font-size: 11px;
+        color: #9aa0a6;
+        margin-bottom: 6px;
+        flex: 0 0 auto;
+      }
+      #${PANEL_ID} .ls-legend {
+        font-size: 10px;
+        color: #9aa0a6;
+        margin-bottom: 6px;
+        flex: 0 0 auto;
+      }
+      #${PANEL_ID} .ls-legend span { margin-right: 10px; }
+      #${PANEL_ID} .ls-dot-inline {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-right: 3px;
+        vertical-align: middle;
+      }
+      #${PANEL_ID} textarea.ls-mapping-input {
+        flex: 0 0 auto;
+        height: 72px;
+        min-height: 56px;
+        resize: vertical;
+        width: 100%;
+        padding: 8px;
+        border: 1px solid #3a3f4b;
+        border-radius: 4px;
+        background: #0d1117;
+        color: #c9d1d9;
+        font-family: Consolas, monospace;
+        font-size: 11px;
+        box-sizing: border-box;
+      }
+      #${PANEL_ID} textarea.ls-mapping-input:focus { outline: none; border-color: #ff9900; }
+      #${PANEL_ID} .ls-queue-list {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        margin-top: 6px;
+        border: 1px solid #3a3f4b;
+        border-radius: 4px;
+        background: #0d1117;
+      }
+      #${PANEL_ID} .ls-queue-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 8px;
+        border-bottom: 1px solid #21262d;
+        font-family: Consolas, monospace;
+        font-size: 11px;
+      }
+      #${PANEL_ID} .ls-queue-empty {
+        padding: 12px;
+        color: #9aa0a6;
+        font-size: 11px;
+      }
+      #${PANEL_ID} .ls-queue-compact-summary,
+      #${PANEL_ID} .ls-queue-more {
+        padding: 8px 10px;
+        font-size: 10px;
+        color: #9aa0a6;
+        border-bottom: 1px solid #21262d;
+        background: #161b22;
+      }
+      #${PANEL_ID} .ls-queue-row-current {
+        background: #1c2128;
+        outline: 1px solid #ff9900;
+        outline-offset: -1px;
+      }
+      #${PANEL_ID} .ls-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+      #${PANEL_ID} .ls-dot-pending { background: #f85149; }
+      #${PANEL_ID} .ls-dot-active { background: #d29922; }
+      #${PANEL_ID} .ls-dot-complete { background: #3fb950; }
+      #${PANEL_ID} .ls-dot-error { background: #f85149; box-shadow: 0 0 0 2px #fff; }
+      #${PANEL_ID} .ls-queue-text { flex: 1; min-width: 0; word-break: break-all; }
+      #${PANEL_ID} .ls-right-scroll {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+      }
+      #${PANEL_ID} .ls-slot {
+        border: 1px solid #3a3f4b;
+        border-radius: 6px;
+        padding: 10px;
+        margin-bottom: 10px;
+        background: #0d1117;
+      }
+      #${PANEL_ID} .ls-slot-title {
+        font-weight: 600;
+        font-size: 11px;
+        color: #ff9900;
+        margin-bottom: 8px;
+      }
+      #${PANEL_ID} .ls-slot label {
+        display: block;
+        font-size: 10px;
+        color: #9aa0a6;
+        margin-bottom: 4px;
+      }
+      #${PANEL_ID} .ls-slot input,
+      #${PANEL_ID} .ls-slot textarea.ls-slot-totes {
+        width: 100%;
+        padding: 6px 8px;
+        margin-bottom: 8px;
+        border: 1px solid #3a3f4b;
+        border-radius: 4px;
+        background: #161b22;
+        color: #e8eaed;
+        font-family: Consolas, monospace;
+        font-size: 11px;
+        box-sizing: border-box;
+        resize: vertical;
+      }
+      #${PANEL_ID} .ls-slot textarea.ls-slot-totes {
+        min-height: 52px;
+        line-height: 1.35;
+      }
+      #${PANEL_ID} .ls-slot input:focus,
+      #${PANEL_ID} .ls-slot textarea.ls-slot-totes:focus {
+        outline: none;
+        border-color: #ff9900;
+      }
+      #${PANEL_ID} .ls-slot-count {
+        font-size: 10px;
+        color: #9aa0a6;
+        line-height: 1.4;
+        word-break: break-word;
+      }
+      #${PANEL_ID} .ls-slot-count.ls-count-full { color: #f85149; font-weight: 600; }
+      body.ls-panel-active {
+        padding-bottom: 58vh !important;
+        box-sizing: border-box !important;
+      }
+      #ls-blocker-overlay {
+        position: fixed !important;
+        inset: 0 !important;
+        z-index: 2147483647 !important;
+        background: rgba(0, 0, 0, 0.65) !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        padding: 16px !important;
+        box-sizing: border-box !important;
+      }
+      #ls-blocker-overlay .ls-blocker-card {
+        max-width: 480px;
+        width: 100%;
+        background: #1a1d23;
+        border: 2px solid #f85149;
+        border-radius: 8px;
+        padding: 18px 20px;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+        font-family: Arial, sans-serif;
+      }
+      #ls-blocker-overlay .ls-blocker-title {
+        margin: 0 0 12px;
+        font-size: 16px;
+        font-weight: 700;
+        color: #ff7b72;
+      }
+      #ls-blocker-overlay .ls-blocker-body {
+        margin: 0 0 16px;
+        font-size: 13px;
+        line-height: 1.45;
+        color: #e8eaed;
+        white-space: pre-wrap;
+      }
+      #ls-blocker-overlay .ls-blocker-ok {
+        cursor: pointer;
+        border: none;
+        background: #ff9900;
+        color: #111;
+        font-weight: 600;
+        padding: 8px 20px;
+        border-radius: 4px;
+        font-size: 13px;
+      }
+      #ls-blocker-overlay .ls-blocker-ok:hover { background: #e88b00; }
+      #ls-blocker-overlay .ls-blocker-card.ls-blocker-confirm {
+        border-color: #d29922;
+      }
+      #ls-blocker-overlay .ls-blocker-card.ls-blocker-confirm .ls-blocker-title {
+        color: #d29922;
+      }
+      #ls-blocker-overlay .ls-blocker-card.ls-blocker-confirm .ls-blocker-pair {
+        color: #e3b341;
+        border: 1px solid #d29922;
+      }
+      #ls-blocker-overlay .ls-confirm-ok {
+        background: #d29922;
+        border: none;
+        color: #1a1d23;
+        font-weight: 600;
+      }
+      #ls-blocker-overlay .ls-confirm-ok:hover { background: #e3b341; }
+      #ls-dashboard-overlay .ls-dashboard-card-fill {
+        max-width: min(1100px, 96vw);
+        width: 100%;
+        height: min(88vh, 760px);
+        max-height: 88vh;
+      }
+      #ls-dashboard-overlay .ls-dash-main {
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: hidden;
+      }
+      #ls-dashboard-overlay .ls-dash-dest-section {
+        flex: 2 1 0;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        border-bottom: 2px solid #ff9900;
+        background: linear-gradient(180deg, #1e2229 0%, #14171c 100%);
+      }
+      #ls-dashboard-overlay .ls-dash-dest-header {
+        flex-shrink: 0;
+        padding: 10px 16px 8px;
+        border-bottom: 1px solid #3a3f4b;
+      }
+      #ls-dashboard-overlay .ls-dash-dest-subtitle {
+        margin: 0;
+        font-size: 11px;
+        color: #c9d1d9;
+        line-height: 1.4;
+        font-weight: 500;
+      }
+      #ls-dashboard-overlay .ls-dash-dest-scroll {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: auto;
+        padding: 14px 16px 16px;
+      }
+      #ls-dashboard-overlay .ls-dash-routes-grid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 12px;
+        align-items: stretch;
+        height: 100%;
+        min-height: 220px;
+      }
+      #ls-dashboard-overlay .ls-dash-route-card {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        border: 1px solid #3a3f4b;
+        border-radius: 8px;
+        background: #0d1117;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+        overflow: hidden;
+      }
+      #ls-dashboard-overlay .ls-dash-route-card.ls-dash-route-has-lpns {
+        border-color: #3fb950;
+        box-shadow: 0 0 0 1px rgba(63, 185, 80, 0.35), 0 6px 16px rgba(0, 0, 0, 0.4);
+      }
+      #ls-dashboard-overlay .ls-dash-route-card.ls-dash-route-unconfigured {
+        opacity: 0.72;
+        border-style: dashed;
+      }
+      #ls-dashboard-overlay .ls-dash-route-badge {
+        align-self: flex-start;
+        margin: 10px 10px 0;
+        padding: 3px 8px;
+        border-radius: 4px;
+        background: #ff9900;
+        color: #111;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+      }
+      #ls-dashboard-overlay .ls-dash-route-sort {
+        margin: 8px 10px 0;
+        font-size: 12px;
+        font-weight: 700;
+        color: #ff9900;
+        line-height: 1.25;
+        min-height: 2.5em;
+        word-break: break-word;
+      }
+      #ls-dashboard-overlay .ls-dash-route-lpn-big {
+        margin: 6px 10px 0;
+        font-size: 42px;
+        font-weight: 800;
+        line-height: 1;
+        color: #3fb950;
+        font-variant-numeric: tabular-nums;
+      }
+      #ls-dashboard-overlay .ls-dash-route-card.ls-dash-route-unconfigured .ls-dash-route-lpn-big {
+        color: #5c6370;
+      }
+      #ls-dashboard-overlay .ls-dash-route-lpn-label {
+        margin: 4px 10px 10px;
+        font-size: 10px;
+        color: #9aa0a6;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      #ls-dashboard-overlay .ls-dash-route-dests {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        border-top: 1px solid #21262d;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        background: #161b22;
+      }
+      #ls-dashboard-overlay .ls-dash-route-dest-item {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        grid-template-rows: auto auto;
+        gap: 2px 8px;
+        padding: 8px 10px;
+        border-bottom: 1px solid #21262d;
+        font-family: Consolas, monospace;
+        font-size: 10px;
+      }
+      #ls-dashboard-overlay .ls-dash-route-dest-item:last-child { border-bottom: none; }
+      #ls-dashboard-overlay .ls-dash-route-dest-id {
+        grid-column: 1 / -1;
+        color: #e8eaed;
+        word-break: break-all;
+        font-weight: 600;
+      }
+      #ls-dashboard-overlay .ls-dash-route-dest-meta {
+        color: #3fb950;
+        font-weight: 700;
+      }
+      #ls-dashboard-overlay .ls-dash-route-dest-units {
+        color: #9aa0a6;
+        text-align: right;
+      }
+      #ls-dashboard-overlay .ls-dash-route-dest-meta.ls-dash-dest-full,
+      #ls-dashboard-overlay .ls-dash-route-dest-units.ls-dash-dest-full {
+        color: #f85149;
+      }
+      #ls-dashboard-overlay .ls-dash-route-dest-empty {
+        padding: 10px;
+        color: #6e7681;
+        font-size: 10px;
+        font-style: italic;
+      }
+      #ls-dashboard-overlay .ls-dash-errors-section {
+        flex: 1 1 0;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        border-top: 1px solid #3a3f4b;
+      }
+      #ls-dashboard-overlay .ls-dash-errors-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 14px;
+        flex-shrink: 0;
+        border-bottom: 1px solid #3a3f4b;
+        background: #23272f;
+      }
+      #ls-dashboard-overlay .ls-dash-errors-title {
+        margin: 0;
+        font-size: 13px;
+        color: #ff7b72;
+        flex: 1;
+        min-width: 0;
+      }
+      #ls-dashboard-overlay .ls-dash-errors-count {
+        font-size: 11px;
+        color: #9aa0a6;
+      }
+      #ls-dashboard-overlay .ls-dash-errors-copy { margin-left: auto; }
+      #ls-dashboard-overlay .ls-dash-reason {
+        max-width: 280px;
+        font-size: 10px;
+        color: #ff7b72;
+      }
+      #ls-blocker-overlay .ls-blocker-pair {
+        margin: 0 0 10px;
+        padding: 8px 10px;
+        background: #0d1117;
+        border-radius: 4px;
+        font-family: Consolas, monospace;
+        font-size: 12px;
+        color: #ff9900;
+        white-space: pre-wrap;
+      }
+      #ls-blocker-overlay .ls-blocker-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }
+      #ls-blocker-overlay .ls-blocker-secondary {
+        cursor: pointer;
+        border: 1px solid #5c6370;
+        background: #2d333b;
+        color: #e8eaed;
+        padding: 8px 12px;
+        border-radius: 4px;
+        font-size: 12px;
+      }
+      #ls-blocker-overlay .ls-blocker-secondary:hover { border-color: #ff9900; color: #ff9900; }
+      #ls-blocker-overlay .ls-blocker-stop {
+        cursor: pointer;
+        border: 1px solid #da3633;
+        background: #3d1214;
+        color: #ff7b72;
+        padding: 8px 12px;
+        border-radius: 4px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      #ls-blocker-overlay .ls-blocker-stop:hover {
+        background: #67060c;
+        border-color: #ff7b72;
+        color: #fff;
+      }
+      #ls-blocker-overlay .ls-blocker-autoclose-hint {
+        font-size: 11px;
+        color: #d29922;
+        margin-bottom: 10px;
+      }
+      #${PANEL_ID} button.ls-toggle-on {
+        background: #238636;
+        border-color: #2ea043;
+        color: #fff;
+        font-weight: 600;
+      }
+      #ls-dashboard-overlay {
+        position: fixed !important;
+        inset: 0 !important;
+        z-index: 2147483647 !important;
+        background: rgba(0, 0, 0, 0.7) !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        padding: 20px !important;
+        box-sizing: border-box !important;
+      }
+      #ls-dashboard-overlay .ls-dashboard-card {
+        width: min(1100px, 96vw);
+        height: min(88vh, 760px);
+        max-height: 88vh;
+        display: flex;
+        flex-direction: column;
+        background: #1a1d23;
+        border: 2px solid #ff9900;
+        border-radius: 8px;
+        overflow: hidden;
+        font-family: Arial, sans-serif;
+      }
+      #ls-dashboard-overlay .ls-dashboard-header {
+        padding: 14px 16px;
+        border-bottom: 1px solid #3a3f4b;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+      }
+      #ls-dashboard-overlay .ls-dashboard-title {
+        margin: 0;
+        font-size: 16px;
+        color: #ff9900;
+        flex: 1;
+        min-width: 180px;
+      }
+      #ls-dashboard-overlay .ls-dashboard-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      #ls-dashboard-overlay .ls-dash-btn {
+        cursor: pointer;
+        border: 1px solid #5c6370;
+        background: #2d333b;
+        color: #e8eaed;
+        padding: 5px 10px;
+        border-radius: 4px;
+        font-size: 11px;
+      }
+      #ls-dashboard-overlay .ls-dash-btn:hover { background: #3d444d; }
+      #ls-dashboard-overlay .ls-dash-close {
+        background: #ff9900;
+        border-color: #e88b00;
+        color: #111;
+        font-weight: 600;
+      }
+      #ls-dashboard-overlay .ls-dashboard-scroll {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: auto;
+        padding: 0;
+      }
+      #ls-dashboard-overlay .ls-dashboard-empty {
+        padding: 24px 16px;
+        color: #9aa0a6;
+        font-size: 13px;
+        margin: 0;
+      }
+      #ls-dashboard-overlay .ls-dashboard-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 11px;
+      }
+      #ls-dashboard-overlay .ls-dashboard-table th {
+        position: sticky;
+        top: 0;
+        background: #23272f;
+        color: #9aa0a6;
+        text-align: left;
+        padding: 8px 10px;
+        border-bottom: 1px solid #3a3f4b;
+        font-weight: 600;
+      }
+      #ls-dashboard-overlay .ls-dashboard-table td {
+        padding: 6px 10px;
+        border-bottom: 1px solid #21262d;
+        color: #e8eaed;
+        vertical-align: middle;
+      }
+      #ls-dashboard-overlay .ls-dash-row-error td { color: #ff7b72; }
+      #ls-dashboard-overlay .ls-dash-row-partial td { color: #d29922; }
+      #ls-dashboard-overlay .ls-dash-row-active td { color: #ff9900; font-weight: 600; }
+      #ls-dashboard-overlay .ls-dash-row-pending td { color: #9aa0a6; }
+      #ls-dashboard-overlay .ls-dash-copycell {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      #ls-dashboard-overlay .ls-dash-val {
+        font-family: Consolas, monospace;
+        word-break: break-all;
+        flex: 1;
+        min-width: 0;
+      }
+      #ls-dashboard-overlay .ls-mini-copy,
+      #ls-blocker-overlay .ls-mini-copy {
+        cursor: pointer;
+        border: 1px solid #5c6370;
+        background: #2d333b;
+        color: #9aa0a6;
+        padding: 2px 6px;
+        border-radius: 3px;
+        font-size: 10px;
+        flex-shrink: 0;
+      }
+      #ls-dashboard-overlay .ls-mini-copy:hover { color: #ff9900; border-color: #ff9900; }
+    `);
+
+    const panel = document.createElement('div');
+    panel.id = PANEL_ID;
+
+    const header = document.createElement('div');
+    header.className = 'ls-header';
+
+    const title = document.createElement('span');
+    title.className = 'ls-title';
+    title.textContent = 'Liquidation Sort';
+
+    const startBtn = document.createElement('button');
+    startBtn.type = 'button';
+    startBtn.className = 'ls-primary';
+    startBtn.textContent = 'Start';
+
+    const startFromTopBtn = document.createElement('button');
+    startFromTopBtn.type = 'button';
+    startFromTopBtn.textContent = 'Start From Top';
+    startFromTopBtn.title =
+      'Begin at row 1 (skips Done rows). Use after Reset Error Statuses.';
+
+    const stopBtn = document.createElement('button');
+    stopBtn.type = 'button';
+    stopBtn.textContent = 'Stop';
+
+    const clearBtn = document.createElement('button');
+    clearBtn.type = 'button';
+    clearBtn.textContent = 'Clear';
+
+    const copyResultsBtn = document.createElement('button');
+    copyResultsBtn.type = 'button';
+    copyResultsBtn.textContent = 'Copy Results';
+
+    const copyDebugBtn = document.createElement('button');
+    copyDebugBtn.type = 'button';
+    copyDebugBtn.textContent = 'Copy Debug';
+
+    const jobsBtn = document.createElement('button');
+    jobsBtn.type = 'button';
+    jobsBtn.textContent = 'Jobs';
+    jobsBtn.title =
+      'Destinations by sort code + errors (pauses automation while open)';
+
+    autoCloseToggleBtn = document.createElement('button');
+    autoCloseToggleBtn.type = 'button';
+    autoCloseToggleBtn.className = 'ls-toggle';
+    autoCloseToggleBtn.textContent = 'Auto-close errors';
+    autoCloseToggleBtn.addEventListener('click', () => {
+      autoCloseErrors = !autoCloseErrors;
+      updateAutoCloseToggleBtn();
+      scheduleSaveState();
+      log(
+        autoCloseErrors
+          ? 'Auto-close errors ON — every red error auto-clicks OK (~0.5s) then continues.'
+          : 'Auto-close errors OFF — red errors stay until you press OK.'
+      );
+    });
+
+    forgetErrorLpnsBtn = document.createElement('button');
+    forgetErrorLpnsBtn.type = 'button';
+    forgetErrorLpnsBtn.textContent = 'Reset Error Statuses';
+    forgetErrorLpnsBtn.disabled = true;
+    forgetErrorLpnsBtn.addEventListener('click', () => {
+      forgetErrorLpns();
+    });
+
+    header.append(
+      title,
+      startBtn,
+      startFromTopBtn,
+      stopBtn,
+      autoCloseToggleBtn,
+      forgetErrorLpnsBtn,
+      jobsBtn,
+      copyResultsBtn,
+      clearBtn,
+      copyDebugBtn
+    );
+    jobsBtn.addEventListener('click', () => openJobsDashboard());
+    updateAutoCloseToggleBtn();
+    updateResetErrorStatusesBtn();
+
+    const progress = document.createElement('div');
+    progress.className = 'ls-progress';
+
+    const progressTop = document.createElement('div');
+    progressTop.className = 'ls-progress-top';
+
+    progressPctEl = document.createElement('span');
+    progressPctEl.className = 'ls-progress-pct';
+    progressPctEl.textContent = '0%';
+
+    progressDetailEl = document.createElement('span');
+    progressDetailEl.className = 'ls-progress-detail';
+    progressDetailEl.textContent = 'Paste queue to begin';
+
+    const timingWrap = document.createElement('div');
+    timingWrap.className = 'ls-progress-timing';
+
+    etaClockEl = document.createElement('div');
+    etaClockEl.textContent = 'ETA —';
+
+    countdownEl = document.createElement('div');
+    countdownEl.className = 'ls-progress-countdown';
+    countdownEl.textContent = '—:—:—';
+
+    timingWrap.append(etaClockEl, countdownEl);
+    progressTop.append(progressPctEl, progressDetailEl, timingWrap);
+
+    const progressBar = document.createElement('div');
+    progressBar.className = 'ls-progress-bar';
+    progressBarFillEl = document.createElement('div');
+    progressBarFillEl.className = 'ls-progress-bar-fill';
+    progressBar.appendChild(progressBarFillEl);
+    progress.append(progressTop, progressBar);
+
+    const split = document.createElement('div');
+    split.className = 'ls-split';
+
+    const left = document.createElement('div');
+    left.className = 'ls-left';
+
+    const leftLabel = document.createElement('div');
+    leftLabel.className = 'ls-pane-label';
+    leftLabel.textContent = 'Container → LPN (work queue)';
+
+    const legend = document.createElement('div');
+    legend.className = 'ls-legend';
+    legend.innerHTML =
+      '<span><i class="ls-dot-inline ls-dot-pending"></i> Not done</span>' +
+      '<span><i class="ls-dot-inline ls-dot-active"></i> Active</span>' +
+      '<span><i class="ls-dot-inline ls-dot-complete"></i> Done</span>';
+
+    mappingInput = document.createElement('textarea');
+    mappingInput.id = 'ls-mapping-input';
+    mappingInput.className = 'ls-mapping-input';
+    mappingInput.spellcheck = false;
+    mappingInput.placeholder = 'tsLIQ924688\tLPNNB6GDK8MX6';
+
+    queueListEl = document.createElement('div');
+    queueListEl.className = 'ls-queue-list';
+    queueListEl.id = 'ls-queue-list';
+
+    left.append(leftLabel, legend, mappingInput, queueListEl);
+
+    const right = document.createElement('div');
+    right.className = 'ls-right';
+
+    const rightLabel = document.createElement('div');
+    rightLabel.className = 'ls-pane-label';
+    rightLabel.textContent = `Sort code → destination containers (one per line, max ${TOTE_MAX_UNITS} each)`;
+
+    const rightScroll = document.createElement('div');
+    rightScroll.className = 'ls-right-scroll';
+
+    slotSortInputs = [];
+    slotToteInputs = [];
+    slotCountEls = [];
+
+    for (let i = 0; i < SORT_SLOT_COUNT; i++) {
+      const slot = document.createElement('div');
+      slot.className = 'ls-slot';
+
+      const slotTitle = document.createElement('div');
+      slotTitle.className = 'ls-slot-title';
+      slotTitle.textContent = `Route ${i + 1}`;
+
+      const sortLbl = document.createElement('label');
+      sortLbl.textContent = 'Sort code to match';
+
+      const sortInp = document.createElement('input');
+      sortInp.type = 'text';
+      sortInp.spellcheck = false;
+      sortInp.placeholder = 'e.g. Liquidator OLBRT';
+
+      const toteLbl = document.createElement('label');
+      toteLbl.textContent = 'Destination containers (one per line)';
+
+      const toteInp = document.createElement('textarea');
+      toteInp.className = 'ls-slot-totes';
+      toteInp.rows = 3;
+      toteInp.spellcheck = false;
+      toteInp.placeholder = 'TOTE_ABC123\nTOTE_XYZ456';
+
+      const countEl = document.createElement('div');
+      countEl.className = 'ls-slot-count';
+      countEl.textContent = `0 / ${TOTE_MAX_UNITS} units`;
+
+      slot.append(slotTitle, sortLbl, sortInp, toteLbl, toteInp, countEl);
+      rightScroll.appendChild(slot);
+
+      slotSortInputs.push(sortInp);
+      slotToteInputs.push(toteInp);
+      slotCountEls.push(countEl);
+    }
+
+    right.append(rightLabel, rightScroll);
+    split.append(left, right);
+    panel.append(header, progress, split);
+
+    const mount = () => {
+      if (!document.body) {
+        requestAnimationFrame(mount);
+        return;
+      }
+      if (!document.getElementById(PANEL_ID)) {
+        document.body.appendChild(panel);
+        document.body.classList.add('ls-panel-active');
+      }
+    };
+    mount();
+
+    const persistMapping = () => {
+      invalidateMappingListCache();
+      scheduleSyncRowStatusesFromMapping();
+      storageSet(STORAGE_KEY_MAPPING, getMappingText());
+      scheduleSaveState();
+      clearBarcodeBlock();
+      if (canRunAutomation() && sourceContainerDone && !barcodeDone) {
+        resolvePendingLpn({ quiet: true });
+        tryAutoBarcode();
+      }
+    };
+
+    const persistSlots = () => {
+      storageSetJson(STORAGE_KEY_SORT_SLOTS, getSortSlotsFromInputs());
+      renderSlotCounts();
+      scheduleSaveState();
+    };
+
+    mappingInput.addEventListener('input', persistMapping);
+    mappingInput.addEventListener('change', persistMapping);
+    for (let i = 0; i < SORT_SLOT_COUNT; i++) {
+      slotSortInputs[i].addEventListener('input', persistSlots);
+      slotSortInputs[i].addEventListener('change', persistSlots);
+      slotToteInputs[i].addEventListener('input', persistSlots);
+      slotToteInputs[i].addEventListener('change', persistSlots);
+    }
+
+    startBtn.addEventListener('click', () => onStart(startBtn));
+    startFromTopBtn.addEventListener('click', () => onStartFromTop(startFromTopBtn));
+    stopBtn.addEventListener('click', () => {
+      void onStop();
+    });
+    clearBtn.addEventListener('click', () => {
+      void onClear();
+    });
+    copyDebugBtn.addEventListener('click', copyDebug);
+    copyResultsBtn.addEventListener('click', copyResults);
+
+    startProgressTicker();
+    updateProgressUI();
+    log('Panel ready — paste mapping, press Start (first line runs first).');
+  }
+
+  function forceCloseBlockerOverlay() {
+    if (blockerAutoCloseTimer) {
+      clearTimeout(blockerAutoCloseTimer);
+      blockerAutoCloseTimer = null;
+    }
+    const overlay = document.getElementById('ls-blocker-overlay');
+    if (overlay) {
+      overlay.remove();
+      releaseAutomation();
+    }
+  }
+
+  function wasMidJobWhenStopping(wasArmed) {
+    if (!wasArmed) return false;
+    const pair = getCurrentPair();
+    if (!pair) return false;
+    const key = rowKey(pair.container, pair.lpn);
+    if (rowStatuses[key] === 'active') return true;
+    return (
+      sourceContainerDone ||
+      barcodeDone ||
+      postBarcodeHandled ||
+      running ||
+      exceptionFlowActive
+    );
+  }
+
+  async function onStop() {
+    const wasArmed = sessionArmed;
+    const midJob = wasMidJobWhenStopping(wasArmed);
+
+    sessionArmed = false;
+    onStartActive = false;
+    setRunningFlag(false);
+    exceptionFlowActive = false;
+    setErrorHalt(false);
+    forceCloseBlockerOverlay();
+    releaseAllAutomationHolds();
+    pauseProgressTiming();
+    scheduleSaveState();
+
+    const pair = getCurrentPair();
+    if (pair && midJob) {
+      rowStatuses[rowKey(pair.container, pair.lpn)] = 'pending';
+      bumpRowStatusVersion();
+    }
+
+    resetStepFlagsForCurrentItem();
+    lastSubmittedLpn = null;
+
+    if (midJob) {
+      const clicked = await clickPageResetUpdates();
+      log(
+        clicked
+          ? '[Stop] Current LPN marked Not Done; clicked Update to reset page.'
+          : '[Stop] Current LPN marked Not Done; Update link not found on page.'
+      );
+    } else {
+      log('--- Stop --- Automation halted. Press Start to continue.');
+    }
+
+    renderQueueList();
+    updateProgressUI();
+    savePersistedState();
+  }
+
+  async function onStartFromTop(startBtn) {
+    queueIndex = 0;
+    scheduleRenderQueueList();
+    scheduleSaveState();
+    log('--- Start From Top --- Queue index set to row 1.');
+    await onStart(startBtn);
+  }
+
+  async function onClear() {
+    sortCodeResults = [];
+    rebuildMovedCountByContainer();
+    rowStatuses = {};
+    bumpRowStatusVersion();
+    toteCounts = {};
+    queueIndex = 0;
+    lastExceptionKey = '';
+    lastSubmittedLpn = null;
+    acknowledgedFullTotes = new Set();
+    setErrorHalt(false);
+    postBarcodeHandled = false;
+    barcodeDone = false;
+    sourceContainerDone = false;
+    updateResetErrorStatusesBtn();
+    resetProgressTiming();
+    renderQueueList();
+    renderSlotCounts();
+    savePersistedState();
+    log('Cleared statuses, results, tote counts, and queue position.');
+    const clicked = await clickUpdateSortType();
+    log(clicked ? '[Clear] Clicked Update (#change-sort-type).' : '[Clear] Update link not found on page.');
+  }
+
+  async function onStart(startBtn) {
+    if (onStartActive) {
+      log('Start already in progress…');
+      return;
+    }
+
+    resetStuckAutomationFlags();
+
+    if (document.getElementById('ls-dashboard-overlay')) {
+      log('Close the Jobs dashboard before starting.');
+      return;
+    }
+
+    onStartActive = true;
+    startBtn.disabled = true;
+
+    sessionArmed = true;
+    workflowTrace = [];
+    lastWatchTraceKey = '';
+    traceWorkflow('session.start', { queueIndex, label: formatQueueLabel() });
+    armProgressTiming();
+    lastExceptionKey = '';
+    lastSubmittedLpn = null;
+    resetStepFlagsForCurrentItem();
+    updateProgressUI();
+    scheduleSaveState();
+
+    try {
+      log('--- Start ---');
+      const list = getMappingList();
+      if (!list.length) {
+        log('Mapping is empty — paste container + LPN rows first.');
+        sessionArmed = false;
+        return;
+      }
+
+      if (!skipDoneRowsFromCurrent()) {
+        log('Every row in the mapping is already marked Done.');
+        sessionArmed = false;
+        return;
+      }
+
+      log(`Queue: ${list.length} row(s). Active: ${formatQueueLabel()}`);
+      setRowStatusByIndex(queueIndex, 'active');
+
+      await resumeWorkflowFromPageState();
+    } catch (err) {
+      log('Error: ' + (err instanceof Error ? err.message : String(err)));
+      console.error('[Liquidation Sort]', err);
+    } finally {
+      onStartActive = false;
+      startBtn.disabled = false;
+      scheduleSaveState();
+    }
+  }
+
+  function fieldDebugSnapshot(selector, placeholder) {
+    const field = document.querySelector(selector);
+    return {
+      fieldFound: Boolean(field),
+      stepActive: isFieldStepActive(selector),
+      field: field
+        ? {
+            id: field.id,
+            name: field.name,
+            value: field.value,
+            display: getComputedStyle(field).display,
+            opacity: getComputedStyle(field).opacity,
+          }
+        : null,
+      placeholder,
+    };
+  }
+
+  function copyResults() {
+    const text = buildResultsTsv();
+    if (!text.trim() || sortCodeResults.length === 0) {
+      log('No results to copy yet.');
+      return;
+    }
+    copyTextToClipboard(text, 'Results copied to clipboard (TSV).');
+  }
+
+  function gatherDebugPayload() {
+    const list = getMappingList();
+    const pair = getCurrentPair();
+    return {
+      script: {
+        name: 'Liquidation Sort Helper',
+        version: SCRIPT_VERSION,
+        toteMaxUnits: TOTE_MAX_UNITS,
+        toteCounts,
+        toteCountsSummary: formatToteCountsSummary(),
+        sortTypeExpected: SORT_TYPE_VALUE,
+        panelMounted: Boolean(document.getElementById(PANEL_ID)),
+        sessionArmed,
+        autoCloseErrors,
+        errorHaltActive,
+        running,
+        onStartActive,
+        exceptionFlowActive,
+        automationHoldDepth,
+        queueIndex,
+        queueTotal: list.length,
+        sourceContainerDone,
+        barcodeDone,
+        postBarcodeHandled,
+        barcodeBlocked,
+        pendingLpn,
+        lastSubmittedLpn,
+        pageResetInProgress,
+        jobStartupInProgress,
+        runningForMs: runningSince ? Date.now() - runningSince : 0,
+      },
+      exception: {
+        btnVisible: isExceptionBtnVisible(),
+        message: readExceptionDetail(),
+      },
+      page: {
+        url: location.href,
+        title: document.title,
+        timestamp: new Date().toISOString(),
+        userAgent: navigator.userAgent,
+        displayedSourceContainer: readDisplayedSourceContainer() || null,
+        barcodeOnPage: readBarcodeOnPage() || null,
+        staleBarcodeOnPage: isStaleBarcodeOnPage(),
+        staleSortCodeBeforeBarcode: isStaleSortCodeBeforeBarcode(),
+        barcodeBeforeSourceStep: isBarcodeBeforeSourceStep(),
+        awaitingSourceContainerScan: isAwaitingSourceContainerScan(),
+        shouldClickUpdateToFinishJob: shouldClickUpdateToFinishJob(),
+        sortCodeElementPopulated: isSortCodeElementPopulated(),
+        conflictingScanSteps: hasConflictingScanSteps(),
+        pageResetInProgress,
+        sortTypeSatisfiedOnPage: isSortTypeSatisfiedOnPage(),
+        barcodeEmptyError: isBarcodeEmptyErrorOnPage(),
+        needsSortTypeEntry: needsSortTypeEntry(),
+      },
+      workflowTrace: workflowTrace.slice(-100),
+      lastWatchTraceKey: lastWatchTraceKey || null,
+      sortCode: {
+        elementFound: Boolean(document.querySelector(SORT_CODE_SELECTOR)),
+        text: readSortCodeText(),
+        ready: isSortCodeReady(),
+        elementPopulated: isSortCodeElementPopulated(),
+        updateLinkFound: Boolean(document.querySelector(UPDATE_SORT_TYPE_SELECTOR)),
+      },
+      panel: {
+        currentQueueLabel: formatQueueLabel(),
+        currentContainer: pair?.container || null,
+        currentLpn: pair?.lpn || null,
+        mappingEntryCount: list.length,
+        recordedCount: sortCodeResults.length,
+        rowStatusCount: Object.keys(rowStatuses).length,
+        resultsTsv: buildResultsTsv(),
+        sortSlots: getSortSlotsFromInputs(),
+      },
+      sortTypeStep: fieldDebugSnapshot(
+        STEPS.sortType.selector,
+        STEPS.sortType.placeholder
+      ),
+      sourceContainerStep: fieldDebugSnapshot(
+        STEPS.sourceContainer.selector,
+        STEPS.sourceContainer.placeholder
+      ),
+      barcodeStep: fieldDebugSnapshot(
+        STEPS.barcode.selector,
+        STEPS.barcode.placeholder
+      ),
+      scanToteStep: fieldDebugSnapshot(
+        STEPS.scanTote.selector,
+        STEPS.scanTote.placeholder
+      ),
+    };
+  }
+
+  function copyDebug() {
+    const payload = gatherDebugPayload();
+    const text = JSON.stringify(payload, null, 2);
+
+    const done = (ok) => {
+      log(ok ? 'Debug copied to clipboard.' : 'Copy failed — see browser console (F12).');
+      if (!ok) console.log('[Liquidation Sort] Debug payload:', payload);
+    };
+
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(text, { type: 'text', mimetype: 'text/plain' });
+      done(true);
+      return;
+    }
+
+    navigator.clipboard
+      .writeText(text)
+      .then(() => done(true))
+      .catch(() => done(false));
+  }
+
+  async function loadAllPersisted() {
+    const [savedMapping, savedSlots] = await Promise.all([
+      storageGet(STORAGE_KEY_MAPPING, DEFAULT_CONTAINER_LPN_TEXT),
+      storageGetJson(STORAGE_KEY_SORT_SLOTS, DEFAULT_SORT_SLOTS),
+    ]);
+    if (mappingInput && savedMapping) mappingInput.value = savedMapping;
+    applySortSlotsToInputs(savedSlots);
+    const restored = await loadPersistedState();
+    syncRowStatusesFromMapping();
+    return restored;
+  }
+
+  async function init() {
+    buildPanel();
+    const restored = await loadAllPersisted();
+    watchWorkflowSteps();
+    if (restored && sessionArmed) {
+      log('Session was armed — press Start to continue the queue.');
+    }
+    window.addEventListener('beforeunload', () => {
+      savePersistedState();
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();

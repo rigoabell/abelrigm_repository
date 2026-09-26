@@ -1,0 +1,1008 @@
+// ==UserScript==
+// @name        AFT DeleteItems Auto Click
+// @namespace   http://tampermonkey.net/
+// @version     3.6.0
+// @description Queue containers, type them into the form, and click Continue.
+// @match       https://aft-qt-na.aka.amazon.com/app/deleteitems*
+// @match       https://qt.na.aftx.amazonoperations.app/app/deleteitems*
+// @grant       GM_getValue
+// @grant       GM_setValue
+// @run-at      document-idle
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const STORE_KEYS = {
+        enabled: 'tm_auto_click_enabled',
+        collapsed: 'tm_auto_click_collapsed',
+        queueText: 'tm_container_queue_text',
+        processed: 'tm_container_processed',
+        pending: 'tm_container_pending',
+        dispositionReason: 'tm_disposition_reason'
+    };
+
+    const DISPOSITION_REASONS = {
+        sweeping_missing: 'Sweeping out(Missing)',
+        damaged_unreturnable: 'Damaged and unreturnable'
+    };
+
+    const CONTAINER_INPUT_SELECTORS = [
+        'div.a-input-text-wrapper.a-form-normal > input',
+        'div.a-input-text-wrapper.a-form-error > input',
+        'div.a-input-text-wrapper > input'
+    ];
+    const EMPTY_ALERT_SELECTOR = 'div.a-alert-content';
+    const RECALL_ALERT_SELECTOR = 'div.a-alert-content';
+    const RETURN_TO_CONTAINER_SELECTOR = '#a-autoid-2 > span.a-button-inner > input.a-button-input[type="submit"][data-aft-tool-hotkey="d"]';
+    const CONTINUE_SELECTORS = [
+        '#a-autoid-1 > span.a-button-inner > input.a-button-input[type="submit"][data-aft-tool-hotkey="return"]',
+        '#a-autoid-0 > span.a-button-inner > input.a-button-input[type="submit"][data-aft-tool-hotkey="return"]',
+        'input.a-button-input[type="submit"][data-aft-tool-hotkey="return"]'
+    ];
+    const TICK_MS = 175;
+    const ACTION_COOLDOWN_MS = 500;
+    const AFTER_TYPE_MS = 400;
+
+    let enabled = GM_getValue(STORE_KEYS.enabled, false);
+    let collapsed = GM_getValue(STORE_KEYS.collapsed, true);
+    let queueText = GM_getValue(STORE_KEYS.queueText, '');
+    let processedContainers = Array.isArray(GM_getValue(STORE_KEYS.processed, []))
+        ? GM_getValue(STORE_KEYS.processed, [])
+        : [];
+    let pendingContainer = typeof GM_getValue(STORE_KEYS.pending, '') === 'string'
+        ? GM_getValue(STORE_KEYS.pending, '')
+        : '';
+    const savedDisposition = GM_getValue(STORE_KEYS.dispositionReason, null);
+    let dispositionReason = Object.prototype.hasOwnProperty.call(DISPOSITION_REASONS, savedDisposition)
+        ? savedDisposition
+        : 'sweeping_missing';
+    let loopId = null;
+    let lastActionAt = 0;
+    let lastTypedContainer = '';
+
+    const debugState = {
+        status: 'Off',
+        lastAction: 'none',
+        currentContainer: 'none',
+        pendingContainer: pendingContainer || 'none',
+        containerInput: 'missing',
+        emptyAlert: 'missing',
+        recallAlert: 'missing',
+        returnButton: 'missing',
+        continueButton: 'missing',
+        dispositionReason: dispositionReason,
+        dispositionRadio: 'missing',
+        total: 0,
+        processed: 0,
+        remaining: 0,
+        percent: 0,
+        lastError: 'none',
+        url: window.location.href
+    };
+
+    function isVisible(el) {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    }
+
+    function isEnabled(el) {
+        return Boolean(el) && !el.disabled;
+    }
+
+    function describeElement(el) {
+        if (!el) return 'missing';
+
+        const parts = [el.tagName.toLowerCase()];
+        if (el.id) parts.push(`#${el.id}`);
+        if (el.classList.length) {
+            parts.push(`.${Array.from(el.classList).slice(0, 4).join('.')}`);
+        }
+
+        const extras = [];
+        if ('type' in el && el.type) extras.push(`type=${el.type}`);
+        if (el.getAttribute && el.getAttribute('data-aft-tool-hotkey')) {
+            extras.push(`hotkey=${el.getAttribute('data-aft-tool-hotkey')}`);
+        }
+        if ('value' in el && typeof el.value === 'string') {
+            extras.push(`value=${el.value}`);
+        }
+        if (el.disabled) extras.push('disabled=true');
+        if (!isVisible(el)) extras.push('visible=false');
+
+        return `${parts.join('')}${extras.length ? ` [${extras.join(', ')}]` : ''}`;
+    }
+
+    function normalizeContainers(text) {
+        const seen = new Set();
+        const items = [];
+
+        for (const rawLine of text.split(/\r?\n/)) {
+            const value = rawLine.trim();
+            if (!value || seen.has(value)) continue;
+            seen.add(value);
+            items.push(value);
+        }
+
+        return items;
+    }
+
+    function getProgress() {
+        const queue = normalizeContainers(queueText);
+        const processedSet = new Set(processedContainers);
+        const done = queue.filter((item) => processedSet.has(item));
+        const remaining = queue.filter((item) => !processedSet.has(item));
+        const percent = queue.length ? Math.round((done.length / queue.length) * 100) : 0;
+
+        return {
+            queue,
+            done,
+            remaining,
+            next: remaining[0] || '',
+            total: queue.length,
+            processed: done.length,
+            remainingCount: remaining.length,
+            percent
+        };
+    }
+
+    function getContainerState(container) {
+        if (!container) return 'pending';
+        if (processedContainers.includes(container)) return 'processed';
+        if (pendingContainer === container) return 'processing';
+        return 'unprocessed';
+    }
+
+    function persistQueueText(next) {
+        queueText = next;
+        GM_setValue(STORE_KEYS.queueText, queueText);
+    }
+
+    function persistProcessed() {
+        GM_setValue(STORE_KEYS.processed, processedContainers);
+    }
+
+    function persistPending(next) {
+        pendingContainer = next;
+        GM_setValue(STORE_KEYS.pending, pendingContainer);
+    }
+
+    function markProcessed(container) {
+        if (!container || processedContainers.includes(container)) return;
+        processedContainers = [...processedContainers, container];
+        persistProcessed();
+    }
+
+    function resetProcessed() {
+        processedContainers = [];
+        persistProcessed();
+        persistPending('');
+        refreshDebugState();
+        updateProgressUI();
+    }
+
+    function reconcilePendingProcessed() {
+        if (!pendingContainer) return;
+        markProcessed(pendingContainer);
+        persistPending('');
+    }
+
+    function getContainerInput() {
+        for (const selector of CONTAINER_INPUT_SELECTORS) {
+            const el = document.querySelector(selector);
+            if (el instanceof HTMLInputElement && isVisible(el)) {
+                return el;
+            }
+        }
+
+        for (const selector of CONTAINER_INPUT_SELECTORS) {
+            const el = document.querySelector(selector);
+            if (el instanceof HTMLInputElement) {
+                return el;
+            }
+        }
+
+        return null;
+    }
+
+    function getEmptyAlert() {
+        const alerts = Array.from(document.querySelectorAll(EMPTY_ALERT_SELECTOR));
+        return alerts.find((el) => (el.textContent || '').includes('Container Confirm is empty.')) || null;
+    }
+
+    function getRecallAlert() {
+        const alerts = Array.from(document.querySelectorAll(RECALL_ALERT_SELECTOR));
+        return alerts.find((el) => (el.textContent || '').includes('Cannot delete item') && (el.textContent || '').includes('owner type RECALL')) || null;
+    }
+
+    function getReturnToContainerButton() {
+        const el = document.querySelector(RETURN_TO_CONTAINER_SELECTOR);
+        return el instanceof HTMLInputElement ? el : null;
+    }
+
+    function getContinueButton() {
+        for (const selector of CONTINUE_SELECTORS) {
+            const el = document.querySelector(selector);
+            if (el instanceof HTMLInputElement && isVisible(el) && isEnabled(el)) {
+                return el;
+            }
+        }
+
+        for (const selector of CONTINUE_SELECTORS) {
+            const el = document.querySelector(selector);
+            if (el instanceof HTMLInputElement) {
+                return el;
+            }
+        }
+
+        return null;
+    }
+
+    function getDispositionLabelText() {
+        return DISPOSITION_REASONS[dispositionReason] || DISPOSITION_REASONS.sweeping_missing;
+    }
+
+    function getDispositionLabel() {
+        const target = getDispositionLabelText();
+        const spans = Array.from(document.querySelectorAll('span.a-label.a-radio-label'));
+        for (const span of spans) {
+            const text = (span.textContent || '').trim();
+            if (text === target || text.includes(target)) {
+                const label = span.closest('label');
+                if (label) return label;
+            }
+        }
+        return null;
+    }
+
+    function isDispositionSelected(label) {
+        if (!label) return false;
+        const input = label.querySelector('input[type="radio"]');
+        return Boolean(input && input.checked);
+    }
+
+    function selectDisposition(label) {
+        if (!label) return false;
+        if (isDispositionSelected(label)) return true;
+
+        label.click();
+        const input = label.querySelector('input[type="radio"]');
+        if (input && !input.checked) {
+            input.checked = true;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.dispatchEvent(new Event('click', { bubbles: true }));
+        }
+
+        return isDispositionSelected(label);
+    }
+
+    function persistDispositionReason(next) {
+        if (!Object.prototype.hasOwnProperty.call(DISPOSITION_REASONS, next)) return;
+        dispositionReason = next;
+        GM_setValue(STORE_KEYS.dispositionReason, dispositionReason);
+    }
+
+    function setNativeValue(input, value) {
+        const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value');
+        if (descriptor && descriptor.set) {
+            descriptor.set.call(input, value);
+        } else {
+            input.value = value;
+        }
+    }
+
+    function fillContainerInput(input, value) {
+        try {
+            input.focus({ preventScroll: true });
+        } catch (_error) {}
+
+        setNativeValue(input, value);
+        input.setAttribute('value', value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function refreshDebugState() {
+        const progress = getProgress();
+        debugState.url = window.location.href;
+        debugState.currentContainer = progress.next || 'none';
+        debugState.pendingContainer = pendingContainer || 'none';
+        debugState.containerInput = describeElement(getContainerInput());
+        debugState.emptyAlert = describeElement(getEmptyAlert());
+        debugState.recallAlert = describeElement(getRecallAlert());
+        debugState.returnButton = describeElement(getReturnToContainerButton());
+        debugState.continueButton = describeElement(getContinueButton());
+        debugState.dispositionReason = dispositionReason;
+        debugState.dispositionRadio = describeElement(getDispositionLabel());
+        debugState.total = progress.total;
+        debugState.processed = progress.processed;
+        debugState.remaining = progress.remainingCount;
+        debugState.percent = progress.percent;
+    }
+
+    function updateStatus(text) {
+        debugState.status = text;
+        if (statusEl) {
+            statusEl.textContent = text;
+        }
+    }
+
+    function updateProgressUI() {
+        const progress = getProgress();
+
+        if (progressEl) {
+            const next = progress.next ? progress.next : '—';
+            progressEl.textContent = `${progress.processed}/${progress.total} · ${progress.percent}% · ${progress.remainingCount} left`;
+            progressEl.title = `Next: ${next}${pendingContainer ? ` · Pending: ${pendingContainer}` : ''}`;
+        }
+        if (queueMirrorEl) {
+            const queue = progress.queue;
+            queueMirrorEl.innerHTML = '';
+
+            if (!queue.length) {
+                const emptyEl = document.createElement('div');
+                emptyEl.className = 'tm-queue-empty';
+                emptyEl.textContent = 'No containers loaded';
+                queueMirrorEl.appendChild(emptyEl);
+                return;
+            }
+
+            for (const container of queue) {
+                const row = document.createElement('div');
+                row.className = 'tm-queue-row';
+
+                const dot = document.createElement('span');
+                const state = getContainerState(container);
+                dot.className = `tm-queue-dot tm-queue-dot-${state}`;
+                dot.title = state;
+
+                const text = document.createElement('span');
+                text.className = 'tm-queue-text';
+                text.textContent = container;
+
+                row.appendChild(dot);
+                row.appendChild(text);
+                queueMirrorEl.appendChild(row);
+            }
+        }
+    }
+
+    function canAct(delayMs = ACTION_COOLDOWN_MS) {
+        return Date.now() - lastActionAt >= delayMs;
+    }
+
+    function markAction() {
+        lastActionAt = Date.now();
+    }
+
+    function tryClickContinue(continueButton, lastAction, statusText) {
+        if (!canAct()) return false;
+        if (!continueButton || !isVisible(continueButton) || !isEnabled(continueButton)) {
+            return false;
+        }
+        continueButton.click();
+        markAction();
+        lastTypedContainer = '';
+        debugState.lastAction = lastAction;
+        updateStatus(statusText);
+        refreshDebugState();
+        updateProgressUI();
+        return true;
+    }
+
+    function runPostQueueStep(continueButton, returnButton, recallAlert) {
+        if (recallAlert) {
+            if (returnButton && isVisible(returnButton) && isEnabled(returnButton)) {
+                if (!canAct()) return true;
+                returnButton.click();
+                markAction();
+                debugState.lastAction = 'queue complete -> recall return';
+                updateStatus('Recall · finishing');
+                refreshDebugState();
+                updateProgressUI();
+                return true;
+            }
+            updateStatus('Recall wait · finishing');
+            return true;
+        }
+
+        if (tryClickContinue(continueButton, 'queue complete -> Continue', 'Finishing…')) {
+            return true;
+        }
+
+        debugState.lastAction = 'queue complete';
+        updateStatus('Queue complete');
+        return false;
+    }
+
+    function runStep() {
+        refreshDebugState();
+        updateProgressUI();
+
+        if (!enabled) return;
+
+        if (!canAct()) return;
+
+        const progress = getProgress();
+        const containerInput = getContainerInput();
+        const emptyAlert = getEmptyAlert();
+        const recallAlert = getRecallAlert();
+        const returnButton = getReturnToContainerButton();
+        const continueButton = getContinueButton();
+
+        if (!progress.next) {
+            try {
+                runPostQueueStep(continueButton, returnButton, recallAlert);
+            } catch (error) {
+                debugState.lastError = error instanceof Error ? error.message : String(error);
+                updateStatus('Action error');
+            }
+            return;
+        }
+
+        try {
+            if (recallAlert) {
+                const recallContainer = pendingContainer || progress.next || 'unknown';
+
+                if (pendingContainer) {
+                    markProcessed(pendingContainer);
+                    persistPending('');
+                }
+
+                if (returnButton && isVisible(returnButton) && isEnabled(returnButton)) {
+                    returnButton.click();
+                    markAction();
+                    lastTypedContainer = '';
+                    debugState.lastAction = `recall alert -> returned from ${recallContainer}`;
+                    updateStatus(`Recall · ${recallContainer}`);
+                    refreshDebugState();
+                    updateProgressUI();
+                    return;
+                }
+
+                debugState.lastAction = `recall alert -> waiting for return button (${recallContainer})`;
+                updateStatus(`Recall wait · ${recallContainer}`);
+                refreshDebugState();
+                updateProgressUI();
+                return;
+            }
+
+            if (pendingContainer && emptyAlert) {
+                markProcessed(pendingContainer);
+                persistPending('');
+                debugState.lastAction = `empty container error -> skipped ${pendingContainer}`;
+                updateStatus(`Skipped empty · ${pendingContainer}`);
+                markAction();
+                lastTypedContainer = '';
+                refreshDebugState();
+                updateProgressUI();
+                return;
+            }
+
+            const dispositionLabel = getDispositionLabel();
+            if (dispositionLabel && isVisible(dispositionLabel) && !isDispositionSelected(dispositionLabel)) {
+                selectDisposition(dispositionLabel);
+                markAction();
+                debugState.lastAction = `selected disposition: ${getDispositionLabelText()}`;
+                updateStatus(`Reason · ${getDispositionLabelText()}`);
+                refreshDebugState();
+                updateProgressUI();
+                return;
+            }
+
+            if (!containerInput || !isVisible(containerInput) || !isEnabled(containerInput)) {
+                if (tryClickContinue(continueButton, 'clicked Continue without container input', 'Continue')) {
+                    return;
+                }
+
+                debugState.lastAction = 'waiting for container input';
+                updateStatus('Waiting for container input');
+                return;
+            }
+
+            const inputValue = (containerInput.value || '').trim();
+            const readyToSubmit =
+                lastTypedContainer === progress.next &&
+                inputValue === progress.next &&
+                canAct(AFTER_TYPE_MS);
+
+            if (!readyToSubmit) {
+                fillContainerInput(containerInput, progress.next);
+                lastTypedContainer = progress.next;
+                markAction();
+                debugState.lastAction = `typed ${progress.next}`;
+                updateStatus(`Typed · ${progress.next}`);
+                return;
+            }
+
+            if (!continueButton || !isVisible(continueButton) || !isEnabled(continueButton)) {
+                updateStatus(`Typed · ${progress.next}`);
+                return;
+            }
+
+            persistPending(progress.next);
+            continueButton.click();
+            markAction();
+            lastTypedContainer = '';
+            debugState.lastAction = `typed ${progress.next} -> clicked Continue (pending load)`;
+            updateStatus(`Submitted · ${progress.next}`);
+            refreshDebugState();
+            updateProgressUI();
+        } catch (error) {
+            debugState.lastError = error instanceof Error ? error.message : String(error);
+            updateStatus('Action error');
+        }
+    }
+
+    function startLoop() {
+        stopLoop();
+        loopId = window.setInterval(runStep, TICK_MS);
+    }
+
+    function stopLoop() {
+        if (loopId) {
+            window.clearInterval(loopId);
+            loopId = null;
+        }
+    }
+
+    function updateToggle() {
+        if (!toggleEl) return;
+        toggleEl.textContent = enabled ? 'On' : 'Off';
+        toggleEl.classList.toggle('tm-on', enabled);
+    }
+
+    function syncDispositionSelect() {
+        if (!dispositionSelectEl) return;
+        if (dispositionSelectEl.value !== dispositionReason) {
+            dispositionSelectEl.value = dispositionReason;
+        }
+    }
+
+    function setEnabled(next) {
+        enabled = !!next;
+        GM_setValue(STORE_KEYS.enabled, enabled);
+        updateToggle();
+        updateStatus(enabled ? 'Armed' : 'Off');
+    }
+
+    function setCollapsed(next) {
+        collapsed = !!next;
+        GM_setValue(STORE_KEYS.collapsed, collapsed);
+        if (!panelEl || !fabEl) return;
+        panelEl.style.display = collapsed ? 'none' : 'block';
+        fabEl.textContent = collapsed ? '▸' : '▾';
+        fabEl.title = collapsed ? 'Open' : 'Close';
+    }
+
+    function getDebugReport() {
+        refreshDebugState();
+        const progress = getProgress();
+
+        return [
+            'AFT DeleteItems Auto Click Debug',
+            `Time: ${new Date().toISOString()}`,
+            `URL: ${debugState.url}`,
+            `Enabled: ${enabled}`,
+            `Collapsed: ${collapsed}`,
+            `Status: ${debugState.status}`,
+            `Last action: ${debugState.lastAction}`,
+            `Current container: ${debugState.currentContainer}`,
+            `Pending container: ${debugState.pendingContainer}`,
+            `Container input: ${debugState.containerInput}`,
+            `Empty alert: ${debugState.emptyAlert}`,
+            `Recall alert: ${debugState.recallAlert}`,
+            `Return button: ${debugState.returnButton}`,
+            `Continue button: ${debugState.continueButton}`,
+            `Disposition reason: ${debugState.dispositionReason} (${getDispositionLabelText()})`,
+            `Disposition radio: ${debugState.dispositionRadio}`,
+            `Progress: ${debugState.percent}%`,
+            `Counts: processed=${debugState.processed}, remaining=${debugState.remaining}, total=${debugState.total}`,
+            `Last error: ${debugState.lastError}`,
+            `Container input selectors: ${CONTAINER_INPUT_SELECTORS.join(' || ')}`,
+            `Empty alert selector: ${EMPTY_ALERT_SELECTOR}`,
+            `Recall alert selector: ${RECALL_ALERT_SELECTOR}`,
+            `Return button selector: ${RETURN_TO_CONTAINER_SELECTOR}`,
+            `Continue selectors: ${CONTINUE_SELECTORS.join(' || ')}`,
+            `Processed containers: ${JSON.stringify(progress.done)}`,
+            `Remaining containers: ${JSON.stringify(progress.remaining)}`
+        ].join('\n');
+    }
+
+    async function copyText(text) {
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(text);
+            return;
+        }
+
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', 'true');
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+    }
+
+    async function copyDebug() {
+        try {
+            await copyText(getDebugReport());
+            updateStatus('Copied debug');
+        } catch (error) {
+            debugState.lastError = error instanceof Error ? error.message : String(error);
+            updateStatus('Copy failed');
+        }
+    }
+
+    async function copyProcessedContainers() {
+        const { done } = getProgress();
+        try {
+            await copyText(done.join('\n'));
+            updateStatus('Copied processed');
+        } catch (error) {
+            debugState.lastError = error instanceof Error ? error.message : String(error);
+            updateStatus('Copy failed');
+        }
+    }
+
+    async function copyUnprocessedContainers() {
+        const { remaining } = getProgress();
+        try {
+            await copyText(remaining.join('\n'));
+            updateStatus('Copied unprocessed');
+        } catch (error) {
+            debugState.lastError = error instanceof Error ? error.message : String(error);
+            updateStatus('Copy failed');
+        }
+    }
+
+    function addStyles() {
+        const style = document.createElement('style');
+        style.textContent = `
+            #tm-auto-click-root {
+                position: fixed;
+                right: 12px;
+                bottom: 12px;
+                z-index: 2147483647;
+                font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+                font-size: 11px;
+                line-height: 1.35;
+                -webkit-font-smoothing: antialiased;
+            }
+            #tm-auto-click-fab {
+                width: 36px;
+                height: 36px;
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                border-radius: 10px;
+                background: linear-gradient(145deg, #1e293b, #0f172a);
+                color: #e2e8f0;
+                cursor: pointer;
+                box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+                font-size: 13px;
+                font-weight: 600;
+                line-height: 1;
+                padding: 0;
+            }
+            #tm-auto-click-fab:hover {
+                background: linear-gradient(145deg, #334155, #1e293b);
+            }
+            #tm-auto-click-panel {
+                width: 208px;
+                margin-bottom: 6px;
+                padding: 8px;
+                border-radius: 10px;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                background: rgba(15, 23, 42, 0.94);
+                backdrop-filter: blur(12px);
+                color: #f1f5f9;
+                box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+            }
+            #tm-auto-click-panel .tm-row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 6px;
+                margin-bottom: 6px;
+            }
+            #tm-auto-click-panel .tm-title {
+                font-size: 11px;
+                font-weight: 600;
+                letter-spacing: 0.02em;
+                color: #f8fafc;
+            }
+            #tm-auto-click-toggle {
+                min-width: 40px;
+                height: 22px;
+                padding: 0 8px;
+                border: none;
+                border-radius: 999px;
+                background: #475569;
+                color: #fff;
+                font-size: 10px;
+                font-weight: 600;
+                cursor: pointer;
+                transition: background 0.15s ease;
+            }
+            #tm-auto-click-toggle.tm-on {
+                background: #059669;
+            }
+            #tm-auto-click-status {
+                font-size: 10px;
+                color: #94a3b8;
+                margin-bottom: 4px;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            #tm-auto-click-progress {
+                font-size: 10px;
+                font-weight: 500;
+                color: #cbd5e1;
+                margin-bottom: 6px;
+                font-variant-numeric: tabular-nums;
+            }
+            #tm-auto-click-disposition-row {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                margin-bottom: 6px;
+            }
+            #tm-auto-click-disposition-label {
+                flex: 0 0 auto;
+                font-size: 10px;
+                color: #94a3b8;
+                margin: 0;
+            }
+            #tm-auto-click-disposition {
+                flex: 1;
+                min-width: 0;
+                height: 24px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 6px;
+                padding: 0 6px;
+                background: rgba(0, 0, 0, 0.25);
+                color: #f1f5f9;
+                font-size: 10px;
+                cursor: pointer;
+            }
+            #tm-auto-click-disposition:focus {
+                outline: none;
+                border-color: #38bdf8;
+            }
+            #tm-auto-click-queue {
+                width: 100%;
+                min-height: 52px;
+                max-height: 88px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 6px;
+                padding: 6px;
+                background: rgba(0, 0, 0, 0.2);
+                color: #f1f5f9;
+                font-size: 10px;
+                line-height: 1.4;
+                resize: vertical;
+                box-sizing: border-box;
+                margin-bottom: 6px;
+            }
+            #tm-auto-click-queue::placeholder {
+                color: #64748b;
+            }
+            #tm-auto-click-queue-mirror {
+                width: 100%;
+                max-height: 64px;
+                overflow: auto;
+                border: 1px solid rgba(255, 255, 255, 0.06);
+                border-radius: 6px;
+                padding: 4px 6px;
+                background: rgba(0, 0, 0, 0.15);
+                box-sizing: border-box;
+                margin-bottom: 6px;
+                scrollbar-width: thin;
+            }
+            .tm-queue-row {
+                display: flex;
+                align-items: center;
+                gap: 5px;
+                font-size: 9px;
+                color: #cbd5e1;
+                margin-bottom: 3px;
+                word-break: break-all;
+            }
+            .tm-queue-row:last-child { margin-bottom: 0; }
+            .tm-queue-dot {
+                width: 5px;
+                height: 5px;
+                border-radius: 50%;
+                flex: 0 0 5px;
+            }
+            .tm-queue-dot-unprocessed { background: #f87171; }
+            .tm-queue-dot-processing { background: #fbbf24; }
+            .tm-queue-dot-processed { background: #4ade80; }
+            .tm-queue-empty {
+                font-size: 9px;
+                color: #64748b;
+            }
+            #tm-auto-click-actions {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 4px;
+            }
+            #tm-auto-click-actions button {
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 6px;
+                padding: 5px 4px;
+                background: rgba(255, 255, 255, 0.06);
+                color: #e2e8f0;
+                font-size: 9px;
+                font-weight: 500;
+                cursor: pointer;
+                transition: background 0.12s ease;
+            }
+            #tm-auto-click-actions button:hover {
+                background: rgba(255, 255, 255, 0.12);
+            }
+            #tm-auto-click-reset {
+                grid-column: 1 / -1;
+                color: #94a3b8;
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    let panelEl;
+    let fabEl;
+    let toggleEl;
+    let statusEl;
+    let queueTextareaEl;
+    let queueMirrorEl;
+    let progressEl;
+    let dispositionSelectEl;
+
+    function buildUI() {
+        const rootEl = document.createElement('div');
+        rootEl.id = 'tm-auto-click-root';
+
+        panelEl = document.createElement('div');
+        panelEl.id = 'tm-auto-click-panel';
+
+        const headerRow = document.createElement('div');
+        headerRow.className = 'tm-row';
+
+        const title = document.createElement('div');
+        title.innerHTML = `
+            <div class="tm-title">Delete Items</div>
+        `;
+
+        toggleEl = document.createElement('button');
+        toggleEl.id = 'tm-auto-click-toggle';
+        toggleEl.addEventListener('click', () => setEnabled(!enabled));
+
+        headerRow.appendChild(title);
+        headerRow.appendChild(toggleEl);
+
+        statusEl = document.createElement('div');
+        statusEl.id = 'tm-auto-click-status';
+
+        progressEl = document.createElement('div');
+        progressEl.id = 'tm-auto-click-progress';
+
+        const dispositionRow = document.createElement('div');
+        dispositionRow.id = 'tm-auto-click-disposition-row';
+
+        const dispositionLabelEl = document.createElement('label');
+        dispositionLabelEl.id = 'tm-auto-click-disposition-label';
+        dispositionLabelEl.htmlFor = 'tm-auto-click-disposition';
+        dispositionLabelEl.textContent = 'Reason';
+
+        dispositionSelectEl = document.createElement('select');
+        dispositionSelectEl.id = 'tm-auto-click-disposition';
+        for (const [key, label] of Object.entries(DISPOSITION_REASONS)) {
+            const option = document.createElement('option');
+            option.value = key;
+            option.textContent = label;
+            dispositionSelectEl.appendChild(option);
+        }
+        dispositionSelectEl.value = dispositionReason;
+        dispositionSelectEl.addEventListener('change', () => {
+            persistDispositionReason(dispositionSelectEl.value);
+            refreshDebugState();
+        });
+
+        dispositionRow.appendChild(dispositionLabelEl);
+        dispositionRow.appendChild(dispositionSelectEl);
+
+        queueTextareaEl = document.createElement('textarea');
+        queueTextareaEl.id = 'tm-auto-click-queue';
+        queueTextareaEl.placeholder = 'One container per line';
+        queueTextareaEl.value = queueText;
+        queueTextareaEl.addEventListener('input', () => {
+            persistQueueText(queueTextareaEl.value);
+            refreshDebugState();
+            updateProgressUI();
+        });
+
+        queueMirrorEl = document.createElement('div');
+        queueMirrorEl.id = 'tm-auto-click-queue-mirror';
+
+        const actionsEl = document.createElement('div');
+        actionsEl.id = 'tm-auto-click-actions';
+
+        const copyDebugBtn = document.createElement('button');
+        copyDebugBtn.id = 'tm-auto-click-copy-debug';
+        copyDebugBtn.textContent = 'Debug';
+        copyDebugBtn.addEventListener('click', () => {
+            void copyDebug();
+        });
+
+        const copyProcessedBtn = document.createElement('button');
+        copyProcessedBtn.id = 'tm-auto-click-copy-processed';
+        copyProcessedBtn.textContent = 'Done';
+        copyProcessedBtn.addEventListener('click', () => {
+            void copyProcessedContainers();
+        });
+
+        const copyUnprocessedBtn = document.createElement('button');
+        copyUnprocessedBtn.id = 'tm-auto-click-copy-unprocessed';
+        copyUnprocessedBtn.textContent = 'Left';
+        copyUnprocessedBtn.addEventListener('click', () => {
+            void copyUnprocessedContainers();
+        });
+
+        const resetBtn = document.createElement('button');
+        resetBtn.id = 'tm-auto-click-reset';
+        resetBtn.textContent = 'Reset processed';
+        resetBtn.addEventListener('click', () => {
+            resetProcessed();
+            updateStatus('Reset');
+        });
+
+        actionsEl.appendChild(copyDebugBtn);
+        actionsEl.appendChild(copyProcessedBtn);
+        actionsEl.appendChild(copyUnprocessedBtn);
+        actionsEl.appendChild(resetBtn);
+
+        panelEl.appendChild(headerRow);
+        panelEl.appendChild(statusEl);
+        panelEl.appendChild(progressEl);
+        panelEl.appendChild(dispositionRow);
+        panelEl.appendChild(queueTextareaEl);
+        panelEl.appendChild(queueMirrorEl);
+        panelEl.appendChild(actionsEl);
+
+        fabEl = document.createElement('button');
+        fabEl.id = 'tm-auto-click-fab';
+        fabEl.addEventListener('click', () => setCollapsed(!collapsed));
+
+        rootEl.appendChild(panelEl);
+        rootEl.appendChild(fabEl);
+        document.body.appendChild(rootEl);
+
+        syncDispositionSelect();
+        updateToggle();
+        refreshDebugState();
+        updateStatus(enabled ? 'Armed' : 'Off');
+        updateProgressUI();
+        setCollapsed(collapsed);
+    }
+
+    window.addEventListener(
+        'keydown',
+        (event) => {
+            if (event.key === 'Escape') {
+                setEnabled(false);
+                updateStatus('Killed by ESC');
+            }
+        },
+        true
+    );
+
+    reconcilePendingProcessed();
+    addStyles();
+    buildUI();
+    startLoop();
+})();

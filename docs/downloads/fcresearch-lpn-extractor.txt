@@ -1,0 +1,1417 @@
+// ==UserScript==
+// @name         FCResearch LPN Extractor
+// @namespace    fcresearch-lpn
+// @version      0.7.3
+// @description  Search MEM3 containers for LPNs and copy a golden-format list ready to paste into AFT Edit Items. Collapsible panel.
+// @author       abelrigm
+// @match        https://qi-fcresearch-na.corp.amazon.com/*
+// @match        https://qifcr.na.aftx.amazonoperations.app/*
+// @match        https://qifcr.eu.aftx.amazonoperations.app/*
+// @match        https://qifcr.fe.aftx.amazonoperations.app/*
+// @grant        GM_setClipboard
+// @grant        GM_addStyle
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // Use whatever origin the user is currently on so the iframe stays same-origin.
+  // Works for both the legacy `qi-fcresearch-na.corp.amazon.com` and the new
+  // `qifcr.<region>.aftx.amazonoperations.app` hosts. Loading the iframe from a
+  // different origin than the parent breaks document access ("iframe-no-document").
+  const ORIGIN = location.origin;
+  const RESULTS_PATH = '/MEM3/results';
+  const LPN_COLUMN_INDEX = 4;
+  const INVENTORY_TABLE_ID = 'table-inventory';
+
+  const IFRAME_TIMEOUT_MS = 5000;
+  const IFRAME_POLL_MS = 150;
+  const LIVE_PAGE_TIMEOUT_MS = 5000;
+  const BETWEEN_CONTAINER_MS = 80;
+  const PROGRESS_TICK_MS = 200;
+  const DEFAULT_CONTAINER_ESTIMATE_MS = 2500;
+
+  const LPN_PATTERN = /^LPN[A-Z0-9]+$/i;
+
+  const PANEL_OPEN_KEY = 'fcresearch_lpn_panel_open';
+
+  function loadPanelOpen() {
+    try {
+      const v = GM_getValue(PANEL_OPEN_KEY, true);
+      return v !== false;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  function savePanelOpen(open) {
+    try {
+      GM_setValue(PANEL_OPEN_KEY, Boolean(open));
+    } catch (_) {}
+  }
+
+  function setPanelOpen(open) {
+    const panel = document.getElementById('fcresearch-lpn-debug-panel');
+    const icon = document.getElementById('fcresearch-lpn-icon');
+    if (panel) panel.hidden = !open;
+    if (icon) icon.hidden = Boolean(open);
+    savePanelOpen(open);
+  }
+
+  let lastBatchResult = null;
+  let searchGeneration = 0;
+  let sharedIframe = null;
+  let progressState = null;
+  let progressTickTimer = null;
+
+  function resultsUrl(containerId) {
+    return `${ORIGIN}${RESULTS_PATH}?s=${encodeURIComponent(containerId)}`;
+  }
+
+  function normalizeCellText(text) {
+    return (text || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function looksLikeLpn(value) {
+    const v = normalizeCellText(value);
+    return v.length > 0 && LPN_PATTERN.test(v);
+  }
+
+  function parseContainerList(raw) {
+    return [...new Set(
+      (raw || '')
+        .split(/[\s,;]+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+    )];
+  }
+
+  function getContainerIdFromPage() {
+    if (!location.pathname.includes('/MEM3/results')) return null;
+    return new URLSearchParams(location.search).get('s') || null;
+  }
+
+  function isDataRow(row) {
+    if (row.querySelector('td.dataTables_empty')) return false;
+    return row.querySelectorAll('td').length > 1;
+  }
+
+  function isProcessingVisible(doc) {
+    const el = doc.querySelector('.dataTables_processing, #table-inventory_processing');
+    if (!el) return false;
+    const style = doc.defaultView?.getComputedStyle(el);
+    if (style && (style.display === 'none' || style.visibility === 'hidden')) {
+      return false;
+    }
+    return el.offsetParent !== null || normalizeCellText(el.textContent).length > 0;
+  }
+
+  function assessTableState(doc) {
+    const table = doc.getElementById(INVENTORY_TABLE_ID);
+    if (!table) {
+      return { state: 'loading', reason: 'no-table' };
+    }
+
+    if (isProcessingVisible(doc)) {
+      return { state: 'loading', reason: 'datatables-processing' };
+    }
+
+    const info = doc.getElementById('table-inventory_info');
+    const infoText = normalizeCellText(info?.textContent);
+    if (/of 0 entries/i.test(infoText) || /Showing 0 to 0 of 0/i.test(infoText)) {
+      return {
+        state: 'ready',
+        reason: 'datatables-zero-entries',
+        emptyInventory: true,
+      };
+    }
+
+    const tbody = table.querySelector('tbody');
+    const emptyCell = tbody?.querySelector('td.dataTables_empty');
+    if (emptyCell) {
+      const msg = normalizeCellText(emptyCell.textContent);
+      if (/no data available/i.test(msg)) {
+        return {
+          state: 'ready',
+          reason: 'datatables-empty-row',
+          emptyInventory: true,
+        };
+      }
+    }
+
+    const dataRows = tbody
+      ? Array.from(tbody.querySelectorAll('tr')).filter(isDataRow)
+      : [];
+
+    if (dataRows.length > 0) {
+      return {
+        state: 'ready',
+        reason: 'has-data-rows',
+        emptyInventory: false,
+        dataRowCount: dataRows.length,
+      };
+    }
+
+    const wrapper = doc.getElementById('table-inventory_wrapper');
+    if (table.classList.contains('dataTable') && wrapper && !isProcessingVisible(doc)) {
+      return {
+        state: 'ready',
+        reason: 'datatable-initialized-empty',
+        emptyInventory: true,
+      };
+    }
+
+    if (wrapper && tbody && !isProcessingVisible(doc)) {
+      return {
+        state: 'ready',
+        reason: 'wrapper-ready-no-data-rows',
+        emptyInventory: true,
+      };
+    }
+
+    return { state: 'loading', reason: 'waiting' };
+  }
+
+  function getTableHeaders(table) {
+    const headers = [];
+    const theadRows = table.querySelectorAll('thead tr');
+    const lastThead = theadRows[theadRows.length - 1];
+    if (!lastThead) return headers;
+    lastThead.querySelectorAll('th, td').forEach((cell, i) => {
+      headers.push({
+        index: i,
+        text: normalizeCellText(cell.textContent),
+        className: cell.className || '',
+      });
+    });
+    return headers;
+  }
+
+  function extractRowCells(row) {
+    const cells = row.querySelectorAll('td');
+    return Array.from(cells).map((td, index) => ({
+      index,
+      text: normalizeCellText(td.textContent),
+      className: td.className || '',
+      isLpnColumn: index === LPN_COLUMN_INDEX,
+      looksLikeLpn: looksLikeLpn(td.textContent),
+    }));
+  }
+
+  function extractInventoryRows(table) {
+    const tbody = table.querySelector('tbody');
+    if (!tbody) return [];
+
+    return Array.from(tbody.querySelectorAll('tr'))
+      .filter(isDataRow)
+      .map((row, rowIndex) => {
+        const cells = extractRowCells(row);
+        const lpnCell = cells[LPN_COLUMN_INDEX] || null;
+        return {
+          rowIndex,
+          rowClass: row.className || '',
+          cellCount: cells.length,
+          lpnFromColumn: lpnCell?.text || null,
+          lpnsInRow: cells.filter((c) => c.looksLikeLpn).map((c) => c.text),
+          cells,
+        };
+      });
+  }
+
+  function collectLpns(rows) {
+    const fromColumn = rows
+      .map((r) => r.lpnFromColumn)
+      .filter((v) => looksLikeLpn(v));
+    const anywhere = rows.flatMap((r) => r.lpnsInRow);
+    return [...new Set([...fromColumn, ...anywhere])];
+  }
+
+  function extractFromDocument(doc, containerId, meta = {}) {
+    const table = doc.getElementById(INVENTORY_TABLE_ID);
+    const tableState = assessTableState(doc);
+    const headers = table ? getTableHeaders(table) : [];
+    const rows = table ? extractInventoryRows(table) : [];
+    const lpns = collectLpns(rows);
+    const confirmed = meta.confirmed !== false && tableState.state === 'ready';
+
+    return {
+      containerId,
+      resultsUrl: resultsUrl(containerId),
+      ...meta,
+      tableState,
+      extraction: {
+        confirmed,
+        inventoryTableFound: Boolean(table),
+        lpnColumnIndex: LPN_COLUMN_INDEX,
+        headerCount: headers.length,
+        rowCount: rows.length,
+        lpns,
+        primaryLpn: lpns[0] || null,
+        hasLpn: lpns.length > 0,
+        emptyInventory: Boolean(tableState.emptyInventory),
+      },
+      table: {
+        headers,
+        rows: rows.map((r) => ({
+          rowIndex: r.rowIndex,
+          cellCount: r.cellCount,
+          lpnFromColumn: r.lpnFromColumn,
+          lpnsInRow: r.lpnsInRow,
+          cells: r.cells.map((c) => ({
+            index: c.index,
+            text: c.text,
+            looksLikeLpn: c.looksLikeLpn,
+          })),
+        })),
+      },
+    };
+  }
+
+  function extractFromLivePage() {
+    const containerId = getContainerIdFromPage();
+    if (!containerId) return null;
+    const state = assessTableState(document);
+    return extractFromDocument(document, containerId, {
+      source: 'live-page',
+      pageUrl: location.href,
+      confirmed: state.state === 'ready',
+      fetchMethod: 'live-page',
+    });
+  }
+
+  function getSharedIframe() {
+    if (sharedIframe) return sharedIframe;
+
+    sharedIframe = document.createElement('iframe');
+    sharedIframe.setAttribute('aria-hidden', 'true');
+    sharedIframe.style.cssText =
+      'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;border:0;opacity:0;pointer-events:none;';
+    document.body.appendChild(sharedIframe);
+    return sharedIframe;
+  }
+
+  function waitForDocumentReady(doc, containerId, generation, timeoutMs, onTick) {
+    const started = performance.now();
+
+    return new Promise((resolve) => {
+      let settled = false;
+
+      const finish = (payload) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        clearInterval(pollId);
+        resolve(payload);
+      };
+
+      const poll = () => {
+        if (generation !== searchGeneration) {
+          finish({
+            ok: false,
+            error: 'search-cancelled',
+            containerId,
+            durationMs: Math.round(performance.now() - started),
+          });
+          return;
+        }
+
+        if (onTick) onTick(doc, Math.round(performance.now() - started));
+
+        const readiness = assessTableState(doc);
+        if (readiness.state !== 'ready') return;
+
+        const data = extractFromDocument(doc, containerId, {
+          source: 'iframe',
+          fetchMethod: 'shared-iframe',
+          tableReadyReason: readiness.reason,
+          confirmed: true,
+          durationMs: Math.round(performance.now() - started),
+        });
+
+        finish({ ok: true, ...data });
+      };
+
+      const timeoutId = setTimeout(() => {
+        const readiness = assessTableState(doc);
+        const partial = extractFromDocument(doc, containerId, {
+          source: 'iframe',
+          fetchMethod: 'shared-iframe',
+          timedOut: true,
+          confirmed: false,
+          durationMs: Math.round(performance.now() - started),
+        });
+
+        finish({
+          ok: false,
+          error: 'timeout',
+          containerId,
+          resultsUrl: resultsUrl(containerId),
+          lastTableState: readiness,
+          partial,
+          durationMs: Math.round(performance.now() - started),
+        });
+      }, timeoutMs);
+
+      const pollId = setInterval(poll, IFRAME_POLL_MS);
+      poll();
+    });
+  }
+
+  function navigateSharedIframe(containerId, generation, onTick) {
+    const url = resultsUrl(containerId);
+    const iframe = getSharedIframe();
+
+    return new Promise((resolve) => {
+      let loadHandled = false;
+
+      const onLoad = () => {
+        loadHandled = true;
+        let doc;
+        try {
+          doc = iframe.contentDocument;
+        } catch (err) {
+          resolve({
+            ok: false,
+            error: 'iframe-document-blocked',
+            detail: String(err),
+            containerId,
+            resultsUrl: url,
+          });
+          return;
+        }
+
+        if (!doc) {
+          resolve({
+            ok: false,
+            error: 'iframe-no-document',
+            containerId,
+            resultsUrl: url,
+          });
+          return;
+        }
+
+        waitForDocumentReady(doc, containerId, generation, IFRAME_TIMEOUT_MS, onTick)
+          .then(resolve);
+      };
+
+      iframe.addEventListener('load', onLoad, { once: true });
+
+      const currentSrc = iframe.src || '';
+      if (currentSrc === url && loadHandled === false) {
+        try {
+          const doc = iframe.contentDocument;
+          if (doc?.body) {
+            iframe.removeEventListener('load', onLoad);
+            waitForDocumentReady(doc, containerId, generation, IFRAME_TIMEOUT_MS, onTick)
+              .then(resolve);
+            return;
+          }
+        } catch (_) {
+          /* fall through to navigation */
+        }
+      }
+
+      iframe.src = url;
+    });
+  }
+
+  function waitForLivePage(containerId, generation) {
+    if (getContainerIdFromPage() !== containerId) {
+      return Promise.resolve(null);
+    }
+
+    return waitForDocumentReady(
+      document,
+      containerId,
+      generation,
+      LIVE_PAGE_TIMEOUT_MS,
+      null
+    ).then((result) => {
+      if (!result.ok) return null;
+      return { ...result, fetchMethod: 'live-page-skip-navigation' };
+    });
+  }
+
+  function averageContainerMs(state) {
+    if (!state.containerDurations.length) return DEFAULT_CONTAINER_ESTIMATE_MS;
+    const sum = state.containerDurations.reduce((a, b) => a + b, 0);
+    return sum / state.containerDurations.length;
+  }
+
+  function formatCountdown(totalSeconds) {
+    const s = Math.max(0, Math.ceil(totalSeconds));
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}m ${r}s`;
+  }
+
+  function computePercentComplete(state) {
+    const { total, completed, currentContainerStart } = state;
+    if (!total) return 0;
+
+    let fraction = completed / total;
+    if (currentContainerStart != null) {
+      const avg = averageContainerMs(state);
+      const elapsed = performance.now() - currentContainerStart;
+      const partial = Math.min(0.92, elapsed / avg);
+      fraction += partial / total;
+    }
+
+    if (state.finished) {
+      return Math.min(100, Math.max(0, Math.round((state.completed / state.total) * 100)));
+    }
+    return Math.min(99, Math.max(0, Math.round(fraction * 100)));
+  }
+
+  function refreshEtaDeadline(state) {
+    const now = performance.now();
+    const remaining = state.total - state.completed;
+    let remainingMs = 0;
+
+    if (state.currentContainerStart != null) {
+      const avg = averageContainerMs(state);
+      const currentElapsed = now - state.currentContainerStart;
+      remainingMs += Math.max(300, avg - currentElapsed);
+    }
+
+    remainingMs += Math.max(0, remaining - (state.currentContainerStart ? 1 : 0)) * averageContainerMs(state);
+    remainingMs += state.completed < state.total ? BETWEEN_CONTAINER_MS * remaining : 0;
+    state.etaDeadline = now + remainingMs;
+  }
+
+  function updateProgressDisplay(detail) {
+    if (!progressState) return;
+
+    if (detail !== undefined) {
+      progressState.detail = detail;
+    }
+
+    const pct = computePercentComplete(progressState);
+    const etaSec = Math.max(
+      0,
+      (progressState.etaDeadline - performance.now()) / 1000
+    );
+
+    const pctEl = document.getElementById('fcresearch-lpn-progress-pct');
+    const etaEl = document.getElementById('fcresearch-lpn-progress-eta');
+    const fillEl = document.getElementById('fcresearch-lpn-progress-fill');
+    const detailEl = document.getElementById('fcresearch-lpn-progress-detail');
+
+    if (pctEl) pctEl.textContent = `${pct}%`;
+    if (etaEl) etaEl.textContent = `ETA ${formatCountdown(etaSec)}`;
+    if (fillEl) fillEl.style.width = `${pct}%`;
+    if (detailEl) {
+      const { currentIndex, total, currentContainerId, detail: d } = progressState;
+      const head = currentContainerId
+        ? `${currentIndex + 1}/${total} · ${currentContainerId}`
+        : `${progressState.completed}/${total} complete`;
+      detailEl.textContent = d ? `${head} — ${d}` : head;
+    }
+  }
+
+  function setProgressVisible(visible) {
+    const wrap = document.getElementById('fcresearch-lpn-progress-wrap');
+    const statusEl = document.getElementById('fcresearch-lpn-status-label');
+    if (wrap) wrap.hidden = !visible;
+    if (statusEl) statusEl.hidden = visible;
+  }
+
+  function startProgress(total) {
+    stopProgressTick();
+    progressState = {
+      total,
+      completed: 0,
+      finished: false,
+      currentIndex: 0,
+      currentContainerId: null,
+      currentContainerStart: null,
+      containerDurations: [],
+      detail: '',
+      etaDeadline: performance.now() + total * DEFAULT_CONTAINER_ESTIMATE_MS,
+    };
+    setProgressVisible(true);
+    updateProgressDisplay('Starting…');
+    progressTickTimer = setInterval(() => updateProgressDisplay(), PROGRESS_TICK_MS);
+  }
+
+  function beginContainer(index, containerId) {
+    if (!progressState) return;
+    progressState.currentIndex = index;
+    progressState.currentContainerId = containerId;
+    progressState.currentContainerStart = performance.now();
+    progressState.detail = 'Loading…';
+    refreshEtaDeadline(progressState);
+    updateProgressDisplay();
+  }
+
+  function completeContainer(durationMs) {
+    if (!progressState) return;
+    progressState.completed += 1;
+    progressState.containerDurations.push(durationMs);
+    progressState.currentContainerStart = null;
+    progressState.currentContainerId = null;
+    progressState.detail = '';
+    refreshEtaDeadline(progressState);
+    updateProgressDisplay();
+  }
+
+  function finishProgress() {
+    if (!progressState) return;
+    progressState.finished = true;
+    progressState.currentContainerStart = null;
+    progressState.currentContainerId = null;
+    progressState.etaDeadline = performance.now();
+    updateProgressDisplay('Done');
+  }
+
+  function stopProgressTick() {
+    clearInterval(progressTickTimer);
+    progressTickTimer = null;
+    progressState = null;
+    setProgressVisible(false);
+  }
+
+  async function fetchContainer(containerId, generation, index, total) {
+    const tick = (_doc, ms) => {
+      const readiness = assessTableState(_doc);
+      updateProgressDisplay(`${readiness.reason} (${ms}ms)`);
+    };
+
+    const live = await waitForLivePage(containerId, generation);
+    if (live) return live;
+
+    return navigateSharedIframe(containerId, generation, tick);
+  }
+
+  function delay(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  async function searchContainers(containerIds) {
+    const generation = ++searchGeneration;
+    const startedAt = new Date().toISOString();
+    const batchStarted = performance.now();
+    const results = [];
+
+    startProgress(containerIds.length);
+
+    for (let i = 0; i < containerIds.length; i += 1) {
+      if (generation !== searchGeneration) break;
+
+      const containerId = containerIds[i];
+      const containerStarted = performance.now();
+      beginContainer(i, containerId);
+
+      const result = await fetchContainer(containerId, generation, i, containerIds.length);
+      results.push(result);
+      completeContainer(Math.round(performance.now() - containerStarted));
+
+      if (i < containerIds.length - 1 && generation === searchGeneration) {
+        await delay(BETWEEN_CONTAINER_MS);
+      }
+    }
+
+    if (generation === searchGeneration) {
+      finishProgress();
+    }
+    stopProgressTick();
+
+    const confirmed = results.filter((r) => r.extraction?.confirmed);
+    const summary = {
+      total: results.length,
+      confirmed: confirmed.length,
+      withLpn: confirmed.filter((r) => r.extraction.hasLpn).length,
+      withoutLpn: confirmed.filter((r) => r.extraction.hasLpn === false).length,
+      errors: results.filter((r) => !r.ok || !r.extraction?.confirmed).length,
+      totalDurationMs: Math.round(performance.now() - batchStarted),
+    };
+
+    lastBatchResult = {
+      mode: 'batch-search',
+      scriptVersion: '0.7.3',
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      fromPage: {
+        url: location.href,
+        title: document.title,
+        pathname: location.pathname,
+      },
+      requestedContainers: containerIds,
+      containers: results,
+      summary,
+      performanceNote:
+        'v0.3 uses shared iframe only (no XHR). Empty inventory resolves via DataTables zero-entries / empty row signals.',
+    };
+
+    return lastBatchResult;
+  }
+
+  function buildDebugPayload() {
+    const live = extractFromLivePage();
+    return {
+      script: {
+        name: 'FCResearch LPN Extractor',
+        version: '0.7.2',
+      },
+      capturedAt: new Date().toISOString(),
+      fromPage: {
+        url: location.href,
+        title: document.title,
+        pathname: location.pathname,
+        containerOnPage: getContainerIdFromPage(),
+      },
+      livePage: live,
+      lastBatch: lastBatchResult,
+    };
+  }
+
+  function copyToClipboard(text) {
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(text, 'text');
+      return Promise.resolve();
+    }
+    if (navigator.clipboard?.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    return Promise.resolve();
+  }
+
+  function flashButton(btn, message, isError) {
+    const original = btn.dataset.label || btn.textContent;
+    btn.textContent = message;
+    btn.classList.toggle('fcresearch-lpn-btn--error', Boolean(isError));
+    btn.disabled = true;
+    setTimeout(() => {
+      btn.textContent = original;
+      btn.classList.remove('fcresearch-lpn-btn--error');
+      btn.disabled = false;
+    }, 2200);
+  }
+
+  function setStatus(text) {
+    const el = document.getElementById('fcresearch-lpn-status-label');
+    if (el) {
+      el.textContent = text;
+      el.style.color = '#bdf';
+    }
+  }
+
+  function formatLpnsForCell(result) {
+    if (!result.ok || !result.extraction?.confirmed) {
+      return result.error ? `(${result.error})` : '(uncertain)';
+    }
+    const lpns = result.extraction.lpns || [];
+    if (!lpns.length) return '—';
+    return lpns.join(', ');
+  }
+
+  function formatLpnsForExport(result) {
+    if (!result.ok || !result.extraction?.confirmed) {
+      return result.error ? `(${result.error})` : '(uncertain)';
+    }
+    return (result.extraction.lpns || []).join(', ');
+  }
+
+  function getExportableBatch() {
+    if (!lastBatchResult?.containers?.length) return null;
+    return lastBatchResult;
+  }
+
+  function csvEscape(value) {
+    const s = String(value ?? '');
+    if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  }
+
+  function buildTableTsv(batch) {
+    const lines = ['Container\tLPNs'];
+    batch.containers.forEach((result) => {
+      lines.push(
+        `${result.containerId || ''}\t${formatLpnsForExport(result)}`
+      );
+    });
+    return lines.join('\n');
+  }
+
+  /**
+   * Golden-copy format for AFT Edit Items.
+   * One line per (container, lpn) — Edit Items textarea parses container<TAB>lpn directly.
+   * Skips containers with no LPN. Multiple LPNs become multiple lines for the same container.
+   */
+  function buildEditItemsGoldenCopy(batch) {
+    const lines = [];
+    let withLpn = 0;
+    let withoutLpn = 0;
+    let uncertain = 0;
+
+    batch.containers.forEach((result) => {
+      const containerId = result.containerId || '';
+      if (!containerId) return;
+      if (!result.ok || !result.extraction?.confirmed) {
+        uncertain += 1;
+        return;
+      }
+      const lpns = result.extraction.lpns || [];
+      if (!lpns.length) {
+        withoutLpn += 1;
+        return;
+      }
+      withLpn += 1;
+      lpns.forEach((lpn) => {
+        lines.push(`${containerId}\t${lpn}`);
+      });
+    });
+
+    return {
+      text: lines.join('\n'),
+      lineCount: lines.length,
+      withLpn,
+      withoutLpn,
+      uncertain,
+    };
+  }
+
+  async function onCopyGoldenClick(btn) {
+    const batch = getExportableBatch();
+    if (!batch) {
+      flashButton(btn, 'No batch yet', true);
+      return;
+    }
+    const golden = buildEditItemsGoldenCopy(batch);
+    if (!golden.text) {
+      flashButton(btn, 'No LPNs to copy', true);
+      return;
+    }
+    try {
+      await copyToClipboard(golden.text);
+      flashButton(
+        btn,
+        `Copied ${golden.lineCount} line(s) for Edit Items`,
+        false
+      );
+      setStatus(
+        `Golden copy: ${golden.lineCount} line(s) — ${golden.withLpn} container(s) with LPN, ` +
+          `${golden.withoutLpn} skipped (no LPN), ${golden.uncertain} uncertain.`
+      );
+    } catch (err) {
+      console.error('[FCResearch LPN] golden copy failed', err);
+      flashButton(btn, 'Copy failed', true);
+    }
+  }
+
+  /**
+   * Collect container IDs that came back confirmed but had zero LPNs (empty inventory).
+   * Uncertain / errored containers are NOT included — they need a re-search, not a "no LPN" tag.
+   */
+  function collectNoLpnContainers(batch) {
+    const ids = [];
+    batch.containers.forEach((result) => {
+      if (!result.containerId) return;
+      if (!result.ok || !result.extraction?.confirmed) return;
+      const lpns = result.extraction.lpns || [];
+      if (lpns.length === 0) ids.push(result.containerId);
+    });
+    return ids;
+  }
+
+  async function onCopyNoLpnClick(btn) {
+    const batch = getExportableBatch();
+    if (!batch) {
+      flashButton(btn, 'No batch yet', true);
+      return;
+    }
+    const ids = collectNoLpnContainers(batch);
+    if (!ids.length) {
+      flashButton(btn, 'No empty containers', true);
+      return;
+    }
+    try {
+      await copyToClipboard(ids.join('\n'));
+      flashButton(btn, `Copied ${ids.length} container(s)`, false);
+      setStatus(
+        `Copied ${ids.length} container(s) with no LPNs (one per line).`
+      );
+    } catch (err) {
+      console.error('[FCResearch LPN] copy no-LPN containers failed', err);
+      flashButton(btn, 'Copy failed', true);
+    }
+  }
+
+  function buildTableCsv(batch) {
+    const lines = ['Container,LPNs'];
+    batch.containers.forEach((result) => {
+      lines.push(
+        `${csvEscape(result.containerId || '')},${csvEscape(formatLpnsForExport(result))}`
+      );
+    });
+    return lines.join('\n');
+  }
+
+  function exportFilename() {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    return `fcresearch-lpn-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.csv`;
+  }
+
+  function downloadCsv(csv) {
+    const blob = new Blob([`\ufeff${csv}`], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = exportFilename();
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function setResultsActionsVisible(visible) {
+    const el = document.getElementById('fcresearch-lpn-results-actions');
+    if (el) el.hidden = !visible;
+  }
+
+  async function onCopyTableClick(btn) {
+    const batch = getExportableBatch();
+    if (!batch) {
+      flashButton(btn, 'No table yet', true);
+      return;
+    }
+    try {
+      await copyToClipboard(buildTableTsv(batch));
+      flashButton(btn, 'Table copied', false);
+    } catch (err) {
+      console.error('[FCResearch LPN] copy table failed', err);
+      flashButton(btn, 'Copy failed', true);
+    }
+  }
+
+  function onExportTableClick(btn) {
+    const batch = getExportableBatch();
+    if (!batch) {
+      flashButton(btn, 'No table yet', true);
+      return;
+    }
+    try {
+      downloadCsv(buildTableCsv(batch));
+      flashButton(btn, 'CSV exported', false);
+    } catch (err) {
+      console.error('[FCResearch LPN] export table failed', err);
+      flashButton(btn, 'Export failed', true);
+    }
+  }
+
+  function renderResultsTable(batch) {
+    const wrap = document.getElementById('fcresearch-lpn-results-wrap');
+    const tbody = document.getElementById('fcresearch-lpn-results-body');
+    if (!wrap || !tbody) return;
+
+    tbody.textContent = '';
+
+    if (!batch?.containers?.length) {
+      wrap.hidden = true;
+      setResultsActionsVisible(false);
+      return;
+    }
+
+    wrap.hidden = false;
+    setResultsActionsVisible(true);
+
+    batch.containers.forEach((result) => {
+      const tr = document.createElement('tr');
+      const containerId = result.containerId || '—';
+      const lpns = result.extraction?.lpns || [];
+      const uncertain = !result.ok || !result.extraction?.confirmed;
+
+      const tdContainer = document.createElement('td');
+      tdContainer.className = 'fcresearch-lpn-col-container';
+      tdContainer.textContent = containerId;
+
+      const tdLpns = document.createElement('td');
+      tdLpns.className = 'fcresearch-lpn-col-lpns';
+      if (uncertain) {
+        tdLpns.textContent = formatLpnsForCell(result);
+        tdLpns.classList.add('fcresearch-lpn-cell--warn');
+      } else if (!lpns.length) {
+        tdLpns.textContent = '—';
+        tdLpns.classList.add('fcresearch-lpn-cell--none');
+      } else {
+        lpns.forEach((lpn, i) => {
+          if (i > 0) tdLpns.appendChild(document.createElement('br'));
+          tdLpns.appendChild(document.createTextNode(lpn));
+        });
+      }
+
+      tr.append(tdContainer, tdLpns);
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderSummary(batch) {
+    if (!batch) {
+      setStatus('Enter containers, then Search.');
+      renderResultsTable(null);
+      return;
+    }
+    const { summary } = batch;
+    setStatus(
+      `Done in ${(summary.totalDurationMs / 1000).toFixed(1)}s — ` +
+        `${summary.withLpn} with LPN, ${summary.withoutLpn} without, ` +
+        `${summary.errors} uncertain/error`
+    );
+    renderResultsTable(batch);
+  }
+
+  function getUiContainerIds() {
+    const ta = document.getElementById('fcresearch-lpn-input');
+    return parseContainerList(ta?.value || '');
+  }
+
+  async function onSearchClick(btn) {
+    const ids = getUiContainerIds();
+    if (!ids.length) {
+      flashButton(btn, 'Add containers', true);
+      return;
+    }
+
+    btn.disabled = true;
+    const original = btn.dataset.label || btn.textContent;
+    btn.textContent = 'Searching…';
+
+    try {
+      const batch = await searchContainers(ids);
+      renderSummary(batch);
+      flashButton(btn, `Done (${batch.summary.totalDurationMs}ms)`, false);
+      console.log('[FCResearch LPN] batch', batch);
+    } catch (err) {
+      console.error('[FCResearch LPN] search failed', err);
+      stopProgressTick();
+      setStatus(`Error: ${err}`);
+      flashButton(btn, 'Search failed', true);
+    } finally {
+      btn.textContent = original;
+      btn.disabled = false;
+    }
+  }
+
+  async function onDebugClick(btn) {
+    try {
+      const payload = buildDebugPayload();
+      await copyToClipboard(JSON.stringify(payload, null, 2));
+      const n = lastBatchResult?.summary?.total ?? 0;
+      flashButton(
+        btn,
+        n ? `Copied (last batch: ${n})` : 'Copied debug JSON',
+        false
+      );
+      console.log('[FCResearch LPN] debug', payload);
+    } catch (err) {
+      console.error('[FCResearch LPN] copy failed', err);
+      flashButton(btn, 'Copy failed', true);
+    }
+  }
+
+  function injectUi() {
+    if (document.getElementById('fcresearch-lpn-debug-root')) return;
+
+    GM_addStyle(`
+      #fcresearch-lpn-debug-root {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        z-index: 2147483646;
+        font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+      }
+      #fcresearch-lpn-icon {
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #3d5a80, #5a8ab0);
+        color: #fff;
+        border: 1px solid #4a4a6a;
+        box-shadow: 0 4px 14px rgba(0,0,0,.4);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: .02em;
+        user-select: none;
+        transition: transform .12s ease, box-shadow .12s ease;
+      }
+      #fcresearch-lpn-icon:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 6px 18px rgba(0,0,0,.5);
+      }
+      #fcresearch-lpn-debug-panel {
+        background: #1a1a2e;
+        color: #eee;
+        border: 1px solid #4a4a6a;
+        border-radius: 8px;
+        padding: 10px 12px;
+        box-shadow: 0 4px 20px rgba(0,0,0,.35);
+        width: 280px;
+        max-height: 70vh;
+        overflow: auto;
+      }
+      #fcresearch-lpn-debug-panel .fcresearch-lpn-title-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 6px;
+        gap: 6px;
+      }
+      #fcresearch-lpn-debug-panel .fcresearch-lpn-title {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: .04em;
+        text-transform: uppercase;
+        color: #9ab;
+        margin-bottom: 0;
+      }
+      #fcresearch-lpn-close {
+        width: 20px;
+        height: 20px;
+        border-radius: 4px;
+        border: none;
+        background: #6a2a2a;
+        color: #fff;
+        font-size: 13px;
+        font-weight: 700;
+        line-height: 1;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+      }
+      #fcresearch-lpn-close:hover { background: #8b3a3a; }
+      #fcresearch-lpn-debug-panel .fcresearch-lpn-status {
+        font-size: 11px;
+        margin-bottom: 8px;
+        color: #bdf;
+        line-height: 1.35;
+      }
+      #fcresearch-lpn-progress-wrap {
+        margin-bottom: 8px;
+      }
+      .fcresearch-lpn-progress-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 12px;
+        font-weight: 700;
+        color: #cde;
+        margin-bottom: 4px;
+      }
+      #fcresearch-lpn-progress-eta {
+        color: #9df;
+        font-variant-numeric: tabular-nums;
+      }
+      #fcresearch-lpn-progress-pct {
+        font-variant-numeric: tabular-nums;
+      }
+      .fcresearch-lpn-progress-track {
+        height: 6px;
+        background: #0f0f1a;
+        border-radius: 4px;
+        overflow: hidden;
+        border: 1px solid #4a4a6a;
+        margin-bottom: 4px;
+      }
+      #fcresearch-lpn-progress-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #3d5a80, #5a8ab0);
+        border-radius: 3px;
+        transition: width 0.15s ease-out;
+      }
+      #fcresearch-lpn-progress-detail {
+        font-size: 10px;
+        color: #9ab;
+        line-height: 1.3;
+        word-break: break-all;
+      }
+      #fcresearch-lpn-input {
+        width: 100%;
+        box-sizing: border-box;
+        min-height: 72px;
+        resize: vertical;
+        border-radius: 6px;
+        border: 1px solid #4a4a6a;
+        background: #0f0f1a;
+        color: #eee;
+        font-size: 12px;
+        padding: 6px 8px;
+        margin-bottom: 8px;
+        font-family: ui-monospace, Consolas, monospace;
+      }
+      .fcresearch-lpn-btn {
+        display: block;
+        width: 100%;
+        border: none;
+        border-radius: 6px;
+        padding: 8px 10px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        background: #3d5a80;
+        color: #fff;
+        margin-bottom: 6px;
+      }
+      .fcresearch-lpn-btn:last-child { margin-bottom: 0; }
+      .fcresearch-lpn-btn:hover:not(:disabled) { background: #4d6a90; }
+      .fcresearch-lpn-btn:disabled { opacity: .55; cursor: wait; }
+      .fcresearch-lpn-btn--secondary { background: #2a4a5a; font-size: 12px; }
+      .fcresearch-lpn-btn--error { background: #8b3a3a !important; }
+      #fcresearch-lpn-results-wrap {
+        margin-bottom: 8px;
+        max-height: 220px;
+        overflow: auto;
+        border: 1px solid #4a4a6a;
+        border-radius: 6px;
+      }
+      #fcresearch-lpn-results-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 11px;
+      }
+      #fcresearch-lpn-results-table th {
+        position: sticky;
+        top: 0;
+        background: #252540;
+        color: #9ab;
+        text-align: left;
+        padding: 5px 6px;
+        border-bottom: 1px solid #4a4a6a;
+        font-weight: 600;
+      }
+      #fcresearch-lpn-results-table td {
+        padding: 5px 6px;
+        border-bottom: 1px solid #2e2e48;
+        vertical-align: top;
+      }
+      #fcresearch-lpn-results-table tr:last-child td {
+        border-bottom: none;
+      }
+      .fcresearch-lpn-col-container {
+        font-family: ui-monospace, Consolas, monospace;
+        white-space: nowrap;
+        color: #cde;
+      }
+      .fcresearch-lpn-col-lpns {
+        font-family: ui-monospace, Consolas, monospace;
+        word-break: break-all;
+        color: #9f9;
+      }
+      .fcresearch-lpn-cell--none { color: #888; }
+      .fcresearch-lpn-cell--warn { color: #f96; }
+      #fcresearch-lpn-results-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: 8px;
+      }
+      #fcresearch-lpn-results-actions .fcresearch-lpn-btn {
+        flex: 1 1 calc(50% - 3px);
+        margin-bottom: 0;
+        font-size: 11px;
+        padding: 6px 8px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+    `);
+
+    const root = document.createElement('div');
+    root.id = 'fcresearch-lpn-debug-root';
+
+    const panel = document.createElement('div');
+    panel.id = 'fcresearch-lpn-debug-panel';
+
+    const titleRow = document.createElement('div');
+    titleRow.className = 'fcresearch-lpn-title-row';
+
+    const title = document.createElement('div');
+    title.className = 'fcresearch-lpn-title';
+    title.textContent = 'FCResearch LPN Search';
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.id = 'fcresearch-lpn-close';
+    closeBtn.title = 'Hide panel';
+    closeBtn.setAttribute('aria-label', 'Hide panel');
+    closeBtn.textContent = '\u00D7';
+    closeBtn.addEventListener('click', () => setPanelOpen(false));
+
+    titleRow.append(title, closeBtn);
+
+    const statusEl = document.createElement('div');
+    statusEl.className = 'fcresearch-lpn-status';
+    statusEl.id = 'fcresearch-lpn-status-label';
+    statusEl.textContent =
+      'v0.7.3 — search containers, then "Copy for Edit Items".';
+
+    const progressWrap = document.createElement('div');
+    progressWrap.id = 'fcresearch-lpn-progress-wrap';
+    progressWrap.hidden = true;
+
+    const progressHead = document.createElement('div');
+    progressHead.className = 'fcresearch-lpn-progress-head';
+
+    const pctEl = document.createElement('span');
+    pctEl.id = 'fcresearch-lpn-progress-pct';
+    pctEl.textContent = '0%';
+
+    const etaEl = document.createElement('span');
+    etaEl.id = 'fcresearch-lpn-progress-eta';
+    etaEl.textContent = 'ETA —';
+
+    progressHead.append(pctEl, etaEl);
+
+    const progressTrack = document.createElement('div');
+    progressTrack.className = 'fcresearch-lpn-progress-track';
+    const progressFill = document.createElement('div');
+    progressFill.id = 'fcresearch-lpn-progress-fill';
+    progressTrack.appendChild(progressFill);
+
+    const progressDetail = document.createElement('div');
+    progressDetail.id = 'fcresearch-lpn-progress-detail';
+
+    progressWrap.append(progressHead, progressTrack, progressDetail);
+
+    const resultsWrap = document.createElement('div');
+    resultsWrap.id = 'fcresearch-lpn-results-wrap';
+    resultsWrap.hidden = true;
+
+    const resultsTable = document.createElement('table');
+    resultsTable.id = 'fcresearch-lpn-results-table';
+
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    const thContainer = document.createElement('th');
+    thContainer.textContent = 'Container';
+    const thLpns = document.createElement('th');
+    thLpns.textContent = 'LPNs';
+    headRow.append(thContainer, thLpns);
+    thead.appendChild(headRow);
+
+    const tbody = document.createElement('tbody');
+    tbody.id = 'fcresearch-lpn-results-body';
+
+    resultsTable.append(thead, tbody);
+    resultsWrap.appendChild(resultsTable);
+
+    const resultsActions = document.createElement('div');
+    resultsActions.id = 'fcresearch-lpn-results-actions';
+    resultsActions.hidden = true;
+
+    const copyGoldenBtn = document.createElement('button');
+    copyGoldenBtn.type = 'button';
+    copyGoldenBtn.className = 'fcresearch-lpn-btn';
+    copyGoldenBtn.dataset.label = 'Copy for Edit Items';
+    copyGoldenBtn.textContent = copyGoldenBtn.dataset.label;
+    copyGoldenBtn.title =
+      'Copy container<TAB>lpn lines (golden format) ready to paste into the AFT Edit Items automation.';
+    copyGoldenBtn.addEventListener('click', () => onCopyGoldenClick(copyGoldenBtn));
+
+    const copyNoLpnBtn = document.createElement('button');
+    copyNoLpnBtn.type = 'button';
+    copyNoLpnBtn.className = 'fcresearch-lpn-btn fcresearch-lpn-btn--secondary';
+    copyNoLpnBtn.dataset.label = 'Copy no-LPN containers';
+    copyNoLpnBtn.textContent = copyNoLpnBtn.dataset.label;
+    copyNoLpnBtn.title =
+      'Copy container IDs (one per line) for containers that came back confirmed but with zero LPNs.';
+    copyNoLpnBtn.addEventListener('click', () => onCopyNoLpnClick(copyNoLpnBtn));
+
+    const copyTableBtn = document.createElement('button');
+    copyTableBtn.type = 'button';
+    copyTableBtn.className = 'fcresearch-lpn-btn fcresearch-lpn-btn--secondary';
+    copyTableBtn.dataset.label = 'Copy table (TSV)';
+    copyTableBtn.textContent = copyTableBtn.dataset.label;
+    copyTableBtn.addEventListener('click', () => onCopyTableClick(copyTableBtn));
+
+    const exportTableBtn = document.createElement('button');
+    exportTableBtn.type = 'button';
+    exportTableBtn.className = 'fcresearch-lpn-btn fcresearch-lpn-btn--secondary';
+    exportTableBtn.dataset.label = 'Export CSV';
+    exportTableBtn.textContent = exportTableBtn.dataset.label;
+    exportTableBtn.addEventListener('click', () => onExportTableClick(exportTableBtn));
+
+    resultsActions.append(copyGoldenBtn, copyNoLpnBtn, copyTableBtn, exportTableBtn);
+
+    const textarea = document.createElement('textarea');
+    textarea.id = 'fcresearch-lpn-input';
+    textarea.placeholder =
+      'Container IDs (one per line)\ncsXAWk7wGGq\ncsXNO5Hj963';
+    textarea.spellcheck = false;
+
+    const searchBtn = document.createElement('button');
+    searchBtn.type = 'button';
+    searchBtn.className = 'fcresearch-lpn-btn';
+    searchBtn.dataset.label = 'Search containers';
+    searchBtn.textContent = searchBtn.dataset.label;
+    searchBtn.addEventListener('click', () => onSearchClick(searchBtn));
+
+    const debugBtn = document.createElement('button');
+    debugBtn.type = 'button';
+    debugBtn.className = 'fcresearch-lpn-btn fcresearch-lpn-btn--secondary';
+    debugBtn.dataset.label = 'Copy debug JSON';
+    debugBtn.textContent = debugBtn.dataset.label;
+    debugBtn.addEventListener('click', () => onDebugClick(debugBtn));
+
+    panel.append(
+      titleRow,
+      progressWrap,
+      statusEl,
+      resultsWrap,
+      resultsActions,
+      textarea,
+      searchBtn,
+      debugBtn
+    );
+
+    const icon = document.createElement('button');
+    icon.type = 'button';
+    icon.id = 'fcresearch-lpn-icon';
+    icon.title = 'Open FCResearch LPN Search';
+    icon.setAttribute('aria-label', 'Open FCResearch LPN Search');
+    icon.textContent = 'FCR';
+    icon.addEventListener('click', () => setPanelOpen(true));
+
+    root.append(panel, icon);
+    document.body.appendChild(root);
+
+    // Restore last open/closed state.
+    setPanelOpen(loadPanelOpen());
+
+    const pageContainer = getContainerIdFromPage();
+    if (pageContainer) {
+      textarea.value = pageContainer;
+      setStatus(`On results page for ${pageContainer}. Search or Copy debug.`);
+    }
+  }
+
+  function init() {
+    injectUi();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();

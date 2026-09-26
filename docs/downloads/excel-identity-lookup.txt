@@ -1,0 +1,536 @@
+// ==UserScript==
+// @name         Excel Identity Lookup
+// @namespace    excel-identity-lookup
+// @version      1.0.0
+// @description  Search Name, Login, Employee ID, and Badge on the open SharePoint Excel workbook and report whether the value exists.
+// @author       abelrigm
+// @match        https://amazon-my.sharepoint.com/personal/abelrigm_amazon_com/*
+// @match        https://amazon-my.sharepoint.com/:x:/*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
+
+/*
+  Install
+  1. Tampermonkey → Create a new script
+  2. Paste this file
+  3. Open the Excel Online sheet
+  4. Use the "Identity lookup" panel (top-right)
+
+  Notes
+  - Searches the last saved workbook (Save with Ctrl+S if you just edited).
+  - Excel Online virtualizes rows, so this reads the file via SharePoint instead of scraping the grid.
+  - Only Name, Login, Employee ID, and Badge are searched.
+*/
+
+(function () {
+  "use strict";
+
+  if (window.top !== window.self) return;
+  const isExcelEditor =
+    /doc\.aspx/i.test(location.pathname) ||
+    new URLSearchParams(location.search).has("sourcedoc") ||
+    location.pathname.includes("/:x:/");
+  if (!isExcelEditor) return;
+
+  const SEARCH_HEADERS = [
+    { key: "name", labels: ["name"] },
+    { key: "login", labels: ["login", "user id", "userid", "username"] },
+    { key: "employeeId", labels: ["employee id", "employeeid", "emp id", "empid"] },
+    { key: "badge", labels: ["badge", "badge number", "badgenumber"] },
+  ];
+  const FALLBACK_COLS = [
+    { key: "name", col: 0, title: "Name" },
+    { key: "login", col: 1, title: "Login" },
+    { key: "employeeId", col: 2, title: "Employee ID" },
+    { key: "badge", col: 3, title: "Badge" },
+  ];
+  const CACHE_MS = 20000;
+  const TITLE = {
+    name: "Name",
+    login: "Login",
+    employeeId: "Employee ID",
+    badge: "Badge",
+  };
+
+  let cache = { at: 0, records: [], error: "" };
+
+  function siteUrl() {
+    const cut = location.pathname.toLowerCase().indexOf("/_layouts/");
+    return location.origin + (cut === -1 ? "" : location.pathname.slice(0, cut));
+  }
+
+  function sourcedocId() {
+    const raw = new URLSearchParams(location.search).get("sourcedoc") || "";
+    const m = raw.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+    return m ? m[0] : "";
+  }
+
+  function normalize(value) {
+    return String(value ?? "")
+      .replace(/\u00a0/g, " ")
+      .trim()
+      .replace(/\s+/g, " ")
+      .toLowerCase();
+  }
+
+  function digits(value) {
+    return String(value ?? "").replace(/\D/g, "");
+  }
+
+  function headerKey(text) {
+    const n = normalize(text).replace(/[:*]/g, "");
+    for (const col of SEARCH_HEADERS) {
+      if (col.labels.includes(n)) return col.key;
+    }
+    return null;
+  }
+
+  function parseCellRef(ref) {
+    const m = /^([A-Z]+)(\d+)$/i.exec(ref || "");
+    if (!m) return null;
+    let col = 0;
+    for (const ch of m[1].toUpperCase()) col = col * 26 + (ch.charCodeAt(0) - 64);
+    return { col: col - 1, row: Number(m[2]) };
+  }
+
+  function cellText(value) {
+    if (value == null) return "";
+    if (typeof value === "number" && Number.isFinite(value)) {
+      if (Number.isInteger(value)) return String(value);
+      const nearest = Math.round(value);
+      if (Math.abs(value - nearest) < 1e-6) return String(nearest);
+      return String(value);
+    }
+    return String(value).trim();
+  }
+
+  async function inflateRaw(bytes) {
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
+  async function unzip(buffer) {
+    const view = new DataView(buffer);
+    const u8 = new Uint8Array(buffer);
+    let eocd = -1;
+    const min = Math.max(0, buffer.byteLength - 22 - 65535);
+    for (let i = buffer.byteLength - 22; i >= min; i--) {
+      if (view.getUint32(i, true) === 0x06054b50) {
+        eocd = i;
+        break;
+      }
+    }
+    if (eocd < 0) throw new Error("Not a valid xlsx file.");
+
+    const count = view.getUint16(eocd + 10, true);
+    let offset = view.getUint32(eocd + 16, true);
+    const files = new Map();
+
+    for (let n = 0; n < count; n++) {
+      if (view.getUint32(offset, true) !== 0x02014b50) throw new Error("Corrupt xlsx zip.");
+      const method = view.getUint16(offset + 10, true);
+      const compSize = view.getUint32(offset + 20, true);
+      const nameLen = view.getUint16(offset + 28, true);
+      const extraLen = view.getUint16(offset + 30, true);
+      const commentLen = view.getUint16(offset + 32, true);
+      const localOff = view.getUint32(offset + 42, true);
+      const name = new TextDecoder("utf-8").decode(u8.subarray(offset + 46, offset + 46 + nameLen));
+      const localNameLen = view.getUint16(localOff + 26, true);
+      const localExtraLen = view.getUint16(localOff + 28, true);
+      const dataStart = localOff + 30 + localNameLen + localExtraLen;
+      const compressed = u8.subarray(dataStart, dataStart + compSize);
+      let data;
+      if (method === 0) data = compressed;
+      else if (method === 8) data = await inflateRaw(compressed);
+      else throw new Error("Unsupported xlsx compression.");
+      files.set(name.replace(/\\/g, "/"), data);
+      offset += 46 + nameLen + extraLen + commentLen;
+    }
+    return files;
+  }
+
+  function xml(bytes) {
+    return new DOMParser().parseFromString(new TextDecoder("utf-8").decode(bytes), "application/xml");
+  }
+
+  function localName(node) {
+    return (node.localName || node.nodeName || "").replace(/^.*:/, "");
+  }
+
+  function children(node, name) {
+    return [...(node?.childNodes || [])].filter((n) => n.nodeType === 1 && localName(n) === name);
+  }
+
+  function descendants(root, name) {
+    const out = [];
+    const walk = (node) => {
+      for (const child of node.childNodes || []) {
+        if (child.nodeType !== 1) continue;
+        if (localName(child) === name) out.push(child);
+        walk(child);
+      }
+    };
+    walk(root);
+    return out;
+  }
+
+  function siText(si) {
+    let out = "";
+    const take = (node) => {
+      for (const child of node.childNodes || []) {
+        if (child.nodeType === 3) out += child.textContent || "";
+        else if (child.nodeType === 1 && localName(child) !== "rPh") take(child);
+      }
+    };
+    take(si);
+    return out;
+  }
+
+  function attr(el, name) {
+    return el.getAttribute(name) || el.getAttribute(name.toLowerCase()) || "";
+  }
+
+  function parseSharedStrings(files) {
+    const bytes = files.get("xl/sharedStrings.xml");
+    if (!bytes) return [];
+    return descendants(xml(bytes), "si").map(siText);
+  }
+
+  function parseWorkbook(files) {
+    const wb = xml(files.get("xl/workbook.xml"));
+    const rels = xml(files.get("xl/_rels/workbook.xml.rels"));
+    const relMap = new Map();
+    for (const rel of descendants(rels, "Relationship")) {
+      relMap.set(attr(rel, "Id"), attr(rel, "Target"));
+    }
+    const sheets = [];
+    const relNs = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    for (const sheet of descendants(wb, "sheet")) {
+      const rid = attr(sheet, "r:id") || sheet.getAttributeNS?.(relNs, "id") || attr(sheet, "Id");
+      const target = relMap.get(rid);
+      if (!target) continue;
+      let path = target.replace(/\\/g, "/").replace(/^\.\//, "");
+      if (path.startsWith("/")) path = path.slice(1);
+      if (!path.startsWith("xl/")) path = `xl/${path.replace(/^\.\.\//, "")}`;
+      sheets.push({ name: attr(sheet, "name") || "Sheet", path });
+    }
+    return sheets;
+  }
+
+  function readCellValue(cell, strings) {
+    const type = attr(cell, "t");
+    const v = children(cell, "v")[0];
+    const is = children(cell, "is")[0];
+    if (type === "s") {
+      const idx = Number(v?.textContent || 0);
+      return strings[idx] ?? "";
+    }
+    if (type === "inlineStr") return is ? siText(is) : "";
+    if (type === "b") return v?.textContent === "1" ? "TRUE" : "FALSE";
+    if (type === "str" || type === "e") return (v?.textContent || "").trim();
+    const raw = (v?.textContent || "").trim();
+    if (!raw) return "";
+    const num = Number(raw);
+    return Number.isFinite(num) ? cellText(num) : raw;
+  }
+
+  function parseSheet(files, sheet, strings) {
+    const bytes = files.get(sheet.path) || files.get(decodeURIComponent(sheet.path));
+    if (!bytes) return [];
+    const doc = xml(bytes);
+    const rows = new Map();
+    for (const cell of descendants(doc, "c")) {
+      const pos = parseCellRef(attr(cell, "r"));
+      if (!pos) continue;
+      const value = readCellValue(cell, strings);
+      if (!value) continue;
+      if (!rows.has(pos.row)) rows.set(pos.row, new Map());
+      rows.get(pos.row).set(pos.col, value);
+    }
+    return [...rows.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([row, cols]) => ({ row, cols }));
+  }
+
+  function detectColumns(rows) {
+    const scan = rows.slice(0, 10);
+    for (const row of scan) {
+      const found = [];
+      for (const [col, value] of row.cols.entries()) {
+        const key = headerKey(value);
+        if (!key) continue;
+        found.push({ key, col, title: TITLE[key], headerRow: row.row });
+      }
+      const keys = new Set(found.map((f) => f.key));
+      if (keys.size >= 2) return found.filter((c, i, arr) => arr.findIndex((x) => x.key === c.key) === i);
+    }
+    return FALLBACK_COLS.map((c) => ({ ...c, headerRow: rows[0]?.row || 1 }));
+  }
+
+  function recordsFromWorkbook(files) {
+    const strings = parseSharedStrings(files);
+    const sheets = parseWorkbook(files);
+    const records = [];
+    for (const sheet of sheets) {
+      const rows = parseSheet(files, sheet, strings);
+      if (!rows.length) continue;
+      const columns = detectColumns(rows);
+      const headerRow = Math.min(...columns.map((c) => c.headerRow || 1));
+      for (const row of rows) {
+        if (row.row <= headerRow) continue;
+        const rec = { sheet: sheet.name, row: row.row, values: {} };
+        let any = false;
+        for (const col of columns) {
+          const value = cellText(row.cols.get(col.col) || "");
+          rec.values[col.key] = value;
+          if (value) any = true;
+        }
+        if (any) records.push(rec);
+      }
+    }
+    return records;
+  }
+
+  async function downloadWorkbook(id) {
+    const base = siteUrl();
+    const urls = [
+      `${base}/_api/web/GetFileById('${id}')/$value`,
+      `${base}/_layouts/15/download.aspx?UniqueId=${id}`,
+    ];
+    let last = "Could not download the workbook.";
+    for (const url of urls) {
+      const res = await fetch(url, { credentials: "include", redirect: "follow" });
+      if (!res.ok) {
+        last = `Download failed (${res.status}).`;
+        continue;
+      }
+      const buf = await res.arrayBuffer();
+      const magic = new Uint8Array(buf, 0, 2);
+      if (magic[0] === 0x50 && magic[1] === 0x4b) return buf;
+      last = "SharePoint did not return an Excel file.";
+    }
+    throw new Error(last);
+  }
+
+  async function loadRecords(force) {
+    if (!force && cache.records.length && Date.now() - cache.at < CACHE_MS) return cache.records;
+    const id = sourcedocId();
+    if (!id) throw new Error("Open the Excel file in the browser editor (URL must include sourcedoc).");
+    const files = await unzip(await downloadWorkbook(id));
+    const records = recordsFromWorkbook(files);
+    cache = { at: Date.now(), records, error: "" };
+    return records;
+  }
+
+  function matchRecord(record, query) {
+    const nq = normalize(query);
+    const dq = digits(query);
+    const hits = [];
+    for (const [key, value] of Object.entries(record.values)) {
+      if (!value) continue;
+      const nv = normalize(value);
+      const dv = digits(value);
+      if (nv === nq) {
+        hits.push({ key, value, kind: "exact" });
+        continue;
+      }
+      if (dq.length >= 6 && dv === dq && (key === "employeeId" || key === "badge")) {
+        hits.push({ key, value, kind: "exact" });
+        continue;
+      }
+      if (nq.length >= 3 && nv.includes(nq)) hits.push({ key, value, kind: "partial" });
+    }
+    if (!hits.length) return null;
+    hits.sort((a, b) => (a.kind === "exact" ? 0 : 1) - (b.kind === "exact" ? 0 : 1));
+    return hits[0];
+  }
+
+  function search(records, query) {
+    const q = String(query || "").trim();
+    if (!q) return { ok: false, reason: "empty" };
+    const matches = [];
+    for (const rec of records) {
+      const hit = matchRecord(rec, q);
+      if (hit) matches.push({ ...rec, hit });
+    }
+    matches.sort((a, b) => {
+      if (a.hit.kind !== b.hit.kind) return a.hit.kind === "exact" ? -1 : 1;
+      return a.row - b.row;
+    });
+    return { ok: true, query: q, matches };
+  }
+
+  function el(tag, attrs, ...kids) {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (k === "class") node.className = v;
+      else if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2), v);
+      else if (v != null) node.setAttribute(k, v);
+    }
+    for (const kid of kids) {
+      if (kid == null || kid === false) continue;
+      node.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+    }
+    return node;
+  }
+
+  function mount() {
+    if (document.getElementById("ae-id-lookup-host")) return;
+    const host = el("div", { id: "ae-id-lookup-host" });
+    Object.assign(host.style, {
+      position: "fixed",
+      top: "12px",
+      right: "12px",
+      zIndex: "2147483646",
+      width: "340px",
+      fontFamily: 'Segoe UI, system-ui, sans-serif',
+    });
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
+      <style>
+        :host { all: initial; }
+        * { box-sizing: border-box; font-family: "Segoe UI", system-ui, sans-serif; }
+        .panel {
+          background: #1b2430;
+          color: #e8eef5;
+          border: 1px solid #3b4a5c;
+          border-radius: 10px;
+          box-shadow: 0 10px 28px rgba(0,0,0,.35);
+          overflow: hidden;
+        }
+        .bar {
+          display: flex; align-items: center; justify-content: space-between;
+          padding: 8px 10px; background: #243140; cursor: default; user-select: none;
+        }
+        .title { font-size: 13px; font-weight: 650; letter-spacing: .01em; }
+        .sub { font-size: 11px; color: #9db0c3; margin-top: 1px; }
+        button.icon {
+          background: transparent; border: 0; color: #c5d4e3; cursor: pointer;
+          font-size: 16px; line-height: 1; padding: 2px 6px; border-radius: 6px;
+        }
+        button.icon:hover { background: #314257; }
+        .body { padding: 10px; }
+        .row { display: flex; gap: 6px; }
+        input[type="text"] {
+          flex: 1; min-width: 0; border: 1px solid #4b5d72; background: #0f1720;
+          color: #f3f7fb; border-radius: 7px; padding: 8px 9px; font-size: 13px;
+        }
+        input[type="text"]:focus { outline: 2px solid #5b9fd6; border-color: #5b9fd6; }
+        button.go, button.refresh {
+          border: 0; border-radius: 7px; padding: 8px 10px; cursor: pointer; font-size: 12px; font-weight: 650;
+        }
+        button.go { background: #3d7cc9; color: white; }
+        button.go:disabled { opacity: .55; cursor: wait; }
+        button.refresh { background: #314257; color: #d5e2ef; }
+        .hint { margin: 8px 0 0; font-size: 11px; color: #9db0c3; line-height: 1.35; }
+        .result { margin-top: 8px; border-radius: 8px; padding: 8px 9px; font-size: 13px; line-height: 1.4; }
+        .found { background: #16351f; border: 1px solid #2f9e57; color: #d8ffe6; }
+        .missing { background: #3a1c1c; border: 1px solid #c45b5b; color: #ffd7d7; }
+        .info { background: #1c2a3a; border: 1px solid #3d536b; color: #d5e2ef; }
+        .error { background: #3a2a12; border: 1px solid #c4892c; color: #ffe3b8; }
+        .meta { margin-top: 6px; font-size: 12px; color: inherit; opacity: .92; }
+        .more { margin-top: 6px; font-size: 11px; opacity: .85; }
+        .collapsed .body { display: none; }
+      </style>
+      <div class="panel" id="panel">
+        <div class="bar">
+          <div>
+            <div class="title">Identity lookup</div>
+            <div class="sub">Name · Login · Employee ID · Badge</div>
+          </div>
+          <button class="icon" id="toggle" title="Collapse">–</button>
+        </div>
+        <div class="body">
+          <div class="row">
+            <input id="q" type="text" placeholder="Paste login, badge, employee ID, or name" />
+            <button class="go" id="go">Search</button>
+            <button class="refresh" id="reload" title="Reload saved file">↻</button>
+          </div>
+          <p class="hint">Uses the last saved file, not unsaved grid edits. Save first if you just changed the sheet.</p>
+          <div class="result info" id="out">Ready. Search only checks the four identity columns.</div>
+        </div>
+      </div>
+    `;
+    document.documentElement.append(host);
+
+    const panel = shadow.getElementById("panel");
+    const input = shadow.getElementById("q");
+    const go = shadow.getElementById("go");
+    const reload = shadow.getElementById("reload");
+    const out = shadow.getElementById("out");
+    const toggle = shadow.getElementById("toggle");
+
+    const setOut = (mode, html) => {
+      out.className = `result ${mode}`;
+      out.innerHTML = html;
+    };
+
+    async function run(force) {
+      const query = input.value.trim();
+      if (!query) {
+        setOut("info", "Enter a name, login, employee ID, or badge.");
+        return;
+      }
+      go.disabled = true;
+      setOut("info", "Loading workbook and searching…");
+      try {
+        const records = await loadRecords(force);
+        const result = search(records, query);
+        if (!result.matches.length) {
+          setOut(
+            "missing",
+            `<strong>Not found.</strong><div class="meta">“${escapeHtml(result.query)}” is not in Name, Login, Employee ID, or Badge (${records.length} people scanned).</div>`
+          );
+          return;
+        }
+        const first = result.matches[0];
+        const extra = result.matches.length - 1;
+        setOut(
+          "found",
+          `<strong>Found.</strong>
+           <div class="meta">${escapeHtml(TITLE[first.hit.key] || first.hit.key)}: ${escapeHtml(first.hit.value)} · row ${first.row}${first.sheet ? ` · ${escapeHtml(first.sheet)}` : ""} · ${first.hit.kind} match</div>
+           ${extra ? `<div class="more">${extra} more match${extra === 1 ? "" : "es"} in identity columns.</div>` : ""}`
+        );
+      } catch (err) {
+        setOut("error", `<strong>Could not search.</strong><div class="meta">${escapeHtml(err.message || String(err))}</div>`);
+      } finally {
+        go.disabled = false;
+      }
+    }
+
+    go.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      run(false);
+    });
+    reload.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      cache = { at: 0, records: [], error: "" };
+      run(true);
+    });
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") {
+        e.preventDefault();
+        run(false);
+      }
+    });
+    input.addEventListener("keyup", (e) => e.stopPropagation());
+    toggle.addEventListener("click", () => {
+      panel.classList.toggle("collapsed");
+      toggle.textContent = panel.classList.contains("collapsed") ? "+" : "–";
+    });
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  mount();
+})();

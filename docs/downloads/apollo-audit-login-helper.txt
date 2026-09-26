@@ -1,0 +1,659 @@
+// ==UserScript==
+// @name         Apollo Audit Login Helper
+// @namespace    https://apollo-audit.corp.amazon.com/
+// @version      1.3.0
+// @description  Adds a lightweight runner panel to Apollo audits.
+// @match        https://apollo-audit.corp.amazon.com/audits/new*
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  "use strict";
+
+  const STORAGE_KEY = "apolloAuditSavedLogins";
+  const COMMENT_STORAGE_KEY = "apolloAuditSavedComments";
+  const PANEL_ID = "apollo-audit-login-helper";
+  const TARGET_AUDIT_TYPE_ID = "25543";
+  const LOGIN_INPUT_ID = "apollo-employee-login";
+  const INPUT_WATCH_FLAG = "apolloAuditHelperWatcherBound";
+  const DISPOSITION_SELECT_ID = "audit_properties_What is the associate's disposition opportunity? (Lowest Accuracy Percentage)";
+  const PRIMARY_ATTRIBUTE_SELECT_ID = "audit_properties_What is the associate's primary attribute opportunity? (Lowest Accuracy Percentage)";
+  const DEFECT_COUNT_SELECT_ID = "audit_properties_Out of 3 audited units, how many contained accuracy defects? (Consider both disposition flips and incorrect answers for the primary attribute opportunity)";
+  const PREFERRED_LANGUAGE_SELECT_ID = "audit_properties_Is the associate able to access their preferred language in the TREX UI";
+  const ENGAGEMENT_NOTES_INPUT_ID = "audit_properties_Engagement Notes";
+  const LPN_INPUT_IDS = [
+    "audit_properties_LPN 1",
+    "audit_properties_LPN 2",
+    "audit_properties_LPN 3"
+  ];
+  const ATTRIBUTE_BARRIER_FIELDS = {
+    "Seal Broken Accuracy": "audit_properties_“Seal Broken” primary attribute opportunity – were barriers found during real-time audits or in-path observation",
+    "Seal Type Accuracy": "audit_properties_“Seal Type” primary attribute opportunity – were barriers found during real-time audits or in-path observation",
+    "Package Type Accuracy": "audit_properties_“Package Type” primary attribute opportunity – were barriers found during real-time audits or in-path observation",
+    "Package Damage Accuracy": "audit_properties_“Package Damage” primary attribute opportunity – were barriers found during real-time audits or in-path observation",
+    "Item Damage Accuracy": "audit_properties_“Item Damage” primary attribute opportunity – were barriers found during real-time audits or in-path observation"
+  };
+  const LPN_PREFIX = "LPNN";
+  const LPN_RANDOM_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+  function normalizeLogin(value) {
+    return String(value || "").trim().toLowerCase();
+  }
+
+  function loadLogins() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+      if (!Array.isArray(parsed)) {
+        return [];
+      }
+
+      return parsed
+        .map((entry) => {
+          if (typeof entry === "string") {
+            const normalized = normalizeLogin(entry);
+            return normalized ? { login: normalized, audited: false } : null;
+          }
+
+          if (!entry || typeof entry !== "object") {
+            return null;
+          }
+
+          const normalized = normalizeLogin(entry.login);
+          if (!normalized) {
+            return null;
+          }
+
+          return {
+            login: normalized,
+            audited: Boolean(entry.audited)
+          };
+        })
+        .filter(Boolean);
+    } catch (error) {
+      console.warn("Apollo Audit Helper: failed to read saved logins", error);
+      return [];
+    }
+  }
+
+  function saveLogins(logins) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(logins));
+  }
+
+  function loadComments() {
+    return String(localStorage.getItem(COMMENT_STORAGE_KEY) || "");
+  }
+
+  function saveComments(value) {
+    localStorage.setItem(COMMENT_STORAGE_KEY, String(value || ""));
+  }
+
+  function getLoginInput() {
+    return document.getElementById(LOGIN_INPUT_ID);
+  }
+
+  function dispatchFieldEvents(element) {
+    ["input", "change", "blur"].forEach((eventName) => {
+      element.dispatchEvent(new Event(eventName, { bubbles: true }));
+    });
+  }
+
+  function getRandomSelectableValue(selectElement) {
+    const options = Array.from(selectElement.options)
+      .map((option) => option.value)
+      .filter((value) => String(value).trim() !== "");
+
+    if (options.length === 0) {
+      return "";
+    }
+
+    const randomIndex = Math.floor(Math.random() * options.length);
+    return options[randomIndex];
+  }
+
+  function chooseRandomValue(values) {
+    if (!values.length) {
+      return "";
+    }
+
+    const randomIndex = Math.floor(Math.random() * values.length);
+    return values[randomIndex];
+  }
+
+  function setSelectValue(selectId, value) {
+    const select = document.getElementById(selectId);
+    if (!select) {
+      return "";
+    }
+
+    select.value = value;
+    dispatchFieldEvents(select);
+    return select.value;
+  }
+
+  function setRandomSelectValue(selectId) {
+    const select = document.getElementById(selectId);
+    if (!select) {
+      return "";
+    }
+
+    const randomValue = getRandomSelectableValue(select);
+    if (!randomValue) {
+      return "";
+    }
+
+    return setSelectValue(selectId, randomValue);
+  }
+
+  function randomizeAuditFields() {
+    setRandomSelectValue(DISPOSITION_SELECT_ID);
+    return setRandomSelectValue(PRIMARY_ATTRIBUTE_SELECT_ID);
+  }
+
+  function setRandomDefectCount() {
+    setRandomSelectValue(DEFECT_COUNT_SELECT_ID);
+  }
+
+  function setPreferredLanguageYes() {
+    setSelectValue(PREFERRED_LANGUAGE_SELECT_ID, "Yes");
+  }
+
+  function setBarrierSelections(primaryAttribute) {
+    Object.values(ATTRIBUTE_BARRIER_FIELDS).forEach((selectId) => {
+      setSelectValue(selectId, "N/A");
+    });
+
+    const selectedBarrierId = ATTRIBUTE_BARRIER_FIELDS[primaryAttribute];
+    if (!selectedBarrierId) {
+      return;
+    }
+
+    setSelectValue(selectedBarrierId, chooseRandomValue(["Yes", "No"]));
+  }
+
+  function randomFromChars(length) {
+    let value = "";
+
+    for (let index = 0; index < length; index += 1) {
+      const randomIndex = Math.floor(Math.random() * LPN_RANDOM_CHARS.length);
+      value += LPN_RANDOM_CHARS[randomIndex];
+    }
+
+    return value;
+  }
+
+  function generateRandomLpn() {
+    return `${LPN_PREFIX}${randomFromChars(9)}`;
+  }
+
+  function setInputValueById(inputId, value) {
+    const input = document.getElementById(inputId);
+    if (!input) {
+      return;
+    }
+
+    input.value = value;
+    dispatchFieldEvents(input);
+  }
+
+  function fillRandomLpns() {
+    LPN_INPUT_IDS.forEach((inputId) => {
+      setInputValueById(inputId, generateRandomLpn());
+    });
+  }
+
+  function fillLogin(login) {
+    const input = getLoginInput();
+    if (!input) {
+      alert("Apollo Audit Helper: associate login field was not found.");
+      return;
+    }
+
+    input.value = login;
+    dispatchFieldEvents(input);
+    input.focus();
+    input.select();
+  }
+
+  function addLogin(login) {
+    const normalized = normalizeLogin(login);
+    if (!normalized) {
+      return false;
+    }
+
+    const logins = loadLogins();
+    if (logins.some((entry) => entry.login === normalized)) {
+      return false;
+    }
+
+    logins.unshift({ login: normalized, audited: false });
+    saveLogins(logins);
+    return true;
+  }
+
+  function addLogins(loginsToAdd) {
+    const existing = loadLogins();
+    const merged = [...existing];
+    let addedCount = 0;
+
+    loginsToAdd.forEach((login) => {
+      const normalized = normalizeLogin(login);
+      if (!normalized || merged.some((entry) => entry.login === normalized)) {
+        return;
+      }
+
+      merged.unshift({ login: normalized, audited: false });
+      addedCount += 1;
+    });
+
+    if (addedCount > 0) {
+      saveLogins(merged);
+    }
+
+    return addedCount;
+  }
+
+  function clearLogins() {
+    saveLogins([]);
+  }
+
+  function markLoginAudited(login, audited) {
+    const normalized = normalizeLogin(login);
+    if (!normalized) {
+      return;
+    }
+
+    const updated = loadLogins().map((entry) => {
+      if (entry.login !== normalized) {
+        return entry;
+      }
+
+      return {
+        login: entry.login,
+        audited: Boolean(audited)
+      };
+    });
+
+    saveLogins(updated);
+  }
+
+  function getNextUnauditedLogin() {
+    return loadLogins().find((entry) => !entry.audited) || null;
+  }
+
+  function parseLoginList(value) {
+    return String(value || "")
+      .split(/[\s,;]+/)
+      .map(normalizeLogin)
+      .filter(Boolean);
+  }
+
+  function parseCommentList(value) {
+    return String(value || "")
+      .split(/\r?\n/)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+
+  function fillRandomComment() {
+    const notes = parseCommentList(loadComments());
+    const randomComment = chooseRandomValue(notes);
+    if (!randomComment) {
+      return;
+    }
+
+    setInputValueById(ENGAGEMENT_NOTES_INPUT_ID, randomComment);
+  }
+
+  async function copyTextToClipboard(text) {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+
+    const tempTextArea = document.createElement("textarea");
+    tempTextArea.value = text;
+    tempTextArea.style.position = "fixed";
+    tempTextArea.style.opacity = "0";
+    document.body.appendChild(tempTextArea);
+    tempTextArea.focus();
+    tempTextArea.select();
+    document.execCommand("copy");
+    document.body.removeChild(tempTextArea);
+  }
+
+  function getLoginsByAuditState(audited) {
+    return loadLogins()
+      .filter((entry) => entry.audited === audited)
+      .map((entry) => entry.login);
+  }
+
+  async function copyLoginsByAuditState(audited) {
+    const logins = getLoginsByAuditState(audited);
+    if (logins.length === 0) {
+      alert(`Apollo Audit Helper: no ${audited ? "audited" : "unaudited"} logins to copy.`);
+      return;
+    }
+
+    try {
+      await copyTextToClipboard(logins.join("\n"));
+    } catch (error) {
+      alert("Apollo Audit Helper: failed to copy logins.");
+    }
+  }
+
+  function buildStyles() {
+    const style = document.createElement("style");
+    style.textContent = `
+      #${PANEL_ID} {
+        position: fixed;
+        top: 96px;
+        right: 16px;
+        width: 280px;
+        max-height: calc(100vh - 120px);
+        z-index: 99999;
+        background: #ffffff;
+        color: #111827;
+        border: 1px solid #d1d5db;
+        border-radius: 12px;
+        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.15);
+        font: 13px/1.4 Arial, sans-serif;
+      }
+
+      #${PANEL_ID} * {
+        box-sizing: border-box;
+      }
+
+      #${PANEL_ID} .apollo-helper-header {
+        padding: 12px 14px 8px;
+        border-bottom: 1px solid #e5e7eb;
+      }
+
+      #${PANEL_ID} .apollo-helper-title {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      #${PANEL_ID} .apollo-helper-subtitle {
+        margin: 4px 0 0;
+        color: #6b7280;
+        font-size: 12px;
+      }
+
+      #${PANEL_ID} .apollo-helper-progress {
+        margin: 6px 0 0;
+        color: #111827;
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      #${PANEL_ID} button,
+      #${PANEL_ID} input,
+      #${PANEL_ID} textarea {
+        font: inherit;
+      }
+
+      #${PANEL_ID} .apollo-helper-input {
+        width: calc(100% - 28px);
+        margin: 12px 14px 10px;
+        padding: 8px 10px;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+      }
+
+      #${PANEL_ID} .apollo-helper-button {
+        width: calc(100% - 28px);
+        margin: 0 14px 12px;
+        padding: 8px 10px;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        background: #f8fafc;
+        color: #111827;
+        cursor: pointer;
+      }
+
+      #${PANEL_ID} .apollo-helper-button.apollo-helper-run {
+        background: #2563eb;
+        border-color: #2563eb;
+        color: #ffffff;
+      }
+
+      #${PANEL_ID} .apollo-helper-button.apollo-helper-copy {
+        margin-bottom: 8px;
+      }
+
+      #${PANEL_ID} .apollo-helper-comments {
+        width: calc(100% - 28px);
+        min-height: 88px;
+        margin: 0 14px 12px;
+        padding: 8px 10px;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        resize: vertical;
+      }
+
+      #${PANEL_ID} .apollo-helper-list {
+        max-height: calc(100vh - 380px);
+        overflow-y: auto;
+        padding: 0 14px 14px;
+      }
+
+      #${PANEL_ID} .apollo-helper-item {
+        padding: 8px 10px;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        margin-bottom: 8px;
+        background: #f8fafc;
+      }
+
+      #${PANEL_ID} .apollo-helper-item.is-current {
+        border-color: #93c5fd;
+        background: #eff6ff;
+      }
+
+      #${PANEL_ID} .apollo-helper-login {
+        font-weight: 700;
+      }
+
+      #${PANEL_ID} .apollo-helper-state {
+        margin-top: 2px;
+        color: #6b7280;
+        font-size: 12px;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function renderPanel(panel) {
+    const list = panel.querySelector(".apollo-helper-list");
+    const input = panel.querySelector(".apollo-helper-input");
+    const savedLogins = loadLogins();
+    const currentLogin = normalizeLogin(getLoginInput()?.value);
+    const progress = panel.querySelector(".apollo-helper-progress");
+    const auditedCount = savedLogins.filter((entry) => entry.audited).length;
+    const totalCount = savedLogins.length;
+    const percentAudited = totalCount === 0 ? 0 : Math.round((auditedCount / totalCount) * 100);
+
+    progress.textContent = `${percentAudited}% audited (${auditedCount}/${totalCount})`;
+
+    list.innerHTML = "";
+
+    if (savedLogins.length === 0) {
+      const emptyState = document.createElement("div");
+      emptyState.className = "apollo-helper-item";
+      emptyState.textContent = "No saved logins yet.";
+      list.appendChild(emptyState);
+    } else {
+      savedLogins.forEach((entry) => {
+        const item = document.createElement("div");
+        item.className = "apollo-helper-item";
+        if (entry.login === currentLogin) {
+          item.classList.add("is-current");
+        }
+
+        const loginLine = document.createElement("div");
+        loginLine.className = "apollo-helper-login";
+        loginLine.textContent = entry.login;
+        loginLine.addEventListener("click", () => fillLogin(entry.login));
+
+        const stateLine = document.createElement("div");
+        stateLine.className = "apollo-helper-state";
+        stateLine.textContent = entry.audited ? "audited" : "unaudited";
+
+        item.append(loginLine, stateLine);
+        list.appendChild(item);
+      });
+    }
+
+    input.value = "";
+  }
+
+  function hookFormAutosave(panel) {
+    const submitButton = document.getElementById("audit-submit");
+    if (!submitButton || submitButton.dataset.apolloAuditHelperBound === "true") {
+      return;
+    }
+
+    submitButton.dataset.apolloAuditHelperBound = "true";
+    submitButton.addEventListener("click", () => {
+      const loginInput = getLoginInput();
+      if (loginInput && normalizeLogin(loginInput.value)) {
+        addLogin(loginInput.value);
+        markLoginAudited(loginInput.value, true);
+        renderPanel(panel);
+      }
+    });
+  }
+
+  function hookLoginSync(panel) {
+    const loginInput = getLoginInput();
+    if (!loginInput || loginInput.dataset[INPUT_WATCH_FLAG] === "true") {
+      return;
+    }
+
+    loginInput.dataset[INPUT_WATCH_FLAG] = "true";
+    ["input", "change", "blur"].forEach((eventName) => {
+      loginInput.addEventListener(eventName, () => renderPanel(panel));
+    });
+  }
+
+  function runNextAudit(panel) {
+    const nextEntry = getNextUnauditedLogin();
+    if (!nextEntry) {
+      alert("Apollo Audit Helper: no unaudited saved logins are available.");
+      return;
+    }
+
+    fillLogin(nextEntry.login);
+    const primaryAttribute = randomizeAuditFields();
+    setRandomDefectCount();
+    setBarrierSelections(primaryAttribute);
+    setPreferredLanguageYes();
+    fillRandomComment();
+    fillRandomLpns();
+    renderPanel(panel);
+    window.setTimeout(() => {
+      const form = document.getElementById("audits-form");
+      if (form && typeof form.reportValidity === "function" && !form.reportValidity()) {
+        alert("Apollo Audit Helper: form validation failed before submit.");
+        return;
+      }
+
+      const submitButton = document.getElementById("audit-submit");
+      if (!submitButton) {
+        alert("Apollo Audit Helper: submit button was not found.");
+        return;
+      }
+
+      submitButton.click();
+    }, 300);
+  }
+
+  function createPanel() {
+    if (document.getElementById(PANEL_ID)) {
+      return;
+    }
+
+    buildStyles();
+
+    const panel = document.createElement("aside");
+    panel.id = PANEL_ID;
+    panel.innerHTML = `
+      <div class="apollo-helper-header">
+        <h2 class="apollo-helper-title">Saved Logins</h2>
+        <p class="apollo-helper-subtitle">Press Enter to save one or many logins.</p>
+        <div class="apollo-helper-progress"></div>
+      </div>
+      <input class="apollo-helper-input" type="text" placeholder="Paste logins, then press Enter" />
+      <textarea class="apollo-helper-comments" placeholder="One comment per line. RUN will pick one at random."></textarea>
+      <button class="apollo-helper-button apollo-helper-copy apollo-helper-copy-audited" type="button">Copy Audited</button>
+      <button class="apollo-helper-button apollo-helper-copy apollo-helper-copy-unaudited" type="button">Copy Unaudited</button>
+      <button class="apollo-helper-button apollo-helper-run" type="button">RUN</button>
+      <button class="apollo-helper-button apollo-helper-clear" type="button">Wipe Memory</button>
+      <div class="apollo-helper-list"></div>
+    `;
+
+    const helperInput = panel.querySelector(".apollo-helper-input");
+    const commentsInput = panel.querySelector(".apollo-helper-comments");
+    const copyAuditedButton = panel.querySelector(".apollo-helper-copy-audited");
+    const copyUnauditedButton = panel.querySelector(".apollo-helper-copy-unaudited");
+    const runButton = panel.querySelector(".apollo-helper-run");
+    const clearButton = panel.querySelector(".apollo-helper-clear");
+
+    commentsInput.value = loadComments();
+
+    helperInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        const addedCount = addLogins(parseLoginList(helperInput.value));
+        if (addedCount > 0) {
+          renderPanel(panel);
+        }
+      }
+    });
+
+    commentsInput.addEventListener("input", () => {
+      saveComments(commentsInput.value);
+    });
+
+    copyAuditedButton.addEventListener("click", () => {
+      void copyLoginsByAuditState(true);
+    });
+
+    copyUnauditedButton.addEventListener("click", () => {
+      void copyLoginsByAuditState(false);
+    });
+
+    runButton.addEventListener("click", () => runNextAudit(panel));
+
+    clearButton.addEventListener("click", () => {
+      if (!window.confirm("Wipe all saved login history from this browser?")) {
+        return;
+      }
+
+      clearLogins();
+      renderPanel(panel);
+    });
+
+    document.body.appendChild(panel);
+    renderPanel(panel);
+    hookFormAutosave(panel);
+    hookLoginSync(panel);
+  }
+
+  function init() {
+    const auditTypeId = new URLSearchParams(window.location.search).get("audit_type_id");
+    if (window.location.pathname !== "/audits/new" || auditTypeId !== TARGET_AUDIT_TYPE_ID) {
+      return;
+    }
+
+    createPanel();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init, { once: true });
+  } else {
+    init();
+  }
+})();

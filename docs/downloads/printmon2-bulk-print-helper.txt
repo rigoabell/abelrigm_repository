@@ -1,0 +1,129 @@
+// ==UserScript==
+// @name         Printmon2 Bulk Print Helper
+// @namespace    rigo.printmon.bulk
+// @version      3.0
+// @match        https://drive.corp.amazon.com/documents/*/Printmon2v1_0.html*
+// @match        https://document-versions-production.s3.us-west-2.amazonaws.com/*
+// @run-at       document-idle
+// @all-frames   true
+// @grant        GM_setClipboard
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    function setValue(el, value) {
+        const setter = Object.getOwnPropertyDescriptor(
+            HTMLTextAreaElement.prototype,
+            'value'
+        ).set;
+
+        setter.call(el, value);
+
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function getBulkTextarea() {
+        return document.querySelector('#textAreaID');
+    }
+
+    function getBulkButton() {
+        return [...document.querySelectorAll('button')]
+            .find(btn =>
+                btn.textContent.trim() === 'Print Multiple Labels'
+            );
+    }
+
+    function bulkPrint(values) {
+        const textarea = getBulkTextarea();
+        const button = getBulkButton();
+
+        if (!textarea) {
+            alert('Bulk textarea not found.');
+            return;
+        }
+
+        if (!button) {
+            alert('Print Multiple Labels button not found.');
+            return;
+        }
+
+        setValue(textarea, values.join('\n'));
+
+        console.log('Submitting', values.length, 'labels');
+
+        button.click();
+    }
+
+    function promptForValues() {
+
+        const raw = prompt(
+            'Paste values from Excel.\n\nSpaces, tabs, and newlines are all accepted.'
+        );
+
+        if (!raw) return;
+
+        const values = raw
+            .split(/\s+/)
+            .map(v => v.trim())
+            .filter(Boolean);
+
+        if (!values.length) {
+            alert('No values found.');
+            return;
+        }
+
+        const ok = confirm(
+            `Found ${values.length} labels.\n\n` +
+            values.slice(0, 10).join('\n') +
+            (values.length > 10 ? '\n...' : '')
+        );
+
+        if (!ok) return;
+
+        bulkPrint(values);
+    }
+
+    function addButton() {
+
+        if (document.getElementById('tm-bulk-print')) return;
+
+        const btn = document.createElement('button');
+
+        btn.id = 'tm-bulk-print';
+        btn.textContent = 'Bulk Print Labels';
+
+        btn.style.cssText = `
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            z-index: 2147483647;
+            background:#ff9900;
+            color:#111;
+            border:2px solid #111;
+            border-radius:6px;
+            padding:8px 12px;
+            font-weight:bold;
+            cursor:pointer;
+        `;
+
+        btn.onclick = promptForValues;
+
+        document.body.appendChild(btn);
+    }
+
+    function boot() {
+
+        if (
+            document.querySelector('#textAreaID') &&
+            document.querySelector('#barcodedata')
+        ) {
+            addButton();
+        }
+
+        setTimeout(boot, 1000);
+    }
+
+    boot();
+})();

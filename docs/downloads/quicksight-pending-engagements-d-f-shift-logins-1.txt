@@ -1,0 +1,1347 @@
+// ==UserScript==
+// @name         QuickSight Pending Engagements D/F Shift Logins
+// @namespace    https://github.com/ap3x/quicksight-pending-engagements
+// @version      1.3.1
+// @description  Pending Engagements (Click Me To Load Content) — auto-collect, copy logins, copy debug
+// @author       AP3X
+// @match        https://us-east-1.quicksight.aws.amazon.com/sn/account/quetzal/dashboards/ed0061b1-143a-4b06-adf5-8bbe28d30023/*
+// @match        https://*.quicksight.aws.amazon.com/*
+// @match        https://quicksight.aws.amazon.com/*
+// @grant        GM_setClipboard
+// @grant        GM_addStyle
+// @run-at       document-start
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  /** Blocks legacy Tampermonkey v0.1.2 from mounting duplicate buttons. */
+  const LEGACY_INSTALL_KEY = '__qsPendingEngagementsDFShiftLoginsInstalled';
+  window[LEGACY_INSTALL_KEY] = true;
+
+  const SCRIPT = { name: 'QuickSight Pending Engagements D/F Shift Logins', version: '1.3.1' };
+  const DASHBOARD_ID = 'ed0061b1-143a-4b06-adf5-8bbe28d30023';
+  const PREFERRED_VISUAL_TITLE = 'Pending Engagements (Click Me To Load Content)';
+  const KNOWN_BLOCK_ID =
+    'block-ed0061b1-143a-4b06-adf5-8bbe28d30023_a04bfe8e-d37c-4510-8c2d-70ddc89c03bc';
+  const STORAGE_PREFIX = 'qstd-click-target-block:';
+  const LOGIN_COL = 3;
+  const SHIFT_COL = 5;
+  /** D/F shift codes at col 5 — excludes DA (day A), NN, etc. */
+  const DF_SHIFT_CODES = new Set(['DL', 'DN', 'DF', 'FL', 'FH']);
+  const LOGIN_REGEX = /^[a-z][a-z0-9_-]{2,}$/;
+  const PENDING_ENGAGEMENTS_HEADERS = [
+    'Date',
+    'Region',
+    'Site',
+    'Login',
+    'Name',
+    'Shift',
+    'Manager',
+    'Accuracy',
+    'Col8',
+    'Col9',
+    'Col10',
+  ];
+
+  const CELL_SELECTOR =
+    '[data-automation-id^="sn-table-cell"], div.cell[data-row-path][data-col-path]';
+
+  const STATE = {
+    lastScan: null,
+    observer: null,
+    targetBlockId: null,
+    lockedBlockId: null,
+    lateLoadTimer: null,
+    cellCache: new Map(),
+    cellCacheBlockId: null,
+    columnHeaders: null,
+    collecting: false,
+    autoCollectDone: false,
+    autoCollectScheduled: false,
+    collectPhases: [],
+  };
+
+  function normalizeText(value) {
+    return String(value || '')
+      .replace(/\s+/g, ' ')
+      .replace(/[’]/g, "'")
+      .trim();
+  }
+
+  function cssPath(el) {
+    if (!el || el === document.body) return 'body';
+    const parts = [];
+    let node = el;
+    while (node && node.nodeType === 1 && node !== document.documentElement) {
+      let part = node.tagName.toLowerCase();
+      if (node.id) {
+        part += `#${node.id}`;
+        parts.unshift(part);
+        break;
+      }
+      const parent = node.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children).filter((c) => c.tagName === node.tagName);
+        if (siblings.length > 1) {
+          part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+        }
+      }
+      parts.unshift(part);
+      node = parent;
+    }
+    return parts.join(' > ');
+  }
+
+  function xpathId(el) {
+    return el?.id ? `//*[@id="${el.id}"]` : null;
+  }
+
+  function parseIdsFromPath() {
+    const parts = location.pathname.split('/').filter(Boolean);
+    const dashIdx = parts.indexOf('dashboards');
+    const dashboardId = dashIdx >= 0 ? parts[dashIdx + 1] : null;
+    const sheetPart = parts.find((p) => p.startsWith(`${DASHBOARD_ID}_`)) || null;
+    return { dashboardId, sheetId: sheetPart };
+  }
+
+  function parseCacheKey(key, blockId) {
+    const prefix = `${blockId}:`;
+    if (!key.startsWith(prefix)) return null;
+    const rest = key.slice(prefix.length);
+    const idx = rest.lastIndexOf(':');
+    if (idx < 0) return null;
+    const row = Number(rest.slice(0, idx));
+    const col = Number(rest.slice(idx + 1));
+    if (Number.isNaN(row) || Number.isNaN(col)) return null;
+    return { row, col, value: STATE.cellCache.get(key) };
+  }
+
+  function buildMergedRowMap(blockId) {
+    const byRow = new Map();
+    const ensureRow = (row) => {
+      if (!byRow.has(row)) byRow.set(row, {});
+      return byRow.get(row);
+    };
+
+    for (const key of STATE.cellCache.keys()) {
+      const parsed = parseCacheKey(key, blockId);
+      if (!parsed) continue;
+      ensureRow(parsed.row)[parsed.col] = parsed.value;
+    }
+
+    const blockEl = getBlockElement(blockId);
+    if (blockEl) {
+      for (const el of getCellsInBlock(blockEl, blockId)) {
+        const row = Number(el.getAttribute('data-row-path'));
+        const col = Number(el.getAttribute('data-col-path'));
+        if (Number.isNaN(row) || Number.isNaN(col)) continue;
+        const value = text(el);
+        if (value) ensureRow(row)[col] = value;
+      }
+    }
+
+    return byRow;
+  }
+
+  function isDfShift(value) {
+    const code = String(value || '').trim().toUpperCase();
+    return DF_SHIFT_CODES.has(code);
+  }
+
+  function qs(sel, root = document) {
+    return root.querySelector(sel);
+  }
+
+  function qsa(sel, root = document) {
+    return Array.from(root.querySelectorAll(sel));
+  }
+
+  function text(el) {
+    if (!el) return '';
+    const printable = el.querySelector('.printable-cell');
+    return (printable?.textContent || el.textContent || '').trim();
+  }
+
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  async function copyText(str) {
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(str, 'text');
+      return true;
+    }
+    try {
+      await navigator.clipboard.writeText(str);
+      return true;
+    } catch (_) {
+      const ta = document.createElement('textarea');
+      ta.value = str;
+      ta.style.cssText = 'position:fixed;opacity:0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    }
+  }
+
+  function storageKey() {
+    const parts = location.pathname.split('/').filter(Boolean);
+    const dash = parts.find((p) => /^[0-9a-f-]{36}$/i.test(p)) || 'default';
+    return `${STORAGE_PREFIX}${dash}`;
+  }
+
+  function loadPersistedBlockId() {
+    try {
+      return localStorage.getItem(storageKey()) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function persistBlockId(blockId) {
+    try {
+      if (blockId) localStorage.setItem(storageKey(), blockId);
+    } catch (_) {
+      /* ignore */
+    }
+    STATE.lockedBlockId = blockId;
+  }
+
+  function clearPersistedBlockId() {
+    try {
+      localStorage.removeItem(storageKey());
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function titleMatchesPreferred(title) {
+    const normalized = (title || '').trim().toLowerCase();
+    return (
+      normalized.includes('click me to load content') ||
+      normalized === PREFERRED_VISUAL_TITLE.toLowerCase()
+    );
+  }
+
+  function getLockedBlockId() {
+    return STATE.lockedBlockId || loadPersistedBlockId() || KNOWN_BLOCK_ID;
+  }
+
+  function getBlockElement(blockId) {
+    return blockId ? document.getElementById(blockId) : null;
+  }
+
+  function getVisualTitle(blockEl) {
+    if (!blockEl) return '';
+    const label = blockEl.querySelector('[data-automation-id="analysis_visual_title_label"]');
+    return (
+      label?.dataset?.automationContext ||
+      label?.textContent ||
+      blockEl.querySelector('.visual-title')?.textContent ||
+      ''
+    ).trim();
+  }
+
+  function isAllowedTargetBlock(blockMeta) {
+    if (!blockMeta) return false;
+    if (blockMeta.blockId === KNOWN_BLOCK_ID) return true;
+    if (STATE.lockedBlockId && blockMeta.blockId === STATE.lockedBlockId) return true;
+    return titleMatchesPreferred(blockMeta.visualTitle);
+  }
+
+  function getCellsInBlock(blockEl, blockId) {
+    if (!blockEl || !blockId) return [];
+    return qsa(CELL_SELECTOR, blockEl).filter((el) => el.closest('[id^="block-"]')?.id === blockId);
+  }
+
+  function getBlockMeta(blockId) {
+    const blockEl = getBlockElement(blockId);
+    if (!blockEl) return null;
+    const cells = getCellsInBlock(blockEl, blockId);
+    return {
+      blockId,
+      visualTitle: getVisualTitle(blockEl),
+      cellCount: cells.length,
+      hasTableCells: cells.length > 0,
+    };
+  }
+
+  function resolveTargetBlock(allVisualBlocks) {
+    const lockedId = getLockedBlockId();
+    const locked =
+      allVisualBlocks.find((b) => b.blockId === lockedId) || getBlockMeta(lockedId);
+    if (locked && isAllowedTargetBlock(locked)) return locked;
+    const preferred = allVisualBlocks.find((b) => titleMatchesPreferred(b.visualTitle));
+    return preferred || null;
+  }
+
+  function clearCellCache() {
+    STATE.cellCache.clear();
+    STATE.cellCacheBlockId = null;
+  }
+
+  function mergeCellsIntoCache(blockId, cells) {
+    if (!blockId) return;
+    if (STATE.cellCacheBlockId && STATE.cellCacheBlockId !== blockId) clearCellCache();
+    STATE.cellCacheBlockId = blockId;
+    for (const c of cells) {
+      if (c.rowPath == null || c.colPath == null || !c.value) continue;
+      STATE.cellCache.set(`${blockId}:${c.rowPath}:${c.colPath}`, c.value);
+    }
+  }
+
+  function mergeViewportIntoCache(blockId, blockEl) {
+    if (!blockId || !blockEl) return;
+    const cells = getCellsInBlock(blockEl, blockId).map((el, i) => parseCell(el, i));
+    mergeCellsIntoCache(blockId, cells);
+  }
+
+  function countCachedRows(blockId) {
+    const rows = new Set();
+    for (const key of STATE.cellCache.keys()) {
+      const parsed = parseCacheKey(key, blockId);
+      if (parsed) rows.add(parsed.row);
+    }
+    return rows.size;
+  }
+
+  function getCachedLoginsInRowOrder(blockId) {
+    const byRow = buildMergedRowMap(blockId);
+    return [...byRow.keys()]
+      .sort((a, b) => a - b)
+      .map((row) => byRow.get(row)[LOGIN_COL])
+      .filter(Boolean);
+  }
+
+  function countCachedLogins(blockId) {
+    return getCachedLoginsInRowOrder(blockId).length;
+  }
+
+  function getDfLogins(blockId) {
+    const byRow = buildMergedRowMap(blockId);
+    const out = [];
+    const seen = new Set();
+    for (const row of [...byRow.keys()].sort((a, b) => a - b)) {
+      const cols = byRow.get(row);
+      const login = cols[LOGIN_COL];
+      const shift = (cols[SHIFT_COL] || '').trim();
+      if (!login || !LOGIN_REGEX.test(login)) continue;
+      if (!isDfShift(shift) || seen.has(login)) continue;
+      seen.add(login);
+      out.push(login);
+    }
+    return out;
+  }
+
+  function buildMatrixFromCache(blockId) {
+    const rowMap = new Map();
+    let minCol = Infinity;
+    let maxCol = -Infinity;
+    for (const key of STATE.cellCache.keys()) {
+      const parsed = parseCacheKey(key, blockId);
+      if (!parsed) continue;
+      const { row, col, value } = parsed;
+      if (!rowMap.has(row)) rowMap.set(row, new Map());
+      rowMap.get(row).set(col, value);
+      minCol = Math.min(minCol, col);
+      maxCol = Math.max(maxCol, col);
+    }
+    if (!rowMap.size) return { rows: [], tsv: '' };
+    const lines = [];
+    for (const row of [...rowMap.keys()].sort((a, b) => a - b)) {
+      const cols = rowMap.get(row);
+      const line = [];
+      for (let c = minCol; c <= maxCol; c++) line.push(cols.get(c) ?? '');
+      lines.push(line.join('\t'));
+    }
+    return { rows: lines, tsv: lines.join('\n') };
+  }
+
+  function bumpCacheScanSummary(blockId) {
+    if (!STATE.lastScan || STATE.lastScan.target?.blockId !== blockId) return;
+    STATE.lastScan.accumulatedMatrix = buildMatrixFromCache(blockId);
+    STATE.lastScan.summary.collected.rows = countCachedRows(blockId);
+    STATE.lastScan.summary.collected.cells = STATE.cellCache.size;
+  }
+
+  function parseCell(cellEl, index) {
+    const rowPath = Number(cellEl.getAttribute('data-row-path'));
+    const colPath = Number(cellEl.getAttribute('data-col-path'));
+    return {
+      index,
+      rowPath: Number.isNaN(rowPath) ? null : rowPath,
+      colPath: Number.isNaN(colPath) ? null : colPath,
+      automationId: cellEl.getAttribute('data-automation-id'),
+      value: text(cellEl),
+      titleAttr: cellEl.getAttribute('title'),
+    };
+  }
+
+  function isInsideBlock(el, blockEl) {
+    return el === blockEl || blockEl.contains(el);
+  }
+
+  function findScrollParent(el) {
+    let node = el?.parentElement;
+    while (node && node !== document.body) {
+      const style = getComputedStyle(node);
+      if (/auto|scroll|overlay/.test(style.overflowY + style.overflow)) {
+        if (node.scrollHeight > node.clientHeight + 2) return node;
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function findTableScroller(blockEl) {
+    if (!blockEl) return null;
+    const sample = qs(CELL_SELECTOR, blockEl);
+    if (!sample) return null;
+
+    const candidates = new Set();
+    let node = sample.parentElement;
+    while (node && node !== blockEl && node !== document.body) {
+      if (node.scrollHeight > node.clientHeight + 2) candidates.add(node);
+      node = node.parentElement;
+    }
+
+    for (const el of qsa('*', blockEl)) {
+      const style = getComputedStyle(el);
+      if (/auto|scroll|overlay/.test(style.overflowY + style.overflow)) {
+        if (el.scrollHeight > el.clientHeight + 2 && el.querySelector(CELL_SELECTOR)) {
+          candidates.add(el);
+        }
+      }
+    }
+
+    const sampleDepth = (el) => {
+      let depth = 0;
+      let node = el;
+      while (node && node !== blockEl) {
+        depth += 1;
+        node = node.parentElement;
+      }
+      return depth;
+    };
+
+    const maxH = window.innerHeight * 0.75;
+    const scored = [...candidates]
+      .filter((el) => {
+        if (el === document.body || el === document.documentElement) return false;
+        if (!isInsideBlock(el, blockEl)) return false;
+        if (el.clientHeight > maxH) return false;
+        return el.querySelector(CELL_SELECTOR);
+      })
+      .map((el) => ({
+        el,
+        scrollRange: el.scrollHeight - el.clientHeight,
+        depth: sampleDepth(el),
+      }))
+      .sort((a, b) => b.scrollRange - a.scrollRange || b.depth - a.depth);
+
+    return scored[0]?.el || null;
+  }
+
+  function getScrollerMetrics(scroller) {
+    if (!scroller) return { scrollTop: 0, maxScroll: 0 };
+    return {
+      scrollTop: scroller.scrollTop,
+      maxScroll: Math.max(0, scroller.scrollHeight - scroller.clientHeight),
+    };
+  }
+
+  function savePageScroll() {
+    return { x: window.scrollX, y: window.scrollY };
+  }
+
+  function restorePageScroll(pos) {
+    if (pos) window.scrollTo(pos.x, pos.y);
+  }
+
+  function hoverScroller(scroller) {
+    if (!scroller) return;
+    scroller.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+    scroller.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+  }
+
+  function dispatchWheelAt(target, deltaY, count = 1) {
+    if (!target) return;
+    for (let i = 0; i < count; i++) {
+      target.dispatchEvent(
+        new WheelEvent('wheel', {
+          bubbles: true,
+          cancelable: true,
+          deltaY,
+          deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+        }),
+      );
+    }
+  }
+
+  function prepareCellForFocus(cellEl, { scrollIntoView = false } = {}) {
+    if (!cellEl) return null;
+    if (!cellEl.hasAttribute('tabindex')) cellEl.tabIndex = -1;
+    try {
+      cellEl.focus({ preventScroll: !scrollIntoView });
+    } catch (_) {
+      cellEl.focus();
+    }
+    return cellEl;
+  }
+
+  function getBottomRowCell(blockEl, blockId, col = LOGIN_COL) {
+    const cells = getCellsInBlock(blockEl, blockId);
+    let best = null;
+    let bestRow = -1;
+    for (const el of cells) {
+      if (Number(el.getAttribute('data-col-path')) !== col) continue;
+      const row = Number(el.getAttribute('data-row-path'));
+      if (row > bestRow) {
+        bestRow = row;
+        best = el;
+      }
+    }
+    return best;
+  }
+
+  function getMaxRowPathInViewport(blockEl, blockId) {
+    let max = -1;
+    for (const el of getCellsInBlock(blockEl, blockId)) {
+      const row = Number(el.getAttribute('data-row-path'));
+      if (!Number.isNaN(row) && row > max) max = row;
+    }
+    return max;
+  }
+
+  function applyAllScrollStrategies(blockEl, blockId, scroller, pixels, { fast = true } = {}) {
+    const pagePos = savePageScroll();
+    hoverScroller(scroller);
+    const bottom = prepareCellForFocus(getBottomRowCell(blockEl, blockId), { scrollIntoView: false });
+
+    if (fast) {
+      dispatchWheelAt(bottom || scroller, pixels, 5);
+      if (scroller && bottom !== scroller) dispatchWheelAt(scroller, pixels, 4);
+    } else {
+      dispatchWheelAt(bottom || scroller, pixels, 15);
+      if (scroller) dispatchWheelAt(scroller, pixels, 12);
+    }
+
+    if (scroller && scroller.scrollHeight > scroller.clientHeight + 2) {
+      const nextTop =
+        pixels >= 0
+          ? Math.min(scroller.scrollTop + pixels, scroller.scrollHeight - scroller.clientHeight)
+          : Math.max(scroller.scrollTop + pixels, 0);
+      scroller.scrollTop = nextTop;
+      scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+    }
+
+    restorePageScroll(pagePos);
+    return getMaxRowPathInViewport(blockEl, blockId);
+  }
+
+  function dispatchKey(target, key) {
+    if (!target) return;
+    const opts = { key, bubbles: true, cancelable: true };
+    target.dispatchEvent(new KeyboardEvent('keydown', opts));
+    target.dispatchEvent(new KeyboardEvent('keyup', opts));
+  }
+
+  async function scrollTableToTop(blockEl, blockId, scroller) {
+    if (scroller) scroller.scrollTop = 0;
+    for (let i = 0; i < 8; i++) {
+      applyAllScrollStrategies(blockEl, blockId, scroller, -120, { fast: true });
+      await sleep(25);
+    }
+    if (scroller) scroller.scrollTop = 0;
+    mergeViewportIntoCache(blockId, blockEl);
+    bumpCacheScanSummary(blockId);
+    await sleep(80);
+  }
+
+  function estimateTableRows(scroller, collectedRows = 0, scrollPercent = null) {
+    if (!scroller?.scrollHeight) return null;
+    if (scrollPercent != null && scrollPercent >= 95 && collectedRows > 0) return collectedRows;
+    return Math.max(collectedRows, Math.round(scroller.scrollHeight / 25));
+  }
+
+  function isScrollerAtBottom(scroller, slackPx = 5) {
+    if (!scroller) return false;
+    return scroller.scrollTop >= scroller.scrollHeight - scroller.clientHeight - slackPx;
+  }
+
+  function resolveTargetRows(scroller, blockId, blockEl = null) {
+    const el = blockEl || getBlockElement(blockId);
+    const maxRow = el && blockId ? getMaxRowPathInViewport(el, blockId) : -1;
+    const viewportRows = maxRow >= 0 ? maxRow + 1 : 0;
+    const fromScroll = estimateTableRows(scroller, viewportRows);
+    if (fromScroll != null && fromScroll > 0) return fromScroll;
+    return viewportRows || null;
+  }
+
+  function saveVisualLayoutState(blockEl) {
+    if (!blockEl) return null;
+    const scroller = findTableScroller(blockEl);
+    return {
+      blockWidth: blockEl.style.width,
+      blockHeight: blockEl.style.height,
+      scrollTop: scroller?.scrollTop ?? 0,
+    };
+  }
+
+  function restoreVisualLayoutAfterCollect(blockEl, snapshot) {
+    if (!blockEl || !snapshot) return;
+    const scroller = findTableScroller(blockEl);
+    if (scroller) scroller.scrollTop = snapshot.scrollTop;
+    blockEl.style.width = snapshot.blockWidth || '';
+    blockEl.style.height = snapshot.blockHeight || '';
+    const active = document.activeElement;
+    if (active && blockEl.contains(active)) active.blur();
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', bubbles: true }));
+  }
+
+  function installPageScrollLock(blockEl) {
+    const onScroll = () => window.scrollTo(window.scrollX, window.scrollY);
+    window.addEventListener('scroll', onScroll, { passive: false });
+    return () => window.removeEventListener('scroll', onScroll);
+  }
+
+  async function waitForViewportAdvance(blockEl, blockId, beforeRow, beforeLogins, timeoutMs = 180) {
+    return new Promise((resolve) => {
+      let settled = false;
+      let debounce = null;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        observer.disconnect();
+        clearTimeout(timer);
+        clearTimeout(debounce);
+        resolve();
+      };
+
+      const check = () => {
+        mergeViewportIntoCache(blockId, blockEl);
+        const row = getMaxRowPathInViewport(blockEl, blockId);
+        const logins = countCachedLogins(blockId);
+        if (row > beforeRow || logins > beforeLogins) finish();
+      };
+
+      const observer = new MutationObserver(() => {
+        clearTimeout(debounce);
+        debounce = setTimeout(check, 25);
+      });
+
+      observer.observe(blockEl, { childList: true, subtree: true, characterData: true });
+      debounce = setTimeout(check, 30);
+      const timer = setTimeout(finish, timeoutMs);
+    });
+  }
+
+  async function runScrollPass(blockEl, blockId, scroller, { nudgePx, maxSteps, passLabel, targetRows }) {
+    let stale = 0;
+    let steps = 0;
+    let scrollStale = 0;
+    let lastLogins = countCachedLogins(blockId);
+    let lastScrollTop = getScrollerMetrics(scroller).scrollTop;
+    const phase = { pass: passLabel, steps: 0, loginsEnd: lastLogins, stale: 0, scrollMoved: false };
+
+    while (stale < 8 && steps < maxSteps) {
+      steps += 1;
+      const maxRowBefore = getMaxRowPathInViewport(blockEl, blockId);
+      const loginsBefore = countCachedLogins(blockId);
+
+      applyAllScrollStrategies(blockEl, blockId, scroller, nudgePx, { fast: true });
+      await waitForViewportAdvance(blockEl, blockId, maxRowBefore, loginsBefore, 180);
+      mergeViewportIntoCache(blockId, blockEl);
+      bumpCacheScanSummary(blockId);
+
+      const logins = countCachedLogins(blockId);
+      const maxRowAfter = getMaxRowPathInViewport(blockEl, blockId);
+      const scrollTop = getScrollerMetrics(scroller).scrollTop;
+      if (scrollTop !== lastScrollTop) {
+        phase.scrollMoved = true;
+        lastScrollTop = scrollTop;
+        scrollStale = 0;
+      } else {
+        scrollStale += 1;
+      }
+
+      if (logins > lastLogins || maxRowAfter > maxRowBefore) {
+        lastLogins = logins;
+        stale = 0;
+      } else {
+        stale += 1;
+      }
+
+      if (targetRows && logins >= targetRows) break;
+      if (isScrollerAtBottom(scroller) && stale >= 2) break;
+      if (scrollStale >= 6 && stale >= 4) break;
+    }
+
+    phase.steps = steps;
+    phase.loginsEnd = countCachedLogins(blockId);
+    phase.stale = stale;
+    STATE.collectPhases.push(phase);
+    return phase;
+  }
+
+  async function runKeyboardWalkPass(blockEl, blockId, scroller, { maxSteps = 100, passLabel = 'keyboard' }) {
+    let stale = 0;
+    let steps = 0;
+    let lastLogins = countCachedLogins(blockId);
+    const phase = { pass: passLabel, steps: 0, loginsEnd: lastLogins, stale: 0 };
+
+    while (stale < 10 && steps < maxSteps) {
+      steps += 1;
+      const loginsBefore = countCachedLogins(blockId);
+      const maxRowBefore = getMaxRowPathInViewport(blockEl, blockId);
+      const bottom = prepareCellForFocus(getBottomRowCell(blockEl, blockId), { scrollIntoView: false });
+
+      if (bottom) {
+        for (const key of ['ArrowDown', 'ArrowDown', 'ArrowDown', 'PageDown']) {
+          dispatchKey(bottom, key);
+        }
+      }
+
+      hoverScroller(scroller);
+      dispatchWheelAt(scroller || blockEl, 60, 8);
+      await waitForViewportAdvance(blockEl, blockId, maxRowBefore, loginsBefore, 500);
+      mergeViewportIntoCache(blockId, blockEl);
+      bumpCacheScanSummary(blockId);
+
+      const logins = countCachedLogins(blockId);
+      if (logins > lastLogins) {
+        lastLogins = logins;
+        stale = 0;
+      } else {
+        stale += 1;
+      }
+    }
+
+    phase.steps = steps;
+    phase.loginsEnd = countCachedLogins(blockId);
+    phase.stale = stale;
+    STATE.collectPhases.push(phase);
+    return phase;
+  }
+
+  async function collectAllNoUserInput({ clearFirst = true } = {}) {
+    if (STATE.collecting) return;
+    STATE.collecting = true;
+    STATE.collectPhases = [];
+
+    let releaseScrollLock = null;
+    let layoutSnapshot = null;
+    const blockId = getLockedBlockId();
+    let loginsStart = 0;
+    let loginsEnd = 0;
+    let collectError = null;
+
+    try {
+      if (clearFirst) clearCellCache();
+
+      const scan = await waitForTableReady();
+      if (!scan) {
+        toast('Table not ready — click the visual title to load content', true);
+        return;
+      }
+
+      const blockEl = getBlockElement(scan.target.blockId);
+      if (!blockEl) {
+        toast('Block not found', true);
+        return;
+      }
+
+      layoutSnapshot = saveVisualLayoutState(blockEl);
+      releaseScrollLock = installPageScrollLock(blockEl);
+      refreshScan();
+
+      const scroller = findTableScroller(blockEl);
+      loginsStart = countCachedLogins(blockId);
+      mergeViewportIntoCache(blockId, blockEl);
+      bumpCacheScanSummary(blockId);
+      const targetRows = resolveTargetRows(scroller, blockId, blockEl);
+
+      if (scroller && scroller.scrollTop > 10) {
+        await scrollTableToTop(blockEl, blockId, scroller);
+      }
+
+      const nudgePx = Math.max(55, Math.floor((scroller?.clientHeight || 428) * 0.22));
+      const pass1 = await runScrollPass(blockEl, blockId, scroller, {
+        nudgePx,
+        maxSteps: 40,
+        passLabel: 'pass1-wheel',
+        targetRows,
+      });
+
+      loginsEnd = countCachedLogins(blockId);
+      if (targetRows && loginsEnd < targetRows - 3 && pass1.steps < 4 && !pass1.scrollMoved) {
+        await runKeyboardWalkPass(blockEl, blockId, scroller, {
+          maxSteps: 100,
+          passLabel: 'keyboard-walk',
+        });
+        loginsEnd = countCachedLogins(blockId);
+      }
+
+      if (targetRows && loginsEnd < targetRows - 3) {
+        await scrollTableToTop(blockEl, blockId, scroller);
+        await runScrollPass(blockEl, blockId, scroller, {
+          nudgePx: Math.max(30, Math.floor(nudgePx * 0.65)),
+          maxSteps: 50,
+          passLabel: 'pass2-fine',
+          targetRows,
+        });
+        loginsEnd = countCachedLogins(blockId);
+      }
+
+      const finalTarget = resolveTargetRows(scroller, blockId, blockEl) || targetRows;
+      const atBottom = isScrollerAtBottom(scroller);
+      if (!finalTarget || loginsEnd >= finalTarget - 3 || (atBottom && loginsEnd > 0)) {
+        toast(`Done — ${loginsEnd} rows collected`);
+      } else {
+        toast(`${loginsEnd}/${finalTarget} rows — scroll table manually to finish`, true);
+      }
+    } catch (err) {
+      collectError = String(err?.message || err);
+      toast(`Collect error: ${collectError}`, true);
+    } finally {
+      STATE.collecting = false;
+      releaseScrollLock?.();
+      restoreVisualLayoutAfterCollect(getBlockElement(blockId), layoutSnapshot);
+      refreshScan();
+      loginsEnd = countCachedLogins(blockId);
+      if (collectError) {
+        console.warn(`[${SCRIPT.name}] collect failed:`, collectError);
+      } else {
+        console.info(
+          `[${SCRIPT.name}] collect done: ${loginsStart} → ${loginsEnd} rows, phases=${STATE.collectPhases.length}`,
+        );
+      }
+      STATE.autoCollectDone = true;
+    }
+  }
+
+  function scanTables() {
+    const blocks = qsa('[id^="block-"]')
+      .map((el) => getBlockMeta(el.id))
+      .filter((b) => b && b.hasTableCells);
+
+    const target = resolveTargetBlock(blocks);
+    const blockId = target?.blockId || getLockedBlockId();
+    const blockEl = target ? getBlockElement(target.blockId) : null;
+
+    if (blockEl && target) {
+      mergeViewportIntoCache(target.blockId, blockEl);
+      persistBlockId(target.blockId);
+    }
+
+    const cells = blockEl && target ? getCellsInBlock(blockEl, target.blockId).map(parseCell) : [];
+    const rowPaths = [...new Set(cells.map((c) => c.rowPath).filter((r) => r != null))];
+    const matrix = blockId ? buildMatrixFromCache(blockId) : { rows: [], tsv: '' };
+
+    return {
+      target: target
+        ? { ...target, locked: target.blockId === getLockedBlockId() }
+        : null,
+      waitingFor: target ? null : PREFERRED_VISUAL_TITLE,
+      blocks,
+      cells,
+      headers: { inferredColumnHeaders: PENDING_ENGAGEMENTS_HEADERS },
+      matrix: { tsv: matrix.tsv, dataRows: matrix.rows.length },
+      accumulatedMatrix: matrix,
+      summary: {
+        totalCellsInDom: cells.length,
+        collected: { rows: countCachedRows(blockId), cells: STATE.cellCache.size },
+        matrixSpan: {
+          dataRows: rowPaths.length,
+          minRow: rowPaths.length ? Math.min(...rowPaths) : null,
+          maxRow: rowPaths.length ? Math.max(...rowPaths) : null,
+        },
+      },
+      meta: { scannedAt: new Date().toISOString() },
+    };
+  }
+
+  function purgeLegacyButtonsOnTargetBlock(blockId) {
+    const blockEl = getBlockElement(blockId);
+    if (!blockEl) return;
+    const titleContainer = blockEl.querySelector('.visual-title-container');
+    if (!titleContainer) return;
+    titleContainer
+      .querySelectorAll(
+        '.qstd-title-btns, .qs-pending-df-button, .qs-pe-cd-copy-debug, .qs-pending-df-status',
+      )
+      .forEach((el) => el.remove());
+    titleContainer.classList.remove('qs-pending-df-title-host', 'qs-pe-cd-title-host');
+    for (const btn of titleContainer.querySelectorAll('button')) {
+      if (btn.closest('.qstd-click-title-btns')) continue;
+      const label = (btn.textContent || '').trim();
+      if (/copy\s*(all|d\/f|debug)/i.test(label)) {
+        btn.remove();
+      }
+    }
+  }
+
+  function refreshScan() {
+    const blockId = getLockedBlockId();
+    purgeLegacyButtonsOnTargetBlock(blockId);
+    STATE.lastScan = scanTables();
+    const blockEl = STATE.lastScan.target ? getBlockElement(STATE.lastScan.target.blockId) : null;
+    watchTableScroll(blockEl);
+    if (STATE.lastScan.target?.blockId) updateTitleCopyButtons(STATE.lastScan.target.blockId);
+    return STATE.lastScan;
+  }
+
+  async function waitForTableReady(maxMs = 90000) {
+    const started = Date.now();
+    while (Date.now() - started < maxMs) {
+      const scan = refreshScan();
+      if (scan.target && scan.target.blockId === getLockedBlockId() && scan.summary.totalCellsInDom > 0) {
+        return scan;
+      }
+      await sleep(1000);
+    }
+    return null;
+  }
+
+  function maybeScheduleAutoCollect(scan) {
+    if (STATE.autoCollectScheduled || STATE.collecting || STATE.autoCollectDone) return;
+    if (!scan.target || scan.target.blockId !== getLockedBlockId() || scan.summary.totalCellsInDom === 0) {
+      return;
+    }
+    STATE.autoCollectScheduled = true;
+    setTimeout(() => collectAllNoUserInput({ clearFirst: false }), 1500);
+  }
+
+  function watchTableScroll(blockEl) {
+    if (!blockEl) return;
+    const sample = qs(CELL_SELECTOR, blockEl);
+    const sp = sample ? findScrollParent(sample) : null;
+    if (!sp || sp.dataset.qstdClickScrollWatch) return;
+    sp.dataset.qstdClickScrollWatch = '1';
+    let debounce = null;
+    sp.addEventListener(
+      'scroll',
+      () => {
+        clearTimeout(debounce);
+        debounce = setTimeout(refreshScan, STATE.collecting ? 120 : 350);
+      },
+      { passive: true },
+    );
+  }
+
+  function buildDebugRowMap(cells) {
+    const rowMap = new Map();
+    for (const cell of cells) {
+      const rowPath = cell.getAttribute('data-row-path');
+      if (rowPath == null || rowPath === '') continue;
+      if (!rowMap.has(rowPath)) rowMap.set(rowPath, []);
+      rowMap.get(rowPath).push(cell);
+    }
+    for (const rowCells of rowMap.values()) {
+      rowCells.sort(
+        (a, b) => Number(a.getAttribute('data-col-path')) - Number(b.getAttribute('data-col-path')),
+      );
+    }
+    return rowMap;
+  }
+
+  function findScrollCandidatesForDebug(blockEl) {
+    if (!blockEl) return [];
+    const sample = blockEl.querySelector(CELL_SELECTOR);
+    const candidates = new Set();
+    let node = sample?.parentElement;
+    while (node && node !== blockEl && node !== document.body) {
+      if (node.scrollHeight > node.clientHeight + 2) candidates.add(node);
+      node = node.parentElement;
+    }
+    blockEl.querySelectorAll('*').forEach((el) => {
+      const style = getComputedStyle(el);
+      if (/auto|scroll|overlay/.test(style.overflowY + style.overflow)) {
+        if (el.scrollHeight > el.clientHeight + 2 && el.querySelector(CELL_SELECTOR)) {
+          candidates.add(el);
+        }
+      }
+    });
+    return [...candidates]
+      .map((el) => ({
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+        scrollTop: el.scrollTop,
+        scrollRange: el.scrollHeight - el.clientHeight,
+        estimatedRows: el.scrollHeight ? Math.round(el.scrollHeight / 25) : null,
+        cssPath: cssPath(el),
+      }))
+      .sort((a, b) => b.scrollRange - a.scrollRange);
+  }
+
+  function scanVisualDebug(blockId) {
+    const blockEl = getBlockElement(blockId);
+    const titleLabel = blockEl?.querySelector('[data-automation-id="analysis_visual_title_label"]');
+    const titleContainer = titleLabel?.closest('.visual-title-container');
+    const cells = blockEl ? getCellsInBlock(blockEl, blockId) : [];
+    const rowMap = buildDebugRowMap(cells);
+    const rowPaths = [...rowMap.keys()].map(Number).filter((n) => !Number.isNaN(n));
+    const scrollCandidates = findScrollCandidatesForDebug(blockEl);
+    const primaryScroller = scrollCandidates[0] || null;
+    const scrollRange = primaryScroller?.scrollRange ?? 0;
+    const viewportRowCount = rowMap.size;
+    const estimatedTotalRows =
+      scrollRange < 20 && viewportRowCount > 0
+        ? viewportRowCount
+        : primaryScroller?.estimatedRows ?? null;
+
+    const colSamples = new Map();
+    for (const rowCells of rowMap.values()) {
+      for (const cell of rowCells) {
+        const col = Number(cell.getAttribute('data-col-path'));
+        if (Number.isNaN(col)) continue;
+        if (!colSamples.has(col)) colSamples.set(col, new Set());
+        const value = text(cell);
+        if (value) colSamples.get(col).add(value);
+      }
+    }
+
+    const columnInference = [...colSamples.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([colPath, samples]) => ({
+        colPath,
+        sampleCount: samples.size,
+        samples: [...samples].slice(0, 5),
+        loginLike: [...samples].some((v) => LOGIN_REGEX.test(v)),
+        shiftDfLike: [...samples].some((v) => isDfShift(v)),
+      }));
+
+    const viewportRows = [...rowMap.keys()]
+      .sort((a, b) => Number(a) - Number(b))
+      .slice(0, 20)
+      .map((rowPath) => ({
+        rowPath: Number(rowPath),
+        cells: rowMap.get(rowPath).map((cell) => ({
+          colPath: Number(cell.getAttribute('data-col-path')),
+          value: text(cell),
+        })),
+      }));
+
+    return {
+      scannedAt: new Date().toISOString(),
+      scriptVersion: SCRIPT.version,
+      page: {
+        url: location.href,
+        dashboardId: parseIdsFromPath().dashboardId,
+        sheetId: parseIdsFromPath().sheetId,
+      },
+      visual: {
+        expectedTitle: PREFERRED_VISUAL_TITLE,
+        knownBlockId: KNOWN_BLOCK_ID,
+        blockId: blockEl?.id || null,
+        titleAutomationContext: titleLabel?.dataset?.automationContext || null,
+        titleContainerCssPath: titleContainer ? cssPath(titleContainer) : null,
+      },
+      table: {
+        cellsInDom: cells.length,
+        distinctRowsInViewport: rowMap.size,
+        rowPathMin: rowPaths.length ? Math.min(...rowPaths) : null,
+        rowPathMax: rowPaths.length ? Math.max(...rowPaths) : null,
+        colPaths: columnInference.map((c) => c.colPath),
+        columnInference,
+        estimatedTotalRows,
+        scrollRange,
+        cachedLogins: getCachedLoginsInRowOrder(blockId).length,
+        cachedDfLogins: getDfLogins(blockId).length,
+        matchedLogins: getDfLogins(blockId),
+        dfShiftCodes: [...DF_SHIFT_CODES],
+        primaryScroller,
+      },
+      viewportRows,
+    };
+  }
+
+  function formatDebugReport(data) {
+    const lines = [
+      `=== QuickSight Pending Engagements Copy Debug v${SCRIPT.version} (AP3X) ===`,
+      `NOT v0.1.2 — if you see 0.1.2, the wrong Tampermonkey script is still enabled.`,
+      '',
+      'PAGE',
+      `  URL: ${data.page.url}`,
+      `  Dashboard: ${data.page.dashboardId ?? 'n/a'}`,
+      `  Sheet: ${data.page.sheetId ?? 'n/a'}`,
+      `  Scanned: ${data.scannedAt}`,
+      '',
+      'VISUAL',
+      `  Block id: ${data.visual.blockId ?? 'n/a'}`,
+      `  Title: ${data.visual.titleAutomationContext ?? 'n/a'}`,
+      '',
+      'TABLE',
+      `  Cells in DOM: ${data.table.cellsInDom}`,
+      `  Viewport rows: ${data.table.distinctRowsInViewport}`,
+      `  Cached logins: ${data.table.cachedLogins}`,
+      `  Cached D/F logins: ${data.table.cachedDfLogins}`,
+      `  D/F shift codes: ${(data.table.dfShiftCodes || []).join(', ')}`,
+      `  Matched logins: ${(data.table.matchedLogins || []).join(', ') || 'none'}`,
+      `  Row path range: ${data.table.rowPathMin ?? 'n/a'} – ${data.table.rowPathMax ?? 'n/a'}`,
+      `  Estimated total rows: ${data.table.estimatedTotalRows ?? 'n/a'}`,
+      '',
+      'HEURISTICS',
+      `  login col: ${LOGIN_COL}`,
+      `  shift D/F col: ${SHIFT_COL}`,
+      `  shift filter: explicit codes ${[...DF_SHIFT_CODES].join(', ')} (not /^[df]/i — DA excluded)`,
+    ];
+
+    if (data.table.columnInference.length) {
+      lines.push('', 'COLUMNS');
+      data.table.columnInference.forEach((col) => {
+        lines.push(`  col ${col.colPath}: ${col.samples.join(' | ')}`);
+      });
+    }
+
+    if (data.viewportRows.length) {
+      lines.push('', 'VIEWPORT ROWS');
+      data.viewportRows.forEach((row) => {
+        const parts = row.cells.map((c) => `[${c.colPath}]${c.value}`);
+        lines.push(`  row ${row.rowPath}: ${parts.join('  ')}`);
+      });
+    }
+
+    lines.push('', '--- JSON ---', JSON.stringify(data, null, 2));
+    return lines.join('\n');
+  }
+
+  function flashButton(btn, msg) {
+    const prev = btn.textContent;
+    btn.textContent = msg;
+    setTimeout(() => {
+      btn.textContent = prev;
+    }, 2000);
+  }
+
+  async function copyDebugReport(btn) {
+    const blockId = getLockedBlockId();
+    mergeViewportIntoCache(blockId, getBlockElement(blockId));
+    const data = scanVisualDebug(blockId);
+    const ok = await copyText(formatDebugReport(data));
+    flashButton(btn, ok ? `Copied (${data.table.cachedLogins} logins)` : 'Copy failed');
+  }
+
+  async function copyAllLogins() {
+    const blockId = getLockedBlockId();
+    mergeViewportIntoCache(blockId, getBlockElement(blockId));
+    const logins = getCachedLoginsInRowOrder(blockId);
+    if (!logins.length) {
+      toast('No logins cached yet', true);
+      return;
+    }
+    const ok = await copyText(logins.join('\n'));
+    toast(ok ? `Copied ${logins.length} logins` : 'Copy failed', !ok);
+  }
+
+  async function copyDfLogins() {
+    const blockId = getLockedBlockId();
+    mergeViewportIntoCache(blockId, getBlockElement(blockId));
+    const logins = getDfLogins(blockId);
+    if (!logins.length) {
+      toast('No D/F shift logins in table', true);
+      return;
+    }
+    const ok = await copyText(logins.join('\n'));
+    toast(ok ? `Copied ${logins.length} D/F logins` : 'Copy failed', !ok);
+  }
+
+  function cleanupLegacyTitleButtons(titleContainer) {
+    titleContainer
+      .querySelectorAll(
+        '.qstd-title-btns, .qs-pending-df-button, .qs-pe-cd-copy-debug, .qs-pending-df-status',
+      )
+      .forEach((el) => el.remove());
+  }
+
+  function injectTitleCopyButtons(blockEl, blockId) {
+    const titleLabel = blockEl.querySelector('[data-automation-id="analysis_visual_title_label"]');
+    const titleContainer =
+      titleLabel?.closest('.visual-title-container') ||
+      titleLabel?.parentElement ||
+      blockEl.querySelector('.visual-title-container');
+    if (!titleContainer) return;
+
+    cleanupLegacyTitleButtons(titleContainer);
+
+    let wrap = titleContainer.querySelector('.qstd-click-title-btns');
+    if (!wrap) {
+      titleContainer.style.display = 'flex';
+      titleContainer.style.flexWrap = 'wrap';
+      titleContainer.style.alignItems = 'center';
+      titleContainer.style.gap = '8px';
+
+      wrap = document.createElement('span');
+      wrap.className = 'qstd-click-title-btns';
+      wrap.innerHTML = `
+        <button type="button" class="qstd-click-title-btn" data-qstd-click-copy="all" title="AP3X Click v${SCRIPT.version}">Copy All Logins</button>
+        <button type="button" class="qstd-click-title-btn" data-qstd-click-copy="df" title="AP3X Click v${SCRIPT.version} — DL, DN, FL shifts">Copy D/F Logins</button>
+        <button type="button" class="qstd-click-title-btn qstd-click-title-btn--debug" data-qstd-click-copy="debug" title="AP3X Click v${SCRIPT.version}">Copy Debug</button>
+      `;
+      titleContainer.appendChild(wrap);
+
+      wrap.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-qstd-click-copy]');
+        if (!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (btn.dataset.qstdClickCopy === 'debug') void copyDebugReport(btn);
+        else if (btn.dataset.qstdClickCopy === 'df') void copyDfLogins();
+        else void copyAllLogins();
+      });
+    }
+
+    wrap.dataset.qstdClickVersion = SCRIPT.version;
+
+    let badge = titleContainer.querySelector('.qstd-click-version-badge');
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = 'qstd-click-version-badge';
+      badge.textContent = `v${SCRIPT.version}`;
+      titleContainer.appendChild(badge);
+    } else {
+      badge.textContent = `v${SCRIPT.version}`;
+    }
+
+    titleContainer.dataset.qstdClickTitleBtns = '1';
+  }
+
+  function updateTitleCopyButtons(blockId) {
+    const blockEl = getBlockElement(blockId);
+    if (!blockEl) return;
+    mergeViewportIntoCache(blockId, blockEl);
+    injectTitleCopyButtons(blockEl, blockId);
+    const wrap = blockEl.querySelector('.qstd-click-title-btns');
+    if (!wrap) return;
+    const hasCells = getCellsInBlock(blockEl, blockId).length > 0;
+    for (const btn of wrap.querySelectorAll('[data-qstd-click-copy]')) {
+      btn.disabled = btn.dataset.qstdClickCopy === 'debug' && !hasCells ? true : false;
+    }
+  }
+
+  function toast(msg, isError = false) {
+    let el = qs('#qs-pe-click-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'qs-pe-click-toast';
+      document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.dataset.state = isError ? 'error' : 'ok';
+    el.classList.add('show');
+    clearTimeout(el._t);
+    el._t = setTimeout(() => el.classList.remove('show'), 2800);
+  }
+
+  function injectStyles() {
+    const css = `
+      #qs-pe-click-toast {
+        position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
+        z-index: 2147483647; background: #323232; color: #fff;
+        padding: 10px 18px; border-radius: 8px; opacity: 0;
+        transition: opacity .2s, transform .2s; pointer-events: none;
+        font: 13px/1.4 system-ui, sans-serif;
+      }
+      #qs-pe-click-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+      #qs-pe-click-toast[data-state="error"] { background: #b3261e; }
+      .qstd-click-title-btns { display: inline-flex; gap: 6px; flex-shrink: 0; }
+      .qstd-click-title-btn {
+        font-size: 11px; line-height: 1.3; padding: 3px 10px;
+        border: 1px solid #dadce0; border-radius: 4px; background: #fff; color: #1a73e8;
+        cursor: pointer; white-space: nowrap;
+        font-family: "Amazon Ember", "Helvetica Neue", Arial, sans-serif;
+      }
+      .qstd-click-title-btn:hover:not(:disabled) { background: #e8f0fe; border-color: #1a73e8; }
+      .qstd-click-title-btn:disabled { opacity: .45; cursor: not-allowed; color: #80868b; }
+      .qstd-click-title-btn--debug {
+        background: #7c3aed; border-color: #7c3aed; color: #fff;
+      }
+      .qstd-click-title-btn--debug:hover:not(:disabled) {
+        background: #6d28d9; border-color: #6d28d9;
+      }
+      .qstd-click-version-badge {
+        font-size: 10px; line-height: 1; padding: 2px 6px;
+        border-radius: 4px; background: #e8f0fe; color: #1a73e8;
+        font-weight: 700; flex-shrink: 0;
+        font-family: "Amazon Ember", "Helvetica Neue", Arial, sans-serif;
+      }
+      #${KNOWN_BLOCK_ID} .visual-title-container .qstd-title-btns,
+      #${KNOWN_BLOCK_ID} .visual-title-container > .qs-pending-df-button,
+      #${KNOWN_BLOCK_ID} .visual-title-container > .qs-pe-cd-copy-debug,
+      #${KNOWN_BLOCK_ID} .visual-title-container > .qs-pending-df-status {
+        display: none !important;
+        pointer-events: none !important;
+      }
+    `;
+    if (typeof GM_addStyle === 'function') GM_addStyle(css);
+    else {
+      const s = document.createElement('style');
+      s.textContent = css;
+      document.head.appendChild(s);
+    }
+  }
+
+  function startObserver() {
+    if (STATE.observer) return;
+    let debounce = null;
+    STATE.observer = new MutationObserver(() => {
+      if (STATE.collecting) return;
+      clearTimeout(debounce);
+      debounce = setTimeout(refreshScan, 600);
+    });
+    STATE.observer.observe(document.body, { childList: true, subtree: true });
+  }
+
+  function startLateLoadWatcher() {
+    if (STATE.lateLoadTimer) return;
+    let ticks = 0;
+    STATE.lateLoadTimer = setInterval(() => {
+      ticks += 1;
+      const scan = refreshScan();
+      const ready =
+        scan.target &&
+        scan.target.blockId === getLockedBlockId() &&
+        scan.summary.totalCellsInDom > 0;
+      if (ready) {
+        clearInterval(STATE.lateLoadTimer);
+        STATE.lateLoadTimer = null;
+        maybeScheduleAutoCollect(scan);
+      } else if (ticks >= 90) {
+        clearInterval(STATE.lateLoadTimer);
+        STATE.lateLoadTimer = null;
+      }
+    }, 2000);
+  }
+
+  function init() {
+    if (!location.pathname.includes(DASHBOARD_ID)) return;
+
+    injectStyles();
+    STATE.lockedBlockId = loadPersistedBlockId();
+    STATE.targetBlockId = getLockedBlockId();
+    refreshScan();
+    startObserver();
+    startLateLoadWatcher();
+    window.__qstdClickPeVersion = SCRIPT.version;
+
+    setInterval(() => {
+      purgeLegacyButtonsOnTargetBlock(getLockedBlockId());
+      const blockId = getLockedBlockId();
+      const blockEl = getBlockElement(blockId);
+      if (blockEl) updateTitleCopyButtons(blockId);
+    }, 800);
+
+    console.info(`[${SCRIPT.name} v${SCRIPT.version}] loaded — auto-collect on table load.`);
+    toast(`PE Click v${SCRIPT.version} active`, false);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    init();
+  }
+})();

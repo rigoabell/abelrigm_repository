@@ -1,0 +1,152 @@
+// ==UserScript==
+// @name          Labor Tracking - RELO, CRETs - MEM3
+// @version       1.0
+// @description   Adds Calm Code Buttons into the FCLM Labor Tracking Kiosk. Added DUB servers due to request from EU site.
+// @author        @studds edited by @evokevin
+// @match         https://fcmenu-iad-regionalized.corp.amazon.com/*/laborTrackingKiosk*
+// @match         http://fcmenu-iad-regionalized.corp.amazon.com/*/laborTrackingKiosk*
+// @match         https://fcmenu-dub-regionalized.corp.amazon.com/*/laborTrackingKiosk*
+// @match         http://fcmenu-dub-regionalized.corp.amazon.com/*/laborTrackingKiosk*
+// @exclude       http://fcmenu-iad-regionalized.corp.amazon.com/do/laborTrackingKiosk*
+// @exclude       https://fcmenu-iad-regionalized.corp.amazon.com/do/laborTrackingKiosk*
+
+// ==/UserScript==
+var css = document.createElement("style");
+css.innerHTML += `
+* {
+    box-sizing: border-box;
+}
+#body {
+    display: flex;
+    flex-flow: row nowrap;
+    align-content: space-around;
+    justify-content: space-around;
+}
+#body > .login {
+    margin: 0;
+    width: 25%;
+    max-width: 300px;
+}
+#body > #toolbox {
+    width: 75%;
+    flex-grow: 2;
+    font-size: 150%;
+    display: flex;
+    flex-flow: column nowrap;
+    align-content: space-around;
+    justify-content: space-around;
+}
+#body > #toolbox > .row {
+    margin-bottom: 8px;
+}
+#body > #toolbox > .row > h1 {
+    border-bottom: 2px inset;
+    margin-bottom: 4px;
+    padding: 0 8px;
+    background: rgba(255,255,255,0.5);
+}
+#body > #toolbox > .row > .roles {
+    display: flex;
+    flex-flow: row nowrap;
+    align-content: space-between;
+    justify-content: space-between;
+    padding: 0 8px;
+    max-width: 800px;
+}
+#body > #toolbox > .row > .roles > button {
+    display: table-row;
+    max-width: 25%;
+    background: #203731;
+    border-radius: 13px;
+    border:2px solid black;
+    color: #ffffff;
+    font-size: 20px;
+    padding: 4px 12px;
+    margin: 0 8px;
+}
+
+#body > #toolbox > .row > .roles > button:hover {
+    background: #006400;
+}
+`;
+document.querySelector("head").appendChild(css);
+function movebox() {
+    let waitForIt;
+    if (waitForIt = document.querySelector('#body > .login')) {
+        waitForIt.style = '';
+    } else {
+        setTimeout(movebox, 500);
+    }
+}
+movebox();
+var codes = [
+    {
+        title: 'C-Rets Trn/PS/PA',
+        roles: [
+            {name: 'CRETs Trainee', code: 'CRTR'},
+            {name: 'CRETs 5S', code: 'CR5S'},
+            {name: 'CRETs Lead/PA', code: 'LRTN'},
+            {name: 'ICQA PA', code: 'ICQAPQA'},
+            {name: 'CRETs Problem Solve', code: 'REBTRN3'},
+            {name: 'CRETs Add-in', code: 'CRADD'},
+            {name: 'CRETs Audits', code: 'CRAUDIT'},
+        ]
+    },
+    {
+        title: 'C-Rets Indirects',
+        roles: [
+            {name: 'CRETs Exceptions', code: 'CRETREF'},
+            {name: 'CRETs Waterspider', code: 'CRSDCNTF'},
+            {name: 'CRETs End of Line', code: 'CREOL'},
+            {name: 'CRETs Jam Clear and Metal', code: 'CRTLQA'},
+            {name: 'CRETs Sort', code: 'CRSORT'},
+            {name: 'CRETs IOL', code: 'SCRFB10'},
+        ]
+    },
+    {
+        title: 'C-Rets Dock',
+        roles: [
+            {name: 'Unloader', code: 'CRUNLD'},
+            {name: 'Consolidation', code: 'CRTCON'},
+            {name: 'T.D.R.', code: 'CRDSCAN'},
+        ]
+     },
+     {
+        title: 'Admin/HR/IT',
+        roles: [
+            {name: 'HR Group Events', code: 'HRGROUP'},
+            {name: 'Accomodations', code: 'TLDA'},
+            {name: 'Town Hall Meeting', code: 'HRAHM'},
+            {name: 'Learning Classroom', code: 'LNAMB'},
+            {name: 'ISTOP', code: 'ISTOP'},
+            {name: 'MSTOP', code: 'MSTOP'},
+        ]
+    },
+    {
+        title: 'Safety & SEV Codes',
+        roles: [
+            {name: 'Safety Training', code: 'SFTMISC'},
+            {name: 'Network SEV 1/2', code: 'NTWRKSEV'},
+            {name: 'RME SEV 1/2', code: 'RMESEV'},
+            {name: 'Weather SEV 1/2', code: 'WTHRSEV'},
+        ]
+    },
+];
+let toolbox = document.createElement('div'), toolboxHTML = '';
+toolbox.id = "toolbox";
+for (let shift of codes) {
+    console.log(shift);
+    toolboxHTML += '<div class="row"><h1>' + shift.title + '</h1><div class="roles">';
+    for (let role of shift.roles) {
+        toolboxHTML += '<button value="' + role.code + '">' + role.name + '</button>';
+    }
+    toolboxHTML += '</div></div>';
+}
+toolbox.innerHTML = toolboxHTML
+document.querySelector('#body').appendChild(toolbox);
+Array.from(document.querySelectorAll('#body > #toolbox > .row > .roles > button')).forEach(function(el){
+    el.addEventListener('click', function () {
+        document.getElementById('calmCode').value = el.value
+        document.forms[0].submit()
+    })
+})

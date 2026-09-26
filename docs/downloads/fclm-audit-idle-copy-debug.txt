@@ -1,0 +1,616 @@
+// ==UserScript==
+// @name         FCLM Audit Idle — Copy Debug
+// @namespace    https://github.com/audit-idle-time-kiosk
+// @version      1.0.0
+// @description  Collects FCLM page structure, audit table, badge lookup, and idle-time probes. Click "Copy Debug" and paste to your developer.
+// @match        https://fclm-portal.amazon.com/reports/functionRollup*
+// @match        https://fclm-portal.amazon.com/employee/timeDetails*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setClipboard
+// @connect      fclm-portal.amazon.com
+// ==/UserScript==
+
+(() => {
+  "use strict";
+
+  const CONFIG = {
+    warehouseId: "MEM3",
+    processId: "1003058",
+    shiftStartHour: 6,
+    shiftEndHour: 18,
+    auditCaptionMatchers: ["C-Return Audit [4300018934]"],
+    rosterLinkSelectors: [
+      'tbody tr td:nth-child(3) a[title="View Time Details"]',
+      'tbody tr td:nth-child(3) a[href*="/employee/timeDetails"]',
+      'tbody tr td a[title="View Time Details"]',
+      'tbody tr td a[href*="/employee/timeDetails"]',
+    ],
+    badgeSelectors: [
+      "dl.list-side-by-side:nth-of-type(1) > dd:nth-of-type(3)",
+      "table.empDetailCard dd",
+      "dl.list-side-by-side dd",
+    ],
+    loginDdSel: "table.empDetailCard dd",
+    maxTimeDetailFetches: 8,
+    requestTimeoutMs: 30000,
+  };
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function cleanText(s) {
+    return (s || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+  }
+
+  function absUrl(href) {
+    if (!href) return null;
+    try {
+      return href.startsWith("http") ? href : new URL(href, location.origin).toString();
+    } catch {
+      return null;
+    }
+  }
+
+  function gmGet(url) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: "GET",
+        url,
+        timeout: CONFIG.requestTimeoutMs,
+        onload: (res) => {
+          if (res.status >= 200 && res.status < 300) resolve(res.responseText);
+          else reject(new Error(`HTTP ${res.status} for ${url}`));
+        },
+        onerror: () => reject(new Error(`Request error for ${url}`)),
+        ontimeout: () => reject(new Error(`Timeout for ${url}`)),
+      });
+    });
+  }
+
+  async function copyToClipboard(text) {
+    try {
+      GM_setClipboard(text, "text");
+      return true;
+    } catch {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  }
+
+  function pad2(n) {
+    return String(n).padStart(2, "0");
+  }
+
+  function formatShiftDate(d) {
+    return `${d.getFullYear()}/${pad2(d.getMonth() + 1)}/${pad2(d.getDate())}`;
+  }
+
+  function encodeShiftDate(d) {
+    return encodeURIComponent(formatShiftDate(d));
+  }
+
+  function buildTodayShiftRollupUrl() {
+    const today = new Date();
+    const dateEnc = encodeShiftDate(today);
+    const params = new URLSearchParams({
+      reportFormat: "HTML",
+      warehouseId: CONFIG.warehouseId,
+      processId: String(CONFIG.processId),
+      maxIntradayDays: "1",
+      spanType: "Intraday",
+      startDateIntraday: formatShiftDate(today),
+      startHourIntraday: String(CONFIG.shiftStartHour),
+      startMinuteIntraday: "0",
+      endDateIntraday: formatShiftDate(today),
+      endHourIntraday: String(CONFIG.shiftEndHour),
+      endMinuteIntraday: "0",
+    });
+    return `https://fclm-portal.amazon.com/reports/functionRollup?${params.toString()}`;
+  }
+
+  function buildTimeDetailsUrl(employeeId) {
+    const today = new Date();
+    const params = new URLSearchParams({
+      employeeId: String(employeeId),
+      warehouseId: CONFIG.warehouseId,
+      spanType: "Intraday",
+      startDateIntraday: formatShiftDate(today),
+      endDateIntraday: formatShiftDate(today),
+      startHourIntraday: String(CONFIG.shiftStartHour),
+      startMinuteIntraday: "0",
+      endHourIntraday: String(CONFIG.shiftEndHour),
+      endMinuteIntraday: "0",
+    });
+    return `https://fclm-portal.amazon.com/employee/timeDetails?${params.toString()}`;
+  }
+
+  function parseDurationToSeconds(durationStr) {
+    const t = cleanText(durationStr);
+    if (!t) return 0;
+    const parts = t.split(":").map((n) => Number(n));
+    if (parts.some(Number.isNaN)) return 0;
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    return 0;
+  }
+
+  function formatSeconds(totalSeconds) {
+    totalSeconds = Math.max(0, Math.round(totalSeconds || 0));
+    const h = Math.floor(totalSeconds / 3600);
+    const m = Math.floor((totalSeconds % 3600) / 60);
+    const s = totalSeconds % 60;
+    if (h > 0) {
+      return `${pad2(h)}:${pad2(m)}:${pad2(s)}`;
+    }
+    return `${pad2(m)}:${pad2(s)}`;
+  }
+
+  function formatPct(numerator, denominator) {
+    if (!denominator) return "0.0%";
+    return `${((numerator / denominator) * 100).toFixed(1)}%`;
+  }
+
+  function extractEmployeeIdFromUrl(url) {
+    try {
+      return new URL(url).searchParams.get("employeeId") || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function extractLoginFromDoc(doc) {
+    const dds = [...doc.querySelectorAll(CONFIG.loginDdSel)];
+    for (const dd of dds) {
+      const t = cleanText(dd.textContent);
+      if (!t) continue;
+      if (/^[a-z0-9._-]{2,32}$/i.test(t)) return t;
+    }
+    return dds.length ? cleanText(dds[0].textContent) : "";
+  }
+
+  function probeBadgeSelectors(doc) {
+    return CONFIG.badgeSelectors.map((sel) => {
+      const nodes = [...doc.querySelectorAll(sel)];
+      return {
+        selector: sel,
+        matchCount: nodes.length,
+        values: nodes.slice(0, 5).map((n) => cleanText(n.textContent)),
+      };
+    });
+  }
+
+  function extractBadgeFromDoc(doc) {
+    const primary = doc.querySelector(CONFIG.badgeSelectors[0]);
+    if (primary) return cleanText(primary.textContent);
+    const login = extractLoginFromDoc(doc);
+    if (/^\d{5,8}$/.test(login)) return login;
+    return login || null;
+  }
+
+  function extractIdleSecondsFromDoc(doc) {
+    let idleSeconds = 0;
+    const segments = [];
+
+    for (const row of doc.querySelectorAll("tr.function-seg")) {
+      const cls = row.className || "";
+      const text = cleanText(row.textContent);
+      const isIndirect =
+        row.classList.contains("indirect") ||
+        /\bindirect\b/i.test(cls) ||
+        /\bindirect\b/i.test(text);
+      const isTimeOffTask =
+        row.classList.contains("timeOffTask") ||
+        /\btimeofftask\b/i.test(cls) ||
+        /\btime off task\b/i.test(text);
+
+      const durationCell = row.querySelector("td.rightAlign") || row.querySelector("td:last-child");
+      const durationText = cleanText(durationCell?.textContent || "");
+      const seconds = parseDurationToSeconds(durationText);
+
+      if (isIndirect && !isTimeOffTask) {
+        idleSeconds += seconds;
+        segments.push({ type: "idle-indirect", text: text.slice(0, 120), duration: durationText, seconds });
+      }
+    }
+
+    return { idleSeconds, idleTime: formatSeconds(idleSeconds), segments: segments.slice(0, 12) };
+  }
+
+  function extractClockedInSecondsFromDoc(doc) {
+    let clockedInSeconds = 0;
+    const segments = [];
+
+    for (const row of doc.querySelectorAll("tr.clock-seg")) {
+      const cls = row.className || "";
+      const text = cleanText(row.textContent);
+      const isOnClock =
+        row.classList.contains("on-clock") ||
+        /\bon-clock\b/i.test(cls) ||
+        /\bonclock\b/i.test(text) ||
+        /\bonclock\/paid\b/i.test(text) ||
+        /\bonclock\/unpaid\b/i.test(text);
+
+      const durationCell = row.querySelector("td.rightAlign") || row.querySelector("td:last-child");
+      const durationText = cleanText(durationCell?.textContent || "");
+      const seconds = parseDurationToSeconds(durationText);
+
+      if (isOnClock) {
+        clockedInSeconds += seconds;
+        segments.push({ type: "on-clock", text: text.slice(0, 120), duration: durationText, seconds });
+      }
+    }
+
+    return {
+      clockedInSeconds,
+      clockedInTime: formatSeconds(clockedInSeconds),
+      segments: segments.slice(0, 12),
+    };
+  }
+
+  async function analyzeTimeDetails(url, rosterName = "") {
+    const employeeId = extractEmployeeIdFromUrl(url);
+    const result = {
+      rosterName,
+      employeeId,
+      timeDetailsUrl: url,
+      fetchOk: false,
+      error: null,
+      badge: null,
+      badgeProbes: [],
+      loginFromLegacySelector: null,
+      idle: null,
+      clockedIn: null,
+      idlePct: null,
+    };
+
+    try {
+      const html = await gmGet(url);
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      result.fetchOk = true;
+      result.badgeProbes = probeBadgeSelectors(doc);
+      result.badge = extractBadgeFromDoc(doc);
+      result.loginFromLegacySelector = extractLoginFromDoc(doc);
+      result.idle = extractIdleSecondsFromDoc(doc);
+      result.clockedIn = extractClockedInSecondsFromDoc(doc);
+      result.idlePct = formatPct(result.idle.idleSeconds, result.clockedIn.clockedInSeconds);
+    } catch (e) {
+      result.error = String(e?.message || e);
+    }
+
+    return result;
+  }
+
+  function captionMatches(text) {
+    const t = cleanText(text);
+    return CONFIG.auditCaptionMatchers.some((m) => t.includes(m));
+  }
+
+  function findTargetCaption() {
+    return [...document.querySelectorAll("caption")].find((c) => captionMatches(c.textContent || "")) || null;
+  }
+
+  function getTargetTable() {
+    return findTargetCaption()?.closest("table") || null;
+  }
+
+  function getTableHeaders(table) {
+    const headers = [];
+    const theadRows = [...table.querySelectorAll("thead tr")];
+    const headerRow = theadRows[theadRows.length - 1] || table.querySelector("tr");
+    if (!headerRow) return headers;
+
+    [...headerRow.children].forEach((cell, index) => {
+      const text = cleanText(cell.textContent);
+      headers.push({
+        index,
+        text,
+        tag: cell.tagName.toLowerCase(),
+        className: cell.className || "",
+      });
+    });
+    return headers;
+  }
+
+  function findColumnIndex(headers, patterns) {
+    for (const pattern of patterns) {
+      const idx = headers.findIndex((h) => pattern.test(h.text));
+      if (idx >= 0) return idx;
+    }
+    return -1;
+  }
+
+  function getRosterLinks(table) {
+    let anchors = [];
+    for (const sel of CONFIG.rosterLinkSelectors) {
+      anchors = [...table.querySelectorAll(sel)];
+      if (anchors.length) break;
+    }
+
+    return anchors.map((a, index) => ({
+      index,
+      rosterName: cleanText(a.textContent),
+      href: a.getAttribute("href"),
+      url: absUrl(a.getAttribute("href")),
+      employeeId: extractEmployeeIdFromUrl(absUrl(a.getAttribute("href")) || ""),
+    }));
+  }
+
+  function scrapeAuditRows(table, headers) {
+    const unitsIdx = findColumnIndex(headers, [/^units$/i, /\bunits\b/i]);
+    const uphIdx = findColumnIndex(headers, [/^uph$/i, /\buph\b/i, /units per hour/i]);
+    const rows = [];
+
+    for (const tr of table.querySelectorAll("tbody tr")) {
+      const cells = [...tr.children];
+      if (!cells.length) continue;
+
+      const link =
+        tr.querySelector('a[href*="/employee/timeDetails"]') ||
+        tr.querySelector('a[title="View Time Details"]');
+
+      const cellValues = cells.map((c) => cleanText(c.textContent));
+      const rowClasses = tr.className || "";
+      const rowStyle = tr.getAttribute("style") || "";
+
+      rows.push({
+        rosterName: link ? cleanText(link.textContent) : cellValues[2] || cellValues[0] || "",
+        employeeId: extractEmployeeIdFromUrl(absUrl(link?.getAttribute("href")) || ""),
+        timeDetailsHref: link?.getAttribute("href") || null,
+        units: unitsIdx >= 0 ? cellValues[unitsIdx] ?? null : null,
+        uph: uphIdx >= 0 ? cellValues[uphIdx] ?? null : null,
+        unitsColumnIndex: unitsIdx,
+        uphColumnIndex: uphIdx,
+        rowClasses,
+        rowStyle,
+        cellValues,
+        isHighlighted: /highlight|selected|current|active/i.test(rowClasses + rowStyle),
+      });
+    }
+
+    return rows;
+  }
+
+  function detectCurrentUserHints() {
+    const hints = [];
+
+    const title = cleanText(document.title);
+    if (title) hints.push({ source: "document.title", value: title });
+
+    for (const sel of [
+      "#userName",
+      ".userName",
+      "[data-username]",
+      "header",
+      ".header",
+      "#header",
+    ]) {
+      const el = document.querySelector(sel);
+      if (el) {
+        const t = cleanText(el.textContent);
+        if (t && t.length < 200) hints.push({ source: sel, value: t });
+      }
+    }
+
+    const metaUser = document.querySelector('meta[name="username"], meta[name="user"]');
+    if (metaUser) {
+      hints.push({ source: "meta", value: metaUser.getAttribute("content") });
+    }
+
+    return hints;
+  }
+
+  function selectorSnapshot(el, label) {
+    if (!el) return { label, found: false };
+    return {
+      label,
+      found: true,
+      id: el.id || null,
+      tag: el.tagName.toLowerCase(),
+      className: el.className || null,
+      textPreview: cleanText(el.textContent).slice(0, 200),
+      outerHtmlPreview: (el.outerHTML || "").slice(0, 500),
+    };
+  }
+
+  async function buildDebugReport() {
+    const report = {
+      script: "FCLM Audit Idle — Copy Debug v1.0.0",
+      collectedAt: new Date().toISOString(),
+      page: {
+        href: location.href,
+        pathname: location.pathname,
+        title: document.title,
+      },
+      shift: {
+        warehouseId: CONFIG.warehouseId,
+        processId: CONFIG.processId,
+        window: `${CONFIG.shiftStartHour}:00 – ${CONFIG.shiftEndHour}:00`,
+        todayDate: formatShiftDate(new Date()),
+        expectedRollupUrl: buildTodayShiftRollupUrl(),
+        urlMatchesExpectedShift: location.href.includes(encodeURIComponent(formatShiftDate(new Date()).replace(/\//g, "%2F"))) ||
+          location.href.includes(formatShiftDate(new Date()).replace(/\//g, "%2F")),
+      },
+      currentUserHints: detectCurrentUserHints(),
+      auditTable: null,
+      timeDetailsPage: null,
+      timeDetailProbes: [],
+      notes: [
+        "employeeId in rollup links is NOT the badge number",
+        "badge/login is on timeDetails at dl.list-side-by-side:nth-of-type(1) > dd:nth-of-type(3)",
+        "idle time = sum of tr.function-seg indirect rows excluding timeOffTask",
+      ],
+    };
+
+    if (location.pathname.includes("/employee/timeDetails")) {
+      const params = Object.fromEntries(new URL(location.href).searchParams.entries());
+      report.timeDetailsPage = {
+        queryParams: params,
+        badgeProbes: probeBadgeSelectors(document),
+        badge: extractBadgeFromDoc(document),
+        loginFromLegacySelector: extractLoginFromDoc(document),
+        idle: extractIdleSecondsFromDoc(document),
+        clockedIn: extractClockedInSecondsFromDoc(document),
+        functionSegCount: document.querySelectorAll("tr.function-seg").length,
+        clockSegCount: document.querySelectorAll("tr.clock-seg").length,
+        dlList: [...document.querySelectorAll("dl.list-side-by-side")].slice(0, 3).map((dl, i) => ({
+          index: i,
+          dts: [...dl.querySelectorAll("dt")].map((dt) => cleanText(dt.textContent)),
+          dds: [...dl.querySelectorAll("dd")].map((dd) => cleanText(dd.textContent)),
+        })),
+      };
+      if (report.timeDetailsPage.idle && report.timeDetailsPage.clockedIn) {
+        report.timeDetailsPage.idlePct = formatPct(
+          report.timeDetailsPage.idle.idleSeconds,
+          report.timeDetailsPage.clockedIn.clockedInSeconds
+        );
+      }
+    }
+
+    const caption = findTargetCaption();
+    const table = getTargetTable();
+
+    if (caption && table) {
+      const headers = getTableHeaders(table);
+      const rosterLinks = getRosterLinks(table);
+      const auditRows = scrapeAuditRows(table, headers);
+
+      report.auditTable = {
+        captionText: cleanText(caption.textContent),
+        captionId: caption.id || null,
+        tableId: table.id || null,
+        captionSelector: caption.id ? `#${caption.id}` : "caption matching C-Return Audit",
+        tableSelector: table.id ? `table#${table.id}` : null,
+        headerCount: headers.length,
+        headers,
+        rowCount: auditRows.length,
+        rosterLinkCount: rosterLinks.length,
+        rosterLinks,
+        auditRows,
+        highlightedRows: auditRows.filter((r) => r.isHighlighted),
+        captionSnapshot: selectorSnapshot(caption, "audit-caption"),
+      };
+
+      const toFetch = rosterLinks.slice(0, CONFIG.maxTimeDetailFetches);
+      for (const link of toFetch) {
+        if (!link.url) continue;
+        report.timeDetailProbes.push(await analyzeTimeDetails(link.url, link.rosterName));
+        await sleep(80);
+      }
+
+      const badgeByEmployeeId = new Map(
+        report.timeDetailProbes
+          .filter((p) => p.fetchOk && p.employeeId)
+          .map((p) => [p.employeeId, p.badge])
+      );
+
+      report.auditTable.auditRows = auditRows.map((row) => ({
+        ...row,
+        badgeFromTimeDetails: badgeByEmployeeId.get(row.employeeId) || null,
+      }));
+    } else {
+      report.auditTable = {
+        found: false,
+        allCaptions: [...document.querySelectorAll("caption")]
+          .map((c) => cleanText(c.textContent))
+          .slice(0, 20),
+        tablesOnPage: [...document.querySelectorAll("table")]
+          .map((t) => ({ id: t.id || null, caption: cleanText(t.querySelector("caption")?.textContent || "") }))
+          .slice(0, 15),
+      };
+    }
+
+    return report;
+  }
+
+  function makeDebugButton() {
+    if (document.querySelector("[data-fclm-copy-debug-btn]")) return;
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Copy Debug";
+    btn.setAttribute("data-fclm-copy-debug-btn", "1");
+    btn.title = "Copy FCLM debug JSON for developer analysis";
+    Object.assign(btn.style, {
+      position: "fixed",
+      bottom: "18px",
+      right: "18px",
+      zIndex: "2147483646",
+      padding: "10px 16px",
+      fontSize: "13px",
+      fontWeight: "700",
+      borderRadius: "10px",
+      border: "2px solid #1a5a99",
+      background: "#3b9eff",
+      color: "#fff",
+      cursor: "pointer",
+      boxShadow: "0 4px 14px rgba(0,0,0,0.25)",
+      fontFamily: "Segoe UI, Arial, sans-serif",
+    });
+
+    const status = document.createElement("div");
+    status.setAttribute("data-fclm-copy-debug-status", "1");
+    Object.assign(status.style, {
+      position: "fixed",
+      bottom: "58px",
+      right: "18px",
+      zIndex: "2147483646",
+      padding: "6px 10px",
+      fontSize: "11px",
+      borderRadius: "8px",
+      background: "rgba(0,0,0,0.75)",
+      color: "#fff",
+      maxWidth: "320px",
+      display: "none",
+      fontFamily: "Segoe UI, Arial, sans-serif",
+    });
+
+    btn.addEventListener("click", async () => {
+      const original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Collecting…";
+      status.style.display = "block";
+      status.textContent = "Scanning page and fetching time details…";
+
+      try {
+        const report = await buildDebugReport();
+        const text = JSON.stringify(report, null, 2);
+        const ok = await copyToClipboard(text);
+
+        status.textContent = ok
+          ? `Copied ${text.length.toLocaleString()} chars. Paste in chat for analysis.`
+          : "Copy failed — see browser console.";
+        console.log("[FCLM Copy Debug]", report);
+
+        btn.textContent = ok ? "Copied!" : "Copy failed";
+        setTimeout(() => {
+          btn.textContent = original;
+        }, 2000);
+      } catch (e) {
+        console.error("[FCLM Copy Debug]", e);
+        status.textContent = String(e?.message || e);
+        btn.textContent = "Error";
+        setTimeout(() => {
+          btn.textContent = original;
+        }, 2000);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.documentElement.appendChild(status);
+    document.documentElement.appendChild(btn);
+  }
+
+  function install() {
+    makeDebugButton();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", install);
+  } else {
+    install();
+  }
+})();

@@ -1,0 +1,929 @@
+// ==UserScript==
+// @name         MEM3 LPN Batch Extractor
+// @namespace    https://tampermonkey.net/
+// @version      0.1.0
+// @description  Batch lookup LPNs in MEM3 and extract Product table values.
+// @match        https://qi-fcresearch-na.corp.amazon.com/MEM3/results*
+// @grant        GM_setClipboard
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const SEARCH_URL = 'https://qi-fcresearch-na.corp.amazon.com/MEM3/results?s=';
+  const PANEL_ID = 'mem3-batch-extractor-panel';
+  const HELPER_FRAME_ID = 'mem3-batch-extractor-helper-frame';
+  const PAGE_WAIT_TIMEOUT_MS = 30000;
+  const STATE = {
+    rows: [],
+    debug: [],
+    headers: [],
+    includeTitle: true,
+  };
+
+  function getVisibleHeaders() {
+    if (STATE.includeTitle) {
+      return STATE.headers.slice();
+    }
+    return STATE.headers.filter((header) => header !== 'Title');
+  }
+
+  function injectStyles() {
+    const style = document.createElement('style');
+    style.textContent = `
+      #${PANEL_ID} {
+        position: sticky;
+        top: 8px;
+        z-index: 9999;
+        margin: 12px 0;
+        padding: 16px;
+        border: 1px solid #d5dbdb;
+        border-radius: 8px;
+        background: #fff;
+        box-shadow: 0 2px 8px rgba(15, 17, 17, 0.12);
+        font-family: Arial, sans-serif;
+      }
+      #${PANEL_ID} h2 {
+        margin: 0 0 12px;
+        font-size: 18px;
+      }
+      #${PANEL_ID} .mem3-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-bottom: 10px;
+      }
+      #${PANEL_ID} textarea {
+        width: 100%;
+        min-height: 120px;
+        resize: vertical;
+        padding: 8px;
+        font-family: Consolas, monospace;
+      }
+      #${PANEL_ID} button {
+        border: 1px solid #888c8c;
+        border-radius: 6px;
+        padding: 8px 12px;
+        cursor: pointer;
+        background: #f0f2f2;
+      }
+      #${PANEL_ID} button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      #${PANEL_ID} .mem3-status {
+        font-size: 13px;
+        color: #565959;
+      }
+      #${PANEL_ID} .mem3-table-wrap {
+        margin-top: 12px;
+        max-height: 480px;
+        overflow: auto;
+        border: 1px solid #eaeded;
+      }
+      #${PANEL_ID} table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      #${PANEL_ID} th,
+      #${PANEL_ID} td {
+        border: 1px solid #eaeded;
+        padding: 6px 8px;
+        text-align: left;
+        vertical-align: top;
+        white-space: nowrap;
+      }
+      #${PANEL_ID} th {
+        position: sticky;
+        top: 0;
+        background: #f7fafa;
+      }
+      #${PANEL_ID} .mem3-meta {
+        font-size: 12px;
+        color: #565959;
+      }
+      #${PANEL_ID} .mem3-progress {
+        margin-top: 8px;
+        padding: 8px 10px;
+        border: 1px solid #eaeded;
+        border-radius: 6px;
+        background: #f7fafa;
+        font-size: 12px;
+        color: #0f1111;
+      }
+      #${PANEL_ID} .mem3-progress-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 4px 16px;
+        margin-top: 6px;
+      }
+      #${PANEL_ID} .mem3-progress-grid span b {
+        color: #565959;
+        font-weight: 600;
+        margin-right: 4px;
+      }
+      #${PANEL_ID} .mem3-progress-bar {
+        height: 6px;
+        border-radius: 999px;
+        background: #eaeded;
+        overflow: hidden;
+        margin-top: 8px;
+      }
+      #${PANEL_ID} .mem3-progress-bar > div {
+        height: 100%;
+        width: 0%;
+        background: #1c89e3;
+        transition: width 0.25s ease-out;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function normalizeText(value) {
+    return (value || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function getLpnList(rawValue) {
+    return rawValue
+      .split(/[\s,;]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  async function waitForCondition(check, timeoutMs, intervalMs) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const value = check();
+      if (value) {
+        return value;
+      }
+      await sleep(intervalMs);
+    }
+    return null;
+  }
+
+  function ensureHelperFrame() {
+    let frame = document.getElementById(HELPER_FRAME_ID);
+    if (frame) {
+      return frame;
+    }
+
+    frame = document.createElement('iframe');
+    frame.id = HELPER_FRAME_ID;
+    frame.style.width = '0';
+    frame.style.height = '0';
+    frame.style.border = '0';
+    frame.style.position = 'fixed';
+    frame.style.right = '0';
+    frame.style.bottom = '0';
+    frame.style.visibility = 'hidden';
+    document.body.appendChild(frame);
+    return frame;
+  }
+
+  function getResultsRoot(doc) {
+    return doc.querySelector('#results-content') || doc.querySelector('#drawer-hull') || doc.body;
+  }
+
+  function getTextCandidates(doc, text) {
+    const normalizedTarget = normalizeText(text).toLowerCase();
+    const elements = Array.from(doc.querySelectorAll('a, button, span, div, li'));
+    return elements.filter((node) => normalizeText(node.textContent).toLowerCase() === normalizedTarget);
+  }
+
+  function clickElement(node) {
+    if (!node) {
+      return false;
+    }
+
+    ['mousedown', 'mouseup', 'click'].forEach((eventName) => {
+      node.dispatchEvent(
+        new MouseEvent(eventName, {
+          bubbles: true,
+          cancelable: true,
+          view: node.ownerDocument.defaultView,
+        })
+      );
+    });
+
+    if (typeof node.click === 'function') {
+      node.click();
+    }
+
+    return true;
+  }
+
+  async function activateProductSection(doc) {
+    const exactMatches = getTextCandidates(doc, 'Product');
+
+    for (const match of exactMatches) {
+      const clickable = match.closest('a, button, [role="button"], li, div');
+      if (!clickable) {
+        continue;
+      }
+
+      clickElement(clickable);
+      await sleep(500);
+      const resultsRoot = getResultsRoot(doc);
+      const hasTables = resultsRoot.querySelectorAll('table').length > 0;
+      const hasSectionTitle = Array.from(resultsRoot.querySelectorAll('*')).some(
+        (node) => normalizeText(node.textContent) === 'Product'
+      );
+      if (hasTables || hasSectionTitle) {
+        return {
+          clicked: true,
+          clickedHtml: clickable.outerHTML.slice(0, 1000),
+        };
+      }
+    }
+
+    return {
+      clicked: false,
+      clickedHtml: '',
+    };
+  }
+
+  async function loadRenderedDocument(url) {
+    const frame = ensureHelperFrame();
+
+    return new Promise((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => {
+        cleanup();
+        reject(new Error('Timed out waiting for page load'));
+      }, PAGE_WAIT_TIMEOUT_MS);
+
+      function cleanup() {
+        window.clearTimeout(timeoutId);
+        frame.removeEventListener('load', onLoad);
+      }
+
+      async function onLoad() {
+        try {
+          const frameWindow = frame.contentWindow;
+          const frameDocument = frame.contentDocument || frameWindow?.document;
+          if (!frameDocument) {
+            throw new Error('Unable to access iframe document');
+          }
+
+          await waitForCondition(() => frameDocument.querySelector('#results-content'), 10000, 250);
+          const activation = await activateProductSection(frameDocument);
+
+          const readyDoc =
+            (await waitForCondition(() => {
+              const resultsRoot = getResultsRoot(frameDocument);
+              const titles = resultsRoot.querySelectorAll('.section-title');
+              const tables = resultsRoot.querySelectorAll('table');
+              const productHeadings = Array.from(resultsRoot.querySelectorAll('span, h1, h2, h3, h4, div')).filter(
+                (node) => normalizeText(node.textContent) === 'Product'
+              );
+              const hasRenderedResults =
+                tables.length > 0 ||
+                titles.length > 0 ||
+                productHeadings.length > 1 ||
+                /Manufacturer|ASIN|FNSKU|ISBN|JOB/i.test(resultsRoot.innerText);
+
+              if (hasRenderedResults) {
+                frameDocument.__mem3Activation = activation;
+                return frameDocument;
+              }
+              return null;
+            }, PAGE_WAIT_TIMEOUT_MS, 300)) || frameDocument;
+
+          cleanup();
+          resolve(readyDoc);
+        } catch (error) {
+          cleanup();
+          reject(error);
+        }
+      }
+
+      frame.addEventListener('load', onLoad, { once: false });
+      frame.src = url;
+    });
+  }
+
+  function findSectionByTitle(doc, title) {
+    const titles = Array.from(doc.querySelectorAll('.section-title'));
+    const match = titles.find((node) => normalizeText(node.textContent) === title);
+    if (!match) {
+      return { titleNode: null, container: null };
+    }
+
+    const candidates = [
+      match.closest('.section-placeholder'),
+      match.closest('.a-box-group'),
+      match.closest('.a-box'),
+      match.parentElement,
+    ].filter(Boolean);
+
+    const container = candidates.find((node) => node.querySelector('table')) || candidates[0] || null;
+    return { titleNode: match, container };
+  }
+
+  function extractKeyValueTables(container) {
+    const result = {};
+    const tables = Array.from(container.querySelectorAll('table'));
+
+    tables.forEach((table, tableIndex) => {
+      const rows = Array.from(table.querySelectorAll('tr'));
+      rows.forEach((row, rowIndex) => {
+        const headerCells = Array.from(row.querySelectorAll('th')).map((cell) => normalizeText(cell.textContent));
+        const dataCells = Array.from(row.querySelectorAll('td')).map((cell) => normalizeText(cell.textContent));
+
+        if (headerCells.length && dataCells.length) {
+          const key = headerCells[0];
+          const value = dataCells.join(' | ');
+          if (!key) {
+            return;
+          }
+          if (!(key in result)) {
+            result[key] = value;
+          } else {
+            result[`${key} (${tableIndex + 1}-${rowIndex + 1})`] = value;
+          }
+          return;
+        }
+
+        const cells = [...headerCells, ...dataCells];
+        const nonEmpty = cells.filter(Boolean);
+        if (nonEmpty.length >= 2) {
+          const key = nonEmpty[0];
+          const value = nonEmpty.slice(1).join(' | ');
+          if (key && !(key in result)) {
+            result[key] = value;
+          } else if (key) {
+            result[`${key} (${tableIndex + 1}-${rowIndex + 1})`] = value;
+          }
+          return;
+        }
+
+        if (nonEmpty.length === 1) {
+          result[`table${tableIndex + 1}_row${rowIndex + 1}`] = nonEmpty[0];
+        }
+      });
+    });
+
+    return result;
+  }
+
+  function extractTargetValue(productContainer) {
+    const tables = Array.from(productContainer.querySelectorAll('table'));
+    for (const table of tables) {
+      const rows = Array.from(table.querySelectorAll('tr'));
+      for (const row of rows) {
+        const th = row.querySelector('th');
+        if (!th) {
+          continue;
+        }
+        if (normalizeText(th.textContent).toLowerCase() === 'vendor code') {
+          const td = row.querySelector('td');
+          return normalizeText(td?.textContent || '');
+        }
+      }
+    }
+
+    const selectorCandidates = [
+      'div.a-column.a-span7:nth-of-type(2) > table.a-keyvalue > tbody > tr:nth-of-type(5) > td',
+      'table.a-keyvalue tbody tr:nth-of-type(5) td',
+    ];
+
+    for (const selector of selectorCandidates) {
+      const node = productContainer.querySelector(selector);
+      if (node) {
+        return normalizeText(node.textContent);
+      }
+    }
+
+    return '';
+  }
+
+  function parseResultDocument(doc, lpn) {
+    const productSection = findSectionByTitle(doc, 'Product');
+    const productContainer = productSection.container;
+    const availableSections = Array.from(doc.querySelectorAll('.section-title')).map((node) =>
+      normalizeText(node.textContent)
+    );
+    const resultsRoot = getResultsRoot(doc);
+
+    if (!productContainer) {
+      return {
+        lpn,
+        ok: false,
+        error: 'Product section not found',
+        targetValue: '',
+        productData: {},
+        debugMeta: {
+          availableSections,
+          url: doc.location?.href || '',
+          title: doc.title || '',
+          bodySnippet: (doc.body?.innerText || '').slice(0, 4000),
+          htmlSnippet: (doc.documentElement?.outerHTML || '').slice(0, 4000),
+          resultsTextSnippet: normalizeText(resultsRoot?.innerText || '').slice(0, 4000),
+          resultsHtmlSnippet: (resultsRoot?.innerHTML || '').slice(0, 8000),
+          activation: doc.__mem3Activation || null,
+        },
+      };
+    }
+
+    const productData = extractKeyValueTables(productContainer);
+    const targetValue = extractTargetValue(productContainer);
+
+    return {
+      lpn,
+      ok: true,
+      error: '',
+      targetValue,
+      productData,
+      debugMeta: {
+        availableSections,
+        productHtmlSnippet: productContainer.outerHTML.slice(0, 8000),
+        titleHtml: productSection.titleNode?.outerHTML || '',
+        title: doc.title || '',
+        url: doc.location?.href || '',
+        activation: doc.__mem3Activation || null,
+      },
+    };
+  }
+
+  function formatDuration(ms) {
+    if (!Number.isFinite(ms) || ms < 0) {
+      return '--';
+    }
+    const totalSeconds = Math.round(ms / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const pad = (n) => String(n).padStart(2, '0');
+    if (hours > 0) {
+      return `${hours}:${pad(minutes)}:${pad(seconds)}`;
+    }
+    return `${pad(minutes)}:${pad(seconds)}`;
+  }
+
+  function formatClock(date) {
+    if (!date || !(date instanceof Date) || Number.isNaN(date.getTime())) {
+      return '--';
+    }
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  function renderProgress(progressNode, progress) {
+    if (!progressNode) {
+      return;
+    }
+    const { total, processed, currentLpn, startedAt, durations, finishedAt } = progress;
+    const now = Date.now();
+    const elapsedMs = startedAt ? now - startedAt : 0;
+    const sampleDurations = durations.length ? durations : [];
+    const avgMs = sampleDurations.length
+      ? sampleDurations.reduce((sum, value) => sum + value, 0) / sampleDurations.length
+      : 0;
+    const remaining = Math.max(total - processed, 0);
+    const etaMs = remaining && avgMs ? remaining * avgMs : 0;
+    const etaDate = etaMs ? new Date(now + etaMs) : null;
+    const percent = total ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+    const status = finishedAt
+      ? `Done (${formatDuration(finishedAt - startedAt)})`
+      : currentLpn
+      ? `Working on ${currentLpn}`
+      : 'Starting...';
+
+    progressNode.innerHTML = '';
+
+    const header = document.createElement('div');
+    header.textContent = `${processed}/${total} complete (${percent}%) - ${status}`;
+    progressNode.appendChild(header);
+
+    const grid = document.createElement('div');
+    grid.className = 'mem3-progress-grid';
+
+    const items = [
+      ['Elapsed', formatDuration(elapsedMs)],
+      ['Avg / LPN', avgMs ? formatDuration(avgMs) : '--'],
+      ['Remaining', remaining ? `${remaining} LPN(s)` : '0 LPN(s)'],
+      ['Countdown', remaining && avgMs ? formatDuration(etaMs) : finishedAt ? '00:00' : '--'],
+      ['ETA', etaDate ? formatClock(etaDate) : finishedAt ? formatClock(new Date(finishedAt)) : '--'],
+    ];
+
+    items.forEach(([label, value]) => {
+      const cell = document.createElement('span');
+      const labelNode = document.createElement('b');
+      labelNode.textContent = `${label}:`;
+      cell.appendChild(labelNode);
+      cell.appendChild(document.createTextNode(value));
+      grid.appendChild(cell);
+    });
+
+    progressNode.appendChild(grid);
+
+    const bar = document.createElement('div');
+    bar.className = 'mem3-progress-bar';
+    const fill = document.createElement('div');
+    fill.style.width = `${percent}%`;
+    bar.appendChild(fill);
+    progressNode.appendChild(bar);
+  }
+
+  function escapeCell(value) {
+    const text = String(value ?? '');
+    if (/[",\n]/.test(text)) {
+      return `"${text.replace(/"/g, '""')}"`;
+    }
+    return text;
+  }
+
+  function escapeTsvCell(value) {
+    return String(value ?? '').replace(/\t/g, ' ').replace(/\r?\n/g, ' ');
+  }
+
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (error) {
+      // Fall back to Tampermonkey clipboard support.
+    }
+
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(text);
+      return true;
+    }
+
+    return false;
+  }
+
+  function buildResultsTable(container) {
+    container.innerHTML = '';
+
+    if (!STATE.rows.length) {
+      return;
+    }
+
+    const tableWrap = document.createElement('div');
+    tableWrap.className = 'mem3-table-wrap';
+
+    const table = document.createElement('table');
+    const thead = document.createElement('thead');
+    const tbody = document.createElement('tbody');
+
+    const visibleHeaders = getVisibleHeaders();
+    const headerRow = document.createElement('tr');
+    visibleHeaders.forEach((header) => {
+      const th = document.createElement('th');
+      th.textContent = header;
+      headerRow.appendChild(th);
+    });
+    thead.appendChild(headerRow);
+
+    STATE.rows.forEach((row) => {
+      const tr = document.createElement('tr');
+      visibleHeaders.forEach((header) => {
+        const td = document.createElement('td');
+        td.textContent = row[header] ?? '';
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+
+    table.appendChild(thead);
+    table.appendChild(tbody);
+    tableWrap.appendChild(table);
+    container.appendChild(tableWrap);
+  }
+
+  async function runBatch(textarea, statusNode, outputNode, runButton, progressNode) {
+    const lpns = getLpnList(textarea.value);
+
+    if (!lpns.length) {
+      statusNode.textContent = 'Enter at least one LPN.';
+      return;
+    }
+
+    runButton.disabled = true;
+    statusNode.textContent = `Processing ${lpns.length} LPN(s)...`;
+    STATE.rows = [];
+    STATE.debug = [];
+    STATE.headers = ['LPN', 'Status', 'Error', 'Target Value'];
+    buildResultsTable(outputNode);
+
+    const progress = {
+      total: lpns.length,
+      processed: 0,
+      currentLpn: '',
+      startedAt: Date.now(),
+      durations: [],
+      finishedAt: null,
+    };
+
+    renderProgress(progressNode, progress);
+    const ticker = window.setInterval(() => renderProgress(progressNode, progress), 1000);
+
+    const allKeys = new Set();
+
+    try {
+      for (let index = 0; index < lpns.length; index += 1) {
+        const lpn = lpns[index];
+        progress.currentLpn = lpn;
+        statusNode.textContent = `Fetching ${index + 1}/${lpns.length}: ${lpn}`;
+        renderProgress(progressNode, progress);
+
+        const lpnStartedAt = Date.now();
+
+        try {
+          const sourceUrl = `${SEARCH_URL}${encodeURIComponent(lpn)}`;
+          const resultDocument = await loadRenderedDocument(sourceUrl);
+          const parsed = parseResultDocument(resultDocument, lpn);
+
+          Object.keys(parsed.productData).forEach((key) => allKeys.add(key));
+          STATE.debug.push({
+            lpn,
+            ok: parsed.ok,
+            error: parsed.error,
+            targetValue: parsed.targetValue,
+            productData: parsed.productData,
+            debugMeta: parsed.debugMeta,
+            sourceUrl,
+          });
+        } catch (error) {
+          STATE.debug.push({
+            lpn,
+            ok: false,
+            error: error.message,
+            targetValue: '',
+            productData: {},
+            debugMeta: {},
+            sourceUrl: `${SEARCH_URL}${encodeURIComponent(lpn)}`,
+          });
+        }
+
+        progress.durations.push(Date.now() - lpnStartedAt);
+        progress.processed += 1;
+        renderProgress(progressNode, progress);
+      }
+    } finally {
+      window.clearInterval(ticker);
+    }
+
+    progress.currentLpn = '';
+    progress.finishedAt = Date.now();
+    renderProgress(progressNode, progress);
+
+    const productKeys = Array.from(allKeys);
+    STATE.headers = ['LPN', 'Status', 'Error', ...productKeys, 'Target Value'];
+    STATE.rows = STATE.debug.map((entry) => {
+      const row = {
+        LPN: entry.lpn,
+        Status: entry.ok ? 'OK' : 'ERROR',
+        Error: entry.error || '',
+        'Target Value': entry.targetValue || '',
+      };
+
+      productKeys.forEach((key) => {
+        row[key] = entry.productData[key] || '';
+      });
+
+      return row;
+    });
+
+    buildResultsTable(outputNode);
+    statusNode.textContent = `Completed ${lpns.length} LPN(s).`;
+    runButton.disabled = false;
+  }
+
+  function buildCsv() {
+    if (!STATE.rows.length) {
+      return '';
+    }
+
+    const visibleHeaders = getVisibleHeaders();
+    const lines = [
+      visibleHeaders.map(escapeCell).join(','),
+      ...STATE.rows.map((row) => visibleHeaders.map((header) => escapeCell(row[header] ?? '')).join(',')),
+    ];
+
+    return lines.join('\n');
+  }
+
+  function buildTsv() {
+    if (!STATE.rows.length) {
+      return '';
+    }
+
+    const visibleHeaders = getVisibleHeaders();
+    const lines = [
+      visibleHeaders.map(escapeTsvCell).join('\t'),
+      ...STATE.rows.map((row) => visibleHeaders.map((header) => escapeTsvCell(row[header] ?? '')).join('\t')),
+    ];
+
+    return lines.join('\r\n');
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function buildHtmlTable() {
+    if (!STATE.rows.length) {
+      return '';
+    }
+
+    const visibleHeaders = getVisibleHeaders();
+    const headerCells = visibleHeaders.map((header) => `<th>${escapeHtml(header)}</th>`).join('');
+    const bodyRows = STATE.rows
+      .map((row) => {
+        const cells = visibleHeaders.map((header) => `<td>${escapeHtml(row[header] ?? '')}</td>`).join('');
+        return `<tr>${cells}</tr>`;
+      })
+      .join('');
+
+    return `<table border="1"><thead><tr>${headerCells}</tr></thead><tbody>${bodyRows}</tbody></table>`;
+  }
+
+  async function copyTableToClipboard(html, tsv) {
+    try {
+      if (window.ClipboardItem && navigator.clipboard?.write) {
+        const item = new ClipboardItem({
+          'text/html': new Blob([html], { type: 'text/html' }),
+          'text/plain': new Blob([tsv], { type: 'text/plain' }),
+        });
+        await navigator.clipboard.write([item]);
+        return true;
+      }
+    } catch (error) {
+      // Fall through to document.execCommand fallback.
+    }
+
+    try {
+      const container = document.createElement('div');
+      container.setAttribute('contenteditable', 'true');
+      container.style.position = 'fixed';
+      container.style.left = '-10000px';
+      container.style.top = '0';
+      container.style.opacity = '0';
+      container.innerHTML = html;
+      document.body.appendChild(container);
+
+      const range = document.createRange();
+      range.selectNodeContents(container);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+
+      const ok = document.execCommand('copy');
+      selection.removeAllRanges();
+      container.remove();
+      if (ok) {
+        return true;
+      }
+    } catch (error) {
+      // Ignore and fall through.
+    }
+
+    return copyText(tsv);
+  }
+
+  function createPanel() {
+    if (document.getElementById(PANEL_ID)) {
+      return;
+    }
+
+    const panel = document.createElement('section');
+    panel.id = PANEL_ID;
+
+    const title = document.createElement('h2');
+    title.textContent = 'MEM3 Batch LPN Extractor';
+
+    const help = document.createElement('div');
+    help.className = 'mem3-meta';
+    help.textContent = 'Paste one or more LPNs, one per line or separated by spaces/commas.';
+
+    const textarea = document.createElement('textarea');
+    textarea.placeholder = 'LPNO425486963\nLPNO123456789';
+
+    const actionRow = document.createElement('div');
+    actionRow.className = 'mem3-row';
+
+    const runButton = document.createElement('button');
+    runButton.textContent = 'Run Batch';
+
+    const copyTableButton = document.createElement('button');
+    copyTableButton.textContent = 'Copy Table (Excel)';
+    copyTableButton.title = 'Copies tab-separated so it pastes into columns.';
+
+    const copyDebugButton = document.createElement('button');
+    copyDebugButton.textContent = 'Copy Debug';
+
+    const titleToggleLabel = document.createElement('label');
+    titleToggleLabel.style.display = 'inline-flex';
+    titleToggleLabel.style.alignItems = 'center';
+    titleToggleLabel.style.gap = '6px';
+    titleToggleLabel.style.fontSize = '13px';
+    titleToggleLabel.style.color = '#0f1111';
+    titleToggleLabel.style.cursor = 'pointer';
+
+    const titleToggleInput = document.createElement('input');
+    titleToggleInput.type = 'checkbox';
+    titleToggleInput.checked = STATE.includeTitle;
+
+    const titleToggleText = document.createElement('span');
+    titleToggleText.textContent = 'Include Title column';
+
+    titleToggleLabel.appendChild(titleToggleInput);
+    titleToggleLabel.appendChild(titleToggleText);
+
+    const statusNode = document.createElement('div');
+    statusNode.className = 'mem3-status';
+    statusNode.textContent = 'Ready.';
+
+    const progressNode = document.createElement('div');
+    progressNode.className = 'mem3-progress';
+    progressNode.style.display = 'none';
+
+    const outputNode = document.createElement('div');
+
+    runButton.addEventListener('click', () => {
+      progressNode.style.display = '';
+      runBatch(textarea, statusNode, outputNode, runButton, progressNode);
+    });
+
+    copyTableButton.addEventListener('click', async () => {
+      const tsv = buildTsv();
+      const html = buildHtmlTable();
+      if (!tsv || !html) {
+        statusNode.textContent = 'No results to copy yet.';
+        return;
+      }
+      const copied = await copyTableToClipboard(html, tsv);
+      statusNode.textContent = copied
+        ? 'Table copied. Paste into Excel/Sheets to fill columns.'
+        : 'Unable to copy table.';
+    });
+
+    copyDebugButton.addEventListener('click', async () => {
+      const payload = JSON.stringify(
+        {
+          extractedAt: new Date().toISOString(),
+          currentPage: window.location.href,
+          headers: STATE.headers,
+          rows: STATE.rows,
+          debug: STATE.debug,
+        },
+        null,
+        2
+      );
+      const copied = await copyText(payload);
+      statusNode.textContent = copied ? 'Debug payload copied.' : 'Unable to copy debug payload.';
+    });
+
+    titleToggleInput.addEventListener('change', () => {
+      STATE.includeTitle = titleToggleInput.checked;
+      buildResultsTable(outputNode);
+      statusNode.textContent = STATE.includeTitle
+        ? 'Title column included.'
+        : 'Title column hidden.';
+    });
+
+    actionRow.appendChild(runButton);
+    actionRow.appendChild(copyTableButton);
+    actionRow.appendChild(copyDebugButton);
+    actionRow.appendChild(titleToggleLabel);
+
+    panel.appendChild(title);
+    panel.appendChild(help);
+    panel.appendChild(textarea);
+    panel.appendChild(actionRow);
+    panel.appendChild(statusNode);
+    panel.appendChild(progressNode);
+    panel.appendChild(outputNode);
+
+    const mountTarget = document.querySelector('#results-content') || document.body;
+    mountTarget.prepend(panel);
+  }
+
+  function init() {
+    injectStyles();
+    createPanel();
+  }
+
+  if (window.top !== window.self) {
+    return;
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    init();
+  }
+})();

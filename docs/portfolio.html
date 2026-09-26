@@ -29,7 +29,8 @@
       <p class="eyebrow">Portfolio</p>
       <h1>Work</h1>
       <p class="page-hero-sub">
-        Select a project. The write-up, downloads, and anything else for that project open here.
+        Select a project. Rig Setup and each Tampermonkey script open here.
+        A script downloads as a .txt file.
       </p>
     </div>
   </section>
@@ -41,13 +42,18 @@
         <div class="project-tabs" role="tablist" aria-label="Open projects">
           <button type="button" class="project-tab active" data-tab="projects" role="tab" aria-selected="true">Projects</button>
           <button type="button" class="project-tab hidden" data-tab="rig-setup" id="rig-setup" role="tab" aria-selected="false" aria-controls="project-rig-setup">Rig Setup</button>
+          <button type="button" class="project-tab hidden" data-tab="" id="script-tab" role="tab" aria-selected="false" aria-controls="project-script"></button>
         </div>
 
         <div id="panel-projects">
-          <div class="project-rows" role="list">
+          <div class="project-search">
+            <input id="project-search" type="search" placeholder="Search projects&hellip;" autocomplete="off" />
+          </div>
+          <p id="project-count" class="project-count">Loading projects&hellip;</p>
+          <div class="project-rows" id="project-rows" role="list">
             <button type="button" class="project-row" data-project="rig-setup" role="listitem">
-              <span class="project-icon" aria-hidden="true">&#128295;</span>
               <span class="project-row-body">
+                <span class="project-cat">Setup</span>
                 <span class="project-row-name">Rig Setup</span>
                 <span class="project-row-desc">Install Python, Node, Git, and the other dependencies, then follow the steps.</span>
               </span>
@@ -55,6 +61,7 @@
               <span class="project-row-go" aria-hidden="true">&rarr;</span>
             </button>
           </div>
+          <p id="project-empty" class="project-empty hidden">No projects match that search.</p>
         </div>
 
         <div id="project-rig-setup" class="project-detail hidden" role="tabpanel" aria-labelledby="rig-setup">
@@ -122,6 +129,22 @@
             </div>
           </div>
         </div>
+
+        <div id="project-script" class="project-detail hidden" role="tabpanel" aria-labelledby="script-tab">
+          <header class="project-doc-head">
+            <div>
+              <p class="project-cat" id="script-category"></p>
+              <h2 id="script-name"></h2>
+              <p id="script-detail"></p>
+            </div>
+            <a id="script-download" class="btn btn-primary" href="#" download>Download .txt</a>
+          </header>
+          <p class="script-download-note">The download is the Tampermonkey script saved as a .txt file.</p>
+          <dl class="script-meta">
+            <div><dt>Version</dt><dd id="script-version"></dd></div>
+            <div><dt>Runs on</dt><dd id="script-runs"></dd></div>
+          </dl>
+        </div>
         </div>
       </div>
     </section>
@@ -137,45 +160,6 @@
   <script src="assets/config.js"></script>
   <script src="assets/site.js"></script>
   <script src="assets/app.js"></script>
-  <script>
-    (function () {
-      var projectsPanel = document.getElementById("panel-projects");
-      var sheet = document.querySelector(".project-sheet");
-      function showTab(id) {
-        var project = id && id !== "projects";
-        if (projectsPanel) projectsPanel.classList.toggle("hidden", !!project);
-        document.querySelectorAll(".project-detail").forEach(function (panel) {
-          panel.classList.toggle("hidden", panel.getAttribute("aria-labelledby") !== id);
-        });
-        document.querySelectorAll(".project-tab").forEach(function (tab) {
-          var on = tab.getAttribute("data-tab") === (project ? id : "projects");
-          tab.classList.toggle("active", on);
-          tab.setAttribute("aria-selected", on ? "true" : "false");
-          if (tab.getAttribute("data-tab") === id) tab.classList.remove("hidden");
-        });
-        document.querySelectorAll(".project-row").forEach(function (row) {
-          row.classList.toggle("selected", row.getAttribute("data-project") === id);
-        });
-        if (project) {
-          if (location.hash !== "#" + id) history.replaceState(null, "", "#" + id);
-        } else if (location.hash) {
-          history.replaceState(null, "", location.pathname + location.search);
-        }
-        if (sheet) sheet.scrollIntoView({ block: "start" });
-      }
-      document.querySelectorAll(".project-row").forEach(function (row) {
-        row.addEventListener("click", function () {
-          showTab(row.getAttribute("data-project"));
-        });
-      });
-      document.querySelectorAll(".project-tab").forEach(function (tab) {
-        tab.addEventListener("click", function () {
-          showTab(tab.getAttribute("data-tab"));
-        });
-      });
-      var hash = location.hash.replace("#", "");
-      if (hash && document.querySelector('.project-tab[data-tab="' + hash + '"]')) showTab(hash);
-    })();
-  </script>
+  <script src="assets/portfolio.js"></script>
 </body>
 </html>

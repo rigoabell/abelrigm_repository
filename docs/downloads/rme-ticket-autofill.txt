@@ -1,0 +1,941 @@
+// ==UserScript==
+// @name         RME Ticket Autofill
+// @namespace    rme-ticket-autofill
+// @version      1.0.6
+// @description  Auto-fill t.corp.amazon.com Create Ticket: RME / Equipment Issue / Material Handling Equipment.
+// @author       abelrigm
+// @match        *://*/*
+// @run-at       document-idle
+// @noframes
+// @grant        GM_openInTab
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_setClipboard
+// @grant        GM_registerMenuCommand
+// ==/UserScript==
+
+/*
+  Install: Tampermonkey → Create new script → paste this file → Save.
+  Orange icon sits just below the blue IT icon (bottom-left).
+  Title and description persist. Create stays confirm-on for testing.
+*/
+
+(function () {
+  "use strict";
+
+  const VERSION = "1.0.6";
+  const HOST_ID = "rme-ticket-autofill-host";
+  const TICKET_URL = "https://t.corp.amazon.com/create";
+  const PENDING_TTL_MS = 90 * 1000;
+  const KEYS = {
+    config: "rme.config",
+    pending: "rme.pending",
+    lastRun: "rme.lastRun",
+    lastDebug: "rme.lastDebug",
+  };
+
+  const FIXED = {
+    category: "RME",
+    type: "Equipment Issue",
+    item: "Material Handling Equipment",
+  };
+
+  const FIELD_IDS = {
+    category: "category-selector",
+    type: "type-selector",
+    item: "item-selector",
+    title: "ticket-title",
+    description: "markdown-editor",
+  };
+
+  const DEFAULT_CONFIG = {
+    title: "",
+    description: "",
+    confirmSubmit: true,
+  };
+
+  if (window.top !== window.self) return;
+  if (document.getElementById(HOST_ID)) return;
+
+  const runLog = [];
+  let lastFillReport = null;
+  let statusTimer = 0;
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function nowIso() {
+    return new Date().toISOString();
+  }
+
+  function gmGet(key, fallback) {
+    try {
+      if (typeof GM_getValue === "function") return GM_getValue(key, fallback);
+    } catch {
+      /* ignore */
+    }
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw == null) return fallback;
+      return JSON.parse(raw);
+    } catch {
+      return fallback;
+    }
+  }
+
+  function gmSet(key, value) {
+    try {
+      if (typeof GM_setValue === "function") {
+        GM_setValue(key, value);
+        return;
+      }
+    } catch {
+      /* ignore */
+    }
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function loadConfig() {
+    const saved = gmGet(KEYS.config, null);
+    const merged = { ...DEFAULT_CONFIG, ...(saved && typeof saved === "object" ? saved : {}) };
+    return {
+      title: merged.title || "",
+      description: merged.description || "",
+      confirmSubmit: merged.confirmSubmit !== false,
+    };
+  }
+
+  function saveConfig(cfg) {
+    gmSet(KEYS.config, cfg);
+  }
+
+  function log(step, detail) {
+    runLog.push({ t: nowIso(), step, detail: detail == null ? null : detail });
+    if (runLog.length > 80) runLog.shift();
+  }
+
+  function cleanText(value) {
+    return String(value || "")
+      .replace(/\u00a0/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function normMatch(value) {
+    return cleanText(value).toLowerCase();
+  }
+
+  function isTicketPage() {
+    try {
+      const url = new URL(location.href);
+      return /t\.corp\.amazon\.com$/i.test(url.hostname) && /^\/create\/?$/i.test(url.pathname);
+    } catch {
+      return false;
+    }
+  }
+
+  function visible(el) {
+    if (!el || !el.getBoundingClientRect) return false;
+    const rect = el.getBoundingClientRect();
+    const style = el.ownerDocument?.defaultView?.getComputedStyle?.(el);
+    if (style && (style.display === "none" || style.visibility === "hidden")) return false;
+    return rect.width > 0 || rect.height > 0 || el.offsetParent != null;
+  }
+
+  function mouseClick(el) {
+    if (!el) return;
+    try {
+      el.focus();
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (typeof el.click === "function") el.click();
+    } catch {
+      /* ignore */
+    }
+    const opts = { bubbles: true, cancelable: true };
+    try {
+      el.dispatchEvent(new MouseEvent("mousedown", opts));
+    } catch {
+      /* ignore */
+    }
+    try {
+      el.dispatchEvent(new MouseEvent("mouseup", opts));
+    } catch {
+      /* ignore */
+    }
+    try {
+      el.dispatchEvent(new MouseEvent("click", opts));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function pressKey(el, key) {
+    const target = el || document.activeElement || document.body;
+    const opts = { key, bubbles: true, cancelable: true };
+    target.dispatchEvent(new KeyboardEvent("keydown", opts));
+    target.dispatchEvent(new KeyboardEvent("keyup", opts));
+  }
+
+  function popupRoot() {
+    const nodes = [
+      ...document.querySelectorAll('[role="dialog"], [role="listbox"], [class*="awsui_dropdown"], [class*="dropdown-content"]'),
+    ];
+    return nodes.find((el) => visible(el)) || null;
+  }
+
+  function setNativeValue(el, value) {
+    const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, "value");
+    if (desc?.set) desc.set.call(el, value);
+    else el.value = value;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function collectLabels() {
+    return [...document.querySelectorAll("label, [class*='form-field'] span, [class*='awsui_label']")].map((node) => ({
+      text: cleanText(node.textContent).slice(0, 160),
+      for: node.getAttribute("for"),
+    }));
+  }
+
+  function findByLabel(re) {
+    const nodes = [...document.querySelectorAll("label, [class*='form-field'] > span, [class*='awsui_label'], legend")];
+    const matches = [];
+    for (const node of nodes) {
+      const text = cleanText(node.textContent);
+      if (!text || text.length > 80 || !re.test(text)) continue;
+      matches.push(node);
+    }
+    return matches.find((node) => node.getAttribute("for")) || matches[0] || null;
+  }
+
+  function fieldRoot(id, re) {
+    const byId = document.getElementById(id);
+    if (byId) return byId;
+    const label = findByLabel(re);
+    const forId = label?.getAttribute("for");
+    if (forId) {
+      const fromFor = document.getElementById(forId);
+      if (fromFor) return fromFor;
+    }
+    return fieldWrap(label);
+  }
+
+  function fieldWrap(label) {
+    return (
+      label?.closest("[class*='awsui_form-field'], [class*='form-field'], [data-testid]") ||
+      label?.parentElement
+    );
+  }
+
+  function dropdownTrigger(root) {
+    if (!root) return null;
+    if (root.matches?.('button, [role="combobox"]')) return root;
+    return (
+      root.querySelector('[role="combobox"]') ||
+      root.querySelector("button[aria-haspopup], button[aria-expanded]") ||
+      root.querySelector("button")
+    );
+  }
+
+  function textControl(root) {
+    if (!root) return null;
+    if (root.matches?.("textarea, input:not([type=hidden]):not([type=checkbox]):not([type=radio])")) return root;
+    return (
+      root.querySelector("textarea") ||
+      root.querySelector("input:not([type=hidden]):not([type=checkbox]):not([type=radio])") ||
+      root.querySelector('[contenteditable="true"]')
+    );
+  }
+
+  function locateDropdown(id, re) {
+    const container = fieldRoot(id, re);
+    const trigger = dropdownTrigger(container);
+    const label = document.querySelector(`label[for="${id}"]`) || findByLabel(re);
+    return { id, label, container, trigger, value: currentDropdownValue(container, trigger) };
+  }
+
+  function locateText(id, re) {
+    const container = fieldRoot(id, re);
+    const control = textControl(container);
+    const label = document.querySelector(`label[for="${id}"]`) || findByLabel(re);
+    return { id, label, container, control };
+  }
+
+  function currentDropdownValue(container, trigger) {
+    const el = trigger || dropdownTrigger(container);
+    const text = cleanText(el?.textContent || "");
+    if (!text || /^select /i.test(text) || /auto-fill/i.test(text) || /please select/i.test(text)) return "";
+    return text;
+  }
+
+  function currentTextValue(field) {
+    const el = field?.control;
+    if (!el) return "";
+    if (el.isContentEditable) return cleanText(el.textContent);
+    return cleanText(el.value || "");
+  }
+
+  function isDisabled(el) {
+    if (!el) return true;
+    if (el.disabled) return true;
+    if (el.getAttribute("aria-disabled") === "true") return true;
+    const cls = String(el.className || "");
+    if (/(^|\s)awsui_disabled/i.test(cls)) return true;
+    return false;
+  }
+
+  function resolveTrigger(id, re) {
+    const el = document.getElementById(id);
+    if (el?.matches?.("button, [role='combobox']")) return el;
+    if (el) {
+      const inner = dropdownTrigger(el);
+      if (inner) return inner;
+    }
+    return locateDropdown(id, re).trigger || null;
+  }
+
+  function visibleOptions() {
+    const root = popupRoot() || document;
+    const nodes = [
+      ...root.querySelectorAll(
+        '[role="option"], [role="listbox"] li, [class*="selectable-item"], [class*="option-content"], li, [data-testid*="option"]'
+      ),
+    ];
+    const seen = new Set();
+    const out = [];
+    for (const el of nodes) {
+      if (seen.has(el) || !visible(el)) continue;
+      const text = cleanText(el.textContent);
+      if (!text || text.length > 120) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.height > 120 || rect.width < 8) continue;
+      seen.add(el);
+      out.push(el);
+    }
+    return out;
+  }
+
+  function matchWanted(el, wanted) {
+    const text = normMatch(el.textContent);
+    const want = normMatch(wanted);
+    return text === want || text.startsWith(want + " ") || text.endsWith(" " + want);
+  }
+
+  async function pickOption(wanted) {
+    const want = normMatch(wanted);
+    const deadline = Date.now() + 8000;
+    let lastVisible = [];
+    while (Date.now() < deadline) {
+      const popup = popupRoot();
+      const filter = (popup || document).querySelector(
+        'input:not([type=hidden]):not([type=checkbox]), textarea, [class*="filtering"] input, [class*="dropdown"] input'
+      );
+      if (filter && visible(filter) && filter.value !== wanted) {
+        filter.focus();
+        setNativeValue(filter, wanted);
+        await sleep(300);
+      }
+      const options = visibleOptions();
+      lastVisible = options.map((el) => cleanText(el.textContent)).slice(0, 24);
+      const hit =
+        options.find((el) => matchWanted(el, wanted)) ||
+        options.find((el) => normMatch(el.textContent).includes(want));
+      if (hit) {
+        mouseClick(hit);
+        await sleep(250);
+        return { ok: true, set: cleanText(hit.textContent), via: "option-click", popup: Boolean(popup) };
+      }
+      await sleep(200);
+    }
+    return {
+      ok: false,
+      reason: "option not found",
+      popup: Boolean(popupRoot()),
+      visible: lastVisible,
+    };
+  }
+
+  async function setDropdown(id, re, wanted, waitEnabledMs) {
+    const start = Date.now();
+    let trigger = null;
+    while (Date.now() - start < (waitEnabledMs || 15000)) {
+      trigger = resolveTrigger(id, re);
+      if (trigger && !isDisabled(trigger)) break;
+      await sleep(200);
+    }
+    if (!trigger) return { ok: false, reason: "dropdown trigger not found", id };
+    if (isDisabled(trigger)) return { ok: false, reason: "dropdown still disabled", id };
+    const already = currentDropdownValue(trigger, trigger);
+    if (normMatch(already) === normMatch(wanted) || normMatch(already).includes(normMatch(wanted))) {
+      return { ok: true, set: already, via: "already" };
+    }
+    pressKey(document.body, "Escape");
+    await sleep(120);
+    mouseClick(trigger);
+    await sleep(400);
+    const picked = await pickOption(wanted);
+    if (!picked.ok) {
+      pressKey(trigger, "Enter");
+      await sleep(200);
+    }
+    await sleep(250);
+    const afterTrigger = resolveTrigger(id, re);
+    const after = currentDropdownValue(afterTrigger, afterTrigger);
+    if (picked.ok) return { ...picked, after };
+    if (normMatch(after).includes(normMatch(wanted))) return { ok: true, set: after, via: "value-after" };
+    return { ...picked, after };
+  }
+
+  async function setTextField(id, re, wanted) {
+    const field = locateText(id, re);
+    if (!field.control) return { ok: false, reason: "input not found", id };
+    field.control.focus();
+    if (field.control.isContentEditable) {
+      field.control.textContent = wanted;
+      field.control.dispatchEvent(new InputEvent("input", { bubbles: true, data: wanted, inputType: "insertText" }));
+    } else {
+      setNativeValue(field.control, wanted);
+    }
+    field.control.blur();
+    return { ok: true, set: currentTextValue(field) };
+  }
+
+  function findCreateButton() {
+    return (
+      document.querySelector("button.sim-create--submit") ||
+      [...document.querySelectorAll("button")].find((btn) => /^\s*create\s*$/i.test(cleanText(btn.textContent)))
+    );
+  }
+
+  async function waitForForm(timeoutMs) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const category = document.getElementById(FIELD_IDS.category);
+      if (category && category.matches("button, [role='combobox']") && !isDisabled(category)) return true;
+      await sleep(250);
+    }
+    return false;
+  }
+
+  function elSnap(id) {
+    const el = document.getElementById(id);
+    if (!el) return { id, found: false };
+    const kids = [...el.querySelectorAll("button, input, textarea, [role='combobox'], [contenteditable='true']")].slice(0, 8);
+    return {
+      id,
+      found: true,
+      tag: el.tagName,
+      type: el.getAttribute("type"),
+      role: el.getAttribute("role"),
+      ariaHaspopup: el.getAttribute("aria-haspopup"),
+      ariaDisabled: el.getAttribute("aria-disabled"),
+      disabled: Boolean(el.disabled),
+      className: String(el.className).slice(0, 180),
+      text: cleanText(el.textContent).slice(0, 80),
+      kids: kids.map((c) => ({
+        tag: c.tagName,
+        id: c.id || null,
+        role: c.getAttribute("role"),
+        type: c.getAttribute("type"),
+        ariaHaspopup: c.getAttribute("aria-haspopup"),
+        contenteditable: c.getAttribute("contenteditable"),
+      })),
+    };
+  }
+
+  function snapshotFields() {
+    const category = locateDropdown(FIELD_IDS.category, /category\s*\(c\)|^category$/i);
+    const type = locateDropdown(FIELD_IDS.type, /type\s*\(t\)|^type$/i);
+    const item = locateDropdown(FIELD_IDS.item, /item\s*\(i\)|^item$/i);
+    const title = locateText(FIELD_IDS.title, /^title$/i);
+    const description = locateText(FIELD_IDS.description, /^description$/i);
+    return {
+      category: {
+        label: cleanText(category.label?.textContent || ""),
+        value: category.value,
+        disabled: isDisabled(category.trigger),
+        triggerTag: category.trigger?.tagName || null,
+        rootFound: Boolean(category.container),
+      },
+      type: {
+        label: cleanText(type.label?.textContent || ""),
+        value: type.value,
+        disabled: isDisabled(type.trigger),
+        triggerTag: type.trigger?.tagName || null,
+        rootFound: Boolean(type.container),
+      },
+      item: {
+        label: cleanText(item.label?.textContent || ""),
+        value: item.value,
+        disabled: isDisabled(item.trigger),
+        triggerTag: item.trigger?.tagName || null,
+        rootFound: Boolean(item.container),
+      },
+      title: { label: cleanText(title.label?.textContent || ""), value: currentTextValue(title), controlTag: title.control?.tagName || null },
+      description: { label: cleanText(description.label?.textContent || ""), value: currentTextValue(description), controlTag: description.control?.tagName || null },
+    };
+  }
+
+  function buildDebug(extra) {
+    const payload = {
+      script: { name: "RME Ticket Autofill", version: VERSION },
+      generatedAt: nowIso(),
+      href: location.href,
+      title: document.title,
+      isTicketPage: isTicketPage(),
+      formPresent: Boolean(document.getElementById(FIELD_IDS.category)),
+      createFound: Boolean(findCreateButton()),
+      createSelector: "button.sim-create--submit",
+      ids: {
+        category: elSnap(FIELD_IDS.category),
+        type: elSnap(FIELD_IDS.type),
+        item: elSnap(FIELD_IDS.item),
+        title: elSnap(FIELD_IDS.title),
+        description: elSnap(FIELD_IDS.description),
+      },
+      config: loadConfig(),
+      pending: gmGet(KEYS.pending, null),
+      lastRun: gmGet(KEYS.lastRun, null),
+      lastFillReport,
+      log: runLog.slice(-40),
+      fields: isTicketPage() || extra?.forceFields ? snapshotFields() : null,
+      labels: isTicketPage() || extra?.forceFields ? collectLabels().slice(0, 40) : [],
+      extra: extra || null,
+    };
+    gmSet(KEYS.lastDebug, payload);
+    return payload;
+  }
+
+  async function copyDebug(extra) {
+    const text =
+      "RME Ticket Autofill — Copy Debug\n=== Paste everything below into the chat. ===\n" +
+      JSON.stringify(buildDebug(extra), null, 2);
+    try {
+      if (typeof GM_setClipboard === "function") {
+        GM_setClipboard(text, "text");
+        return true;
+      }
+    } catch {
+      /* fall through */
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function fillForm(cfg) {
+    const report = { startedAt: nowIso(), steps: [], ok: true, fixed: FIXED };
+    if (!isTicketPage()) {
+      report.ok = false;
+      report.error = "not on create ticket page";
+      lastFillReport = report;
+      return report;
+    }
+    if (!(await waitForForm(30000))) {
+      report.ok = false;
+      report.error = "form not found";
+      lastFillReport = report;
+      return report;
+    }
+
+    const saveProgress = () => {
+      lastFillReport = report;
+      gmSet(KEYS.lastRun, report);
+    };
+
+    const category = await setDropdown(FIELD_IDS.category, /category\s*\(c\)|^category$/i, FIXED.category, 15000);
+    report.steps.push({ key: "category", wanted: FIXED.category, ...category });
+    if (!category.ok) report.ok = false;
+    saveProgress();
+    await sleep(400);
+
+    const type = await setDropdown(FIELD_IDS.type, /type\s*\(t\)|^type$/i, FIXED.type, 10000);
+    report.steps.push({ key: "type", wanted: FIXED.type, ...type });
+    if (!type.ok) report.ok = false;
+    saveProgress();
+    await sleep(400);
+
+    const item = await setDropdown(FIELD_IDS.item, /item\s*\(i\)|^item$/i, FIXED.item, 10000);
+    report.steps.push({ key: "item", wanted: FIXED.item, ...item });
+    if (!item.ok) report.ok = false;
+    saveProgress();
+    await sleep(250);
+
+    const title = await setTextField(FIELD_IDS.title, /^title$/i, cleanText(cfg.title));
+    report.steps.push({ key: "title", wanted: cleanText(cfg.title), ...title });
+    if (!title.ok) report.ok = false;
+    saveProgress();
+
+    const description = await setTextField(FIELD_IDS.description, /^description$/i, String(cfg.description || "").trim());
+    report.steps.push({ key: "description", ...description });
+    if (!description.ok) report.ok = false;
+
+    report.finishedAt = nowIso();
+    saveProgress();
+    log("fill", report);
+    return report;
+  }
+
+  function missingRequired(cfg) {
+    const missing = [];
+    if (!cleanText(cfg.title)) missing.push("Title");
+    if (!cleanText(cfg.description)) missing.push("Description");
+    return missing;
+  }
+
+  async function submitForm() {
+    const btn = findCreateButton();
+    if (!btn) return { ok: false, reason: "Create button not found" };
+    const clickable = btn.closest("button") || btn;
+    if (isDisabled(clickable)) return { ok: false, reason: "Create button disabled" };
+    mouseClick(clickable);
+    log("create-click", "Create");
+    return { ok: true };
+  }
+
+  function setPending(action) {
+    gmSet(KEYS.pending, { action, at: Date.now() });
+  }
+
+  function consumePending() {
+    const pending = gmGet(KEYS.pending, null);
+    gmSet(KEYS.pending, null);
+    if (!pending || !pending.action) return null;
+    if (Date.now() - Number(pending.at || 0) > PENDING_TTL_MS) return null;
+    return pending.action;
+  }
+
+  function goToTicket() {
+    if (typeof GM_openInTab === "function") {
+      GM_openInTab(TICKET_URL, { active: true, insert: true });
+      return;
+    }
+    window.open(TICKET_URL, "_blank", "noopener");
+  }
+
+  function mountUi() {
+    const host = document.createElement("div");
+    host.id = HOST_ID;
+    Object.assign(host.style, {
+      position: "fixed",
+      inset: "0",
+      zIndex: "2147483646",
+      pointerEvents: "none",
+    });
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
+      <style>
+        :host {
+          all: initial;
+          position: fixed !important;
+          inset: 0 !important;
+          z-index: 2147483646 !important;
+          display: block !important;
+          pointer-events: none !important;
+        }
+        * { box-sizing: border-box; font-family: Arial, sans-serif; }
+        .fab {
+          pointer-events: auto;
+          position: fixed;
+          left: 12px;
+          bottom: calc(2in - 48px);
+          z-index: 2147483646;
+          width: 40px;
+          height: 40px;
+          border: 0;
+          border-radius: 999px;
+          background: #c2410c;
+          color: #fff;
+          cursor: pointer;
+          box-shadow: 0 8px 20px rgba(15, 23, 42, .35);
+          display: grid;
+          place-items: center;
+        }
+        .fab:hover { background: #9a3412; }
+        .panel {
+          pointer-events: auto;
+          display: none;
+          position: fixed;
+          left: 60px;
+          bottom: calc(2in - 48px);
+          z-index: 2147483646;
+          width: min(380px, calc(100vw - 72px));
+          max-height: min(72vh, 640px);
+          overflow: auto;
+          background: #0f1720;
+          color: #e8eef5;
+          border: 1px solid #2c3c4e;
+          border-radius: 12px;
+          box-shadow: 0 16px 40px rgba(0,0,0,.4);
+          font: 13px/1.4 Arial, sans-serif;
+        }
+        .panel.open { display: flex; flex-direction: column; }
+        .body { padding: 10px 12px 12px; display: grid; gap: 8px; }
+        .heading { font-size: 15px; font-weight: 800; color: #f6fbff; padding: 2px 0 2px; }
+        label.field { display: grid; gap: 4px; color: #c5d4e3; font-size: 12px; font-weight: 700; }
+        input, textarea {
+          width: 100%; box-sizing: border-box; border: 1px solid #3b4a5c; border-radius: 8px;
+          background: #071018; color: #f6fbff; padding: 8px 10px; font: 13px/1.3 Arial, sans-serif;
+        }
+        textarea { min-height: 88px; resize: vertical; }
+        button.act {
+          border: 0; border-radius: 8px; padding: 8px 10px; cursor: pointer;
+          background: #314257; color: #d5e2ef; font-weight: 700; font-size: 12px;
+        }
+        button.warn { background: #c2410c; color: #fff; }
+        .check { display: flex; align-items: center; gap: 8px; font-weight: 650; color: #d5e2ef; }
+        .check input { width: auto; }
+        .confirm-bar {
+          pointer-events: auto;
+          display: none;
+          position: fixed;
+          left: 60px;
+          bottom: calc(2in - 48px);
+          z-index: 2147483646;
+          width: min(260px, calc(100vw - 72px));
+          background: #0f1720;
+          color: #e8eef5;
+          border: 1px solid #2c3c4e;
+          border-radius: 12px;
+          box-shadow: 0 16px 40px rgba(0,0,0,.4);
+          padding: 10px 12px;
+          gap: 8px;
+          font: 13px/1.4 Arial, sans-serif;
+        }
+        .confirm-bar.open { display: flex; flex-direction: column; }
+        .confirm-msg { font-weight: 700; color: #ffedd5; }
+      </style>
+      <button class="fab" id="fab" title="RME Ticket Autofill" aria-label="Open RME Ticket Autofill">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>
+        </svg>
+      </button>
+      <div class="panel" id="panel">
+        <div class="body">
+          <div class="heading">RME Ticket Autofill</div>
+          <label class="field">Title
+            <input id="title" placeholder="Ticket title" />
+          </label>
+          <label class="field">Description
+            <textarea id="description" placeholder="What is wrong"></textarea>
+          </label>
+          <label class="check"><input id="confirmSubmit" type="checkbox" checked /> Confirm before create (testing)</label>
+          <button class="act warn" id="submit">Fill &amp; Create</button>
+          <button class="act" id="debug">Copy Debug</button>
+        </div>
+      </div>
+      <div class="confirm-bar" id="confirmBar">
+        <div class="confirm-msg">Form filled. Review the ticket, then create.</div>
+        <button class="act warn" id="confirmYes">Create</button>
+        <button class="act" id="confirmNo">Cancel</button>
+      </div>
+    `;
+    document.documentElement.appendChild(host);
+    const mo = new MutationObserver(() => {
+      if (!host.isConnected) document.documentElement.appendChild(host);
+    });
+    mo.observe(document.documentElement, { childList: true });
+
+    const panel = shadow.getElementById("panel");
+    const debugBtn = shadow.getElementById("debug");
+    const confirmBar = shadow.getElementById("confirmBar");
+
+    function setOpen(on) {
+      panel.classList.toggle("open", on);
+      if (on) confirmBar.classList.remove("open");
+    }
+
+    function scrollTicketIntoView() {
+      const el =
+        document.getElementById("category-selector") ||
+        document.getElementById("ticket-title") ||
+        document.querySelector("h1, form");
+      try {
+        el?.scrollIntoView({ block: "start", behavior: "smooth" });
+      } catch {
+        /* ignore */
+      }
+    }
+
+    function askSubmitConfirm() {
+      setOpen(false);
+      confirmBar.classList.add("open");
+      return new Promise((resolve) => {
+        const finish = (ok) => {
+          confirmBar.classList.remove("open");
+          yes.removeEventListener("click", onYes);
+          no.removeEventListener("click", onNo);
+          resolve(ok);
+        };
+        const onYes = () => finish(true);
+        const onNo = () => finish(false);
+        const yes = shadow.getElementById("confirmYes");
+        const no = shadow.getElementById("confirmNo");
+        yes.addEventListener("click", onYes);
+        no.addEventListener("click", onNo);
+      });
+    }
+
+    function setStatus(msg, kind) {
+      log("ui", { msg, kind });
+      if (!debugBtn) return;
+      const copied = /debug copied|copied/i.test(msg || "");
+      const failed = /could not copy|copy failed/i.test(msg || "");
+      if (!copied && !failed) return;
+      debugBtn.textContent = failed ? "Copy failed" : "Copied";
+      clearTimeout(statusTimer);
+      statusTimer = setTimeout(() => {
+        debugBtn.textContent = "Copy Debug";
+      }, 2000);
+    }
+
+    function readUi() {
+      const cfg = loadConfig();
+      cfg.title = shadow.getElementById("title").value.trim();
+      cfg.description = shadow.getElementById("description").value.trim();
+      cfg.confirmSubmit = shadow.getElementById("confirmSubmit").checked;
+      return cfg;
+    }
+
+    function writeUi(cfg) {
+      shadow.getElementById("title").value = cfg.title || "";
+      shadow.getElementById("description").value = cfg.description || "";
+      shadow.getElementById("confirmSubmit").checked = cfg.confirmSubmit !== false;
+    }
+
+    function persistFromUi() {
+      const cfg = readUi();
+      saveConfig(cfg);
+      return cfg;
+    }
+
+    async function ensureTicketThen(action) {
+      persistFromUi();
+      if (isTicketPage()) return true;
+      setPending(action);
+      goToTicket();
+      return false;
+    }
+
+    async function afterFillConfirm(cfg) {
+      setOpen(false);
+      scrollTicketIntoView();
+      await sleep(400);
+      if (!cfg.confirmSubmit) return true;
+      return askSubmitConfirm();
+    }
+
+    async function runFill() {
+      const cfg = persistFromUi();
+      const missing = missingRequired(cfg);
+      if (missing.length) {
+        window.alert("Fill required: " + missing.join(", "));
+        return null;
+      }
+      if (!(await ensureTicketThen("fill"))) return null;
+      const report = await fillForm(cfg);
+      if (!report.ok) window.alert("Fill had errors. Copy Debug and paste it in chat.");
+      return report;
+    }
+
+    async function runSubmit() {
+      const cfg = persistFromUi();
+      const missing = missingRequired(cfg);
+      if (missing.length) {
+        window.alert("Fill required: " + missing.join(", "));
+        return;
+      }
+      if (!(await ensureTicketThen("submit"))) return;
+      const report = await fillForm(cfg);
+      if (!report.ok) {
+        window.alert("Did not create — fill failed. Copy Debug.");
+        return;
+      }
+      if (!(await afterFillConfirm(cfg))) return;
+      const submitted = await submitForm();
+      if (!submitted.ok) window.alert(submitted.reason);
+    }
+
+    shadow.getElementById("fab").addEventListener("click", () => {
+      if (panel.classList.contains("open")) {
+        setOpen(false);
+        return;
+      }
+      writeUi(loadConfig());
+      setOpen(true);
+    });
+    for (const id of ["title", "description", "confirmSubmit"]) {
+      shadow.getElementById(id).addEventListener("change", persistFromUi);
+      shadow.getElementById(id).addEventListener("input", persistFromUi);
+    }
+    shadow.getElementById("submit").addEventListener("click", () => {
+      runSubmit().catch((err) => window.alert(String(err)));
+    });
+    shadow.getElementById("debug").addEventListener("click", async () => {
+      persistFromUi();
+      const ok = await copyDebug({ source: "panel" });
+      setStatus(ok ? "Debug copied. Paste it in chat." : "Could not copy debug.", ok ? "ok" : "bad");
+    });
+
+    writeUi(loadConfig());
+    setOpen(false);
+
+    if (typeof GM_registerMenuCommand === "function") {
+      GM_registerMenuCommand("RME Ticket: Fill form", () => {
+        runFill().catch((err) => window.alert(String(err)));
+      });
+      GM_registerMenuCommand("RME Ticket: Fill & Create", () => {
+        runSubmit().catch((err) => window.alert(String(err)));
+      });
+      GM_registerMenuCommand("RME Ticket: Open panel", () => {
+        writeUi(loadConfig());
+        setOpen(true);
+      });
+      GM_registerMenuCommand("RME Ticket: Copy Debug", () => {
+        copyDebug({ source: "menu" }).then((ok) => setStatus(ok ? "Debug copied." : "Copy failed.", ok ? "ok" : "bad"));
+      });
+    }
+
+    return { setStatus, runFill, runSubmit, afterFillConfirm };
+  }
+
+  const ui = mountUi();
+
+  async function resumePending() {
+    if (!isTicketPage()) return;
+    const action = consumePending();
+    if (!action) return;
+    log("resume-pending", action);
+    await waitForForm(30000);
+    const cfg = loadConfig();
+    if (action === "fill" || action === "submit") {
+      const report = await fillForm(cfg);
+      if (!report.ok) {
+        window.alert("Pending fill failed. Copy Debug.");
+        return;
+      }
+      if (action === "fill") return;
+      if (!(await ui.afterFillConfirm(cfg))) return;
+      const submitted = await submitForm();
+      if (!submitted.ok) window.alert(submitted.reason);
+    }
+  }
+
+  resumePending().catch((err) => {
+    log("resume-error", String(err));
+    window.alert(String(err));
+  });
+})();

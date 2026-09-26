@@ -1,0 +1,849 @@
+// ==UserScript==
+// @name         LPN Deleter
+// @namespace    rigo.lpn.deleter
+// @version      2.6
+// @description  Collapsible panel; open/closed state persists across reloads.
+// @match        https://aft-qt-na.aka.amazon.com/app/deleteitems*
+// @match        https://qt.na.aftx.amazonoperations.app/app/deleteitems*
+// @run-at       document-idle
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_setClipboard
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    if (window.top !== window.self) return;
+
+    const KEYS = {
+        enabled: 'lpn_deleter_enabled',
+        list: 'lpn_deleter_list',
+        processed: 'lpn_deleter_processed',
+        pending: 'lpn_deleter_pending',
+        dispositionReason: 'lpn_deleter_disposition',
+        discoveredTitles: 'lpn_deleter_discovered_titles',
+        panelOpen: 'lpn_deleter_panel_open'
+    };
+
+    const DISPOSITION_REASONS = {
+        sweeping_missing: 'Sweeping out(Missing)',
+        damaged_unreturnable: 'Damaged and unreturnable'
+    };
+
+    const LPN_INPUT_SELECTORS = [
+        'div.a-input-text-wrapper.a-form-normal > input',
+        'div.a-input-text-wrapper.a-form-error > input',
+        'div.a-input-text-wrapper > input',
+        '#workflow input[type="text"]'
+    ];
+
+    const CONTINUE_SELECTORS = [
+        '#a-autoid-1 > span.a-button-inner > input.a-button-input[type="submit"][data-aft-tool-hotkey="return"]',
+        '#a-autoid-0 > span.a-button-inner > input.a-button-input[type="submit"][data-aft-tool-hotkey="return"]',
+        'input.a-button-input[type="submit"][data-aft-tool-hotkey="return"]'
+    ];
+
+    const WORKFLOW_STEPS = {
+        select_item: 'Select item to delete',
+        scan_item: 'Scan item',
+        select_reason: 'Select deletion reason',
+        confirm_deletion: 'Confirm the deletion'
+    };
+
+    const LPN_ENTRY_STEPS = new Set(['select_item', 'scan_item']);
+
+    const WORKFLOW_HEADING_SELECTOR = '#workflow h1.a-size-large';
+
+    const NOISE_TITLE_PATTERNS = [
+        /^processing\.{3}$/i,
+        /^loading$/i,
+        /^scan container$/i,
+        /connection issues/i,
+        /failed to process/i,
+        /workflow is closed/i,
+        /processing for a long time/i,
+        /processing your last request/i
+    ];
+
+    const TICK_MS = 175;
+    const ACTION_COOLDOWN_MS = 500;
+    const AFTER_TYPE_MS = 400;
+    const LPN_BOX_WAIT_MS = 1000;
+
+    let enabled = GM_getValue(KEYS.enabled, false);
+    let listText = GM_getValue(KEYS.list, '');
+    let processedLpns = Array.isArray(GM_getValue(KEYS.processed, [])) ? GM_getValue(KEYS.processed, []) : [];
+    let pendingLpn = typeof GM_getValue(KEYS.pending, '') === 'string' ? GM_getValue(KEYS.pending, '') : '';
+    const savedDisposition = GM_getValue(KEYS.dispositionReason, null);
+    let dispositionReason = Object.prototype.hasOwnProperty.call(DISPOSITION_REASONS, savedDisposition)
+        ? savedDisposition
+        : 'damaged_unreturnable';
+
+    let loopId = null;
+    let lastActionAt = 0;
+    let lastTypedLpn = '';
+    let lastWorkflowTitle = '';
+    let lastWorkflowStep = '';
+    let actedOnUnknownTitle = '';
+    let lpnStepEnteredAt = 0;
+    let lpnStepSkippedNoBox = false;
+    let discoveredTitles = Array.isArray(GM_getValue(KEYS.discoveredTitles, []))
+        ? GM_getValue(KEYS.discoveredTitles, [])
+        : [];
+
+    let statusEl;
+    let progressEl;
+    let listEl;
+    let dispositionEl;
+    let panelWrapEl;
+    let panelFabEl;
+    let panelRootEl;
+    let panelOpen = GM_getValue(KEYS.panelOpen, true);
+
+    // --- helpers (from AFT Auto Click) ---
+
+    function isVisible(el) {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    }
+
+    function isEnabled(el) {
+        return Boolean(el) && !el.disabled;
+    }
+
+    function normalizeList(text) {
+        const seen = new Set();
+        const items = [];
+        for (const rawLine of String(text || '').split(/\r?\n/)) {
+            const value = rawLine.trim();
+            if (!value || seen.has(value)) continue;
+            seen.add(value);
+            items.push(value);
+        }
+        return items;
+    }
+
+    function getProgress() {
+        const queue = normalizeList(listText);
+        const processedSet = new Set(processedLpns);
+        const done = queue.filter(item => processedSet.has(item));
+        const remaining = queue.filter(item => !processedSet.has(item));
+        const percent = queue.length ? Math.round((done.length / queue.length) * 100) : 0;
+        return {
+            queue,
+            done,
+            remaining,
+            next: remaining[0] || '',
+            total: queue.length,
+            processed: done.length,
+            remainingCount: remaining.length,
+            percent
+        };
+    }
+
+    function persistList(next) {
+        listText = next;
+        GM_setValue(KEYS.list, listText);
+    }
+
+    function persistProcessed() {
+        GM_setValue(KEYS.processed, processedLpns);
+    }
+
+    function persistPending(next) {
+        pendingLpn = next;
+        GM_setValue(KEYS.pending, pendingLpn);
+    }
+
+    function markProcessed(lpn) {
+        if (!lpn || processedLpns.includes(lpn)) return;
+        processedLpns = [...processedLpns, lpn];
+        persistProcessed();
+    }
+
+    function reconcilePendingProcessed() {
+        if (!pendingLpn) return;
+        markProcessed(pendingLpn);
+        persistPending('');
+    }
+
+    function normalizeTitle(text) {
+        return (text || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function isLpnEntryStep(step) {
+        return LPN_ENTRY_STEPS.has(step);
+    }
+
+    function isNoiseTitle(text) {
+        return NOISE_TITLE_PATTERNS.some(pattern => pattern.test(normalizeTitle(text)));
+    }
+
+    function isKnownTitle(text) {
+        const normalized = normalizeTitle(text);
+        return Object.values(WORKFLOW_STEPS).includes(normalized);
+    }
+
+    function recordDiscoveredTitle(text) {
+        const normalized = normalizeTitle(text);
+        if (!normalized || isNoiseTitle(normalized) || isKnownTitle(normalized)) return;
+        if (discoveredTitles.includes(normalized)) return;
+        discoveredTitles = [...discoveredTitles, normalized];
+        GM_setValue(KEYS.discoveredTitles, discoveredTitles);
+    }
+
+    function getWorkflowSignals() {
+        const workflow = document.querySelector('#workflow');
+        if (!workflow) return [];
+
+        const seen = new Set();
+        const signals = [];
+
+        for (const el of workflow.querySelectorAll('h1, h2, h3, .a-size-large')) {
+            if (!isVisible(el)) continue;
+
+            const text = normalizeTitle(el.textContent);
+            if (!text || seen.has(text) || isNoiseTitle(text)) continue;
+
+            seen.add(text);
+            signals.push({
+                text,
+                tag: el.tagName,
+                step: matchWorkflowStep(text),
+                isKnown: isKnownTitle(text),
+                innerHTML: el.innerHTML,
+                outerHTML: el.outerHTML
+            });
+        }
+
+        return signals;
+    }
+
+    function getDiscoveredWorkflowInfo() {
+        const signals = getWorkflowSignals();
+        const unknownSignals = signals.filter(signal => !signal.isKnown);
+        const unknownTitles = [...new Set([
+            ...discoveredTitles,
+            ...unknownSignals.map(signal => signal.text)
+        ])];
+
+        return {
+            knownTitles: Object.values(WORKFLOW_STEPS),
+            discoveredUnknownTitles: unknownTitles,
+            unknownSignals,
+            fourthStepCandidate:
+                unknownSignals.length === 1
+                    ? unknownSignals[0]
+                    : unknownSignals.find(signal => signal.text) || null
+        };
+    }
+
+    function getVisibleWorkflowHeading() {
+        const workflow = document.querySelector('#workflow');
+        if (!workflow) return null;
+
+        for (const el of workflow.querySelectorAll('h1.a-size-large')) {
+            if (isVisible(el)) return el;
+        }
+
+        for (const el of workflow.querySelectorAll('h1')) {
+            if (isVisible(el)) return el;
+        }
+
+        return null;
+    }
+
+    function matchWorkflowStep(title) {
+        const normalized = normalizeTitle(title);
+        for (const [step, label] of Object.entries(WORKFLOW_STEPS)) {
+            if (normalized === label) return step;
+        }
+        return 'unknown';
+    }
+
+    function getWorkflowScreenInfo() {
+        const el = getVisibleWorkflowHeading();
+        const text = el ? normalizeTitle(el.textContent) : null;
+        const step = text ? matchWorkflowStep(text) : 'unknown';
+        const isKnown = Boolean(text && isKnownTitle(text));
+        const discovered = getDiscoveredWorkflowInfo();
+
+        const visibleHeadings = [...document.querySelectorAll(WORKFLOW_HEADING_SELECTOR)]
+            .filter(isVisible)
+            .map(heading => {
+                const headingText = normalizeTitle(heading.textContent);
+                return {
+                    text: headingText,
+                    step: matchWorkflowStep(heading.textContent),
+                    isKnown: isKnownTitle(heading.textContent),
+                    isNoise: isNoiseTitle(heading.textContent),
+                    innerHTML: heading.innerHTML,
+                    outerHTML: heading.outerHTML
+                };
+            })
+            .filter(heading => !heading.isNoise);
+
+        if (text && step === 'unknown') {
+            recordDiscoveredTitle(text);
+        }
+
+        const base = {
+            step,
+            isKnown,
+            knownSteps: WORKFLOW_STEPS,
+            matchedSelector: WORKFLOW_HEADING_SELECTOR,
+            visibleHeadings,
+            workflowSignals: getWorkflowSignals(),
+            discoveredWorkflow: {
+                ...discovered,
+                currentTitle: text,
+                currentIsKnown: isKnown,
+                isFourthStepCandidate: Boolean(text && step === 'unknown' && !isNoiseTitle(text))
+            }
+        };
+
+        if (!el) {
+            return {
+                ...base,
+                found: false,
+                text: null,
+                innerHTML: null,
+                outerHTML: null,
+                visible: false
+            };
+        }
+
+        return {
+            ...base,
+            found: true,
+            text,
+            innerHTML: el.innerHTML,
+            outerHTML: el.outerHTML,
+            visible: true
+        };
+    }
+
+    function handleWorkflowStepChange(info) {
+        const step = info.step;
+        const text = info.text || '';
+
+        if (text && step === 'unknown') {
+            recordDiscoveredTitle(text);
+        }
+
+        if (text !== lastWorkflowTitle) {
+            actedOnUnknownTitle = '';
+        }
+
+        if (isLpnEntryStep(step) && step !== lastWorkflowStep) {
+            lpnStepEnteredAt = Date.now();
+            lpnStepSkippedNoBox = false;
+        }
+
+        if (!isLpnEntryStep(step)) {
+            lpnStepEnteredAt = 0;
+            lpnStepSkippedNoBox = false;
+        }
+
+        if (
+            isLpnEntryStep(lastWorkflowStep) &&
+            !isLpnEntryStep(step) &&
+            pendingLpn
+        ) {
+            markProcessed(pendingLpn);
+            persistPending('');
+            updateProgressUI();
+        }
+
+        lastWorkflowStep = step;
+        lastWorkflowTitle = text;
+    }
+
+    function refreshWorkflowTitle() {
+        const info = getWorkflowScreenInfo();
+        handleWorkflowStepChange(info);
+        return info;
+    }
+
+    function getLpnInput() {
+        for (const selector of LPN_INPUT_SELECTORS) {
+            const el = document.querySelector(selector);
+            if (el instanceof HTMLInputElement && isVisible(el)) return el;
+        }
+        for (const selector of LPN_INPUT_SELECTORS) {
+            const el = document.querySelector(selector);
+            if (el instanceof HTMLInputElement) return el;
+        }
+        return null;
+    }
+
+    function getContinueButton() {
+        for (const selector of CONTINUE_SELECTORS) {
+            const el = document.querySelector(selector);
+            if (el instanceof HTMLInputElement && isVisible(el) && isEnabled(el)) return el;
+        }
+        for (const selector of CONTINUE_SELECTORS) {
+            const el = document.querySelector(selector);
+            if (el instanceof HTMLInputElement) return el;
+        }
+        return null;
+    }
+
+    function getDispositionLabelText() {
+        return DISPOSITION_REASONS[dispositionReason] || DISPOSITION_REASONS.sweeping_missing;
+    }
+
+    function getDispositionLabel() {
+        const target = getDispositionLabelText();
+        const spans = Array.from(document.querySelectorAll('span.a-label.a-radio-label'));
+        for (const span of spans) {
+            const text = (span.textContent || '').trim();
+            if (text === target || text.includes(target)) {
+                const label = span.closest('label');
+                if (label) return label;
+            }
+        }
+        return null;
+    }
+
+    function isDispositionSelected(label) {
+        if (!label) return false;
+        const input = label.querySelector('input[type="radio"]');
+        return Boolean(input && input.checked);
+    }
+
+    function selectDisposition(label) {
+        if (!label) return false;
+        if (isDispositionSelected(label)) return true;
+
+        label.click();
+        const input = label.querySelector('input[type="radio"]');
+        if (input && !input.checked) {
+            input.checked = true;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.dispatchEvent(new Event('click', { bubbles: true }));
+        }
+        return isDispositionSelected(label);
+    }
+
+    function setNativeValue(input, value) {
+        const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value');
+        if (descriptor && descriptor.set) {
+            descriptor.set.call(input, value);
+        } else {
+            input.value = value;
+        }
+    }
+
+    function fillLpnInput(input, value) {
+        try {
+            input.focus({ preventScroll: true });
+        } catch {}
+
+        setNativeValue(input, value);
+        input.setAttribute('value', value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function canAct(delayMs = ACTION_COOLDOWN_MS) {
+        return Date.now() - lastActionAt >= delayMs;
+    }
+
+    function markAction() {
+        lastActionAt = Date.now();
+    }
+
+    function setStatus(text) {
+        if (statusEl) statusEl.textContent = text;
+    }
+
+    function updateProgressUI() {
+        if (!progressEl) return;
+        const p = getProgress();
+        const next = p.next || '—';
+        progressEl.textContent = `${p.processed}/${p.total} · ${p.percent}% · ${p.remainingCount} left`;
+        progressEl.title = `Next: ${next}${pendingLpn ? ` · Pending: ${pendingLpn}` : ''}`;
+    }
+
+    function tryClickContinue(continueButton, statusText) {
+        if (!canAct()) return false;
+        if (!continueButton || !isVisible(continueButton) || !isEnabled(continueButton)) {
+            return false;
+        }
+        continueButton.click();
+        markAction();
+        lastTypedLpn = '';
+        setStatus(statusText);
+        updateProgressUI();
+        return true;
+    }
+
+    // --- main step (from AFT Auto Click) ---
+
+    function runStep() {
+        const workflow = refreshWorkflowTitle();
+        updateProgressUI();
+
+        if (!enabled) return;
+        if (!canAct()) return;
+
+        const progress = getProgress();
+        const continueButton = getContinueButton();
+        const step = workflow.step;
+
+        if (!progress.next) {
+            if (tryClickContinue(continueButton, 'Finishing…')) return;
+            setStatus('Done');
+            return;
+        }
+
+        if (step === 'select_reason') {
+            const dispositionLabel = getDispositionLabel();
+            if (dispositionLabel && isVisible(dispositionLabel) && !isDispositionSelected(dispositionLabel)) {
+                selectDisposition(dispositionLabel);
+                markAction();
+                setStatus(`Reason · ${getDispositionLabelText()}`);
+                return;
+            }
+            if (tryClickContinue(continueButton, `Continue · ${workflow.text}`)) return;
+            setStatus(`Waiting · ${workflow.text}`);
+            return;
+        }
+
+        if (step === 'confirm_deletion') {
+            if (tryClickContinue(continueButton, `Continue · ${workflow.text}`)) return;
+            setStatus(`Waiting · ${workflow.text}`);
+            return;
+        }
+
+        if (isLpnEntryStep(step)) {
+            const lpnInput = getLpnInput();
+            const hasLpnBox = Boolean(lpnInput && isVisible(lpnInput) && isEnabled(lpnInput));
+
+            if (!lpnStepEnteredAt) {
+                lpnStepEnteredAt = Date.now();
+            }
+
+            if (!hasLpnBox) {
+                const elapsed = Date.now() - lpnStepEnteredAt;
+                const remaining = Math.max(0, LPN_BOX_WAIT_MS - elapsed);
+
+                if (elapsed >= LPN_BOX_WAIT_MS) {
+                    if (tryClickContinue(continueButton, `Continue · no LPN box · ${workflow.text}`)) {
+                        lpnStepSkippedNoBox = true;
+                        return;
+                    }
+                    setStatus(`No LPN box · waiting for Continue · ${workflow.text}`);
+                    return;
+                }
+
+                setStatus(`Waiting for LPN box · ${remaining}ms · ${workflow.text}`);
+                return;
+            }
+
+            lpnStepSkippedNoBox = false;
+
+            const inputValue = (lpnInput.value || '').trim();
+            const readyToSubmit =
+                lastTypedLpn === progress.next &&
+                inputValue === progress.next &&
+                canAct(AFTER_TYPE_MS);
+
+            if (!readyToSubmit) {
+                fillLpnInput(lpnInput, progress.next);
+                lastTypedLpn = progress.next;
+                markAction();
+                setStatus(`Typed · ${progress.next}`);
+                return;
+            }
+
+            if (!continueButton || !isVisible(continueButton) || !isEnabled(continueButton)) {
+                setStatus(`Typed · ${progress.next}`);
+                return;
+            }
+
+            persistPending(progress.next);
+            continueButton.click();
+            markAction();
+            lastTypedLpn = '';
+            setStatus(`Submitted · ${progress.next}`);
+            updateProgressUI();
+            return;
+        }
+
+        // Unknown workflow title — record it, click Continue once, then wait
+        if (step === 'unknown' && workflow.text) {
+            if (actedOnUnknownTitle === workflow.text) {
+                setStatus(`DISCOVERED · waiting · ${workflow.text}`);
+                return;
+            }
+
+            if (tryClickContinue(continueButton, `DISCOVERED · Continue · ${workflow.text}`)) {
+                actedOnUnknownTitle = workflow.text;
+                return;
+            }
+
+            setStatus(`DISCOVERED · ${workflow.text}`);
+            return;
+        }
+
+        setStatus(workflow.text ? `No handler · ${workflow.text}` : 'No workflow title found');
+    }
+
+    function startLoop() {
+        stopLoop();
+        loopId = window.setInterval(runStep, TICK_MS);
+    }
+
+    function stopLoop() {
+        if (loopId) {
+            window.clearInterval(loopId);
+            loopId = null;
+        }
+    }
+
+    function setEnabled(next) {
+        enabled = !!next;
+        GM_setValue(KEYS.enabled, enabled);
+        setStatus(enabled ? 'On' : 'Off');
+        updateProgressUI();
+    }
+
+    // --- UI ---
+
+    function setPanelOpen(open) {
+        panelOpen = !!open;
+        GM_setValue(KEYS.panelOpen, panelOpen);
+        applyPanelOpenState();
+    }
+
+    function applyPanelOpenState() {
+        if (!panelWrapEl) return;
+        panelFabEl.style.display = panelOpen ? 'none' : 'flex';
+        panelRootEl.style.display = panelOpen ? 'block' : 'none';
+    }
+
+    function buildPanel() {
+        if (document.getElementById('lpn-deleter-wrap')) return;
+
+        panelWrapEl = document.createElement('div');
+        panelWrapEl.id = 'lpn-deleter-wrap';
+        panelWrapEl.style.cssText = `
+            position:fixed;top:16px;right:16px;z-index:2147483647;
+            font:13px Arial,sans-serif;color:#111;
+        `;
+
+        panelFabEl = document.createElement('button');
+        panelFabEl.id = 'lpn-deleter-fab';
+        panelFabEl.type = 'button';
+        panelFabEl.title = 'Open LPN Deleter';
+        panelFabEl.textContent = 'LD';
+        panelFabEl.style.cssText = `
+            display:none;align-items:center;justify-content:center;
+            width:40px;height:40px;border:3px solid #ff9900;border-radius:10px;
+            background:#fff;color:#111;font-weight:700;font-size:13px;cursor:pointer;
+            box-shadow:0 4px 24px rgba(0,0,0,.45);
+        `;
+        panelFabEl.addEventListener('click', () => setPanelOpen(true));
+
+        panelRootEl = document.createElement('div');
+        panelRootEl.id = 'lpn-deleter-root';
+        panelRootEl.style.cssText = `
+            width:340px;background:#fff;border:3px solid #ff9900;border-radius:10px;
+            padding:12px;box-shadow:0 4px 24px rgba(0,0,0,.45);
+        `;
+
+        panelRootEl.innerHTML = `
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                <div style="font-weight:700;font-size:16px;">LPN Deleter</div>
+                <div style="display:flex;align-items:center;gap:6px;">
+                    <button type="button" id="lpn-deleter-close" title="Close panel" style="
+                        width:26px;height:26px;border:1px solid #ccc;border-radius:6px;
+                        background:#f4f4f4;color:#444;font-size:16px;line-height:1;cursor:pointer;
+                    ">×</button>
+                    <button type="button" id="lpn-deleter-toggle" style="
+                        min-width:44px;height:26px;border:none;border-radius:999px;
+                        background:#888;color:#fff;font-weight:700;font-size:11px;cursor:pointer;
+                    ">Off</button>
+                </div>
+            </div>
+            <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;">
+                <span style="font-weight:700;">Reason</span>
+                <select id="lpn-deleter-disposition" style="
+                    flex:1;height:28px;border:1px solid #888;border-radius:6px;padding:0 6px;
+                "></select>
+            </label>
+            <textarea id="lpn-deleter-list" placeholder="One LPN per line" style="
+                width:100%;height:110px;box-sizing:border-box;border:1px solid #888;
+                border-radius:6px;padding:6px;font:12px Consolas,monospace;
+            "></textarea>
+            <div id="lpn-deleter-progress" style="margin-top:8px;font-size:12px;color:#444;">0/0</div>
+            <div style="display:flex;gap:6px;margin-top:8px;">
+                <button type="button" id="lpn-deleter-debug" style="
+                    cursor:pointer;border:1px solid #cc7a00;border-radius:6px;padding:6px 10px;
+                    background:#ff9900;color:#111;font-weight:700;font-size:12px;
+                ">Copy Debug</button>
+                <button type="button" id="lpn-deleter-reset" style="
+                    cursor:pointer;border:1px solid #ccc;border-radius:6px;padding:6px 10px;
+                    background:#f4f4f4;color:#111;font-size:12px;
+                ">Reset progress</button>
+            </div>
+            <div id="lpn-deleter-status" style="
+                margin-top:8px;padding:8px;background:#f4f4f4;border:1px solid #ccc;
+                border-radius:6px;font-size:12px;min-height:32px;
+            ">Off</div>
+        `;
+
+        panelWrapEl.appendChild(panelFabEl);
+        panelWrapEl.appendChild(panelRootEl);
+        document.body.appendChild(panelWrapEl);
+
+        const root = panelRootEl;
+
+        listEl = root.querySelector('#lpn-deleter-list');
+        statusEl = root.querySelector('#lpn-deleter-status');
+        progressEl = root.querySelector('#lpn-deleter-progress');
+        dispositionEl = root.querySelector('#lpn-deleter-disposition');
+
+        for (const [key, label] of Object.entries(DISPOSITION_REASONS)) {
+            const opt = document.createElement('option');
+            opt.value = key;
+            opt.textContent = label;
+            dispositionEl.appendChild(opt);
+        }
+        dispositionEl.value = dispositionReason;
+
+        listEl.value = listText;
+
+        const toggleEl = root.querySelector('#lpn-deleter-toggle');
+
+        function syncToggle() {
+            toggleEl.textContent = enabled ? 'On' : 'Off';
+            toggleEl.style.background = enabled ? '#059669' : '#888';
+        }
+
+        toggleEl.addEventListener('click', () => {
+            setEnabled(!enabled);
+            syncToggle();
+        });
+
+        root.querySelector('#lpn-deleter-close').addEventListener('click', () => setPanelOpen(false));
+
+        listEl.addEventListener('input', () => {
+            persistList(listEl.value);
+            updateProgressUI();
+        });
+
+        dispositionEl.addEventListener('change', () => {
+            dispositionReason = dispositionEl.value;
+            GM_setValue(KEYS.dispositionReason, dispositionReason);
+        });
+
+        root.querySelector('#lpn-deleter-reset').addEventListener('click', () => {
+            processedLpns = [];
+            persistProcessed();
+            persistPending('');
+            lastTypedLpn = '';
+            actedOnUnknownTitle = '';
+            lpnStepEnteredAt = 0;
+            lpnStepSkippedNoBox = false;
+            discoveredTitles = [];
+            GM_setValue(KEYS.discoveredTitles, discoveredTitles);
+            updateProgressUI();
+            setStatus('Progress reset');
+        });
+
+        root.querySelector('#lpn-deleter-debug').addEventListener('click', copyDebug);
+
+        syncToggle();
+        updateProgressUI();
+        setStatus(enabled ? 'On' : 'Off');
+        applyPanelOpenState();
+    }
+
+    function describe(el) {
+        if (!el) return 'missing';
+        const parts = [el.tagName.toLowerCase()];
+        if (el.id) parts.push(`#${el.id}`);
+        const extras = [];
+        if (el.type) extras.push(`type=${el.type}`);
+        const hk = el.getAttribute?.('data-aft-tool-hotkey');
+        if (hk) extras.push(`hotkey=${hk}`);
+        if (typeof el.value === 'string' && el.value) extras.push(`value=${el.value}`);
+        if (!isVisible(el)) extras.push('visible=false');
+        return `${parts.join('')}${extras.length ? ` [${extras.join(', ')}]` : ''}`;
+    }
+
+    function copyDebug() {
+        const p = getProgress();
+        const workflow = getWorkflowScreenInfo();
+        const discovered = workflow.discoveredWorkflow;
+        const report = {
+            copiedAt: new Date().toISOString(),
+            scriptVersion: '2.6',
+            panelOpen,
+            url: location.href,
+            enabled,
+            status: statusEl?.textContent || '',
+            workflowStep: workflow.step,
+            workflowIsKnown: workflow.isKnown,
+            workflowScreen: workflow,
+            discoveredWorkflow: discovered,
+            fourthStepCandidate: discovered.fourthStepCandidate,
+            discoveredUnknownTitles: discovered.discoveredUnknownTitles,
+            lastWorkflowStep: lastWorkflowStep || null,
+            lastWorkflowTitle: lastWorkflowTitle || null,
+            actedOnUnknownTitle: actedOnUnknownTitle || null,
+            lpnStepEnteredAt: lpnStepEnteredAt || null,
+            lpnStepWaitMs: lpnStepEnteredAt ? Date.now() - lpnStepEnteredAt : null,
+            lpnStepSkippedNoBox,
+            pendingLpn: pendingLpn || null,
+            lastTypedLpn: lastTypedLpn || null,
+            dispositionReason,
+            dispositionLabel: getDispositionLabelText(),
+            nextLpn: p.next || null,
+            progress: `${p.processed}/${p.total}`,
+            lpnInput: describe(getLpnInput()),
+            continueButton: describe(getContinueButton()),
+            dispositionRadio: describe(getDispositionLabel())
+        };
+
+        const json = JSON.stringify(report, null, 2);
+        try {
+            GM_setClipboard(json, 'text');
+            setStatus('Debug copied');
+        } catch {
+            console.log('LPN Deleter debug:', json);
+            setStatus('Debug in console');
+        }
+    }
+
+  window.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            setEnabled(false);
+            const toggle = document.getElementById('lpn-deleter-toggle');
+            if (toggle) {
+                toggle.textContent = 'Off';
+                toggle.style.background = '#888';
+            }
+            setStatus('Killed by ESC');
+        }
+    }, true);
+
+    function init() {
+        if (!document.body) {
+            setTimeout(init, 100);
+            return;
+        }
+        reconcilePendingProcessed();
+        buildPanel();
+        startLoop();
+    }
+
+    init();
+})();

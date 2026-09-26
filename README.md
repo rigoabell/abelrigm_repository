@@ -10,7 +10,7 @@ Central hub for the work: portfolio, tools built, and notes.
 ## Contents
 
 - **`docs/` — Dev Hub website** (static, GitHub Pages ready).
-  - **Portfolio** is the work: Amazon, tools developed, and other projects.
+  - **Portfolio** lists Rig Setup and 49 Tampermonkey scripts. Each script downloads as a `.txt` file.
   - **Toolkit** lists tools built and ready to download.
   - **Rig Setup** is a project on the Portfolio page, not its own site page.
     That project installs Python, Node, and the other machine dependencies into

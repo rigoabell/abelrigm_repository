@@ -1,0 +1,1221 @@
+// ==UserScript==
+// @name         Control Tower Login Finder (abelrigm)
+// @namespace    http://tampermonkey.net/
+// @version      1.4.0
+// @description  Paste Amazon logins next to Control Tower search and return 1st half (6:00–12:15) / 2nd half (12:15–6:00) locations. Copy Debug dumps DOM details for fixes.
+// @author       Cursor
+// @match        https://beta.control-tower.meta.amazon.dev/*/assignments*
+// @match        https://control-tower.meta.amazon.dev/*/assignments*
+// @grant        GM_setClipboard
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const SCRIPT_ID = 'ct-login-finder';
+  const VERSION = '1.4.0';
+  const INSTALL_KEY = '__ctLoginFinderInstalledV140';
+  const STORAGE_KEY = '__ctLoginFinderState';
+  const TABLE_READY_MS = 2500;
+  const CLEAR_RESTORE_MS = 1200;
+  const BETWEEN_LOGIN_MS = 20;
+  const MAX_DEBUG_HTML = 1200;
+  const UPH_SUMMARY_ID = 'mem3-floor-summary';
+  const FIRST_HALF_START_MIN = 6 * 60;
+  const MIDPOINT_MIN = 12 * 60 + 15;
+  const SECOND_HALF_END_MIN = 18 * 60;
+  const HALF_RE = /^(.*?)\s*1st\s*Half:\s*(.*?)\s*\|\s*2nd\s*Half:\s*(.+)$/i;
+
+  if (window[INSTALL_KEY]) {
+    return;
+  }
+  window[INSTALL_KEY] = true;
+
+  const DEFAULT_DEBUG = {
+    script: SCRIPT_ID,
+    version: VERSION,
+    generatedAt: null,
+    pageUrl: window.location.href,
+    pageTitle: document.title,
+    logins: [],
+    steps: [],
+    results: [],
+    errors: [],
+    live: null,
+  };
+
+  let lastDebugPayload = { ...DEFAULT_DEBUG };
+  let lastTableResults = [];
+  let runToken = 0;
+  let persistTimer = null;
+  let mountTimer = null;
+  let panelWired = false;
+
+  const styles = `
+    #${SCRIPT_ID} {
+      flex: 1 0 100%;
+      width: 100%;
+      box-sizing: border-box;
+      margin: 8px 0 6px;
+      padding: 10px 12px;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      color: #c9d1d9;
+    }
+
+    #${SCRIPT_ID} * {
+      box-sizing: border-box;
+      font-family: inherit;
+    }
+
+    #${SCRIPT_ID} .ct-row {
+      display: flex;
+      align-items: stretch;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    #${SCRIPT_ID} textarea {
+      flex: 1 1 280px;
+      min-width: 180px;
+      min-height: 38px;
+      max-height: 90px;
+      resize: vertical;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: #0d1117;
+      color: #c9d1d9;
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    #${SCRIPT_ID} textarea:focus {
+      outline: none;
+      border-color: #58a6ff;
+      box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.18);
+    }
+
+    #${SCRIPT_ID} .ct-actions {
+      display: flex;
+      gap: 6px;
+      flex: 0 0 auto;
+      align-items: stretch;
+    }
+
+    #${SCRIPT_ID} button {
+      border: 0;
+      border-radius: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    #${SCRIPT_ID}-run {
+      background: #1f6feb;
+      color: #ffffff;
+    }
+
+    #${SCRIPT_ID}-run:hover {
+      background: #388bfd;
+    }
+
+    #${SCRIPT_ID}-run:disabled {
+      opacity: 0.65;
+      cursor: wait;
+    }
+
+    #${SCRIPT_ID}-stop,
+    #${SCRIPT_ID}-copy-table,
+    #${SCRIPT_ID}-copy {
+      background: #21262d;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+    }
+
+    #${SCRIPT_ID}-stop:hover,
+    #${SCRIPT_ID}-copy-table:hover,
+    #${SCRIPT_ID}-copy:hover {
+      background: #30363d;
+    }
+
+    #${SCRIPT_ID}-status {
+      margin-top: 8px;
+      font-size: 12px;
+      line-height: 1.4;
+      color: #8b949e;
+    }
+
+    #${SCRIPT_ID}-status.is-error {
+      color: #f85149;
+    }
+
+    #${SCRIPT_ID}-status.is-success {
+      color: #3fb950;
+    }
+
+    #${SCRIPT_ID}-results {
+      margin-top: 8px;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      overflow: auto;
+      max-height: 240px;
+      background: #0d1117;
+    }
+
+    #${SCRIPT_ID}-results table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    #${SCRIPT_ID}-results th,
+    #${SCRIPT_ID}-results td {
+      padding: 7px 10px;
+      border-bottom: 1px solid #21262d;
+      font-size: 12px;
+      text-align: left;
+      vertical-align: top;
+      word-break: break-word;
+      color: #c9d1d9;
+    }
+
+    #${SCRIPT_ID}-results tr:last-child td {
+      border-bottom: 0;
+    }
+
+    #${SCRIPT_ID}-results th {
+      background: #161b22;
+      font-weight: 600;
+      font-size: 11px;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: #8b949e;
+      position: sticky;
+      top: 0;
+    }
+
+    #${SCRIPT_ID}-results th .ct-sub {
+      display: block;
+      margin-top: 2px;
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: 0;
+      text-transform: none;
+      color: #6e7681;
+    }
+
+    #${SCRIPT_ID}-results td.ct-empty {
+      text-align: center;
+      color: #8b949e;
+      padding: 14px 10px;
+    }
+
+    #${SCRIPT_ID}-results td.ct-miss {
+      color: #d29922;
+    }
+
+    #${SCRIPT_ID}-results td.ct-now {
+      color: #ffffff;
+      background: rgba(31, 111, 235, 0.28);
+      font-weight: 600;
+    }
+  `;
+
+  function injectStyles() {
+    if (document.getElementById(`${SCRIPT_ID}-style`)) {
+      return;
+    }
+    const style = document.createElement('style');
+    style.id = `${SCRIPT_ID}-style`;
+    style.textContent = styles;
+    document.head.appendChild(style);
+  }
+
+  function isOurUi(el) {
+    return !!(el && el.closest && el.closest(`#${SCRIPT_ID}`));
+  }
+
+  function cleanText(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function cellText(el) {
+    if (!el) {
+      return '';
+    }
+    const clone = el.cloneNode(true);
+    Array.from(clone.querySelectorAll('br')).forEach(function (br) {
+      br.replaceWith(document.createTextNode(' '));
+    });
+    return cleanText(clone.textContent);
+  }
+
+  function minutesNow(date) {
+    const d = date || new Date();
+    return d.getHours() * 60 + d.getMinutes();
+  }
+
+  function currentHalfName(date) {
+    const minutes = minutesNow(date);
+    if (minutes >= FIRST_HALF_START_MIN && minutes < MIDPOINT_MIN) {
+      return 'first';
+    }
+    if (minutes >= MIDPOINT_MIN && minutes <= SECOND_HALF_END_MIN) {
+      return 'second';
+    }
+    return 'none';
+  }
+
+  function formatLocationLabel(value) {
+    return cleanText(
+      String(value || '')
+        .replace(/customer\s+returns/gi, 'CRETs')
+        .replace(/\bstation\b/gi, '')
+    );
+  }
+
+  function joinAreaStation(area, station) {
+    const a = formatLocationLabel(area);
+    const s = formatLocationLabel(station);
+    if (!a) {
+      return s;
+    }
+    if (!s) {
+      return a;
+    }
+    if (s.toLowerCase().indexOf(a.toLowerCase()) === 0) {
+      return s;
+    }
+    return `${a} ${s}`;
+  }
+
+  function parseLocation(raw) {
+    const text = cleanText(raw);
+    const match = HALF_RE.exec(text);
+    if (match) {
+      const area = cleanText(match[1]);
+      const firstStation = cleanText(match[2]);
+      const secondStation = cleanText(match[3]);
+      return {
+        raw: text,
+        split: true,
+        area: formatLocationLabel(area),
+        firstStation: formatLocationLabel(firstStation),
+        secondStation: formatLocationLabel(secondStation),
+        firstHalf: joinAreaStation(area, firstStation),
+        secondHalf: joinAreaStation(area, secondStation),
+      };
+    }
+    const compact = formatLocationLabel(text);
+    return {
+      raw: text,
+      split: false,
+      area: '',
+      firstStation: compact,
+      secondStation: compact,
+      firstHalf: compact,
+      secondHalf: compact,
+    };
+  }
+
+  function uniqueJoin(values) {
+    return Array.from(
+      new Set(
+        values
+          .map(function (value) {
+            return cleanText(value);
+          })
+          .filter(Boolean)
+      )
+    ).join(' | ');
+  }
+
+  function decorateResult(entry) {
+    const parsedList = (entry.matches || [])
+      .map(function (item) {
+        return parseLocation(item.location);
+      })
+      .filter(function (item) {
+        return item.raw;
+      });
+    const parsed = parsedList.length ? parsedList : [parseLocation(entry.location)];
+    const half = currentHalfName();
+    entry.firstHalf = uniqueJoin(
+      parsed.map(function (item) {
+        return item.firstHalf;
+      })
+    );
+    entry.secondHalf = uniqueJoin(
+      parsed.map(function (item) {
+        return item.secondHalf;
+      })
+    );
+    entry.split = parsed.some(function (item) {
+      return item.split;
+    });
+    entry.currentHalf = half;
+    entry.now =
+      half === 'first' ? entry.firstHalf : half === 'second' ? entry.secondHalf : '';
+    entry.parsed = parsed;
+    return entry;
+  }
+
+  function parseLogins(rawValue) {
+    return Array.from(
+      new Set(
+        String(rawValue || '')
+          .split(/[\s,;]+/)
+          .map(function (value) {
+            return value.trim().toLowerCase();
+          })
+          .filter(Boolean)
+      )
+    );
+  }
+
+  function sleep(ms) {
+    return new Promise(function (resolve) {
+      window.setTimeout(resolve, ms);
+    });
+  }
+
+  function formatError(error) {
+    if (error instanceof Error) {
+      return error.message;
+    }
+    return String(error || 'Unknown error');
+  }
+
+  function escapeHtml(value) {
+    return String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function clipHtml(value, max) {
+    const text = String(value || '');
+    if (text.length <= max) {
+      return text;
+    }
+    return `${text.slice(0, max)}…`;
+  }
+
+  function buttonLabel(el) {
+    return cleanText(el && el.textContent);
+  }
+
+  function describeEl(el) {
+    if (!el) {
+      return null;
+    }
+    const attrs = {};
+    Array.from(el.attributes || []).forEach(function (attr) {
+      attrs[attr.name] = clipHtml(attr.value, 180);
+    });
+    return {
+      tag: el.tagName,
+      id: el.id || '',
+      className: String(el.className || '').slice(0, 180),
+      type: el.getAttribute && el.getAttribute('type'),
+      placeholder: el.getAttribute && el.getAttribute('placeholder'),
+      ariaLabel: el.getAttribute && el.getAttribute('aria-label'),
+      role: el.getAttribute && el.getAttribute('role'),
+      text: cleanText(el.textContent).slice(0, 160),
+      value: el.value != null ? String(el.value).slice(0, 80) : undefined,
+      attrs,
+      outerHTML: clipHtml(el.outerHTML, MAX_DEBUG_HTML),
+    };
+  }
+
+  function loadState() {
+    try {
+      return JSON.parse(sessionStorage.getItem(STORAGE_KEY) || '{}') || {};
+    } catch {
+      return {};
+    }
+  }
+
+  function storeState(patch) {
+    const next = { ...loadState(), ...patch };
+    try {
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // Ignore quota / private mode.
+    }
+    return next;
+  }
+
+  function persistFormState() {
+    const logins = document.getElementById(`${SCRIPT_ID}-logins`);
+    storeState({
+      logins: logins ? logins.value : '',
+    });
+  }
+
+  function persistFormStateSoon() {
+    window.clearTimeout(persistTimer);
+    persistTimer = window.setTimeout(persistFormState, 250);
+  }
+
+  function resetDebug(logins) {
+    lastDebugPayload = {
+      script: SCRIPT_ID,
+      version: VERSION,
+      generatedAt: new Date().toISOString(),
+      pageUrl: window.location.href,
+      pageTitle: document.title,
+      logins: [...logins],
+      steps: [],
+      results: [],
+      errors: [],
+      live: captureLiveSnapshot(),
+    };
+  }
+
+  function addDebugStep(step, data) {
+    lastDebugPayload.steps.push({
+      at: new Date().toISOString(),
+      step,
+      data: data == null ? null : data,
+    });
+  }
+
+  function addDebugError(step, error) {
+    lastDebugPayload.errors.push({
+      at: new Date().toISOString(),
+      step,
+      error: formatError(error),
+    });
+  }
+
+  function findSearchInput() {
+    const nodes = document.querySelectorAll('input');
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (isOurUi(el)) {
+        continue;
+      }
+      const placeholder = (el.getAttribute('placeholder') || '').toLowerCase();
+      const id = (el.id || '').toLowerCase();
+      if (placeholder.indexOf('search for login') !== -1 || id.indexOf('search-field-') === 0) {
+        return el;
+      }
+    }
+    return null;
+  }
+
+  function findToolbar() {
+    const buttons = document.querySelectorAll('button');
+    for (let i = 0; i < buttons.length; i++) {
+      if (buttonLabel(buttons[i]) !== 'Section') {
+        continue;
+      }
+      let host = buttons[i].parentElement;
+      for (let hops = 0; host && hops < 6; hops++) {
+        if (
+          host.querySelector('a[download*="assignments"]') &&
+          host.querySelector('input[placeholder*="Search for login"]')
+        ) {
+          return host;
+        }
+        host = host.parentElement;
+      }
+    }
+    const input = findSearchInput();
+    if (!input) {
+      return null;
+    }
+    let host = input.parentElement;
+    for (let hops = 0; host && hops < 8; hops++) {
+      if (host.querySelector && host.querySelector('input[placeholder*="Search for login"]')) {
+        if (host.parentElement) {
+          return host;
+        }
+      }
+      host = host.parentElement;
+    }
+    return null;
+  }
+
+  function isClearButton(button) {
+    const aria = `${(button.getAttribute('aria-label') || '')} ${(button.getAttribute('title') || '')}`.toLowerCase();
+    return /clear/.test(aria);
+  }
+
+  function findClearButton() {
+    const input = findSearchInput();
+    if (!input) {
+      return null;
+    }
+    let host = input.parentElement;
+    for (let hops = 0; host && hops < 8; hops++) {
+      const buttons = host.querySelectorAll('button');
+      for (let i = 0; i < buttons.length; i++) {
+        if (!isOurUi(buttons[i]) && isClearButton(buttons[i])) {
+          return buttons[i];
+        }
+      }
+      host = host.parentElement;
+    }
+    return null;
+  }
+
+  async function waitForAssignmentTables(token, timeoutMs) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      if (token !== runToken) {
+        return { ok: false, cancelled: true, count: 0 };
+      }
+      const count = pageTables().length;
+      if (count) {
+        return { ok: true, count, elapsedMs: Date.now() - started };
+      }
+      await sleep(50);
+    }
+    return { ok: false, count: pageTables().length, elapsedMs: timeoutMs };
+  }
+
+  async function clearPageSearch(token) {
+    const input = findSearchInput();
+    if (!input) {
+      return { cleared: false, reason: 'no-input' };
+    }
+    const before = input.value;
+    if (!cleanText(before)) {
+      return { cleared: false, reason: 'already-empty', tables: pageTables().length };
+    }
+    const clearBtn = findClearButton();
+    if (clearBtn) {
+      clearBtn.click();
+      addDebugStep('search:clear', { how: 'button', before });
+    } else {
+      setReactInputValue(input, '');
+      addDebugStep('search:clear', { how: 'value', before });
+    }
+    const restored = await waitForAssignmentTables(token, CLEAR_RESTORE_MS);
+    restored.cleared = true;
+    restored.before = before;
+    return restored;
+  }
+
+  function isIconButton(button) {
+    if (!button || button.tagName !== 'BUTTON') {
+      return false;
+    }
+    if (isClearButton(button)) {
+      return false;
+    }
+    const label = buttonLabel(button);
+    if (/section|csv|override/i.test(label)) {
+      return false;
+    }
+    return !!button.querySelector('svg');
+  }
+
+  function looksLikeSearchButton(button) {
+    if (!isIconButton(button)) {
+      return false;
+    }
+    const aria = `${(button.getAttribute('aria-label') || '')} ${(button.getAttribute('title') || '')}`.toLowerCase();
+    if (/search|find|magnify/.test(aria)) {
+      return true;
+    }
+    const paths = Array.from(button.querySelectorAll('path'))
+      .map(function (path) {
+        return path.getAttribute('d') || '';
+      })
+      .join(' ');
+    return /M8 2a6|a8 8 0 100 16|a6 6 0 110 12/.test(paths);
+  }
+
+  function findSearchButton(input) {
+    if (!input) {
+      return null;
+    }
+    let host = input.parentElement;
+    for (let hops = 0; host && hops < 8; hops++) {
+      const buttons = Array.from(host.querySelectorAll('button')).filter(function (button) {
+        return !isOurUi(button) && isIconButton(button);
+      });
+      const after = buttons.filter(function (button) {
+        return !!(input.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING);
+      });
+      const pool = after.length ? after : buttons;
+      const searchish = pool.find(looksLikeSearchButton);
+      if (searchish) {
+        return searchish;
+      }
+      if (pool.length) {
+        return pool[pool.length - 1];
+      }
+      host = host.parentElement;
+    }
+    return null;
+  }
+
+  function findSearchControls() {
+    const input = findSearchInput();
+    return {
+      input,
+      button: findSearchButton(input),
+    };
+  }
+
+  function setReactInputValue(input, value) {
+    const proto = window.HTMLInputElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (descriptor && descriptor.set) {
+      descriptor.set.call(input, value);
+    } else {
+      input.value = value;
+    }
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    try {
+      input.dispatchEvent(
+        new InputEvent('input', {
+          bubbles: true,
+          data: value,
+          inputType: 'insertText',
+        })
+      );
+    } catch {
+      // Older browsers without InputEvent.
+    }
+  }
+
+  function clickSearch(controls) {
+    if (controls.button) {
+      controls.button.click();
+      return 'button';
+    }
+    if (controls.input) {
+      controls.input.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          keyCode: 13,
+          which: 13,
+          bubbles: true,
+        })
+      );
+      return 'enter';
+    }
+    return 'none';
+  }
+
+  function pageTables() {
+    return Array.from(document.querySelectorAll('table')).filter(function (table) {
+      return !isOurUi(table);
+    });
+  }
+
+  function closestCardTitle(el) {
+    let node = el;
+    for (let hops = 0; node && hops < 14; hops++) {
+      const headings = node.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"]');
+      for (let i = 0; i < headings.length; i++) {
+        const heading = headings[i];
+        if (el.contains(heading)) {
+          continue;
+        }
+        if (heading.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) {
+          const text = cleanText(heading.textContent);
+          if (text && text.length < 140 && !/\bUPH\b/i.test(text)) {
+            return text;
+          }
+        }
+      }
+      node = node.parentElement;
+    }
+    return '';
+  }
+
+  function findEmployeeMatches(login) {
+    const needle = String(login || '').trim().toLowerCase();
+    const matches = [];
+    if (!needle) {
+      return matches;
+    }
+    const tables = pageTables();
+    for (let t = 0; t < tables.length; t++) {
+      const rows = tables[t].querySelectorAll('tbody tr');
+      for (let r = 0; r < rows.length; r++) {
+        const tr = rows[r];
+        const tds = tr.querySelectorAll('td');
+        if (!tds.length) {
+          continue;
+        }
+        const links = tr.querySelectorAll('a, button, [role="button"]');
+        let hit = null;
+        for (let i = 0; i < links.length; i++) {
+          const text = cleanText(links[i].textContent).toLowerCase();
+          if (text === needle) {
+            hit = links[i];
+            break;
+          }
+        }
+        if (!hit) {
+          continue;
+        }
+        const assignmentCell = tds[0];
+        matches.push({
+          login: cleanText(hit.textContent),
+          location: cellText(assignmentCell),
+          area: closestCardTitle(tr),
+          rowIndex: r,
+          cellCount: tds.length,
+          assignmentHtml: clipHtml(assignmentCell ? assignmentCell.innerHTML : '', 500),
+          employeeHtml: clipHtml(hit.outerHTML, 400),
+        });
+      }
+    }
+    return matches;
+  }
+
+  function captureLiveSnapshot() {
+    const controls = findSearchControls();
+    const toolbar = findToolbar();
+    const tables = pageTables();
+    const assignmentTables = tables.filter(function (table) {
+      const head = cleanText((table.tHead && table.tHead.textContent) || table.textContent).toLowerCase();
+      return head.indexOf('assignment') !== -1 && head.indexOf('employee') !== -1;
+    });
+    const sampleRows = [];
+    assignmentTables.slice(0, 3).forEach(function (table) {
+      Array.from(table.querySelectorAll('tbody tr'))
+        .slice(0, 4)
+        .forEach(function (tr) {
+          const tds = tr.querySelectorAll('td');
+          sampleRows.push({
+            assignment: cellText(tds[0]).slice(0, 180),
+            employee: cleanText(tds[1] && tds[1].textContent).slice(0, 180),
+            html: clipHtml(tr.innerHTML, 700),
+          });
+        });
+    });
+    const loginLinks = Array.from(document.querySelectorAll('table tbody tr td a'))
+      .filter(function (a) {
+        return !isOurUi(a);
+      })
+      .slice(0, 8)
+      .map(function (a) {
+        return {
+          text: cleanText(a.textContent),
+          className: String(a.className || '').slice(0, 80),
+          html: clipHtml(a.outerHTML, 300),
+        };
+      });
+    return {
+      url: window.location.href,
+      title: document.title,
+      toolbarFound: !!toolbar,
+      panelMounted: !!document.getElementById(SCRIPT_ID),
+      currentHalf: currentHalfName(),
+      clockMinutes: minutesNow(),
+      searchInput: describeEl(controls.input),
+      searchButton: describeEl(controls.button),
+      tableCount: tables.length,
+      assignmentTableCount: assignmentTables.length,
+      sampleRows,
+      loginLinks,
+    };
+  }
+
+  function updateStatus(message, kind) {
+    const node = document.getElementById(`${SCRIPT_ID}-status`);
+    if (!node) {
+      return;
+    }
+    node.className = kind ? `is-${kind}` : '';
+    node.id = `${SCRIPT_ID}-status`;
+    node.textContent = message;
+  }
+
+  function renderResults(results) {
+    lastTableResults = results.slice();
+    const body = document.getElementById(`${SCRIPT_ID}-results-body`);
+    if (!body) {
+      return;
+    }
+    body.innerHTML = '';
+    if (!results.length) {
+      body.innerHTML = '<tr><td class="ct-empty" colspan="4">No results yet.</td></tr>';
+      return;
+    }
+    results.forEach(function (row) {
+      const decorated = decorateResult(row);
+      const miss = decorated.status !== 'found';
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${escapeHtml(decorated.login)}</td>
+        <td class="${miss ? 'ct-miss' : decorated.now ? 'ct-now' : ''}">${escapeHtml(
+          decorated.now || (miss ? decorated.status : '—')
+        )}</td>
+        <td class="${miss ? 'ct-miss' : ''}">${escapeHtml(decorated.firstHalf || decorated.location || decorated.status)}</td>
+        <td class="${miss ? 'ct-miss' : ''}">${escapeHtml(decorated.secondHalf || decorated.location || decorated.status)}</td>
+      `;
+      body.appendChild(tr);
+    });
+  }
+
+  async function lookupLogin(login, token) {
+    let scanned = findEmployeeMatches(login);
+    if (scanned.length) {
+      addDebugStep(`scan:hit:${login}`, {
+        count: scanned.length,
+        locations: scanned.map(function (item) {
+          return item.location;
+        }),
+      });
+      return { matches: scanned, how: 'scan' };
+    }
+
+    if (!pageTables().length) {
+      await clearPageSearch(token);
+      if (token !== runToken) {
+        return { cancelled: true };
+      }
+      scanned = findEmployeeMatches(login);
+      if (scanned.length) {
+        addDebugStep(`scan:hit:${login}`, {
+          count: scanned.length,
+          afterClear: true,
+          locations: scanned.map(function (item) {
+            return item.location;
+          }),
+        });
+        return { matches: scanned, how: 'scan-after-clear' };
+      }
+    }
+
+    addDebugStep(`scan:miss:${login}`, {
+      tableCount: pageTables().length,
+    });
+    return { matches: [], how: 'scan' };
+  }
+
+  async function runLookup() {
+    const loginsInput = document.getElementById(`${SCRIPT_ID}-logins`);
+    const runButton = document.getElementById(`${SCRIPT_ID}-run`);
+    const logins = parseLogins(loginsInput && loginsInput.value);
+    if (!logins.length) {
+      updateStatus('Paste at least one login first.', 'error');
+      return;
+    }
+
+    const token = ++runToken;
+    resetDebug(logins);
+    lastTableResults = [];
+    renderResults([]);
+    if (runButton) {
+      runButton.disabled = true;
+    }
+    updateStatus(`Looking up 0 / ${logins.length}…`);
+    persistFormState();
+
+    const results = [];
+    try {
+      await clearPageSearch(token);
+      if (token !== runToken) {
+        updateStatus('Stopped.');
+        return;
+      }
+      const ready = await waitForAssignmentTables(token, TABLE_READY_MS);
+      addDebugStep('tables:ready', ready);
+      if (token !== runToken) {
+        updateStatus('Stopped.');
+        return;
+      }
+      for (let i = 0; i < logins.length; i++) {
+        if (token !== runToken) {
+          updateStatus('Stopped.');
+          return;
+        }
+        const login = logins[i];
+        updateStatus(`Looking up ${i + 1} / ${logins.length}: ${login}`);
+        let entry = {
+          login,
+          location: '',
+          area: '',
+          status: 'not found',
+          matchCount: 0,
+        };
+        try {
+          const outcome = await lookupLogin(login, token);
+          if (outcome.cancelled) {
+            updateStatus('Stopped.');
+            return;
+          }
+          const matches = outcome.matches || [];
+          entry.matchCount = matches.length;
+          entry.how = outcome.how || '';
+          if (matches.length) {
+            entry.status = 'found';
+            entry.location = matches
+              .map(function (item) {
+                return item.location;
+              })
+              .filter(Boolean)
+              .join(' | ');
+            entry.area = matches[0].area || '';
+            entry.matches = matches.map(function (item) {
+              return {
+                location: item.location,
+                area: item.area,
+                assignmentHtml: item.assignmentHtml,
+                employeeHtml: item.employeeHtml,
+              };
+            });
+            decorateResult(entry);
+          }
+        } catch (error) {
+          entry.status = 'error';
+          entry.location = formatError(error);
+          addDebugError(`lookup:${login}`, error);
+        }
+        results.push(entry);
+        lastDebugPayload.results = results.slice();
+        renderResults(results);
+        storeState({ results });
+        if (i < logins.length - 1) {
+          await sleep(BETWEEN_LOGIN_MS);
+        }
+      }
+
+      lastDebugPayload.live = captureLiveSnapshot();
+      const found = results.filter(function (row) {
+        return row.status === 'found';
+      }).length;
+      const missed = results.length - found;
+      const message =
+        missed > 0
+          ? `Done. ${found} found, ${missed} missing. Copy Debug if a location looks wrong.`
+          : `Done. Location loaded for ${found} login(s).`;
+      updateStatus(message, missed > 0 ? 'error' : 'success');
+      storeState({ results, statusMessage: message });
+    } catch (error) {
+      addDebugError('runLookup', error);
+      updateStatus(`Lookup failed: ${formatError(error)}`, 'error');
+    } finally {
+      if (token === runToken && runButton) {
+        runButton.disabled = false;
+      }
+    }
+  }
+
+  function stopLookup() {
+    runToken += 1;
+    const runButton = document.getElementById(`${SCRIPT_ID}-run`);
+    if (runButton) {
+      runButton.disabled = false;
+    }
+    updateStatus('Stopped.');
+    addDebugStep('stopped', { remaining: true });
+  }
+
+  function toTsv(results) {
+    const header = ['Login', 'Now', '1st Half (6:00-12:15)', '2nd Half (12:15-6:00)', 'Status', 'Raw'];
+    const lines = [header.join('\t')];
+    results.forEach(function (row) {
+      const decorated = decorateResult(row);
+      lines.push(
+        [
+          decorated.login || '',
+          decorated.now || '',
+          decorated.firstHalf || '',
+          decorated.secondHalf || '',
+          decorated.status || '',
+          decorated.location || '',
+        ].join('\t')
+      );
+    });
+    return lines.join('\n');
+  }
+
+  async function writeClipboard(text) {
+    try {
+      if (typeof GM_setClipboard === 'function') {
+        GM_setClipboard(text, 'text');
+        return;
+      }
+    } catch {
+      // Fall through to browser clipboard.
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', 'readonly');
+    textarea.style.position = 'fixed';
+    textarea.style.top = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textarea);
+  }
+
+  async function copyTableToClipboard() {
+    if (!lastTableResults.length) {
+      updateStatus('No table to copy yet. Run Find Locations first.', 'error');
+      return;
+    }
+    try {
+      await writeClipboard(`${toTsv(lastTableResults)}\n`);
+      updateStatus(`Copied ${lastTableResults.length} row(s).`, 'success');
+    } catch (error) {
+      addDebugError('copyTableToClipboard', error);
+      updateStatus(`Copy failed: ${formatError(error)}`, 'error');
+    }
+  }
+
+  async function copyDebugToClipboard() {
+    lastDebugPayload.generatedAt = new Date().toISOString();
+    lastDebugPayload.version = VERSION;
+    lastDebugPayload.pageUrl = window.location.href;
+    lastDebugPayload.pageTitle = document.title;
+    lastDebugPayload.live = captureLiveSnapshot();
+    const text = JSON.stringify(lastDebugPayload, null, 2);
+    try {
+      await writeClipboard(text);
+      updateStatus('Debug copied. Paste it in chat so location parsing can be fixed.', 'success');
+    } catch (error) {
+      addDebugError('copyDebugToClipboard', error);
+      updateStatus(`Copy failed: ${formatError(error)}`, 'error');
+    }
+  }
+
+  function buildPanel() {
+    const saved = loadState();
+    const panel = document.createElement('div');
+    panel.id = SCRIPT_ID;
+    panel.innerHTML = `
+      <div class="ct-row">
+        <textarea id="${SCRIPT_ID}-logins" placeholder="Paste logins (one per line or comma-separated)">${escapeHtml(
+          saved.logins || ''
+        )}</textarea>
+        <div class="ct-actions">
+          <button id="${SCRIPT_ID}-run" type="button">Find Locations</button>
+          <button id="${SCRIPT_ID}-stop" type="button">Stop</button>
+          <button id="${SCRIPT_ID}-copy-table" type="button">Copy Table</button>
+          <button id="${SCRIPT_ID}-copy" type="button">Copy Debug</button>
+        </div>
+      </div>
+      <div id="${SCRIPT_ID}-status">Paste logins, then Find Locations.</div>
+      <div id="${SCRIPT_ID}-results">
+        <table>
+          <thead>
+            <tr>
+              <th>Login</th>
+              <th>Now</th>
+              <th>1st Half<span class="ct-sub">6:00–12:15</span></th>
+              <th>2nd Half<span class="ct-sub">12:15–6:00</span></th>
+            </tr>
+          </thead>
+          <tbody id="${SCRIPT_ID}-results-body">
+            <tr><td class="ct-empty" colspan="4">No results yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    `;
+    return panel;
+  }
+
+  function wirePanel(panel) {
+    if (panelWired || !panel) {
+      return;
+    }
+    panelWired = true;
+    document.getElementById(`${SCRIPT_ID}-run`).addEventListener('click', runLookup);
+    document.getElementById(`${SCRIPT_ID}-stop`).addEventListener('click', stopLookup);
+    document.getElementById(`${SCRIPT_ID}-copy-table`).addEventListener('click', copyTableToClipboard);
+    document.getElementById(`${SCRIPT_ID}-copy`).addEventListener('click', copyDebugToClipboard);
+    document.getElementById(`${SCRIPT_ID}-logins`).addEventListener('input', persistFormStateSoon);
+    document.getElementById(`${SCRIPT_ID}-logins`).addEventListener('change', persistFormState);
+  }
+
+  function restoreResults() {
+    const saved = loadState();
+    if (Array.isArray(saved.results) && saved.results.length) {
+      renderResults(saved.results);
+      if (saved.statusMessage) {
+        updateStatus(saved.statusMessage);
+      }
+    }
+  }
+
+  function insertPanel(panel, bar) {
+    const parent = bar.parentElement;
+    if (!parent) {
+      return;
+    }
+    const uph = document.getElementById(UPH_SUMMARY_ID);
+    let before = bar.nextSibling;
+    if (uph && uph.parentElement === parent) {
+      before = uph;
+    }
+    if (before) {
+      parent.insertBefore(panel, before);
+    } else {
+      parent.appendChild(panel);
+    }
+  }
+
+  function ensurePanel() {
+    const bar = findToolbar();
+    if (!bar || !bar.parentElement) {
+      return false;
+    }
+
+    let panel = document.getElementById(SCRIPT_ID);
+    if (panel && bar.contains(document.activeElement)) {
+      return true;
+    }
+    if (panel && panel.contains(document.activeElement)) {
+      return true;
+    }
+
+    if (!panel) {
+      panelWired = false;
+      panel = buildPanel();
+      insertPanel(panel, bar);
+      wirePanel(panel);
+      restoreResults();
+      return true;
+    }
+
+    if (panel.parentElement !== bar.parentElement || panel.previousElementSibling !== bar) {
+      insertPanel(panel, bar);
+    }
+    return true;
+  }
+
+  function scheduleMount() {
+    window.clearTimeout(mountTimer);
+    mountTimer = window.setTimeout(ensurePanel, 200);
+  }
+
+  function init() {
+    if (!document.body) {
+      setTimeout(init, 100);
+      return;
+    }
+    injectStyles();
+    ensurePanel();
+    const observer = new MutationObserver(scheduleMount);
+    observer.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener('load', scheduleMount);
+  }
+
+  init();
+})();

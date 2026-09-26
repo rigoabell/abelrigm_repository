@@ -1,0 +1,1264 @@
+// ==UserScript==
+// @name         FCLM Function Rollup Shift Value Table
+// @namespace    ultimate-tampermonkey
+// @version      0.1.5
+// @description  Capture a function rollup value and build day/night tables across a date range
+// @author       Cursor
+// @match        https://fclm-portal.amazon.com/reports/functionRollup*
+// @grant        GM_setClipboard
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const installationKey = '__fclmFunctionRollupShiftValueTableInstalled';
+  const stateKey = '__fclmFunctionRollupShiftValueTableState';
+  const version = '0.1.5';
+  const panelSelector = '.tm-rollup-panel';
+  const highlightClass = 'tm-rollup-capture-highlight';
+
+  function normalizeText(value) {
+    return (value ?? '').replace(/\s+/g, ' ').trim();
+  }
+
+  function padNumber(value) {
+    return String(value).padStart(2, '0');
+  }
+
+  function formatIsoDate(date) {
+    return `${date.getFullYear()}-${padNumber(date.getMonth() + 1)}-${padNumber(date.getDate())}`;
+  }
+
+  function formatSlashDate(date) {
+    return `${date.getFullYear()}/${padNumber(date.getMonth() + 1)}/${padNumber(date.getDate())}`;
+  }
+
+  function formatDisplayDate(date) {
+    const month = date.toLocaleString('en-US', { month: 'short' });
+    return `${date.getDate()}-${month}`;
+  }
+
+  function addDays(date, days) {
+    const next = new Date(date);
+    next.setDate(next.getDate() + days);
+    return next;
+  }
+
+  function enumerateDates(startIso, endIso) {
+    if (!startIso || !endIso) {
+      return [];
+    }
+
+    const start = new Date(`${startIso}T00:00:00`);
+    const end = new Date(`${endIso}T00:00:00`);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) {
+      return [];
+    }
+
+    const dates = [];
+    for (let current = start; current <= end; current = addDays(current, 1)) {
+      dates.push(new Date(current));
+    }
+    return dates;
+  }
+
+  function splitTime(value, fallbackHour, fallbackMinute) {
+    const match = /^(\d{2}):(\d{2})$/.exec(value ?? '');
+    if (!match) {
+      return {
+        hour: fallbackHour,
+        minute: fallbackMinute
+      };
+    }
+
+    return {
+      hour: Number(match[1]),
+      minute: Number(match[2])
+    };
+  }
+
+  function shouldRollToNextDay(startTime, endTime) {
+    if (endTime.hour > startTime.hour) {
+      return false;
+    }
+
+    if (endTime.hour < startTime.hour) {
+      return true;
+    }
+
+    return endTime.minute < startTime.minute;
+  }
+
+  function loadState() {
+    try {
+      return JSON.parse(localStorage.getItem(stateKey) ?? '{}');
+    } catch {
+      return {};
+    }
+  }
+
+  function saveState(nextState) {
+    localStorage.setItem(stateKey, JSON.stringify(nextState));
+  }
+
+  function copyText(text) {
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(text, 'text');
+      return Promise.resolve();
+    }
+
+    if (navigator.clipboard?.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+    return Promise.resolve();
+  }
+
+  function cssEscape(value) {
+    if (window.CSS?.escape) {
+      return window.CSS.escape(value);
+    }
+
+    return value.replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+  }
+
+  function buildCssPath(element) {
+    const segments = [];
+    let current = element;
+
+    while (current && current.nodeType === Node.ELEMENT_NODE) {
+      let segment = current.tagName.toLowerCase();
+      if (current.id) {
+        segment += `#${cssEscape(current.id)}`;
+        segments.unshift(segment);
+        break;
+      }
+
+      const parent = current.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children).filter(
+          (child) => child.tagName === current.tagName
+        );
+        if (siblings.length > 1) {
+          segment += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+        }
+      }
+
+      segments.unshift(segment);
+      current = current.parentElement;
+    }
+
+    return segments.join(' > ');
+  }
+
+  function buildXPath(element) {
+    const segments = [];
+    let current = element;
+
+    while (current && current.nodeType === Node.ELEMENT_NODE) {
+      const parent = current.parentElement;
+      const tagName = current.tagName.toLowerCase();
+
+      if (!parent) {
+        segments.unshift(`${tagName}[1]`);
+        break;
+      }
+
+      const siblings = Array.from(parent.children).filter(
+        (child) => child.tagName === current.tagName
+      );
+      const index = siblings.indexOf(current) + 1;
+      segments.unshift(`${tagName}[${index}]`);
+      current = parent;
+    }
+
+    return `/${segments.join('/')}`;
+  }
+
+  function getElementPreview(element) {
+    const row = element.closest('tr');
+    const table = element.closest('table');
+    const rowCells = row ? Array.from(row.children).filter((child) => child instanceof HTMLElement) : [];
+    const columnIndex = rowCells.indexOf(element) + 1;
+    const rowHeaderElement = row?.querySelector('th, td');
+    const rowParentTag = row?.parentElement?.tagName?.toLowerCase() ?? '';
+    const previousLabel = table?.previousElementSibling
+      ? normalizeText(table.previousElementSibling.textContent ?? '').slice(0, 160)
+      : '';
+
+    return {
+      tagName: element.tagName.toLowerCase(),
+      textSample: normalizeText(element.textContent).slice(0, 160),
+      cssPath: buildCssPath(element),
+      xpath: buildXPath(element),
+      outerHtmlSample: element.outerHTML.slice(0, 400),
+      classList: Array.from(element.classList),
+      tableId: table?.id ?? '',
+      tableClassList: table ? Array.from(table.classList) : [],
+      tableLabelText: previousLabel,
+      dataColumn: element.getAttribute('data-column') ?? '',
+      rowSectionTag: rowParentTag,
+      rowClassList: row ? Array.from(row.classList) : [],
+      rowIndex: row ? Array.from(row.parentElement?.children ?? []).indexOf(row) + 1 : 0,
+      columnIndex,
+      rowHeaderText: normalizeText(rowHeaderElement?.textContent ?? '').slice(0, 160)
+    };
+  }
+
+  function getUsableTargetClasses(classList) {
+    return (classList ?? []).filter(
+      (className) => className && className !== highlightClass && !className.startsWith('tm-rollup-')
+    );
+  }
+
+  function normalizeCapturedCssPath(cssPath) {
+    const normalized = normalizeText(cssPath)
+      .replace(/^html\s*>\s*body\s*>\s*/i, '')
+      .replace(/^html\s*>\s*/i, '')
+      .replace(/^body\s*>\s*/i, '');
+
+    if (!normalized) {
+      return '';
+    }
+
+    const idSegmentMatch = normalized.match(/[a-z0-9_-]+#[a-z0-9_-]+(?:\s*>\s*.*)?$/i);
+    return idSegmentMatch?.[0] ?? normalized;
+  }
+
+  function findRowByHeaderText(table, rowHeaderText) {
+    if (!rowHeaderText) {
+      return null;
+    }
+
+    const rows = Array.from(table.querySelectorAll('tr'));
+    return (
+      rows.find((row) => {
+        const firstCell = row.querySelector('th, td');
+        return normalizeText(firstCell?.textContent ?? '') === rowHeaderText;
+      }) ?? null
+    );
+  }
+
+  function resolveTargetByClassList(doc, target) {
+    const classList = getUsableTargetClasses(target.classList);
+    if (classList.length === 0) {
+      return null;
+    }
+
+    const selector = `${target.tagName || ''}${classList.map((className) => `.${cssEscape(className)}`).join('')}`;
+    const candidates = Array.from(doc.querySelectorAll(selector));
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    const exactTextMatch = candidates.find(
+      (element) => normalizeText(element.textContent) === target.textSample
+    );
+    if (exactTextMatch) {
+      return exactTextMatch;
+    }
+
+    const partialTextMatch = candidates.find((element) =>
+      normalizeText(element.textContent).includes(target.textSample)
+    );
+    return partialTextMatch ?? candidates[0] ?? null;
+  }
+
+  function resolveTargetByTablePosition(doc, target) {
+    const tableSelector = target.tableId
+      ? `table#${cssEscape(target.tableId)}`
+      : target.tableClassList?.length
+        ? `table.${target.tableClassList.map((className) => cssEscape(className)).join('.')}`
+        : '';
+
+    if (!tableSelector || !target.columnIndex) {
+      return null;
+    }
+
+    const table = doc.querySelector(tableSelector);
+    if (!table) {
+      return null;
+    }
+
+    if (target.rowHeaderText) {
+      const rowByHeader = findRowByHeaderText(table, target.rowHeaderText);
+      if (rowByHeader) {
+        const rowCells = Array.from(rowByHeader.children).filter((child) => child instanceof HTMLElement);
+        const cellByHeader = rowCells[target.columnIndex - 1];
+        if (cellByHeader instanceof Element) {
+          return cellByHeader;
+        }
+      }
+    }
+
+    const rowSelectorParts = [];
+    if (target.rowSectionTag) {
+      rowSelectorParts.push(target.rowSectionTag);
+    }
+    rowSelectorParts.push('tr');
+    const usableRowClasses = getUsableTargetClasses(target.rowClassList);
+    if (usableRowClasses.length > 0) {
+      rowSelectorParts.push(usableRowClasses.map((className) => `.${cssEscape(className)}`).join(''));
+    }
+
+    if (target.dataColumn) {
+      const cellSelector = `[data-column="${cssEscape(target.dataColumn)}"]`;
+      const contextualRowSelector = rowSelectorParts.join(' ');
+      const contextualCell = table.querySelector(`${contextualRowSelector} ${cellSelector}`);
+      if (contextualCell instanceof Element) {
+        return contextualCell;
+      }
+
+      const tableScopedCell = table.querySelector(cellSelector);
+      if (tableScopedCell instanceof Element) {
+        return tableScopedCell;
+      }
+    }
+
+    if (target.rowIndex) {
+      const rowScope = target.rowSectionTag ? `${target.rowSectionTag} > ` : '';
+      const row = table.querySelector(
+        `${rowScope}tr:nth-of-type(${target.rowIndex}), tbody > tr:nth-of-type(${target.rowIndex}), tr:nth-of-type(${target.rowIndex})`
+      );
+      const rowCells = Array.from(row?.children ?? []).filter((child) => child instanceof HTMLElement);
+      const cellByIndex = rowCells[target.columnIndex - 1];
+      if (cellByIndex instanceof Element) {
+        return cellByIndex;
+      }
+    }
+
+    return null;
+  }
+
+  function resolveByXPath(doc, xpath) {
+    if (!xpath) {
+      return null;
+    }
+
+    try {
+      const result = doc.evaluate(
+        xpath,
+        doc,
+        null,
+        XPathResult.FIRST_ORDERED_NODE_TYPE,
+        null
+      );
+      return result.singleNodeValue instanceof Element ? result.singleNodeValue : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function resolveTarget(doc, target) {
+    if (!target) {
+      return null;
+    }
+
+    const positionedMatch = resolveTargetByTablePosition(doc, target);
+    if (positionedMatch) {
+      return positionedMatch;
+    }
+
+    const normalizedCssPath = normalizeCapturedCssPath(target.cssPath);
+    if (normalizedCssPath) {
+      const cssMatch = doc.querySelector(normalizedCssPath);
+      if (cssMatch) {
+        return cssMatch;
+      }
+    }
+
+    const classMatch = resolveTargetByClassList(doc, target);
+    if (classMatch) {
+      return classMatch;
+    }
+
+    return resolveByXPath(doc, target.xpath);
+  }
+
+  function getElementValueText(element) {
+    return normalizeText(element?.textContent ?? '');
+  }
+
+  function inferValueKind(sampleText) {
+    const text = normalizeText(sampleText);
+    if (!text) {
+      return 'any';
+    }
+
+    if (/^-?\d+(?:\.\d+)?%$/.test(text)) {
+      return 'percent';
+    }
+
+    if (/^-?\d+(?:\.\d+)?$/.test(text)) {
+      return 'number';
+    }
+
+    return 'any';
+  }
+
+  function isResolvedValueReady(valueText, expectedKind) {
+    const text = normalizeText(valueText);
+    if (!text) {
+      return false;
+    }
+
+    if (expectedKind === 'percent') {
+      return /^-?\d+(?:\.\d+)?%$/.test(text);
+    }
+
+    if (expectedKind === 'number') {
+      return /^-?\d+(?:\.\d+)?$/.test(text);
+    }
+
+    return true;
+  }
+
+  function isPlaceholderValue(valueText) {
+    const text = normalizeText(valueText);
+    return text === '--' || /^n\/a$/i.test(text);
+  }
+
+  function createStyles() {
+    const style = document.createElement('style');
+    style.textContent = `
+      .tm-rollup-launcher {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        z-index: 2147483646;
+        border: none;
+        border-radius: 999px;
+        padding: 10px 14px;
+        background: #111827;
+        color: #f9fafb;
+        font: 600 13px/1.2 Arial, sans-serif;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.25);
+        cursor: pointer;
+      }
+      .tm-rollup-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        pointer-events: none;
+      }
+      .tm-rollup-panel {
+        position: fixed;
+        right: 16px;
+        bottom: 64px;
+        width: min(440px, calc(100vw - 32px));
+        max-height: min(78vh, 760px);
+        overflow: auto;
+        border-radius: 16px;
+        background: #ffffff;
+        box-shadow: 0 24px 60px rgba(15, 23, 42, 0.3);
+        font-family: Arial, sans-serif;
+        pointer-events: auto;
+      }
+      .tm-rollup-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 14px;
+        border-bottom: 1px solid #e5e7eb;
+      }
+      .tm-rollup-title {
+        margin: 0;
+        color: #111827;
+        font: 700 15px/1.2 Arial, sans-serif;
+      }
+      .tm-rollup-close {
+        border: none;
+        background: transparent;
+        color: #6b7280;
+        font: 700 24px/1 Arial, sans-serif;
+        cursor: pointer;
+      }
+      .tm-rollup-content {
+        display: grid;
+        gap: 10px;
+        padding: 12px 14px 14px;
+      }
+      .tm-rollup-help,
+      .tm-rollup-status,
+      .tm-rollup-target {
+        color: #4b5563;
+        font: 500 12px/1.35 Arial, sans-serif;
+        word-break: break-word;
+      }
+      .tm-rollup-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .tm-rollup-field {
+        display: grid;
+        gap: 6px;
+      }
+      .tm-rollup-label {
+        color: #111827;
+        font: 700 12px/1.2 Arial, sans-serif;
+      }
+      .tm-rollup-input {
+        width: 100%;
+        border: 1px solid #cbd5e1;
+        border-radius: 12px;
+        padding: 8px 10px;
+        box-sizing: border-box;
+        color: #111827;
+        font: 500 12px/1.25 Arial, sans-serif;
+      }
+      .tm-rollup-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .tm-rollup-button {
+        border: none;
+        border-radius: 10px;
+        padding: 8px 10px;
+        background: #111827;
+        color: #f9fafb;
+        font: 600 12px/1.2 Arial, sans-serif;
+        cursor: pointer;
+      }
+      .tm-rollup-button[disabled] {
+        opacity: 0.65;
+        cursor: wait;
+      }
+      .tm-rollup-button.tm-rollup-secondary {
+        background: #e5e7eb;
+        color: #111827;
+      }
+      .tm-rollup-button.tm-rollup-active {
+        background: #7c3aed;
+      }
+      .tm-rollup-results {
+        overflow: auto;
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+        max-height: 320px;
+      }
+      .tm-rollup-table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      .tm-rollup-table th,
+      .tm-rollup-table td {
+        padding: 8px 10px;
+        border-bottom: 1px solid #e5e7eb;
+        text-align: left;
+        vertical-align: top;
+        font: 500 12px/1.35 Arial, sans-serif;
+      }
+      .tm-rollup-table th {
+        background: #f8fafc;
+        color: #111827;
+        font-weight: 700;
+      }
+      .${highlightClass} {
+        outline: 3px solid #7c3aed !important;
+        outline-offset: 2px !important;
+        cursor: crosshair !important;
+      }
+    `;
+    return style;
+  }
+
+  function buildShiftUrl(baseUrl, shiftDate, startTime, endTime) {
+    const url = new URL(baseUrl.toString());
+    const endDate = shouldRollToNextDay(startTime, endTime) ? addDays(shiftDate, 1) : shiftDate;
+
+    url.searchParams.set('reportFormat', 'HTML');
+    url.searchParams.set('maxIntradayDays', '1');
+    url.searchParams.set('spanType', 'Intraday');
+    url.searchParams.set('startDateIntraday', formatSlashDate(shiftDate));
+    url.searchParams.set('startHourIntraday', String(startTime.hour));
+    url.searchParams.set('startMinuteIntraday', String(startTime.minute));
+    url.searchParams.set('endDateIntraday', formatSlashDate(endDate));
+    url.searchParams.set('endHourIntraday', String(endTime.hour));
+    url.searchParams.set('endMinuteIntraday', String(endTime.minute));
+    return url;
+  }
+
+  function waitForMs(ms) {
+    return new Promise((resolve) => {
+      window.setTimeout(resolve, ms);
+    });
+  }
+
+  async function resolveValueFromIframeDocument(doc, target, expectedKind, timeoutMs) {
+    const startedAt = Date.now();
+    let lastMatchedElement = null;
+    let lastValueText = '';
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const matchedElement = resolveTarget(doc, target);
+      if (matchedElement) {
+        const valueText = getElementValueText(matchedElement);
+        lastMatchedElement = matchedElement;
+        lastValueText = valueText;
+
+        if (isResolvedValueReady(valueText, expectedKind)) {
+          return {
+            value: valueText,
+            matchedPreview: getElementPreview(matchedElement),
+            source: 'iframe'
+          };
+        }
+      }
+
+      await waitForMs(400);
+    }
+
+    if (lastMatchedElement && expectedKind === 'any') {
+      return {
+        value: lastValueText,
+        matchedPreview: getElementPreview(lastMatchedElement),
+        source: 'iframe-timeout'
+      };
+    }
+
+    if (lastMatchedElement) {
+      throw new Error(
+        `Value not ready after iframe render (last value: ${lastValueText || 'empty'})`
+      );
+    }
+
+    const tableIds = Array.from(doc.querySelectorAll('table[id]'))
+      .slice(0, 5)
+      .map((table) => table.id)
+      .join(', ');
+    throw new Error(
+      `Target not found after iframe render (title: ${normalizeText(doc.title)}, tables: ${doc.querySelectorAll('table').length}, ids: ${tableIds || 'none'})`
+    );
+  }
+
+  async function fetchValueFromIframe(shiftUrl, target) {
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'fixed';
+    iframe.style.width = '1px';
+    iframe.style.height = '1px';
+    iframe.style.opacity = '0';
+    iframe.style.pointerEvents = 'none';
+    iframe.style.left = '-9999px';
+    iframe.style.top = '-9999px';
+    const expectedKind = inferValueKind(target.textSample);
+
+    const loadPromise = new Promise((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => {
+        reject(new Error('Iframe load timeout'));
+      }, 30000);
+
+      iframe.addEventListener(
+        'load',
+        async () => {
+          window.clearTimeout(timeoutId);
+          try {
+            const doc = iframe.contentDocument;
+            if (!doc) {
+              reject(new Error('Iframe document unavailable'));
+              return;
+            }
+
+            resolve(await resolveValueFromIframeDocument(doc, target, expectedKind, 18000));
+          } catch (error) {
+            reject(error);
+          }
+        },
+        { once: true }
+      );
+    });
+
+    document.body.appendChild(iframe);
+    iframe.src = shiftUrl.toString();
+
+    try {
+      return await loadPromise;
+    } finally {
+      iframe.remove();
+    }
+  }
+
+  async function fetchHtmlValueForShift(shiftUrl, target) {
+    const response = await fetch(shiftUrl.toString(), {
+      credentials: 'include'
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const html = await response.text();
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const matchedElement = resolveTarget(doc, target);
+
+    return {
+      doc,
+      matchedElement
+    };
+  }
+
+  async function fetchValueForShift(shiftUrl, target) {
+    const expectedKind = inferValueKind(target.textSample);
+    let doc = null;
+    let htmlError = null;
+
+    try {
+      const htmlResult = await fetchHtmlValueForShift(shiftUrl, target);
+      doc = htmlResult.doc;
+
+      if (htmlResult.matchedElement) {
+        const matchedValue = getElementValueText(htmlResult.matchedElement);
+        if (isResolvedValueReady(matchedValue, expectedKind)) {
+          return {
+            value: matchedValue,
+            matchedPreview: getElementPreview(htmlResult.matchedElement),
+            source: 'html'
+          };
+        }
+      }
+    } catch (error) {
+      htmlError = error;
+    }
+
+    let iframeError = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        const iframeResult = await fetchValueFromIframe(shiftUrl, target);
+        if (
+          !isResolvedValueReady(iframeResult.value, expectedKind) &&
+          isPlaceholderValue(iframeResult.value) &&
+          attempt < 3
+        ) {
+          await waitForMs(1200);
+          continue;
+        }
+
+        return {
+          ...iframeResult,
+          source: `${iframeResult.source}-attempt-${attempt}`
+        };
+      } catch (error) {
+        iframeError = error;
+        if (attempt < 3) {
+          await waitForMs(1500);
+        }
+      }
+    }
+
+    const fallbackTitle = normalizeText(doc?.title ?? '');
+    const fallbackTables = doc?.querySelectorAll('table').length ?? 0;
+    const tableIds = doc
+      ? Array.from(doc.querySelectorAll('table[id]'))
+          .slice(0, 5)
+          .map((table) => table.id)
+          .join(', ')
+      : 'none';
+    throw new Error(
+      `Target not found (title: ${fallbackTitle || 'unknown'}, tables: ${fallbackTables}, ids: ${tableIds || 'none'}; html: ${htmlError instanceof Error ? htmlError.message : 'no direct match'}; iframe: ${iframeError instanceof Error ? iframeError.message : String(iframeError)})`
+    );
+  }
+
+  function install() {
+    if (window[installationKey]) {
+      return;
+    }
+    window[installationKey] = true;
+
+    const persistedState = loadState();
+    document.documentElement.appendChild(createStyles());
+
+    const launcher = document.createElement('button');
+    launcher.type = 'button';
+    launcher.className = 'tm-rollup-launcher';
+    launcher.textContent = 'Shift Table';
+
+    let overlay = null;
+    let captureMode = false;
+    let highlightedElement = null;
+    let lastResults = [];
+    let lastDebugData = null;
+
+    const state = {
+      metricLabel: persistedState.metricLabel ?? '',
+      startDate: persistedState.startDate ?? '',
+      endDate: persistedState.endDate ?? '',
+      dayStart: persistedState.dayStart ?? '06:00',
+      dayEnd: persistedState.dayEnd ?? '18:00',
+      nightStart: persistedState.nightStart ?? '18:00',
+      nightEnd: persistedState.nightEnd ?? '06:00',
+      target: persistedState.target ?? null
+    };
+
+    function persistState() {
+      saveState(state);
+    }
+
+    function clearHighlight() {
+      if (highlightedElement) {
+        highlightedElement.classList.remove(highlightClass);
+        highlightedElement = null;
+      }
+    }
+
+    function setHighlightedElement(element) {
+      if (highlightedElement === element) {
+        return;
+      }
+
+      clearHighlight();
+      highlightedElement = element;
+      highlightedElement?.classList.add(highlightClass);
+    }
+
+    function closeOverlay() {
+      clearHighlight();
+      captureMode = false;
+      overlay?.remove();
+      overlay = null;
+    }
+
+    function handleCaptureMouseMove(event) {
+      if (!captureMode || !overlay?.isConnected) {
+        return;
+      }
+
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target || target.closest(panelSelector)) {
+        clearHighlight();
+        return;
+      }
+
+      setHighlightedElement(target);
+    }
+
+    function handleCaptureContextMenu(event) {
+      if (!captureMode || !overlay?.isConnected) {
+        return;
+      }
+
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target || target.closest(panelSelector)) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+
+      state.target = getElementPreview(target);
+      if (!state.metricLabel) {
+        state.metricLabel = state.target.textSample.slice(0, 48);
+      }
+      captureMode = false;
+      persistState();
+      openOverlay(true);
+    }
+
+    document.addEventListener('mousemove', handleCaptureMouseMove, true);
+    document.addEventListener('contextmenu', handleCaptureContextMenu, true);
+
+    function openOverlay(reopen = false) {
+      if (overlay?.isConnected && !reopen) {
+        return;
+      }
+
+      if (overlay?.isConnected) {
+        overlay.remove();
+      }
+
+      overlay = document.createElement('div');
+      overlay.className = 'tm-rollup-overlay';
+
+      const panel = document.createElement('div');
+      panel.className = 'tm-rollup-panel';
+
+      const header = document.createElement('div');
+      header.className = 'tm-rollup-header';
+
+      const title = document.createElement('h2');
+      title.className = 'tm-rollup-title';
+      title.textContent = 'FCLM Function Rollup Shift Value Table';
+
+      const closeButton = document.createElement('button');
+      closeButton.type = 'button';
+      closeButton.className = 'tm-rollup-close';
+      closeButton.textContent = '×';
+      closeButton.addEventListener('click', closeOverlay);
+
+      header.appendChild(title);
+      header.appendChild(closeButton);
+
+      const content = document.createElement('div');
+      content.className = 'tm-rollup-content';
+
+      const help = document.createElement('div');
+      help.className = 'tm-rollup-help';
+      help.textContent = 'Click Assign Metric, then right-click a report value. The panel stays open while you use the page.';
+
+      const fields = document.createElement('div');
+      fields.className = 'tm-rollup-grid';
+
+      function createField(labelText, inputType, initialValue) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'tm-rollup-field';
+
+        const label = document.createElement('label');
+        label.className = 'tm-rollup-label';
+        label.textContent = labelText;
+
+        const input = document.createElement('input');
+        input.className = 'tm-rollup-input';
+        input.type = inputType;
+        input.value = initialValue;
+
+        wrapper.appendChild(label);
+        wrapper.appendChild(input);
+        return { wrapper, input };
+      }
+
+      const metricField = createField('Metric Label', 'text', state.metricLabel);
+      const startDateField = createField(
+        'Start Date',
+        'date',
+        state.startDate || new Date().toISOString().slice(0, 10)
+      );
+      const endDateField = createField(
+        'End Date',
+        'date',
+        state.endDate || new Date().toISOString().slice(0, 10)
+      );
+      const dayStartField = createField('Day Start', 'time', state.dayStart);
+      const dayEndField = createField('Day End', 'time', state.dayEnd);
+      const nightStartField = createField('Night Start', 'time', state.nightStart);
+      const nightEndField = createField('Night End', 'time', state.nightEnd);
+
+      [
+        metricField,
+        startDateField,
+        endDateField,
+        dayStartField,
+        dayEndField,
+        nightStartField,
+        nightEndField
+      ].forEach((field) => fields.appendChild(field.wrapper));
+
+      const targetSummary = document.createElement('div');
+      targetSummary.className = 'tm-rollup-target';
+      targetSummary.textContent = state.target
+        ? `Target: ${state.target.tagName} via saved selector`
+        : 'Target: none selected yet.';
+
+      const actions = document.createElement('div');
+      actions.className = 'tm-rollup-actions';
+
+      const assignButton = document.createElement('button');
+      assignButton.type = 'button';
+      assignButton.className = `tm-rollup-button tm-rollup-secondary${captureMode ? ' tm-rollup-active' : ''}`;
+      assignButton.textContent = captureMode ? 'Right-click a value...' : 'Assign Metric';
+
+      const generateButton = document.createElement('button');
+      generateButton.type = 'button';
+      generateButton.className = 'tm-rollup-button';
+      generateButton.textContent = 'Generate Table';
+
+      const copyTableButton = document.createElement('button');
+      copyTableButton.type = 'button';
+      copyTableButton.className = 'tm-rollup-button tm-rollup-secondary';
+      copyTableButton.textContent = 'Copy Table';
+
+      const copyDebugButton = document.createElement('button');
+      copyDebugButton.type = 'button';
+      copyDebugButton.className = 'tm-rollup-button tm-rollup-secondary';
+      copyDebugButton.textContent = 'Copy Debug';
+
+      const clearButton = document.createElement('button');
+      clearButton.type = 'button';
+      clearButton.className = 'tm-rollup-button tm-rollup-secondary';
+      clearButton.textContent = 'Clear Results';
+
+      actions.appendChild(assignButton);
+      actions.appendChild(generateButton);
+      actions.appendChild(copyTableButton);
+      actions.appendChild(copyDebugButton);
+      actions.appendChild(clearButton);
+
+      const status = document.createElement('div');
+      status.className = 'tm-rollup-status';
+      status.textContent = captureMode
+        ? 'Capture mode is on. Right-click the report value you want to track.'
+        : 'Select a target and generate the table.';
+
+      const resultsWrap = document.createElement('div');
+      resultsWrap.className = 'tm-rollup-results';
+
+      const resultsTable = document.createElement('table');
+      resultsTable.className = 'tm-rollup-table';
+      resultsTable.innerHTML = `
+        <thead>
+          <tr>
+            <th colspan="2">Days</th>
+            <th colspan="2">Nights</th>
+          </tr>
+          <tr>
+            <th>Date</th>
+            <th>Value</th>
+            <th>Date</th>
+            <th>Value</th>
+          </tr>
+        </thead>
+      `;
+      const tbody = document.createElement('tbody');
+      resultsTable.appendChild(tbody);
+      resultsWrap.appendChild(resultsTable);
+
+      function syncStateFromInputs() {
+        state.metricLabel = metricField.input.value.trim();
+        state.startDate = startDateField.input.value;
+        state.endDate = endDateField.input.value;
+        state.dayStart = dayStartField.input.value || '06:00';
+        state.dayEnd = dayEndField.input.value || '18:00';
+        state.nightStart = nightStartField.input.value || '18:00';
+        state.nightEnd = nightEndField.input.value || '06:00';
+        persistState();
+      }
+
+      function renderRows(rows) {
+        tbody.replaceChildren();
+
+        for (const row of rows) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${row.dayDate}</td>
+            <td>${row.dayValue}</td>
+            <td>${row.nightDate}</td>
+            <td>${row.nightValue}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+      }
+
+      function buildTableTsv() {
+        const header = ['Days Date', 'Days Value', 'Nights Date', 'Nights Value'];
+        const lines = [header.join('\t')];
+        for (const row of lastResults) {
+          lines.push([row.dayDate, row.dayValue, row.nightDate, row.nightValue].join('\t'));
+        }
+        return lines.join('\n');
+      }
+
+      assignButton.addEventListener('click', () => {
+        syncStateFromInputs();
+        captureMode = !captureMode;
+        openOverlay(true);
+      });
+
+      generateButton.addEventListener('click', async () => {
+        syncStateFromInputs();
+
+        if (!state.target) {
+          status.textContent = 'Assign a metric first.';
+          return;
+        }
+
+        const dates = enumerateDates(state.startDate, state.endDate);
+        if (dates.length === 0) {
+          status.textContent = 'Enter a valid date range.';
+          return;
+        }
+
+        const baseUrl = new URL(window.location.href);
+        const dayStart = splitTime(state.dayStart, 6, 0);
+        const dayEnd = splitTime(state.dayEnd, 18, 0);
+        const nightStart = splitTime(state.nightStart, 18, 0);
+        const nightEnd = splitTime(state.nightEnd, 6, 0);
+
+        generateButton.disabled = true;
+        copyTableButton.disabled = true;
+        copyDebugButton.disabled = true;
+        status.textContent = `Generating ${dates.length} day/night row${dates.length === 1 ? '' : 's'}...`;
+        lastResults = [];
+
+        const debug = {
+          scriptVersion: version,
+          metricLabel: state.metricLabel,
+          target: state.target,
+          baseUrl: baseUrl.toString(),
+          dates: dates.map((date) => formatIsoDate(date)),
+          results: [],
+          errors: []
+        };
+
+        try {
+          for (const date of dates) {
+            const dayUrl = buildShiftUrl(baseUrl, date, dayStart, dayEnd);
+            const nightUrl = buildShiftUrl(baseUrl, date, nightStart, nightEnd);
+
+            let dayValue = '';
+            let nightValue = '';
+
+            try {
+              const dayResult = await fetchValueForShift(dayUrl, state.target);
+              dayValue = dayResult.value || 'Not found';
+              debug.results.push({
+                shiftType: 'day',
+                date: formatIsoDate(date),
+                url: dayUrl.toString(),
+                value: dayValue,
+                source: dayResult.source,
+                matchedPreview: dayResult.matchedPreview
+              });
+            } catch (error) {
+              dayValue = `Error: ${error instanceof Error ? error.message : String(error)}`;
+              debug.errors.push({
+                shiftType: 'day',
+                date: formatIsoDate(date),
+                url: dayUrl.toString(),
+                error: dayValue
+              });
+            }
+
+            try {
+              const nightResult = await fetchValueForShift(nightUrl, state.target);
+              nightValue = nightResult.value || 'Not found';
+              debug.results.push({
+                shiftType: 'night',
+                date: formatIsoDate(date),
+                url: nightUrl.toString(),
+                value: nightValue,
+                source: nightResult.source,
+                matchedPreview: nightResult.matchedPreview
+              });
+            } catch (error) {
+              nightValue = `Error: ${error instanceof Error ? error.message : String(error)}`;
+              debug.errors.push({
+                shiftType: 'night',
+                date: formatIsoDate(date),
+                url: nightUrl.toString(),
+                error: nightValue
+              });
+            }
+
+            lastResults.push({
+              dayDate: formatDisplayDate(date),
+              dayValue,
+              nightDate: formatDisplayDate(date),
+              nightValue
+            });
+
+            renderRows(lastResults);
+          }
+
+          lastDebugData = debug;
+          status.textContent = `Finished ${dates.length} row${dates.length === 1 ? '' : 's'} for ${state.metricLabel || 'captured metric'}.`;
+        } finally {
+          generateButton.disabled = false;
+          copyTableButton.disabled = lastResults.length === 0;
+          copyDebugButton.disabled = false;
+        }
+      });
+
+      copyTableButton.addEventListener('click', async () => {
+        if (lastResults.length === 0) {
+          status.textContent = 'No results to copy yet.';
+          return;
+        }
+
+        copyTableButton.disabled = true;
+        try {
+          await copyText(buildTableTsv());
+          status.textContent = `Copied ${lastResults.length} table row${lastResults.length === 1 ? '' : 's'}.`;
+        } catch (error) {
+          status.textContent = `Copy failed: ${error instanceof Error ? error.message : String(error)}`;
+        } finally {
+          copyTableButton.disabled = false;
+        }
+      });
+
+      copyDebugButton.addEventListener('click', async () => {
+        syncStateFromInputs();
+
+        const debugPayload = {
+          scriptVersion: version,
+          pageUrl: window.location.href,
+          metricLabel: state.metricLabel,
+          target: state.target,
+          latestResultsPreview: lastResults.slice(0, 10),
+          latestDebugData: lastDebugData,
+          currentPageTargetPreview: (() => {
+            const matchedElement = state.target ? resolveTarget(document, state.target) : null;
+            return matchedElement ? getElementPreview(matchedElement) : null;
+          })()
+        };
+
+        copyDebugButton.disabled = true;
+        try {
+          await copyText(JSON.stringify(debugPayload, null, 2));
+          status.textContent = 'Copied debug payload.';
+        } catch (error) {
+          status.textContent = `Debug copy failed: ${error instanceof Error ? error.message : String(error)}`;
+        } finally {
+          copyDebugButton.disabled = false;
+        }
+      });
+
+      clearButton.addEventListener('click', () => {
+        lastResults = [];
+        lastDebugData = null;
+        tbody.replaceChildren();
+        status.textContent = 'Results cleared.';
+      });
+
+      [
+        metricField.input,
+        startDateField.input,
+        endDateField.input,
+        dayStartField.input,
+        dayEndField.input,
+        nightStartField.input,
+        nightEndField.input
+      ].forEach((input) => {
+        input.addEventListener('change', syncStateFromInputs);
+      });
+
+      content.appendChild(help);
+      content.appendChild(fields);
+      content.appendChild(targetSummary);
+      content.appendChild(actions);
+      content.appendChild(status);
+      content.appendChild(resultsWrap);
+
+      panel.appendChild(header);
+      panel.appendChild(content);
+      overlay.appendChild(panel);
+      document.body.appendChild(overlay);
+    }
+
+    launcher.addEventListener('click', () => openOverlay());
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && overlay?.isConnected) {
+        captureMode = false;
+        openOverlay(true);
+      }
+    });
+
+    document.body.appendChild(launcher);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', install, { once: true });
+  } else {
+    install();
+  }
+})();

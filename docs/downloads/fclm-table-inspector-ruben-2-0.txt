@@ -1,0 +1,1611 @@
+// ==UserScript==
+// @name         FCLM Table Inspector (Ruben 2.0)
+// @namespace    https://fclm-portal.amazon.com/
+// @version      1.7.8
+// @description  Per-tab pinned Function Rollup values; Live plus fetchable Intraday windows.
+// @author       Ruben
+// @match        *://fclm-portal.amazon.com/*
+// @match        *://*.fclm-portal.amazon.com/*
+// @match        *://fclm-portal.amazon.com.proxy.amazon.com/*
+// @include      *fclm-portal.amazon.com*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @connect      fclm-portal.amazon.com
+// @connect      *.fclm-portal.amazon.com
+// @run-at       document-end
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const IGNORE_HEADER_ROW_CLASSES = ['tablesorter-filter-row', 'tablesorter-ignoreRow'];
+  const SIZE_CLASSES = ['size-small', 'size-medium', 'size-large', 'size-heavybulky', 'size-total'];
+  const VERSION = '1.7.8';
+  const SUMMARY_SIZES = new Set(['small', 'medium', 'large', 'heavybulky', 'total']);
+  const PINS_KEY = 'r20insp.pins.v2';
+  const PINS_LEGACY_KEY = 'r20insp.pins.v1';
+  const PRESETS_KEY = 'r20insp.presets.v1';
+  const TAB_CACHE_KEY = 'r20insp.tabcache.v1';
+  const LIVE_TAB = 'live';
+  let lastPinResults = [];
+  let hudEl = null;
+  let reportWaiter = null;
+  let pinMapMemo = null;
+
+  const addMode = {
+    open: false,
+    tableKey: '',
+    xHeader: '',
+    yIndex: 0,
+  };
+
+  const ui = {
+    tab: LIVE_TAB,
+    fetching: false,
+    addingTab: false,
+    editingTab: null,
+    picking: false,
+    newStart: 6,
+    newEnd: 18,
+  };
+
+  GM_addStyle(`
+    .r20-insp-hud {
+      position: fixed !important;
+      top: 52px !important;
+      right: 10px !important;
+      z-index: 2147483645;
+      width: 304px;
+      max-width: calc(100vw - 16px);
+      max-height: calc(100vh - 64px);
+      overflow: auto;
+      padding: 12px;
+      border-radius: 10px;
+      background: #232f3e;
+      color: #fff;
+      font: 12px/1.4 "Segoe UI", Arial, sans-serif;
+      box-shadow: 0 8px 22px rgba(0,0,0,.4);
+      display: block !important;
+      visibility: visible !important;
+    }
+    .r20-insp-hud h2 {
+      margin: 0 0 8px;
+      font: 700 11px/1.2 "Segoe UI", Arial, sans-serif;
+      color: #ff9900;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+    .r20-insp-hud .hint { margin: 2px 0 0; color: #94a3b8; font-size: 11px; font-weight: 400; }
+    .r20-insp-empty { color: #94a3b8; font-size: 12px; padding: 10px 8px; line-height: 1.45; background: #1b2430; border-radius: 8px; }
+    .r20-insp-pin {
+      position: relative;
+      margin-top: 8px;
+      padding: 9px 28px 9px 10px;
+      border-radius: 8px;
+      background: #1b2430;
+    }
+    .r20-insp-pin .miss { color: #fca5a5; font-size: 12px; margin-bottom: 6px; }
+    .r20-insp-pin .value { color: #86efac; font-size: 20px; font-weight: 700; line-height: 1.2; margin: 2px 0 8px; }
+    .r20-insp-pin .meta {
+      color: #e5e7eb;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .r20-insp-pin .site { color: #fbbf24; font-size: 11px; font-weight: 700; margin-bottom: 2px; }
+    .r20-insp-pin .kv {
+      display: grid;
+      grid-template-columns: 42px 1fr;
+      gap: 6px;
+      margin-top: 3px;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .r20-insp-pin .k { color: #9ca3af; font-weight: 700; text-transform: uppercase; font-size: 10px; padding-top: 1px; }
+    .r20-insp-pin .v { color: #e5e7eb; word-break: break-word; }
+    .r20-insp-pin-x {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      color: #94a3b8;
+      font: 700 15px/22px Arial, sans-serif;
+      cursor: pointer;
+    }
+    .r20-insp-pin-x:hover { background: #7f1d1d; color: #fff; }
+    .r20-insp-add-form {
+      margin-top: 8px;
+      padding: 10px;
+      border-radius: 8px;
+      background: #1b2430;
+    }
+    .r20-insp-hud label {
+      display: block;
+      margin: 0 0 8px;
+      color: #9ca3af;
+      font-size: 10px;
+      text-transform: uppercase;
+    }
+    .r20-insp-hud select {
+      display: block;
+      width: 100%;
+      margin-top: 3px;
+      padding: 6px 8px;
+      border: 0;
+      border-radius: 5px;
+      background: #0f172a;
+      color: #fff;
+      font: 12px "Segoe UI", Arial, sans-serif;
+    }
+    .r20-insp-add-preview { margin: 4px 0 8px; color: #86efac; font-size: 18px; font-weight: 700; }
+    .r20-insp-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .r20-insp-actions button {
+      flex: 1;
+      min-width: 88px;
+      border: 0;
+      border-radius: 6px;
+      padding: 7px 8px;
+      font: 700 11px "Segoe UI", Arial, sans-serif;
+      cursor: pointer;
+    }
+    .r20-insp-add { background: #3b82f6; color: #fff; }
+    .r20-insp-pin-save { background: #22c55e; color: #052e16; }
+    .r20-insp-pin-cancel, .r20-insp-clear { background: #37475a; color: #fff; }
+    body.r20-insp-picking table.result-table tbody td,
+    body.r20-insp-picking table.result-table tbody th,
+    body.r20-insp-picking table#summary tbody td,
+    body.r20-insp-picking table#summary tbody th {
+      cursor: cell;
+    }
+    .r20-insp-fetch { background: #3b82f6; color: #fff; }
+    .r20-insp-tabs { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 8px; }
+    .r20-insp-tab, .r20-insp-tab-add {
+      border: 0;
+      border-radius: 6px;
+      padding: 5px 8px;
+      background: #37475a;
+      color: #fff;
+      font: 700 11px "Segoe UI", Arial, sans-serif;
+      cursor: pointer;
+    }
+    .r20-insp-tab.on { background: #ff9900; color: #111; }
+    .r20-insp-tab-add { background: #1b2430; color: #94a3b8; }
+    .r20-insp-tab-x {
+      margin-left: 5px;
+      opacity: .75;
+      font-weight: 700;
+    }
+    .r20-insp-tab-meta {
+      margin: 0 0 10px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: #1b2430;
+      color: #cbd5e1;
+      font-size: 11px;
+      line-height: 1.45;
+    }
+    .r20-insp-tab-meta .line { margin-top: 3px; }
+    .r20-insp-tab-form { display: flex; flex-wrap: wrap; gap: 6px; align-items: end; margin: 0 0 10px; }
+    .r20-insp-tab-form label { margin: 0; flex: 1; min-width: 72px; }
+    .r20-insp-hud input[type="number"] {
+      width: 100%;
+      padding: 6px 8px;
+      border: 0;
+      border-radius: 5px;
+      background: #0f172a;
+      color: #fff;
+      font: 12px "Segoe UI", Arial, sans-serif;
+    }
+    .r20-insp-help {
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid #37475a;
+      color: #94a3b8;
+      font-size: 11px;
+      line-height: 1.45;
+    }
+    .r20-insp-sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin: 0 4px 0 0; vertical-align: middle; }
+    .r20-insp-sw.gold { background: #fbbf24; }
+    .r20-insp-sw.blue { background: #60a5fa; }
+    .r20-insp-sw.green { background: #22c55e; }
+    .r20-insp-x { box-shadow: inset 0 0 0 2px #60a5fa !important; background: rgba(96,165,250,.22) !important; }
+    .r20-insp-y { box-shadow: inset 0 0 0 2px #22c55e !important; background: rgba(34,197,94,.2) !important; }
+    .r20-insp-cell {
+      box-shadow: inset 0 0 0 2px #fbbf24 !important;
+      background: rgba(251,191,36,.32) !important;
+      outline: 2px solid #fbbf24;
+      outline-offset: -2px;
+    }
+    .r20-insp-tab-edit {
+      margin: 0 0 0 4px;
+      border: 0;
+      background: transparent;
+      color: #93c5fd;
+      font: 700 10px "Segoe UI", Arial, sans-serif;
+      cursor: pointer;
+      padding: 0;
+    }
+  `);
+
+  function $(sel, root = document) {
+    return root.querySelector(sel);
+  }
+
+  function $$(sel, root = document) {
+    return [...root.querySelectorAll(sel)];
+  }
+
+  function clean(s) {
+    return String(s ?? '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function headerText(th) {
+    const clone = th.cloneNode(true);
+    clone.querySelectorAll('.filteroption, .filter, input, .fclm-col-cb').forEach((n) => n.remove());
+    return clean(clone.textContent);
+  }
+
+  function tableCaption(table) {
+    const cap = $('caption', table);
+    if (!cap) return table.id || 'untitled';
+    const clone = cap.cloneNode(true);
+    clone.querySelectorAll('.filteroption, .filter, button, input, .ut-fclm-action-row').forEach((n) => n.remove());
+    return clean(clone.textContent) || table.id || 'untitled';
+  }
+
+  function isTargetTable(table) {
+    if (!table || table.id === 'filterbox') return false;
+    if (table.closest('#control-panel, #fcpn-header, #timestamps')) return false;
+    if (table.id === 'summary' || /^function-/.test(table.id)) return true;
+    return table.classList.contains('result-table') && Boolean(table.closest('.main-panel'));
+  }
+
+  function targetTables(doc = document) {
+    return $$('table', doc).filter(isTargetTable);
+  }
+
+  function tableKey(table) {
+    return table.id || `caption:${tableCaption(table)}`;
+  }
+
+  function getDataHeaderRows(table) {
+    return $$('thead tr', table).filter((row) => {
+      if (IGNORE_HEADER_ROW_CLASSES.some((c) => row.classList.contains(c))) return false;
+      const cells = [...row.children];
+      if (cells.length === 0) return true;
+      return !cells.every((cell) => cell.querySelector('input, select, textarea') && !headerText(cell));
+    });
+  }
+
+  function getBodyColCount(table) {
+    let max = 0;
+    $$('tbody tr', table).forEach((tr) => {
+      let n = 0;
+      [...tr.children].forEach((cell) => {
+        n += parseInt(cell.getAttribute('colspan') || '1', 10) || 1;
+      });
+      max = Math.max(max, n, tr.children.length);
+    });
+    return max;
+  }
+
+  function buildHeaderModel(table) {
+    const headerRows = getDataHeaderRows(table);
+    const colCount = getBodyColCount(table);
+    const grid = headerRows.map(() => Array(colCount).fill(null));
+    const cellSpan = new Map();
+
+    headerRows.forEach((row, rowIdx) => {
+      let colIdx = 0;
+      [...row.children].forEach((th) => {
+        while (colIdx < colCount && grid[rowIdx][colIdx] !== null) colIdx += 1;
+        const colspan = parseInt(th.getAttribute('colspan') || '1', 10) || 1;
+        const rowspan = parseInt(th.getAttribute('rowspan') || '1', 10) || 1;
+        const info = { el: th, text: headerText(th), colspan, rowspan };
+        cellSpan.set(th, { start: colIdx, end: colIdx + colspan });
+        for (let c = 0; c < colspan; c += 1) {
+          for (let r = 0; r < rowspan; r += 1) {
+            if (rowIdx + r < grid.length && colIdx + c < colCount) grid[rowIdx + r][colIdx + c] = info;
+          }
+        }
+        colIdx += colspan;
+      });
+    });
+
+    const columns = [];
+    for (let i = 0; i < colCount; i += 1) {
+      const parts = grid.map((row) => row[i]?.text).filter(Boolean);
+      columns.push({
+        index: i,
+        header: [...new Set(parts)].join(' / ') || `Column ${i + 1}`,
+      });
+    }
+    return { colCount, columns, cellSpan };
+  }
+
+  const bodyGridMemo = new WeakMap();
+
+  function buildBodyGrid(table) {
+    const rows = $$('tbody tr', table);
+    const colCount = Math.max(getBodyColCount(table), 1);
+    const sig = `${rows.length}:${colCount}:${rows[0]?.children.length || 0}:${rows[rows.length - 1]?.children.length || 0}`;
+    const hit = bodyGridMemo.get(table);
+    if (hit && hit.sig === sig) return hit.model;
+    const grid = rows.map(() => Array(colCount).fill(null));
+    rows.forEach((tr, r) => {
+      let c = 0;
+      [...tr.children].forEach((cell) => {
+        while (c < colCount && grid[r][c] !== null) c += 1;
+        const cs = parseInt(cell.getAttribute('colspan') || '1', 10) || 1;
+        const rs = parseInt(cell.getAttribute('rowspan') || '1', 10) || 1;
+        const info = { el: cell, text: clean(cell.textContent) };
+        for (let dr = 0; dr < rs; dr += 1) {
+          for (let dc = 0; dc < cs; dc += 1) {
+            if (r + dr < grid.length && c + dc < colCount) grid[r + dr][c + dc] = info;
+          }
+        }
+        c += cs;
+      });
+    });
+    const model = { rows, grid, colCount };
+    bodyGridMemo.set(table, { sig, model });
+    return model;
+  }
+
+  function occupancyLabel(info) {
+    if (!info?.el) return '';
+    const a = info.el.querySelector('a[href^="#function-"]');
+    return a ? clean(a.textContent) : clean(info.text || info.el.textContent);
+  }
+
+  function bodyCellSpan(cell) {
+    const tr = cell.parentElement;
+    const table = tr?.closest('table');
+    if (table && isTargetTable(table)) {
+      const { rows, grid, colCount } = buildBodyGrid(table);
+      const r = rows.indexOf(tr);
+      if (r >= 0) {
+        let start = -1;
+        let end = -1;
+        for (let c = 0; c < colCount; c += 1) {
+          if (grid[r][c]?.el === cell) {
+            if (start < 0) start = c;
+            end = c + 1;
+          }
+        }
+        if (start >= 0) return { start, end };
+      }
+    }
+    let i = 0;
+    for (const sibling of tr.children) {
+      const cs = parseInt(sibling.getAttribute('colspan') || '1', 10) || 1;
+      if (sibling === cell) return { start: i, end: i + cs };
+      i += cs;
+    }
+    return { start: [...tr.children].indexOf(cell), end: [...tr.children].indexOf(cell) + 1 };
+  }
+
+  function cellAtColumn(tr, colIndex) {
+    const table = tr?.closest('table');
+    if (table && isTargetTable(table)) {
+      const { rows, grid } = buildBodyGrid(table);
+      const r = rows.indexOf(tr);
+      if (r >= 0 && grid[r]?.[colIndex]?.el) return grid[r][colIndex].el;
+    }
+    let i = 0;
+    for (const cell of tr.children) {
+      const cs = parseInt(cell.getAttribute('colspan') || '1', 10) || 1;
+      if (colIndex >= i && colIndex < i + cs) return cell;
+      i += cs;
+    }
+    return tr.children[colIndex] || null;
+  }
+
+  function isNumericLike(s) {
+    return /^-?\d[\d,]*\.?\d*$/.test(String(s || '').replace(/,/g, ''));
+  }
+
+  function rowIdentity(table, tr) {
+    if (table.id === 'summary') {
+      const { rows, grid } = buildBodyGrid(table);
+      const r = rows.indexOf(tr);
+      if (r >= 0) {
+        const fn = occupancyLabel(grid[r][0]);
+        const size = occupancyLabel(grid[r][1]);
+        const hours = occupancyLabel(grid[r][2]);
+        if (/^total$/i.test(fn) && !SUMMARY_SIZES.has(size.toLowerCase())) {
+          return {
+            kind: 'summary-total',
+            label: 'Total',
+            fields: { Function: 'Total' },
+          };
+        }
+        return {
+          kind: 'summary-row',
+          label: [fn, size].filter(Boolean).join(' / ') || fn || `row ${tr.rowIndex}`,
+          fields: { Function: fn, Size: size, 'Total Paid Hours': hours },
+        };
+      }
+    }
+    const cells = [...tr.children].map((c) => clean(c.textContent));
+    const first = cells[0] || '';
+    if (/^total$/i.test(first)) {
+      return {
+        kind: 'associate-total',
+        label: 'Total',
+        fields: { Name: 'Total' },
+      };
+    }
+    return {
+      kind: 'associate',
+      label: cells[2] ? `${cells[2]} (${cells[1]})` : cells[1] || cells[0] || `row ${tr.rowIndex}`,
+      fields: { Type: cells[0], ID: cells[1], Name: cells[2], Manager: cells[3] },
+    };
+  }
+
+  function isTotalY(y) {
+    if (!y) return false;
+    return y.kind === 'summary-total' || y.kind === 'associate-total';
+  }
+
+  function sizeClassOn(el) {
+    return SIZE_CLASSES.find((c) => el?.classList?.contains(c)) || '';
+  }
+
+  function loadLegacyPinList() {
+    try {
+      if (typeof GM_getValue === 'function') {
+        const raw = GM_getValue(PINS_LEGACY_KEY, '');
+        if (raw) {
+          const parsed = typeof raw === 'string' ? JSON.parse(raw || '[]') : raw;
+          if (Array.isArray(parsed)) return parsed;
+        }
+      }
+      const ls = localStorage.getItem(PINS_LEGACY_KEY);
+      if (ls) {
+        const parsed = JSON.parse(ls);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {
+      /* ignore */
+    }
+    return [];
+  }
+
+  function loadPinMap() {
+    if (pinMapMemo) return pinMapMemo;
+    const parsed = loadJson(PINS_KEY, null);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      pinMapMemo = parsed;
+      return pinMapMemo;
+    }
+    pinMapMemo = { [LIVE_TAB]: loadLegacyPinList() };
+    saveJson(PINS_KEY, pinMapMemo);
+    return pinMapMemo;
+  }
+
+  function loadPins(tab = ui.tab) {
+    const list = loadPinMap()[tab];
+    return Array.isArray(list) ? list.slice() : [];
+  }
+
+  function savePins(pins, tab = ui.tab) {
+    const map = loadPinMap();
+    map[tab] = pins;
+    pinMapMemo = map;
+    saveJson(PINS_KEY, map);
+  }
+
+  function loadJson(key, fallback) {
+    try {
+      if (typeof GM_getValue === 'function') {
+        const raw = GM_getValue(key, '');
+        if (raw) {
+        const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (parsed != null) return parsed;
+        }
+      }
+      const ls = localStorage.getItem(key);
+      if (ls) return JSON.parse(ls);
+    } catch {
+      /* ignore */
+    }
+    return fallback;
+  }
+
+  function saveJson(key, value) {
+    const payload = JSON.stringify(value);
+    if (typeof GM_setValue === 'function') GM_setValue(key, payload);
+    try {
+      localStorage.setItem(key, payload);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function defaultPresets() {
+    return [{ id: 'intraday-6-18', name: '6–18', startHour: 6, startMinute: 0, endHour: 18, endMinute: 0 }];
+  }
+
+  function loadPresets() {
+    const parsed = loadJson(PRESETS_KEY, null);
+    if (Array.isArray(parsed) && parsed.length) return parsed;
+    const seeded = defaultPresets();
+    saveJson(PRESETS_KEY, seeded);
+    return seeded;
+  }
+
+  function savePresets(presets) {
+    saveJson(PRESETS_KEY, presets);
+  }
+
+  function loadTabCache() {
+    const parsed = loadJson(TAB_CACHE_KEY, {});
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  }
+
+  function pageContext() {
+    const q = new URLSearchParams(location.search);
+    const site = document.querySelector('#fcpn-site-input');
+    return {
+      warehouseId: q.get('warehouseId') || clean(site?.value) || '',
+      processId: q.get('processId') || '',
+    };
+  }
+
+  function fclmDate(d = new Date()) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}/${m}/${day}`;
+  }
+
+  function addDays(d, n) {
+    const x = new Date(d.getTime());
+    x.setDate(x.getDate() + n);
+    return x;
+  }
+
+  function hhmm(hour, minute) {
+    return `${String(hour).padStart(2, '0')}:${String(minute || 0).padStart(2, '0')}`;
+  }
+
+  function presetLabel(preset) {
+    return `${preset.startHour}–${preset.endHour}`;
+  }
+
+  function presetRange(preset) {
+    return `${hhmm(preset.startHour, preset.startMinute)}–${hhmm(preset.endHour, preset.endMinute)}`;
+  }
+
+  function tabTitle() {
+    if (ui.tab === LIVE_TAB) return 'Live';
+    const preset = currentPreset();
+    return preset ? presetLabel(preset) : 'Tab';
+  }
+
+  function currentPreset() {
+    return loadPresets().find((p) => p.id === ui.tab) || null;
+  }
+
+  function buildRollupUrl(warehouseId, processId, preset, when = new Date()) {
+    const overnight =
+      preset.endHour < preset.startHour ||
+      (preset.endHour === preset.startHour && (preset.endMinute || 0) <= (preset.startMinute || 0));
+    const params = new URLSearchParams({
+      reportFormat: 'HTML',
+      warehouseId,
+      processId,
+      maxIntradayDays: '1',
+      spanType: 'Intraday',
+      startDateIntraday: fclmDate(when),
+      startHourIntraday: String(preset.startHour),
+      startMinuteIntraday: String(preset.startMinute || 0),
+      endDateIntraday: fclmDate(overnight ? addDays(when, 1) : when),
+      endHourIntraday: String(preset.endHour),
+      endMinuteIntraday: String(preset.endMinute || 0),
+    });
+    return `${location.origin}/reports/functionRollup?${params}`;
+  }
+
+  function fetchHtml(url) {
+    if (typeof GM_xmlhttpRequest === 'function') {
+      return new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url,
+          onload: (res) => {
+            if (res.status >= 200 && res.status < 300) resolve(res.responseText);
+            else reject(new Error(`HTTP ${res.status}`));
+          },
+          onerror: () => reject(new Error('fetch failed')),
+        });
+      });
+    }
+    return fetch(url, { credentials: 'include' }).then((res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.text();
+    });
+  }
+
+  function headerTokens(header) {
+    return String(header)
+      .split(' / ')
+      .map((t) => t.trim().toLowerCase())
+      .filter(Boolean);
+  }
+
+  function scoreHeader(candidate, wanted) {
+    if (candidate === wanted) return 1000;
+    if (candidate.toLowerCase() === wanted.toLowerCase()) return 900;
+    const a = headerTokens(candidate);
+    const b = headerTokens(wanted);
+    if (!b.length) return 0;
+    let i = 0;
+    for (const tok of b) {
+      const idx = a.indexOf(tok, i);
+      if (idx === -1) return 0;
+      i = idx + 1;
+    }
+    return 100 + b.length * 10 - Math.abs(a.length - b.length);
+  }
+
+  function findColumnByName(model, wanted) {
+    let best = null;
+    let bestScore = 0;
+    model.columns.forEach((col) => {
+      const score = scoreHeader(col.header, wanted);
+      if (score > bestScore) {
+        bestScore = score;
+        best = col;
+      }
+    });
+    return bestScore > 0 ? best : null;
+  }
+
+  function findTableForPin(pin, doc = document) {
+    if (pin.tableId) {
+      const byId = doc.getElementById(pin.tableId);
+      if (byId && isTargetTable(byId)) return byId;
+    }
+    const want = clean(pin.tableName || '')
+      .replace(/\s*\[\d+]\s*$/, '')
+      .toLowerCase();
+    return (
+      targetTables(doc).find((t) => {
+        const cap = tableCaption(t).toLowerCase();
+        return cap === clean(pin.tableName || '').toLowerCase() || (want && cap.startsWith(want));
+      }) || null
+    );
+  }
+
+  function findTableByKey(key, doc = document) {
+    if (!key) return null;
+    if (key.startsWith('caption:')) {
+      const name = key.slice(8).toLowerCase();
+      return targetTables(doc).find((t) => tableCaption(t).toLowerCase() === name) || null;
+    }
+    const byId = doc.getElementById(key);
+    return byId && isTargetTable(byId) ? byId : targetTables(doc).find((t) => tableKey(t) === key) || null;
+  }
+
+  function hoursEqual(a, b) {
+    const na = String(a ?? '').replace(/,/g, '').trim();
+    const nb = String(b ?? '').replace(/,/g, '').trim();
+    if (!na || !nb) return false;
+    if (na === nb) return true;
+    const fa = Number(na);
+    const fb = Number(nb);
+    return Number.isFinite(fa) && Number.isFinite(fb) && fa === fb;
+  }
+
+  function isBrokenSummaryY(y) {
+    if (!y) return false;
+    const f = y.fields || {};
+    if (isNumericLike(f.Size) && /^total$/i.test(f.Function || '')) return true;
+    if (/^total\s*\/\s*[\d.,]+$/i.test(y.label || '')) return true;
+    return false;
+  }
+
+  function repairSummaryY(table, y) {
+    if (!y || table.id !== 'summary' || !isBrokenSummaryY(y)) return y;
+    const fromLabel = String(y.label || '').match(/[\d,.]+/);
+    const hoursGuess = isNumericLike(y.fields?.Size) ? y.fields.Size : fromLabel ? fromLabel[0] : '';
+    if (!hoursGuess) return y;
+    const hit = $$('tbody tr', table)
+      .map((tr) => rowIdentity(table, tr))
+      .find((ident) => ident.kind === 'summary-row' && /^total$/i.test(ident.fields.Size || '') && hoursEqual(ident.fields['Total Paid Hours'], hoursGuess));
+    if (!hit) return y;
+    return { kind: hit.kind, label: hit.label, fields: hit.fields };
+  }
+
+  function rewriteStoredPinY(pin, y) {
+    const oldSig = pinSignature(pin);
+    const next = { ...pin, y };
+    const map = loadPinMap();
+    let changed = false;
+    Object.keys(map).forEach((tab) => {
+      const list = map[tab];
+      if (!Array.isArray(list)) return;
+      const i = list.findIndex((p) => pinSignature(p) === oldSig);
+      if (i >= 0) {
+        list[i] = next;
+        changed = true;
+      }
+    });
+    if (changed) {
+      pinMapMemo = map;
+      saveJson(PINS_KEY, map);
+    }
+    return next;
+  }
+
+  function findRowForPin(table, y) {
+    y = repairSummaryY(table, y);
+    const fields = y?.fields || {};
+    return (
+      $$('tbody tr', table).find((tr) => {
+        const ident = rowIdentity(table, tr);
+        if (isTotalY(y)) {
+          return ident.kind === 'summary-total' || ident.kind === 'associate-total' || /^total$/i.test(ident.fields.Function || ident.fields.Name || ident.label || '');
+        }
+        if (y.kind === 'summary-row' || table.id === 'summary') {
+          if (ident.kind === 'summary-total') return false;
+          if (ident.fields.Function !== fields.Function) return false;
+          if (fields.Size && !isNumericLike(fields.Size) && ident.fields.Size !== fields.Size) return false;
+          return true;
+        }
+        if (ident.kind === 'associate-total') return false;
+        if (fields.ID && ident.fields.ID === fields.ID) return true;
+        if (fields.Name && ident.fields.Name === fields.Name) return true;
+        return false;
+      }) || null
+    );
+  }
+
+  function listYRows(table) {
+    return $$('tbody tr', table).map((tr) => ({ tr, ident: rowIdentity(table, tr) }));
+  }
+
+  function uniqueXHeaders(table) {
+    const model = buildHeaderModel(table);
+    const seen = new Set();
+    return model.columns
+      .map((c) => c.header)
+      .filter((h) => {
+        if (!h || seen.has(h)) return false;
+        seen.add(h);
+        return true;
+      });
+  }
+
+  function resolvePin(pin, doc = document) {
+    const table = findTableForPin(pin, doc);
+    if (!table) {
+      const here = pageContext().warehouseId;
+      if (doc === document && pin.warehouseId && here && pin.warehouseId !== here) {
+        return { ok: false, pin, error: `on ${pin.warehouseId}, not this page` };
+      }
+      return { ok: false, pin, error: 'table not on page' };
+    }
+    const model = buildHeaderModel(table);
+    const cols = (pin.xHeaders || []).map((name) => findColumnByName(model, name));
+    if (cols.some((c) => !c)) {
+      return {
+        ok: false,
+        pin,
+        table,
+        error: `header not found: ${(pin.xHeaders || []).filter((n, i) => !cols[i]).join(', ')}`,
+        available: model.columns.map((c) => c.header),
+      };
+    }
+    if (table.id === 'summary') {
+      const fixedY = repairSummaryY(table, pin.y);
+      if (fixedY && fixedY.label !== pin.y?.label) pin = rewriteStoredPinY(pin, fixedY);
+    }
+    const yRow = findRowForPin(table, pin.y);
+    if (!yRow) return { ok: false, pin, table, error: `row not found: ${pin.y?.label || '?'}` };
+    const indexes = cols.map((c) => c.index).sort((a, b) => a - b);
+    const values = cols.map((col, i) => {
+      const cell = cellAtColumn(yRow, col.index);
+      return {
+        header: col.header,
+        wanted: pin.xHeaders[i] || col.header,
+        index: col.index,
+        value: cell ? clean(cell.textContent) : '',
+        size: sizeClassOn(cell),
+      };
+    });
+    return {
+      ok: true,
+      pin,
+      table,
+      yRow,
+      xStart: indexes[0],
+      xEnd: indexes[indexes.length - 1] + 1,
+      values,
+    };
+  }
+
+  function compactResult(r) {
+    return {
+      ok: r.ok,
+      error: r.error || '',
+      pin: r.pin,
+      values: r.values || [],
+    };
+  }
+
+  function pinSignature(pin) {
+    const y = pin.y || {};
+    const f = y.fields || {};
+    const yKey = [y.kind || '', f.Function || '', f.Size || '', f.ID || '', f.Name || '', y.label || ''].join('\0');
+    return [pin.warehouseId || '', pin.tableId || '', (pin.xHeaders || []).join('\0'), yKey].join('::');
+  }
+
+  function identityWidth(table) {
+    return table.id === 'summary' ? 2 : 4;
+  }
+
+  function metricSpan(table, span) {
+    const ident = identityWidth(table);
+    if (span.end <= ident) return { start: ident, end: ident + 1 };
+    if (span.start < ident) return { start: ident, end: span.end };
+    return span;
+  }
+
+  function upsertPin(pin) {
+    const sig = pinSignature(pin);
+    const pins = loadPins().filter((p) => pinSignature(p) !== sig);
+    pins.push(pin);
+    savePins(pins);
+  }
+
+  function draftPinFromAddForm() {
+    const table = findTableByKey(addMode.tableKey);
+    if (!table || !addMode.xHeader) return null;
+    const rows = listYRows(table);
+    const picked = rows[addMode.yIndex];
+    if (!picked) return null;
+    return {
+      tableId: table.id || '',
+      tableName: tableCaption(table),
+      warehouseId: pageContext().warehouseId,
+      processId: pageContext().processId,
+      xHeaders: [addMode.xHeader],
+      y: { kind: picked.ident.kind, label: picked.ident.label, fields: picked.ident.fields },
+      savedAt: new Date().toISOString(),
+    };
+  }
+
+  function previewAddForm() {
+    const draft = draftPinFromAddForm();
+    if (!draft) return { ok: false, error: 'Pick a table, column title, and row title' };
+    return resolvePin(draft);
+  }
+
+  function savePinFromAddForm() {
+    const draft = draftPinFromAddForm();
+    if (!draft) return false;
+    const resolved = resolvePin(draft);
+    if (!resolved.ok) return false;
+    upsertPin(draft);
+    addMode.open = false;
+    refreshPinValues();
+    highlightResolved(resolved);
+    return true;
+  }
+
+  function setPicking(on) {
+    ui.picking = Boolean(on);
+    document.body?.classList.toggle('r20-insp-picking', ui.picking);
+    renderAddForm();
+  }
+
+  function pinFromBodyCell(table, cell) {
+    if (!table || !cell || cell.closest('thead')) return false;
+    const tr = cell.closest('tbody tr') || cell.closest('tr');
+    if (!tr) return false;
+    const model = buildHeaderModel(table);
+    const span = metricSpan(table, bodyCellSpan(cell));
+    const xHeaders = [];
+    for (let i = span.start; i < span.end; i += 1) {
+      xHeaders.push(model.columns[i]?.header || `Column ${i + 1}`);
+    }
+    const ident = rowIdentity(table, tr);
+    const pin = {
+      id: `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
+      tableId: table.id || '',
+      tableName: tableCaption(table),
+      warehouseId: pageContext().warehouseId,
+      processId: pageContext().processId,
+      xHeaders,
+      y: { kind: ident.kind, label: ident.label, fields: ident.fields },
+      savedAt: new Date().toISOString(),
+    };
+    upsertPin(pin);
+    addMode.open = false;
+    const resolved = resolvePin(pin);
+    refreshPinValues();
+    const hiCell = cellAtColumn(tr, span.start) || cell;
+    highlightSelection(table, span.start, span.end, tr, hiCell);
+    if (resolved.ok) highlightSelection(resolved.table, resolved.xStart, resolved.xEnd, resolved.yRow, hiCell);
+    return true;
+  }
+
+  function removePinAt(index) {
+    const pins = loadPins();
+    if (index < 0 || index >= pins.length) return;
+    const pin = pins[index];
+    const label = [pin.y?.label, (pin.xHeaders || []).join(' / ')].filter(Boolean).join('\n');
+    if (!window.confirm(`Remove this pin from ${tabTitle()}?\n${label}`)) return;
+    pins.splice(index, 1);
+    savePins(pins);
+    refreshPinValues();
+  }
+
+  function displayedResults() {
+    const pins = loadPins();
+    if (ui.tab === LIVE_TAB) return pins.map((p) => resolvePin(p, document));
+    const cache = loadTabCache()[ui.tab];
+    if (cache?.results?.length) {
+      const bySig = new Map(cache.results.map((r) => [pinSignature(r.pin), r]));
+      return pins.map((p) => bySig.get(pinSignature(p)) || { ok: false, pin: p, error: 'not in last fetch' });
+    }
+    return pins.map((p) => ({ ok: false, pin: p, error: 'Click Fetch for this tab' }));
+  }
+
+  function refreshPinValues() {
+    lastPinResults = displayedResults();
+    renderTabs();
+    renderPins();
+    if (addMode.open) {
+      const tableSel = $('[data-add-table]', hud());
+      const tables = targetTables();
+      if (!tableSel || tableSel.options.length !== tables.length) renderAddForm();
+      else updateAddPreview();
+    } else {
+      renderAddForm();
+    }
+    return lastPinResults;
+  }
+
+  async function fetchCurrentTab() {
+    const preset = currentPreset();
+    if (!preset || ui.fetching) return;
+    const pins = loadPins();
+    if (!pins.length) return;
+    ui.fetching = true;
+    renderTabs();
+    renderAddForm();
+    try {
+      const when = new Date();
+      const groups = new Map();
+      const fallback = pageContext();
+      pins.forEach((pin) => {
+        const warehouseId = pin.warehouseId || fallback.warehouseId;
+        const processId = pin.processId || fallback.processId;
+        const key = `${warehouseId}|${processId}`;
+        if (!groups.has(key)) groups.set(key, { warehouseId, processId, pins: [] });
+        groups.get(key).pins.push(pin);
+      });
+      const bySig = new Map();
+      for (const group of groups.values()) {
+        if (!group.warehouseId || !group.processId) {
+          group.pins.forEach((p) => bySig.set(pinSignature(p), { ok: false, pin: p, error: 'missing warehouse or process' }));
+          continue;
+        }
+        try {
+          const url = buildRollupUrl(group.warehouseId, group.processId, preset, when);
+          const html = await fetchHtml(url);
+          const doc = new DOMParser().parseFromString(html, 'text/html');
+          group.pins.forEach((p) => bySig.set(pinSignature(p), compactResult(resolvePin(p, doc))));
+        } catch (err) {
+          const msg = err?.message || 'fetch failed';
+          group.pins.forEach((p) => bySig.set(pinSignature(p), { ok: false, pin: p, error: msg }));
+        }
+      }
+      const results = pins.map((p) => bySig.get(pinSignature(p)) || { ok: false, pin: p, error: 'not fetched' });
+      const cache = loadTabCache();
+      cache[preset.id] = {
+        fetchedAt: when.toISOString(),
+        dateUsed: fclmDate(when),
+        hours: presetLabel(preset),
+        results,
+      };
+      saveJson(TAB_CACHE_KEY, cache);
+    } finally {
+      ui.fetching = false;
+      lastPinResults = displayedResults();
+      renderHud();
+    }
+  }
+
+  function yIdentityCols(table, yRow) {
+    const kind = yRow ? rowIdentity(table, yRow).kind : '';
+    if (kind === 'summary-total' || kind === 'associate-total') return { start: 0, end: 1 };
+    return table.id === 'summary' ? { start: 0, end: 2 } : { start: 1, end: 3 };
+  }
+
+  function clearHighlights() {
+    $$('.r20-insp-x, .r20-insp-y, .r20-insp-cell').forEach((el) => {
+      el.classList.remove('r20-insp-x', 'r20-insp-y', 'r20-insp-cell');
+    });
+  }
+
+  function highlightSelection(table, xStart, xEnd, yRow, cell) {
+    clearHighlights();
+    if (!table || xStart == null) return;
+    $$('thead tr', table).forEach((row) => {
+      let i = 0;
+      [...row.children].forEach((th) => {
+        const cs = parseInt(th.getAttribute('colspan') || '1', 10) || 1;
+        if (i < xEnd && i + cs > xStart) th.classList.add('r20-insp-x');
+        i += cs;
+      });
+    });
+    if (yRow && table.id === 'summary') {
+      const { rows, grid } = buildBodyGrid(table);
+      const r = rows.indexOf(yRow);
+      grid[r]?.[0]?.el?.classList.add('r20-insp-y');
+      grid[r]?.[1]?.el?.classList.add('r20-insp-y');
+    } else if (yRow) {
+      const ident = yIdentityCols(table, yRow);
+      let i = 0;
+      [...yRow.children].forEach((td) => {
+        const cs = parseInt(td.getAttribute('colspan') || '1', 10) || 1;
+        if (i < ident.end && i + cs > ident.start) td.classList.add('r20-insp-y');
+        i += cs;
+      });
+    }
+    const target = cell || (yRow ? cellAtColumn(yRow, xStart) : null);
+    if (target) target.classList.add('r20-insp-cell');
+  }
+
+  function highlight(table, xStart, xEnd, yRow, cell) {
+    highlightSelection(table, xStart, xEnd, yRow, cell);
+  }
+
+  function highlightResolved(resolved) {
+    if (!resolved?.ok) {
+      clearHighlights();
+      return;
+    }
+    const cell = resolved.yRow ? cellAtColumn(resolved.yRow, resolved.xStart) : null;
+    highlightSelection(resolved.table, resolved.xStart, resolved.xEnd, resolved.yRow, cell);
+  }
+
+  function highlightAddPreview() {
+    highlightResolved(previewAddForm());
+  }
+
+  function hostEl() {
+    return document.body || document.documentElement;
+  }
+
+  function hud() {
+    if (hudEl) {
+      const host = hostEl();
+      if (host && !host.contains(hudEl)) host.appendChild(hudEl);
+      return hudEl;
+    }
+    hudEl = document.createElement('div');
+    hudEl.className = 'r20-insp-hud';
+    hudEl.setAttribute('data-r20-insp-hud', '1');
+    hudEl.innerHTML = `
+      <h2 title="Each tab has its own pins. Live reads this page once; other tabs Fetch that Intraday window for today.">Pins · Live</h2>
+      <div data-tabs></div>
+      <div class="r20-insp-tab-meta" data-tab-meta></div>
+      <div data-tab-form></div>
+      <div data-pins></div>
+      <div data-add></div>
+      <div class="r20-insp-actions" data-actions></div>
+      <div class="r20-insp-help">
+        Right-click cells to add pins to this tab (as many as you want). Esc ends pick mode.<br>
+        <span class="r20-insp-sw gold"></span>cell
+        &nbsp;<span class="r20-insp-sw blue"></span>column
+        &nbsp;<span class="r20-insp-sw green"></span>row
+      </div>`;
+    const host = hostEl();
+    if (host) host.appendChild(hudEl);
+    hudEl.addEventListener('click', (e) => {
+      const delTab = e.target.closest('[data-tab-del]');
+      if (delTab) {
+        e.preventDefault();
+        e.stopPropagation();
+        removePreset(delTab.getAttribute('data-tab-del'));
+        return;
+      }
+      if (e.target.closest('[data-tab-edit]')) {
+        startEditTab(ui.tab);
+        return;
+      }
+      const tab = e.target.closest('[data-tab]');
+      if (tab) {
+        ui.tab = tab.getAttribute('data-tab');
+        ui.addingTab = false;
+        ui.editingTab = null;
+        setPicking(false);
+        refreshPinValues();
+        return;
+      }
+      if (e.target.closest('[data-tab-add]')) {
+        ui.editingTab = null;
+        ui.addingTab = !ui.addingTab;
+        renderTabs();
+        return;
+      }
+      if (e.target.closest('[data-tab-save]')) {
+        saveTabForm();
+        return;
+      }
+      if (e.target.closest('[data-tab-cancel]')) {
+        ui.addingTab = false;
+        ui.editingTab = null;
+        renderTabs();
+        return;
+      }
+      if (e.target.closest('[data-fetch]')) {
+        fetchCurrentTab();
+        return;
+      }
+      const del = e.target.closest('.r20-insp-pin-x');
+      if (del) {
+        e.preventDefault();
+        const index = Number(del.closest('.r20-insp-pin')?.dataset.pinIndex);
+        if (Number.isInteger(index)) removePinAt(index);
+        return;
+      }
+      const card = e.target.closest('.r20-insp-pin');
+      if (card) {
+        const index = Number(card.dataset.pinIndex);
+        const r = lastPinResults[index];
+        if (r?.ok && r.table) {
+          const cell = r.yRow ? cellAtColumn(r.yRow, r.xStart) : null;
+          highlightSelection(r.table, r.xStart, r.xEnd, r.yRow, cell);
+        }
+        return;
+      }
+      if (e.target.closest('.r20-insp-add')) {
+        setPicking(!ui.picking);
+        return;
+      }
+      if (e.target.closest('.r20-insp-pin-save')) {
+        savePinFromAddForm();
+        return;
+      }
+      if (e.target.closest('.r20-insp-pin-cancel')) {
+        setPicking(false);
+        addMode.open = false;
+        clearHighlights();
+        renderHud();
+        return;
+      }
+      if (e.target.closest('.r20-insp-clear')) {
+        clearHighlights();
+      }
+    });
+    hudEl.addEventListener('change', (e) => {
+      const tableSel = e.target.closest('[data-add-table]');
+      const xSel = e.target.closest('[data-add-x]');
+      const ySel = e.target.closest('[data-add-y]');
+      if (tableSel) {
+        addMode.tableKey = tableSel.value;
+        addMode.xHeader = '';
+        addMode.yIndex = 0;
+        const table = findTableByKey(addMode.tableKey);
+        const headers = table ? uniqueXHeaders(table) : [];
+        addMode.xHeader = headers[0] || '';
+        renderHud();
+        highlightAddPreview();
+        return;
+      }
+      if (xSel) {
+        addMode.xHeader = xSel.value;
+        updateAddPreview();
+        highlightAddPreview();
+        return;
+      }
+      if (ySel) {
+        addMode.yIndex = Number(ySel.value) || 0;
+        updateAddPreview();
+        highlightAddPreview();
+      }
+    });
+    return hudEl;
+  }
+
+  function readTabHours() {
+    const start = Number($('[data-tab-start]', hud())?.value);
+    const end = Number($('[data-tab-end]', hud())?.value);
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start > 23 || end < 0 || end > 23) return null;
+    return { start, end };
+  }
+
+  function startEditTab(id) {
+    if (!id || id === LIVE_TAB) return;
+    const preset = loadPresets().find((p) => p.id === id);
+    if (!preset) return;
+    ui.tab = id;
+    ui.addingTab = false;
+    ui.editingTab = id;
+    ui.newStart = preset.startHour;
+    ui.newEnd = preset.endHour;
+    renderTabs();
+  }
+
+  function saveTabForm() {
+    const hours = readTabHours();
+    if (!hours) return;
+    if (ui.editingTab) {
+      const presets = loadPresets().map((p) =>
+        p.id === ui.editingTab
+          ? { ...p, startHour: hours.start, startMinute: 0, endHour: hours.end, endMinute: 0, name: `${hours.start}–${hours.end}` }
+          : p,
+      );
+      savePresets(presets);
+      ui.editingTab = null;
+      refreshPinValues();
+      return;
+    }
+    const presets = loadPresets();
+    const id = `intraday-${hours.start}-${hours.end}-${Date.now()}`;
+    presets.push({
+      id,
+      name: `${hours.start}–${hours.end}`,
+      startHour: hours.start,
+      startMinute: 0,
+      endHour: hours.end,
+      endMinute: 0,
+    });
+    savePresets(presets);
+    ui.addingTab = false;
+    ui.tab = id;
+    savePins([], id);
+    refreshPinValues();
+  }
+
+  function addPresetFromForm() {
+    ui.editingTab = null;
+    saveTabForm();
+  }
+
+  function removePreset(id) {
+    if (!id || id === LIVE_TAB) return;
+    const preset = loadPresets().find((p) => p.id === id);
+    const label = preset ? presetLabel(preset) : 'this tab';
+    const n = (loadPinMap()[id] || []).length;
+    const extra = n === 1 ? ' and its 1 pin' : n > 1 ? ` and its ${n} pins` : '';
+    if (!window.confirm(`Delete the ${label} tab${extra}?`)) return;
+    const presets = loadPresets().filter((p) => p.id !== id);
+    savePresets(presets.length ? presets : defaultPresets());
+    const cache = loadTabCache();
+    delete cache[id];
+    saveJson(TAB_CACHE_KEY, cache);
+    const map = loadPinMap();
+    delete map[id];
+    saveJson(PINS_KEY, map);
+    if (ui.tab === id) ui.tab = LIVE_TAB;
+    ui.editingTab = null;
+    refreshPinValues();
+  }
+
+  function defaultAddSelection() {
+    const tables = targetTables();
+    if (!tables.length) {
+      addMode.tableKey = '';
+      addMode.xHeader = '';
+      addMode.yIndex = 0;
+      return;
+    }
+    const table = findTableByKey(addMode.tableKey) || tables[0];
+    addMode.tableKey = tableKey(table);
+    const headers = uniqueXHeaders(table);
+    if (!headers.includes(addMode.xHeader)) addMode.xHeader = headers[0] || '';
+    const rows = listYRows(table);
+    if (addMode.yIndex < 0 || addMode.yIndex >= rows.length) addMode.yIndex = 0;
+  }
+
+  function openAddForm(prefill) {
+    addMode.open = true;
+    if (prefill) {
+      addMode.tableKey = prefill.tableKey || addMode.tableKey;
+      addMode.xHeader = prefill.xHeader || addMode.xHeader;
+      if (Number.isInteger(prefill.yIndex)) addMode.yIndex = prefill.yIndex;
+    }
+    defaultAddSelection();
+    renderHud();
+    highlightAddPreview();
+  }
+
+  function optionHtml(value, label, selected) {
+    const esc = String(label).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+    const val = String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    return `<option value="${val}"${selected ? ' selected' : ''}>${esc}</option>`;
+  }
+
+  function escAttr(s) {
+    return String(s ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/</g, '&lt;');
+  }
+
+  function previewText(preview) {
+    if (!preview.ok) return preview.error;
+    const v = preview.values[0]?.value;
+    return v === '' ? '(blank)' : v;
+  }
+
+  function renderTabs() {
+    const tabs = $('[data-tabs]', hud());
+    const meta = $('[data-tab-meta]', hud());
+    const form = $('[data-tab-form]', hud());
+    const heading = $('h2', hud());
+    if (!tabs) return;
+    const presets = loadPresets();
+    const presetBtns = presets
+      .map((p) => {
+        const on = ui.tab === p.id ? ' on' : '';
+        return `<button type="button" class="r20-insp-tab${on}" data-tab="${escAttr(p.id)}">${escAttr(presetLabel(p))}<span class="r20-insp-tab-x" data-tab-del="${escAttr(p.id)}" aria-label="Remove tab">×</span></button>`;
+      })
+      .join('');
+    tabs.innerHTML = `<button type="button" class="r20-insp-tab${ui.tab === LIVE_TAB ? ' on' : ''}" data-tab="${LIVE_TAB}">Live</button>${presetBtns}<button type="button" class="r20-insp-tab-add" data-tab-add>+</button>`;
+    if (heading) heading.textContent = `Pins · ${tabTitle()}`;
+    const n = loadPins().length;
+    const pinWord = n === 1 ? '1 pin' : `${n} pins`;
+    if (ui.tab === LIVE_TAB) {
+      const here = pageContext();
+      meta.innerHTML = `<strong>${escAttr(here.warehouseId || 'site')}</strong> · this page
+        <div class="line">${pinWord} on Live · this page load (reload the report to refresh)</div>`;
+    } else if (ui.fetching) {
+      meta.textContent = `Fetching ${tabTitle()} for today…`;
+    } else {
+      const cache = loadTabCache()[ui.tab];
+      const preset = currentPreset();
+      const range = preset ? presetRange(preset) : tabTitle();
+      const edit = `<button type="button" class="r20-insp-tab-edit" data-tab-edit>Edit hours</button>`;
+      if (cache) {
+        meta.innerHTML = `<strong>Intraday ${escAttr(range)}</strong> ${edit}
+          <div class="line">${escAttr(cache.dateUsed)} · ${pinWord} · last Fetch kept until you Fetch again</div>`;
+      } else {
+        meta.innerHTML = `<strong>Intraday ${escAttr(range)}</strong> ${edit}
+          <div class="line">${pinWord} · Fetch to load today’s values for these hours</div>`;
+      }
+    }
+    const showForm = ui.addingTab || ui.editingTab;
+    const startVal = ui.editingTab ? ui.newStart : ui.newStart;
+    const endVal = ui.editingTab ? ui.newEnd : ui.newEnd;
+    form.innerHTML = showForm
+      ? `<div class="r20-insp-tab-form">
+          <label>Start <input type="number" min="0" max="23" data-tab-start value="${startVal}"></label>
+          <label>End <input type="number" min="0" max="23" data-tab-end value="${endVal}"></label>
+          <button type="button" class="r20-insp-pin-save" data-tab-save>${ui.editingTab ? 'Save' : 'Add'}</button>
+          <button type="button" class="r20-insp-pin-cancel" data-tab-cancel>Cancel</button>
+        </div>`
+      : '';
+  }
+
+  function pinWhere(pin) {
+    return pin.tableName || '';
+  }
+
+  function renderPins() {
+    const stored = loadPins();
+    const pinBox = $('[data-pins]', hud());
+    if (!stored.length) {
+      pinBox.innerHTML =
+        ui.tab === LIVE_TAB
+          ? `<div class="r20-insp-empty">No pins on Live yet.<br>Right-click a report cell, or click Add pin then the cell.</div>`
+          : `<div class="r20-insp-empty">No pins on ${escAttr(tabTitle())} yet.<br>Pin cells while this tab is selected, then Fetch to load this window.</div>`;
+      return;
+    }
+    const pins = lastPinResults.length
+      ? lastPinResults
+      : stored.map((p) => ({ ok: false, pin: p, error: 'not resolved yet' }));
+    pinBox.innerHTML = pins
+      .map((r, i) => {
+        const x = `<button type="button" class="r20-insp-pin-x" aria-label="Remove pin">×</button>`;
+        const site = r.pin.warehouseId ? `<div class="site">${escAttr(r.pin.warehouseId)}</div>` : '';
+        const y = escAttr(r.pin.y?.label || '');
+        const header = escAttr((r.pin.xHeaders || []).join(' · ') || r.values?.[0]?.header || '');
+        const where = escAttr(pinWhere(r.pin));
+        const kv = `<div class="kv"><span class="k">Row</span><span class="v" title="${y}">${y}</span></div>
+            <div class="kv"><span class="k">Col</span><span class="v" title="${header}">${header}</span></div>
+            <div class="kv"><span class="k">Table</span><span class="v" title="${where}">${where}</span></div>`;
+        if (!r.ok) {
+          return `<div class="r20-insp-pin" data-pin-index="${i}">${x}${site}<div class="miss">${escAttr(r.error)}</div>${kv}</div>`;
+        }
+        const vals = r.values
+          .map((v) => `<div class="value">${escAttr(v.value === '' ? '(blank)' : v.value)}</div>`)
+          .join('');
+        return `<div class="r20-insp-pin" data-pin-index="${i}">${x}${site}${vals}${kv}</div>`;
+      })
+      .join('');
+  }
+
+  function actionButtons() {
+    const fetchBtn =
+      ui.tab !== LIVE_TAB
+        ? `<button type="button" class="r20-insp-fetch" data-fetch>${ui.fetching ? '…' : 'Fetch'}</button>`
+        : '';
+    return `${fetchBtn}
+        <button type="button" class="r20-insp-add">${ui.picking ? 'Click a cell…' : 'Add pin'}</button>`;
+  }
+
+  function renderAddForm() {
+    const addBox = $('[data-add]', hud());
+    const actions = $('[data-actions]', hud());
+    if (!addMode.open) {
+      addBox.innerHTML = ui.picking
+        ? `<div class="r20-insp-empty">Click cells to add them to <strong>${escAttr(tabTitle())}</strong>. Each click adds another pin. Esc when done.</div>`
+        : '';
+      actions.innerHTML = actionButtons();
+      return;
+    }
+    defaultAddSelection();
+    const tables = targetTables();
+    const table = findTableByKey(addMode.tableKey);
+    const headers = table ? uniqueXHeaders(table) : [];
+    const rows = table ? listYRows(table) : [];
+    addBox.innerHTML = `
+      <div class="r20-insp-add-form">
+        <label>Table
+          <select data-add-table>${tables.map((t) => optionHtml(tableKey(t), tableCaption(t), tableKey(t) === addMode.tableKey)).join('')}</select>
+        </label>
+        <label>Column (X)
+          <select data-add-x>${headers.map((h) => optionHtml(h, h, h === addMode.xHeader)).join('')}</select>
+        </label>
+        <label>Row (Y)
+          <select data-add-y>${rows.map((row, i) => optionHtml(String(i), row.ident.label, i === addMode.yIndex)).join('')}</select>
+        </label>
+        <div class="r20-insp-add-preview">${previewText(previewAddForm())}</div>
+        <div class="r20-insp-actions">
+          <button type="button" class="r20-insp-pin-save">Pin to ${escAttr(tabTitle())}</button>
+          <button type="button" class="r20-insp-pin-cancel">Cancel</button>
+        </div>
+      </div>`;
+    actions.innerHTML = `
+      ${ui.tab !== LIVE_TAB ? `<button type="button" class="r20-insp-fetch" data-fetch>${ui.fetching ? '…' : 'Fetch'}</button>` : ''}
+      <button type="button" class="r20-insp-clear">Clear</button>`;
+  }
+
+  function updateAddPreview() {
+    const el = $('[data-add-preview]', hud());
+    if (el) el.textContent = previewText(previewAddForm());
+  }
+
+  function renderHud() {
+    renderTabs();
+    renderPins();
+    renderAddForm();
+  }
+
+  function reportTablesReady() {
+    return Boolean(document.getElementById('summary') || document.querySelector('.main-panel table[id^="function-"]'));
+  }
+
+  function whenReportReady(fn) {
+    if (reportTablesReady()) {
+      fn();
+      return;
+    }
+    if (reportWaiter) {
+      reportWaiter.fns.push(fn);
+      return;
+    }
+    const root = document.querySelector('.main-panel') || document.body;
+    if (!root) {
+      setTimeout(() => whenReportReady(fn), 250);
+      return;
+    }
+    reportWaiter = { fns: [fn] };
+    const obs = new MutationObserver(() => {
+      if (!reportTablesReady()) return;
+      obs.disconnect();
+      const fns = reportWaiter?.fns || [];
+      reportWaiter = null;
+      fns.forEach((f) => f());
+    });
+    obs.observe(root, { childList: true, subtree: true });
+    setTimeout(() => {
+      obs.disconnect();
+      if (!reportWaiter) return;
+      const fns = reportWaiter.fns;
+      reportWaiter = null;
+      fns.forEach((f) => f());
+    }, 15000);
+  }
+
+  function onContextMenu(e) {
+    if (e.altKey) return;
+    const cell = e.target.closest('th, td');
+    if (!cell) return;
+    const table = cell.closest('table');
+    if (!isTargetTable(table)) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    if (cell.closest('thead')) return;
+    pinFromBodyCell(table, cell);
+  }
+
+  function onReportClick(e) {
+    if (!ui.picking) return;
+    if (e.target.closest('.r20-insp-hud')) return;
+    const cell = e.target.closest('th, td');
+    if (!cell) return;
+    const table = cell.closest('table');
+    if (!isTargetTable(table) || cell.closest('thead')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    pinFromBodyCell(table, cell);
+  }
+
+  function mountHud() {
+    try {
+      hud();
+      $$('[data-r20-insp-debug-fab], .r20-insp-fab').forEach((el) => el.remove());
+      renderHud();
+      whenReportReady(refreshPinValues);
+    } catch (err) {
+      console.warn('[R20 Inspector] mount', err);
+    }
+  }
+
+  let watchedBody = null;
+  function watchHudLifetime() {
+    const bindBody = () => {
+      if (!document.body || watchedBody === document.body) return;
+      watchedBody = document.body;
+      new MutationObserver(() => {
+        if (!hudEl || !document.body.contains(hudEl)) mountHud();
+      }).observe(document.body, { childList: true });
+    };
+    bindBody();
+    new MutationObserver(bindBody).observe(document.documentElement, { childList: true });
+  }
+
+  function boot() {
+    try {
+      mountHud();
+      watchHudLifetime();
+    } catch (err) {
+      console.warn('[R20 Inspector] boot', err);
+      setTimeout(boot, 400);
+    }
+  }
+
+  document.addEventListener('dblclick', (e) => {
+    const tab = e.target.closest('.r20-insp-hud [data-tab]');
+    if (!tab) return;
+    const id = tab.getAttribute('data-tab');
+    if (!id || id === LIVE_TAB) return;
+    e.preventDefault();
+    startEditTab(id);
+  }, true);
+  document.addEventListener('click', onReportClick, true);
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    setPicking(false);
+    if (addMode.open) {
+      addMode.open = false;
+      clearHighlights();
+      renderHud();
+      return;
+    }
+    clearHighlights();
+  });
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
+  window.addEventListener('load', mountHud);
+})();

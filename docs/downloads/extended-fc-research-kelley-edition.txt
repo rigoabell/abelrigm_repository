@@ -1,0 +1,1927 @@
+// ==UserScript==
+// @name         Extended FC Research - Kelley Edition
+// @version      1.4.36
+// @author       joergri
+// @include      http*://fcresearch-*.aka.amazon.com/*/results*
+// @include      http*://qi-fcresearch-na.corp.amazon.com/*/results*
+// @include      https://qifcr.na.aftx.amazonoperations.app/*
+// @match        https://qifcr.na.aftx.amazonoperations.app/*
+// @require      https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js
+// @require      https://drive.corp.amazon.com/view/joergri@/Bibos/jquery.cookie.js
+// @require      https://drive.corp.amazon.com/view/joergri@/Bibos/waitForKeyElements.js
+// @icon         https://www.google.com/s2/favicons?domain=amazon.com
+// @grant        GM_xmlhttpRequest
+// @grant        GM_addStyle
+// @grant        GM_openInTab
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_info
+// @description  add ProzessPath/Condition & Dwell Time by Costumer Shipments
+// ==/UserScript==
+
+
+// Changelog
+// 1.4.36 remove Copy Hazmat Debug button
+// 1.4.35 rename to Kelley Edition; disable auto-update redirect (was reverting local fixes)
+// 1.4.34 show script version on debug button; warn in debug report if FC/marketplace broken
+// 1.4.33 fix fcname/region parsing for QIFCR; default Pandash marketplace US/DE; handle empty hazmat rows
+// 1.4.32 add Copy Hazmat Debug button (bottom center, copies diagnostics to clipboard)
+// 1.4.30 add Dwell Fnc on Container History Tbl
+// 1.4.28 add Catalog Price
+// 1.4.25 add Title on History Tbl
+// 1.4.24 change Print over Printmon / add EmployeeID & Title
+// 1.4.23 add HazmatLevel Request by Container // fix Bug in Dr.Sku Request
+// 1.4.22 add Sort & HRV to Inventory Table
+// 1.4.20 add Link to Box Recommendation Browser
+//        add FUD Request
+//        add Transshipment to Inventory Tbl
+// 1.4.16 add IdelTime Fnc
+// 1.4.14 change Pandash Request to FC specific
+// 1.4.12 add Sort Fnc on Inventory Tbl by CUSTOMER_SHIPMENT
+// 1.4.11 add SIAv2 Option to Autodwell Visualization
+// 1.4.6  add FCResearchAdjacentBins Script   author -> jachyd
+// 1.4.5  add FastSolve Script   author -> jachyd
+// 1.4.5  add FCResearch Print ASIN Script(Print over Fc Art)  author -> mojordaq
+// 1.4.4  add Prep Infos to MoreInfo Button
+// 1.4.3  add CSI Infos to MoreInfo Button
+// 1.4.2  add Config Button to Product Table/ hide useless Information
+// 1.4    add MoreInfo Button to Product Table/ Infos from PanDash und DrSku
+
+
+(function() {
+    var URL = document.URL
+    var Item = URL.substr(URL.indexOf('results?s') + 10)
+    if(Item.includes('&profile')){ Item = Item.substr(0, Item.indexOf('&profile')) }
+
+    function parseRegionFromUrl(url){
+        var match = url.match(/(?:fcresearch|qifcr)[.-]([a-z]{2})\./i);
+        if(match){ return match[1].toLowerCase() }
+        return 'na';
+    }
+    function parseFcFromUrl(url){
+        var match = url.match(/\/([A-Z0-9]{3,5})\/(?:results|search)/i);
+        return match ? match[1].toUpperCase() : '';
+    }
+    function resolveFcName(){
+        var fromUrl = parseFcFromUrl(document.URL);
+        if(fromUrl){ return fromUrl }
+        var warehouse = $('.warehouse-id').first();
+        if(warehouse.length){
+            var cleaned = warehouse.clone().find('#FastSolveBtn').remove().end().text().replace(/\s*Turn FastSolve.*$/i, '').trim();
+            var match = cleaned.match(/^([A-Z0-9]{3,5})/i);
+            if(match){ return match[1].toUpperCase() }
+        }
+        var state = ($('.a-color-state').first().text() || '').replace(/\s*Turn FastSolve.*$/i, '').trim();
+        var stateMatch = state.match(/^([A-Z0-9]{3,5})/i);
+        return stateMatch ? stateMatch[1].toUpperCase() : state.slice(0, 5);
+    }
+    function refreshSiteContext(){
+        Region = parseRegionFromUrl(document.URL);
+        fcname = resolveFcName();
+        Login = ($('.aok-float-right').text() || Login || '').trim();
+    }
+    function getDefaultPandashMarketplace(){
+        return Region === 'eu' ? 'DE' : 'US';
+    }
+    function getPandashMarketplace(){
+        refreshSiteContext();
+        return ($.cookie(`${fcname}_PandashMarketplace`) || getDefaultPandashMarketplace()).toUpperCase();
+    }
+    function hazmatLevelColor(level){
+        if(level == '0'){ return 'grey' }
+        if(level == '1'){ return 'green' }
+        if(level == '2'){ return 'rgb(255, 191, 0)' }
+        if(level == '4'){ return 'orange' }
+        if(level == '5'){ return 'rgb(255, 64, 0)' }
+        if(level == '6'){ return 'red' }
+        return '';
+    }
+    var pandashRestrictionCache = { fc: '', level: '', fetchedAt: 0 };
+    async function fetchPandashRestriction(){
+        refreshSiteContext();
+        if(pandashRestrictionCache.fc === fcname && Date.now() - pandashRestrictionCache.fetchedAt < 300000){
+            return pandashRestrictionCache.level;
+        }
+        var Response = await CommonFunctions.gmFetch.get(`https://pandash.amazon.com/GridServlet?fc=${fcname}`);
+        var body = JSON.parse(Response.responseText);
+        if(body.error === 'Invalid FC' || !body.restriction){
+            throw new Error(body.error || 'Missing restriction level');
+        }
+        pandashRestrictionCache = { fc: fcname, level: body.restriction, fetchedAt: Date.now() };
+        return body.restriction;
+    }
+
+    var Region = parseRegionFromUrl(URL)
+    var fcname = parseFcFromUrl(URL) || resolveFcName()
+    var Login = ($('.aok-float-right').text() || '').trim()
+    var ASIN = '', FNSku = '', CopyIcon, Asinfound = false, FCLM_Check = false, FudObj = ''
+
+    const CommonFunctions = {
+        "addCSS":()=>{
+            GM_addStyle(`.fud-label { margin-right: 10px;  padding: 0.6em 2em;  border: none;  outline: none;  border-radius: 10px; } .fud-color { background: #f75252; }  `)
+            GM_addStyle(`.autodwell-label { margin-right: 30px;  padding: 0.6em 2em;  border: none;  outline: none;  border-radius: 10px; } .autodwell-color { background: #faa2e8; } `)
+            GM_addStyle(`.loader {  --c:#000;  width: fit-content;  font-weight: bold;  font-family: monospace;  font-size: 20px;  color: #0000;  overflow: hidden;  text-shadow: 0 0 var(--c),11ch 0 var(--c);  animation: l6 2s infinite linear;}.loader:before {  content:"Loading..."}@keyframes l6 {to{text-shadow:-11ch 0 var(--c),0ch 0 var(--c)}}`)
+            GM_addStyle(`.overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(80, 80, 80, 0.911); } .infobox { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 20px; background: #fff; color: black; box-shadow: 0 0 10px rgba(0, 0, 0, 0.3); z-index: 2; }`)
+        },
+        "gmFetch" : {
+            "get" : (address,headers,anonymous)=>{
+                return new Promise((resolve, reject) => {
+                    if (!headers){headers = ""}
+                    anonymous = anonymous ? anonymous : false;
+                    GM_xmlhttpRequest({
+                        method: "GET",
+                        url: address,
+                        headers: headers,
+                        anonymous: anonymous,
+                        nocache: true,
+                        onload: (res)=>{resolve(res)},
+                        onerror: reject,
+                        ontimeout: reject
+                    });
+                });
+            },
+            "post" : (address,postData,headers,anonymous)=>{
+                return new Promise((resolve, reject) => {
+                    if (!headers){headers = {"Content-Type": "application/x-www-form-urlencoded"}}
+                    anonymous = anonymous ? anonymous : false;
+                    GM_xmlhttpRequest({
+                        method: "POST",
+                        url: address,
+                        headers: headers,
+                        data: postData,
+                        anonymous: anonymous,
+                        onload: (res)=>{CommonFunctions.gmFetch.processRes(res, resolve, reject)},
+                        onerror: reject,
+                        ontimeout: reject
+                    });
+                });
+            },
+            "processRes" : (response, resolve, reject)=>{
+                resolve(response);
+            },
+        },
+        "showToast" : async (msg, colour="#000")=>{
+            if(!CommonFunctions.showToast.toastStylesAdded){
+                GM_addStyle(`.toastyyy{ visibility:hidden; min-width:160px; margin-left:-125px; color:#fff; text-align:center; border-radius:25px; padding:16px; position:fixed; z-index:2147483647; left:50%; top:30px; font-size:14px}.showtoastyyy{ visibility:visible !important; -webkit-animation:.5s fadein,.5s 2.5s fadeout; animation:.5s fadein,.5s 2.5s fadeout}@-webkit-keyframes fadein{    from{top:0;opacity:0}    to{top:30px;opacity:1}}@keyframes fadein{    from{top:0;opacity:0}    to{top:30px;opacity:1}}@-webkit-keyframes fadeout{    from{top:30px;opacity:1}    to{top:0;opacity:0}}@keyframes fadeout{ from{top:30px;opacity:1} to{top:0;opacity:0}}`);
+
+                CommonFunctions.showToast.toastStylesAdded = true;
+            }
+            let toast = document.createElement("div");
+            toast.id = `toastyyy-${CommonFunctions.genId()}`;
+            toast.className = "toastyyy";
+            document.body.appendChild(toast);
+            toast.style.backgroundColor = colour;
+            toast.innerText = msg;
+            toast.classList.toggle("showtoastyyy");
+            setTimeout(function(){
+                toast.classList.toggle("showtoastyyy");
+                setTimeout(function(){toast.remove()},1500);
+            }, 3000);
+        },
+        "genId" : ()=>{
+            var id = "";
+            for (var i = 0; i < 10; i++){id += Math.floor(Math.random() * 9);}
+            return id;
+        },
+    };
+    const MainTbl = {
+        "StartMain":()=>{
+            MainTbl.FastSolve.Config()
+            MainTbl.WaitForTbl.WaitToInventoyTbl()
+        },
+        "FastSolve":{
+            "Config":()=>{
+                GM_addStyle(`#FastSolveBtn{cursor: pointer; margin-left: 15px;}`)
+
+                var FastSolve = $.cookie(`FcResearch_FastSolve_${fcname}`)
+                if(FastSolve){
+                    $('.warehouse-id').after('<button id="FastSolveBtn" style="margin-left: 15px;">Turn FastSolve off</button>')
+                    MainTbl.FastSolve.StartFastSolve()
+                }else{
+                    $('.warehouse-id').after('<button id="FastSolveBtn" style="margin-left: 15px;">Turn FastSolve on</button>')
+                }
+
+                $('#FastSolveBtn').click( function() {
+                    if(!FastSolve){
+                        $.cookie(`FcResearch_FastSolve_${fcname}`, true, { expires: 365 })
+                        location.reload();
+                    }else{
+                        $.cookie(`FcResearch_FastSolve_${fcname}`, '', { expires: 365 })
+                        location.reload();
+                    }
+                })
+            },
+            "StartFastSolve":()=>{
+                // po zaladowaniu listy PZ sortujemy malejaco po dacie zamówienia..
+                waitForKeyElements('#purchase-order-placed', function() {
+                    $('#purchase-order-placed').click().click();
+                });
+
+                // po zaladowaniu wysylek sortujemy je po dacie nadejscia malejaco..
+                waitForKeyElements('#shipment-arrival', function() {
+                    $('#shipment-arrival').click().click();
+                });
+
+                // po zaladowaniu pozycji z PZ sortujemy malejaco po dacie zamówienia..
+                waitForKeyElements('#purchase-order-item-order-date', function() {
+                    $('#purchase-order-item-order-date').click().click();
+                });
+
+
+                //Ustawienia domyslne
+                const myCookies = [['cfg-design','1'],['cfg-region','eu']];
+                for(let i=0;i<myCookies.length;i++){
+                    if(document.cookie.indexOf(myCookies[i][0]) == '-1'){
+                        $.cookie(myCookies[i][0],myCookies[i][1]);
+                    }
+                }
+
+                //Komunikaty
+                const locale = ['', //0
+                                '', //1
+                                'FastSolve', //2
+                                'Extension created by ', //3
+                                '', //4
+                                'Barcode Generator', //5
+                                'Settings', //6
+                                'Quick Links', //7
+                                'Re-Design FCResearch', //8
+                                '(Reload needed)', //9
+                                'Set default', //10
+                                '', //11
+                                'Region (e.g. "eu" or "na")', //12
+                                '' //13
+                               ];
+
+                //obrazy 0=oko,1=,2=ustawienia,3=loading
+                const images = ['https://drive-render.corp.amazon.com/view/jachyd@/TamperMonkey/fcrp/1.png','','https://drive-render.corp.amazon.com/view/jachyd@/TamperMonkey/fcrp/3.png','https://drive-render.corp.amazon.com/view/jachyd@/TamperMonkey/fcrp/4.gif',];
+
+
+                function loadingDiv(txt){
+                    $('body').append('<div id="fcrp-el-loading" ><img src="'+images[3]+'" /> '+txt+'</div>');
+                    $('#fcrp-el-loading').css({
+                        'position':'fixed',
+                        'bottom':'10px',
+                        'min-height':'36px',
+                        'right':'210px',
+                        'padding':'10px',
+                        'z-index':'150',
+                        'border-radius':'5px',
+                        'background-color':'#3f5973',
+                        'opacity':0.9,
+                        'color':'white',
+                        'font-size':'13px'
+                    });
+                    $('#fcrp-el-loading img').css({'float':'left','padding-right':'3px'});
+                }
+                function showPicture(asin){
+                    $('.fcrp_prodPic').css('display','none');
+                    let ppid = $('.fcrp_prodPic').length;
+                    $('body').append('<div class="fcrp_prodPic fcrp_prodPic_'+ppid+'" />');
+                    $('.fcrp_prodPic_'+ppid).css({
+                        'display':'block',
+                        'position':'fixed',
+                        'text-align':'center',
+                        'background-color':'white',
+                        'overflow':'hidden',
+                        'width':150,
+                        'top':70,
+                        'right': 220,
+                        'opacity':0.9,
+                        'z-index':'300',
+                        'border-radius':10,
+                        'border':'solid 1px black'
+                    });
+                    $('.fcrp_prodPic_'+ppid).append('<img src="'+images[3]+'" />');
+                    $('.fcrp_prodPic_'+ppid+' img').css({
+                        'width':'auto',
+                        'top':0,
+                        'right': 0
+                    });
+
+                    $.ajax({
+                        method: "POST",
+                        headers: {'content-type':"application/x-www-form-urlencoded; charset=UTF-8"},
+                        url: "http://fcresearch-"+$.cookie('cfg-region')+".aka.amazon.com/"+$.cookie('fcmenu-warehouseId')+"/results/product",
+                        data: { s: asin},
+                        success: function(data){
+
+                            $('#worksheet').html(data);
+                            let img = $('#worksheet img').attr('src');
+
+                            $('.fcrp_prodPic_'+ppid+' img').attr('src',img)
+                            $('.fcrp_prodPic_'+ppid).append('<p class="fcrp-pimg-time">3</p>');
+                            let imgHiding = setInterval(function(){
+                                let pimgTime = $('.fcrp_prodPic_'+ppid+' .fcrp-pimg-time').text();
+                                if(pimgTime == 0){
+                                    $('.fcrp_prodPic_'+ppid).remove();
+                                    clearInterval(imgHiding);
+                                }
+                                else {
+                                    $('.fcrp_prodPic_'+ppid+' .fcrp-pimg-time').html($('.fcrp_prodPic_'+ppid+' .fcrp-pimg-time').text()*1-1);
+                                }
+                            },1000);
+                            $('.fcrp_prodPic_'+ppid+' img').css({
+                                'width':150,
+                                'top':0,
+                                'right': 0
+                            });
+                        }
+                    });
+
+                }
+                function generateCodes(code){
+                    let codes = code.replace(new RegExp("(\n){2}", 'g'), "*entyr**nextLine**entyr*" ).replace(new RegExp(", ", 'g'), "*entyr*" ).replace(new RegExp(",", 'g'), "*entyr*" ).replace( /\n/g, "*entyr*" ).split( "*entyr*" );
+                    $('#fcrp #codes').html("");
+                    if(codes.length){
+                        for(let cod=0;cod<codes.length;cod++){
+                            if(codes[cod].length){
+                                if(codes[cod]=='*nextLine*'){
+                                    $('#fcrp #codes').append('<div style="height:50px" />');
+                                }
+                                else {
+                                    $('#fcrp #codes').append('<svg id="svg'+cod+'" /><br />');
+                                    $('#svg'+cod).JsBarcode(codes[cod], {
+                                        format: "CODE128",
+                                        width:1,
+                                        height:30,});
+                                }
+                            }
+                        }
+                    }
+                }
+
+
+                function copy(text){
+                    $('body').append('<input id="fcrp-toCopy" style="display:hidden;" value="'+text+'" />');
+                    let copyEl =  document.getElementById('fcrp-toCopy');
+                    copyEl.select();
+                    document.execCommand('copy');
+                    $('#fcrp-toCopy').remove();
+                }
+
+                const tables = ['product','purchase-order','purchase-order-item','receive-history','inventory','inventory-history','carton-contents'],
+                      fastPass = [3,5];
+                let checkTables = [];
+                for(let i=0;i<tables.length;i++){checkTables.push(0);}
+
+                function addMenu(el,elint){
+                    const elm = "div[data-section-type='"+el+"']";
+
+                    //czekam na wiecej
+                    let tryCount = 0,tBufor;
+                    let tries = setInterval(function(){
+                        let neededData = ($('#table-'+el+'_info').text()).split(' ');
+                        let showingRows = neededData[3]*1, maxRows = neededData[5]*1;
+                        if(fastPass.indexOf(elint) != "-1"){
+                            maxRows = (maxRows > 300)?300:maxRows;
+                        }
+                        if(showingRows < maxRows){
+
+                            //console.log(el + ': '+showingRows+' < '+maxRows);
+                            $(elm+' .dataTables_scrollBody').scrollTop($('#table-'+el).height());
+                        }else{
+
+                            $(elm+' .dataTables_scrollBody').scrollTop(0);
+
+                            //Asin Menu
+                            $(elm+' td').filter(function() {
+                                //Cell Filtering ([0-9]{1}([A-Z0-9]){7})
+                                return ($(this).text().match(/(B0)([A-Z0-9]){8}/) || $(this).text().match(/(X0)([A-Z0-9]{8})/)|| $(this).text().match(/(sp)([A-Z0-9]{1})/)|| $(this).text().match(/(LP)([A-Z0-9])/)|| $(this).text().match(/([0-9]{12})/)) && $(this).text().length > 9 && $(this).text().length < 16;
+                            }).each(function( index ) {
+                                let itemAsin = $.trim($(this).text());
+                                if(elm.includes('inventory-history')){return}
+
+                                $(this).html('<img class="fcrp_img_'+el+'_'+index+'" data-asin="'+itemAsin+'" src="'+images[0]+'">'+$(this).html());
+                                $('.fcrp_img_'+el+'_'+index).click(function(){
+                                    showPicture($(this).attr('data-asin'));
+                                });
+
+                                let unique = new Date().getTime();
+                                $(this).attr('style','cursor:copy').children().attr('style','cursor:copy!important');
+
+                                $(this).contextmenu(function(e){
+                                    let posX = e.clientX;
+                                    let posY = $(document).scrollTop() + e.clientY;
+                                    let toteId = $('#search').attr('placeholder');
+
+                                    $('body').append('<div id="fcrp-tooltip-'+unique+'" class="fcrp-tooltip"/>');
+                                    $('#fcrp-tooltip-'+unique).css({'top':posY,'left':posX});
+
+
+                                    $('.fcrp-tooltip').append('<span class="fcrp-ti fcrp-copyA-'+index+'" data-asin="'+itemAsin+'" >Copy</span>');
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti" target="_blank" href="http://fcresearch-eu.aka.amazon.com/LEJ1/results?s='+itemAsin+'" >Open in New Tab</a>');
+                                    $('.fcrp-tooltip').append('<hr/>ASIN');
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href="https://prepmanager-dub.amazon.com/view/'+itemAsin+'?region=EU">Prep Manager</a>');
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href="https://pandash.amazon.com#'+itemAsin+'">PanDash</a>');
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href=https://box-web-dub.amazon.com/BoxRecBrowser/getBoxRecommendation?marketplaceId=4&marketplace-selector=1&warehouseId=LEJ1&asin='+itemAsin+'&giftOption=NoGift&siocOverride=NONE&_requiresConcealment=on&postalCode=>BoxWeb</a>');
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href="https://image-assist.amazon.com/bulk_asin_viewer/view?display_type=SMALL-IMAGES&image_type=ALL&marketplaceId=4&asin='+itemAsin+'">Image Assist</a>')
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href="https://t.corp.amazon.com/issues?q=extensions.tt.status%3A%28Assigned%20OR%20%22Work%20In%20Progress%22%20OR%20Researching%20OR%20Pending%20OR%20Resolved%20OR%20Closed%29%20AND%20currentSeverity%3A%283%20OR%204%20OR%205%20OR%20N%29%20AND%20full_text%3A%28'+itemAsin+'%29">SIM search</a>');
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href="https://eu.item-measurement.aft.a2z.com/item/'+itemAsin+'">Items Detail</a>');
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href="https://cpex-fc-eu.amazon.com/sioc/?asin='+itemAsin+'">Sioc-Flag</a>');
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href="https://csi.amazon.com/view?view=simple_product_data_view&item_id='+itemAsin+'&marketplace_id=4&customer_id=&merchant_id=&sku=&fn_sku=&gcid=&fulfillment_channel_code=&listing_type=purchasable&submission_id=&order_id=&external_id=&search_string=&realm=USAmazon&stage=prod&domain_id=&keyword=&submit=Show">CSI</a>');
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href="https://fba-fnsku-commingling-console-eu.aka.amazon.com/tool/fnsku-mappings-tool?getMappingsType=ASIN_MAPPINGS&FNSku=&FNSkus=&merchantId=&MSku=&ASIN='+itemAsin+'&includeInactive=true&submit=get&paginationToken=">GetMappings</a>');
+                                    $('.fcrp-tooltip').append('<hr/>Ship ID');
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href="https://atrops-web-eu.amazon.com/operations/gsm_fill_data_using_shipment?utf8=%E2%9C%93&shipment_id='+itemAsin+'">atrops</a>');
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href="https://hero.eu.picking.aft.a2z.com/fc/LEJ1/pick-events/customer-shipment/'+itemAsin+'">Hero</a>');
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href="https://rodeo-dub.amazon.com/LEJ1/Search?_enabledColumns=on&enabledColumns=ASIN_TITLES&enabledColumns=DEMAND_ID&enabledColumns=FAST_TRACK&enabledColumns=FC_SKU&enabledColumns=LAST_EXSD&enabledColumns=LPN&enabledColumns=NEXT_DESTINATION&enabledColumns=OUTER_CONTAINER_TYPE&enabledColumns=OUTER_SCANNABLE_ID&searchKey='+itemAsin+'">Rodeo Search</a>');
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href="https://picking-console.eu.picking.aft.a2z.com/fc/LEJ1/pick-research/type/customer-shipment/id/'+itemAsin+'">APS</a>');
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank"href=" https://eu.hitch.aft.amazon.dev/warehouse/LEJ1/shipment/'+itemAsin+'">HitchReport</a>');
+                                    $('.fcrp-tooltip').append('<hr/>Sp00');
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank"href="https://eagleeye.amazon.dev/?lang=en_US&region=EU&format=leg&nodeInfo=&shipmentType=scannable&searchId='+itemAsin+'">eagleEye</a>');
+
+                                    $('.fcrp-copyA-'+index).click(function(){
+                                        copy(itemAsin);
+                                    });
+
+
+                                    $(document).click(function(){
+                                        if($('#fcrp-tooltip-'+unique).length){
+                                            $('#fcrp-tooltip-'+unique).remove();
+                                        }
+                                    });
+                                    return false;
+                                });
+                            });
+
+                            //Po Menu
+                            $(elm+' td').filter(function() {
+                                //Filtrowanie komorek
+                                return $(this).text().match(/([0-9]{1}([A-Z0-9]){7})/) && $(this).text().length == 8;
+                            }).each(function( index ) {
+                                let unique = new Date().getTime();
+
+                                $(this).attr('style','cursor:copy').children().attr('style','cursor:copy!important');
+
+                                $(this).contextmenu(function(e){
+                                    let itemPo = $.trim($(this).text());
+
+                                    let posX = e.clientX;
+                                    let posY = $(document).scrollTop() + e.clientY;
+
+                                    $('body').append('<div id="fcrp-tooltip-'+unique+'" class="fcrp-tooltip"/>');
+                                    $('#fcrp-tooltip-'+unique).css({'top':posY,'left':posX});
+
+                                    $('.fcrp-tooltip').append('<span class="fcrp-ti fcrp-copyP-'+index+'" data-po="'+itemPo+'" >Copy</span>');
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti" target="_blank" href="http://fcresearch-eu.aka.amazon.com/LEJ1/results?s='+itemPo+'" >Open in New Tab</a>');
+                                    $('.fcrp-tooltip').append('<hr/>');
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href="https://transportation-internal-eu.amazon.com/lookups/AsnLookup/AsnLookup-Result.cgi?start_date=&end_date=&pro_area=&bol_area=&po_area='+itemPo+'&arn_area=&asn_id=&encrypted_asn_id=&scac=&asin_area=&shipper_code=&shipper_asn_id=&sscc_area=&fc_id_list=&container_id=&vessel_name=&submit=Submit">ASN Lookup</a>');
+
+                                    $('.fcrp-copyP-'+index).click(function(){
+                                        copy(itemPo);
+                                    });
+
+                                    $('.fcrp-po-'+index+'-ppo').click(function(){printLabel($(this).attr('data-po'));});
+
+
+
+
+                                    $(document).click(function(){
+                                        if($('#fcrp-tooltip-'+unique).length){
+                                            $('#fcrp-tooltip-'+unique).remove();
+                                        }
+                                    });
+                                    return false;
+                                });
+                            });
+
+                            clearInterval(tries);
+                            checkTables[elint] = 2;
+
+                            if(checkTables.every( (val, i, arr) => val == 2 )){
+                                $('#fcrp-el-loading').remove();
+                            }
+                        }
+                    },300);
+                }
+
+                function waitMenu(){
+                    loadingDiv('Loading quick links');
+                    let waitmn = setInterval(function(){
+                        if(checkTables.every( (val, i, arr) => val > 0 )){
+                            clearInterval(waitmn);
+                        }
+                        else {
+
+                            for(let i=0;i<tables.length;i++){
+                                if(checkTables[i]){
+                                    continue;
+                                }
+                                else {
+                                    //console.log('['+tables[i]+'] Sprawdzanie...');
+                                    if(!$("#"+tables[i]+"-status").hasClass('loading')){
+                                        //console.log('['+tables[i]+'] Potwierdzono status - zaladowana');
+
+                                        if($("#"+tables[i]+"-status a").length){
+
+                                            checkTables[i] = 1;
+                                            //console.log('['+tables[i]+'] Istnieje');
+                                            addMenu(tables[i],i);
+                                        }
+                                        else {
+                                            //console.log('['+tables[i]+'] nie istnieje - pomijam');
+                                            checkTables[i] = 2;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },1000);
+                }
+                function groupSize(){
+                    //console.log('groupping');
+                    let sizesCount = [['Sort',0],['Mezz',0],['Corner',0],['HighRack',0],['TeamLift',0],['HaevyBulky',0],['MechLift',0],['Cubiscan',0]],
+                        ready = 0, containingHrv = 0, totalCount = 0,
+                        summaryTable = "<span id='fcrp-stb'><table id='sizeSummary' class='a-bordered' style='margin:10px 0px 10px 0px;border:2px solid red;'><thead><tr><th>Size group</th><th>Asins</th></tr></thead><tbody>";
+                    $('#fcrp-groupSize').remove();
+                    let mainPart = 'div [data-section-type="inventory"]';
+                    $('#inventory-container div').html('Size Group');
+
+                    $(mainPart+' tbody:eq(1) tr').each(function(index){
+                        let opEl = $(mainPart+' tbody:eq(1) tr:eq('+index+') td:eq(0)');
+                        let asin = $(mainPart+' tbody:eq(1) tr:eq('+index+') td:eq(1)').text();
+                        //getSize
+                        $.ajax({
+                            method: "POST",
+                            headers: {'content-type':"application/x-www-form-urlencoded; charset=UTF-8"},
+                            url: "http://fcresearch-eu.aka.amazon.com/"+$.cookie('fcmenu-warehouseId')+"/results/product",
+                            data: { s: asin},
+                            success: function(data){
+                                $('#worksheet').html(data);
+                                let weight = $('#worksheet tr:eq(5) td').text();
+                                let size = $('#worksheet tr:eq(6) td').text();
+                                let sort = $('#worksheet tr:eq(10) td').text();
+                                let hrv = $('#worksheet tr:eq(12) td').text();
+
+                                let group = '';
+                                if(hrv == 'true'){
+                                    containingHrv ++;
+                                    group = '[HRV] ';
+                                }
+
+                                if(size.length < 1 || weight.length < 1){group+='Cubi';sizesCount[7][1]++;}else{
+                                    let temp = size.split(' ');
+
+                                    let sizes =[(temp[0]*1),(temp[2]*1),(temp[4]*1)];
+                                    sizes.sort(function(a, b){return a-b});
+
+                                    let maxSize = sizes[2]*1, secSize=sizes[1]*1;
+                                    weight = weight.split(' ')[0];
+
+                                    //console.log(asin+':'+size+' | '+maxSize+', '+secSize);
+
+                                    if(sort == 'true'){group+='Sort';sizesCount[0][1]++;}
+                                    else if(maxSize <= 70 && secSize <= 50 && weight < 12){group+='Mezz';sizesCount[1][1]++;}
+                                    else if(maxSize <= 105 && secSize <= 70 && weight < 15){group+='Corner';sizesCount[2][1]++;}
+                                    else if(maxSize <= 170 && weight < 15){group+='HR';sizesCount[3][1]++;}
+                                    else if(maxSize <= 170 && weight <= 30){group+='TL';sizesCount[4][1]++;}
+                                    else if(maxSize <= 240 && weight < 45){group+='HB';sizesCount[5][1]++;}
+                                    else if(maxSize >= 240 || weight >= 45){group+='Mechlift';sizesCount[6][1]++;}
+                                    else {group+='ERROR';}
+                                }
+                                opEl.html(group);
+                                ready++;
+                                $('#worksheet').html('');
+                            }
+                        });
+                    });
+
+                    let isCategorizationReady = setInterval(function(){
+                        //console.log(ready+" / "+$(mainPart+' tbody:eq(1) tr').length);
+                        if(ready==$(mainPart+' tbody:eq(1) tr').length){
+                            sizesCount.sort(function(a,b){return b[1] - a[1];});
+                            for(let i=0;i<sizesCount.length;i++){
+                                totalCount += sizesCount[i][1];
+                                if(sizesCount[i][1]>0){
+                                    summaryTable += "<tr><td>"+sizesCount[i][0]+"</td><td>"+sizesCount[i][1]+"</td></tr>";
+                                }
+                                else{
+                                    break;
+                                }
+                            }
+                            let hrvStyle = (containingHrv)?" style='color:red;font-weight:bold;font-size:20px;'":" style='display:none;'";
+                            summaryTable += "</tbody></table><p class='dataTables_info' "+hrvStyle+">Container contains HRV asins: "+containingHrv+" / "+totalCount+"</p><br /></span>";
+                            $(mainPart+' .a-last .a-box-inner').prepend(summaryTable);
+
+                            $('div [data-section-type="inventory"] .section-title').append('<span id="fcrp-gsUndo" class="fcrp-gsb">[Undo]</span>');
+                            $('#fcrp-gsUndo').click(function(){
+
+                                $('div [data-section-type="inventory"]').find('span[id="fcrp-stb"]').remove();
+                                $('#fcrp-gsUndo').remove();
+                                $('#inventory-container div').html('Container');
+
+                                $(mainPart+' tbody:eq(1) tr').each(function(index){
+                                    let toteId = $('#search').attr('placeholder');
+                                    $(mainPart+' tbody:eq(1) tr:eq('+index+') td:eq(0)').html('<a href="http://fcresearch-eu.aka.amazon.com/'+$.cookie('fcmenu-warehouseId')+'/results?s='+toteId+'">'+toteId+'</a>');
+                                });
+
+                                $('div [data-section-type="inventory"] .section-title').append('<span id="fcrp-groupSize" class="fcrp-gsb">[Categorize by size]</span>');
+                                $('#fcrp-groupSize').click(function(){groupSize()});
+                            });
+
+                            clearInterval(isCategorizationReady);
+                        }
+                    },100);
+                }
+
+                $(document).ready(function(){
+                    if(window.location.href == 'http://barcodes.corp.amazon.com/index.html?bargenJachyd=1#auto'){
+
+                        document.title = locale[5]+" by jachyd"
+                        $('body').html("").append("<div id='fcrp'><div id='fcrp_logo'>"+locale[5]+" <small>by jachyd</small></div><div id='fcrp_bargen' ><textarea></textarea><br /><div id='codes'></div></div></div>").css({'border':0,'margin':0,'padding':0});
+                        $('#fcrp').css({'padding':5,'width':290,'margin':'auto'});
+                        $('#fcrp_logo').css('text-align','center');
+                        $('#fcrp_bargen textarea').css('width',290).on('change keyup paste', function() {
+                            generateCodes($(this).val());
+                        });
+                    }
+                    else if(window.location.hostname == 'pandash.amazon.com'){
+                        if(window.location.hash){
+                            setTimeout(function(){
+                                let boAsin = window.location.hash;
+                                boAsin = boAsin.replace('#','');
+                                $('#asinsFilter').val(boAsin);
+
+                                $('#de').addClass('ui-selected');
+
+                                $('#sourceFilter').val('FC');
+                                $('#FCinput').css('display','inline');
+                                $('#FCinput').val($.cookie('fcmenu-warehouseId'));
+                                $('#FCinput').trigger('change');
+                                validateFC();
+
+                                $('#languageFilter').val('EN');
+                                let waitForValidateFc = setInterval(function(){
+                                    if($('.statusOk').length){
+                                        $('#btOk').click();
+                                        clearInterval(waitForValidateFc);
+                                    }
+                                },100);
+                            },500)
+                        }
+                    }else {
+
+
+                        let design = ".a-popover-inner{color:grey!important;}.a-alert-container {box-shadow: 0 0 0 4px #359933 inset !important;background-color:#2f2f2f!important;color:#66ff00;}.fcrp_box button{margin-bottom:10px !important;}#fcrp_cfg{background-color:#484848;color:white;border-radius-left-bottom:5px}.a-cal-labels,body,.a-popover-inner,#side-bar{background-color: #3c3c3c;}.a-box,.a-cal-na{background-color: #2f2f2f  ;border:1px #6e6e6e solid;color:white}table.a-keyvalue th{background-color: #484848;color:white;}table.a-keyvalue td, table.a-keyvalue th { border-top: 1px solid #6e6e6e;}table.a-keyvalue {border-bottom:1px solid #6e6e6e;}.a-box-title .a-box-inner, .a-popover-header {color:white;background: #626262;box-shadow: 0 1px 0 rgba(53,153,51,1) inset;background: linear-gradient(to bottom, #626262 ,#2f2f2f);}.a-box {border-top-color: #6e6e6e!important;}body a{color:#66ff00 !important;}.a-search input{color:white;background-color:#3c3c3c!important;border:1px solid  #626262 ;box-shadow: 0 1px 0 rgba(53,153,51,1),0 1px 0 rgba(53,153,51,1) inset;}.p-icon{border:0px;box-shadow:none;}.p-icon:hover{cursor:pointer;border:none;}table.a-bordered tr:nth-child(2n) {background-color:  #555555 ;}table.a-bordered tr:nth-child(2n+1) {background-color:  #626262 ;}table.a-bordered td, table.a-bordered th { border-bottom: 1px solid #484848;}table.a-bordered { border: 1px solid #484848;}table.a-bordered tr:last-child td{border-color:#484848;}table.a-bordered tr:first-child th{background: #484848;color:white;border-color: #484848;border-bottom: 1px solid #484848;box-shadow:none;}.a-nostyle, .a-nostyle span{color:white!important;}.logo-fc ,.logo-research{color:white;}.aui-nav-row {background: linear-gradient(to bottom, #626262 ,#3c3c3c); border-bottom: 1px solid #484848;}a.a-link-section-expander{background-color:#484848;}.a-icon, .p-icon{filter:invert(100%);}a.a-link-section-expander:hover,a.a-link-section-expander:focus{background-color: #555555 ;}.a-expander-content{background-color: #555555 ;}.a-section-expander-inner,.sidebar-expander-header {border-top: 1px solid  #3c3c3c;}.separator{border-right:1px solid rgba(53, 153, 51,1)!important;}.a-declarative.a-link-section-expander {background-color: #2f2f2f !important;}.ui-datepicker.ui-widget.ui-widget-content.ui-helper-clearfix.ui-corner-all {background-color: #3c3c3c !important;}";
+                        let importantD = ".fcrp-gsb {padding:3px;font-weight:normal;background-color:gray; border-radius:2px;font-size:10pt;cursor:pointer;color:white;margin-left:10px}#fcrp_cfg{background-color:rgba(0,0,0,0,2);}.fcrp-tooltip hr{margin:0px 5px 0px 27px;border-top:1px solid #ccc;}.fcrp-tooltip{z-index:999;position:absolute;width:200px;padding:3px;background-color:#2f2f2f;border:solid 1px #ccc;box-shadow:1px 1px 3px rgba(0,0,0,0.8)}.fcrp-ti{display:block;cursor:pointer;width:100%;font-size:9pt;line-height:24px;text-decoration:none!important;color:white!important;box-sizing:border-box;padding:0px 30px;margin:0px 0px 2px 0px}.fcrp-ti:hover{background-color:#c4e8ee}#fcrp_amznsoft a:not(:last-child):after { content: ', ';}";
+
+
+                        let stylesToAdd = ($.cookie("cfg-design") == 1)?design+importantD:importantD;
+                        $("<style>").text(stylesToAdd).appendTo($("body"));
+
+                        $('.a-thumbnail-right').css('border-radius','3px');
+                        $('.aui-nav-row .aok-float-right').css('color','white');
+
+                        let fc = ((window.location.href).split("/"))[3]
+
+                        if(window.location.href == "http://fcresearch-eu.aka.amazon.com/"+fc+"/search"){
+                            $('body').append('<div class="a-row"><div class="a-column a-span12 a-text-center" style="color:#66ff00;">FCResearch extended by jachyd!</div></div>')
+                        }
+                        else {
+
+                            //tworzenie miejsca pracy
+                            if(!$('#worksheet').length){
+                                $('body').append('<div id="worksheet" style="display:none" />');
+                            }
+                            //Size Groupping
+                            waitForKeyElements('#table-inventory tbody', function() {
+                                const ContainerSample = $('#search').attr('placeholder').substr(0,2);
+                                if(ContainerSample == 'ts' || ContainerSample == 'cs'){
+                                    $('div [data-section-type="inventory"] .section-title').html($('div [data-section-type="inventory"] .section-title').html()+'<span id="fcrp-groupSize" class="fcrp-gsb">[Categorize by size]</span>');
+                                    $('#fcrp-groupSize').click(function(){groupSize();});
+                                }
+                            });
+                            //Wstawianie buttonow przy PO i Asinach
+                            waitMenu();
+
+
+                            let cln = $('.a-expander-container:eq(0)').clone();
+                            $('.a-expander-container:eq(0)').remove();
+
+                            var QuickLinks = `
+                                              <a href='https://trans-logistics-eu.amazon.com/sortcenter/tantei'>TS 2.0/Egale Eye</a>
+                                              <a href='https://liquidationtool.qubit.amazon.dev/new'>Liquidation</a>
+                                              <a href='https://w.amazon.com/bin/view/DE_Leseratten/ShippingProblemsRiverWorkFlowDE/'>DE Leseratte</a><a href=''></a>
+                                             `
+
+                            $('#side-bar').prepend("<div class='a-expander-container'><a href='javascript:void(0)' data-action='a-expander-toggle' class='a-declarative a-link-section-expander' data-a-expander-toggle='{\"expand_prompt\":\"\", \"collapse_prompt\":\"\"}'><i class='a-icon a-icon-section-collapse'></i><span class='a-expander-prompt'><h6>"+locale[2]+"</h6></span></a><div  class='a-expander-content fcrp_box'><button id='fcrp_bargen'>"+locale[5]+"</button><br /><button id='fcrpSettings'  style='margin-bottom:0px!important;'><img src='"+images[2]+"'/> "+locale[6]+"</button><div id='fcrp_cfg' style='display:none'><h5>"+locale[12]+"</h5><input type='text' id='fcrp_cfgRegion' value='"+$.cookie("cfg-region")+"' /><br /><br /><input type='checkbox' id='fcrp_redesign' class='fcrp_cfgchx' data-cfg='cfg-design'>"+locale[8]+"</span><br />"+locale[9]+"<br /><br /><span id='cfg-res'>"+locale[10]+"</span><br /><br/>"+locale[3]+" <a href='mailto:jachyd@amazon.com'>jachyd</a></div><div id='fcrp_amznsoft' style='margin-top:10px;'><h5>"+locale[7]+"</h5>"+QuickLinks+"</div></div>" ).append(cln);
+
+                            waitForKeyElements('.a-span7 > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > th:nth-child(1)', function(){ AddMoreLinks() });
+                            function AddMoreLinks(){
+                                var ASIN = $('.a-span7 > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(2)  a:nth-child(1)').text().trim()
+                                var Price = $(".a-span7 > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(9) > td:nth-child(2)").text();
+                                Price= Price.split(" ").pop();
+                                if (!$.isNumeric(Price)) Price='';
+
+                                $('#fcrp_amznsoft').append(`
+                                                  <a href='https://t.corp.amazon.com/create/options?title=%5B${fcname}%5D+Bitte+Fachkontrolle+fuer+%5B${ASIN}%5D+&description=Hi%2C+%0A%0Abitte+f%C3%BChrt+eine+Fachkontrolle+fuer+%5B${ASIN}%5D+durch.+Wir+haben+beim+Hotpick+den+gleichen+Fehler+festgestellt.%0A%28%29+Bad+Sticker%0A%28%29+Bundle+Issue%0A%28%29+wrong+color%0A%28%29+wrong+title%0A%28%29+wrong+size%0A%28%29+other%0A%0ADer+Bestand+wurde+deshalb+pending-research+gesetzt.%0A%0ADanke+und+Gru%C3%9F%0A%0A&ticket_type=Regular+Ticket&severity=FIVE&category=Distribution+Center&type=LEJ1-ICQA&item=Bin+Check+OB+Contact&building_id=NOT-FOUND&group=${fcname}-Escalation+Specialist&assignee=LEJ1-Leseratte&asin=-&quantity=-&isd=-&upc=-&binding=-&vendor_id=-&purchase_order_id=-&stock_number=-&ship_origin=-&invoice_number=-&physical_location=-&tracking_number=-&bol_number=-&picture_file_imdex_location=-&vendor_info_title=-'>SIM FK</a>
+                                                  <a href='https://atrops-web-eu.amazon.com/operations/get_shipmethod'>GET Shipmethod</a>
+                                                  <a class="btn_fast" target="_blank" href="https://smart-icqa.corp.amazon.com/defects/new?itemDefect=${ASIN}&prezzoDefect=${Price}">Defect</a>
+                                                  <a target='_blank' href='https://eu.item-measurement.aft.a2z.com/item/${ASIN}'>Cubi</a>
+                                                  <a href='https://liquidationtool.qubit.amazon.dev/new'>Liquidation</a>
+                                                `)
+                            }
+
+
+
+                            $('.fcrp_box').css({'padding':'15px 15px 10px 10px','text-align':'center'});
+                            $('#fcrp_amznsoft').css({'width':180});$('#fcrp_amznsoft h5').css({'color':'white'});$('#fcrp_amznsoft a').attr('target','_blank');
+                            $('#fcrp_qty, #printLabel').css('margin-top','5px');
+                            $('.fcrp_box button').css({'width':175,'height':30,'border-radius':3});
+                            $('#printLabel').css('width',1);
+
+
+
+                            waitForKeyElements('div [data-section-type="product"] .a-keyvalue',function(){
+                                let sortable = $('.a-keyvalue th:contains("Sortable"), .a-keyvalue th:contains("Sortowalna")'), hrv = $('.a-keyvalue th:contains("Very High Value"), .a-keyvalue th:contains("Bardzo wartościowa")');
+                                sortable.css({'background-color':'#3f5973','color':'white'}).parent().css('background-color',(sortable.parent().find('td').text()=='false')?'#a73225':'#359933');
+                                hrv.css({'background-color':'#3f5973','color':'white'}).parent().css('background-color',(hrv.parent().find('td').text()=='false')?'#a73225':'#359933');
+                            });
+                            if($.cookie('cfg-design')=='1')
+                                $('.fcrp_cfgchx[data-cfg="cfg-design"]').prop('checked',true);
+
+                            $('.fcrp_cfgchx').change(function(){
+                                let temp = 0;
+                                if($(this).prop("checked") == true){
+                                    temp = 1;
+                                }
+                                $.cookie($(this).attr('data-cfg'),temp);
+                            });
+
+                            $('#fcrp_bargen').css('cursor','pointer').click(function(){
+                                if(typeof barGen == 'undefined'){
+                                    let height = (screen.height), left = screen.availWidth-310;
+                                    const barGen = window.open("http://barcodes.corp.amazon.com/?bargenJachyd=1", "", "toolbar=no,location=no,scrollbars=yes,resizable=yes,width=30,height="+height+";");
+                                    barGen.resizeTo(320,screen.height-35);
+                                    barGen.moveTo(screen.availWidth-310,0);
+                                }
+
+                            });
+                            $('#fcrp_cfgRegion').bind('input', function(){
+                                $.cookie('cfg-region',$('#fcrp_cfgRegion').val());
+                            });
+
+                            $('#cfg-res').css({'text-decoration':'underline','color':'red'}).click(function(){
+                                $('.fcrp_cfgchx').prop('checked',true);
+                                for(let i=0;i<myCookies.length;i++){
+                                    $.cookie(myCookies[i][0],myCookies[i][1]);
+                                }
+                            });
+
+
+                            $('#fcrpSettings').click(function(){
+                                if($('#fcrp_cfg').css('display') == 'none'){
+                                    $('#fcrp_cfg').css('display','block');
+                                }
+                                else {
+                                    $('#fcrp_cfg').css('display','none');
+                                }
+                            });
+                        }
+                    }
+                })
+
+
+
+            },
+        },
+        "WaitForTbl":{
+            "WaitToInventoyTbl":()=>{
+                waitForKeyElements('#table-inventory > tbody:nth-child(2) > tr:nth-child(1) > td:nth-child(1)', MainTbl.WaitForTbl.WaitToHistoryTbl);
+            },
+            "WaitToHistoryTbl":()=>{
+                waitForKeyElements('#table-inventory-history > tbody:nth-child(2) > tr:nth-child(1) > td:nth-child(1)', MainTbl.WaitForTbl.StartMainFnc);
+            },
+            "StartMainFnc":()=>{
+                MainTbl.Autodwell.SearchAutodwell()
+                MainTbl.TilteOnHistoryTbl.addButton()
+            }
+        },
+        "Autodwell":{
+            "SearchAutodwell":()=>{
+                $('#table-inventory > tbody:nth-child(2) > tr').each(function () {
+                    var ThisRow = $(this)
+                    var inv_Container = $(this).find(' td:nth-child(1)').text().trim()
+                    var inv_FnSku = $(this).find(' td:nth-child(3)').text().trim()
+                    if(inv_Container.startsWith('P-')){return}
+                    $('#table-inventory-history > tbody:nth-child(2) > tr').each(function () {
+                        var Person = $(this).find(' td:nth-child(9)').text().trim()
+                        var oldContainer = $(this).find(' td:nth-child(10)').text().trim()
+                        if(inv_Container == oldContainer && Person == 'AutoDwel' || inv_Container == oldContainer && Person == 'SIAv2'){
+                            $(ThisRow).find('td').addClass('autodwell-color')
+                            if($('.autodwell-label').length != 0){return}
+                            $('.aui-nav-search form').prepend('<span class="autodwell-label autodwell-color" >AutoDwell/SIAv2 found</span>')
+                        }
+                    })
+                })
+            },
+        },
+        "TilteOnHistoryTbl":{
+            "addButton":()=>{
+                if( $('#addTitleBtn').length == 1 ){ return }
+                $('.section-placeholder[data-section-type="inventory-history"]  > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > ul:nth-child(1)').append('<button id="addTitleBtn">add Title</button>');
+
+                if($.cookie("addTitleBtnActiv")){
+                    $('#addTitleBtn').css('background-color', 'lightgreen');
+                    MainTbl.TilteOnHistoryTbl.FindTitle()
+                }
+
+                $('#addTitleBtn').click( function() {
+                    console.log($.cookie("addTitleBtnActiv"))
+                    if( $.cookie("addTitleBtnActiv")){
+                        $.removeCookie('addTitleBtnActiv');
+                    }else{
+                        $.cookie("addTitleBtnActiv", true, { expires: 365 });
+                    }
+                    location.reload();
+                })
+            },
+            "FindTitle":()=>{
+                var TitelJSON = {}
+                $('#table-inventory > tbody:nth-child(2) > tr').each(function () {
+                    var FNSKU = $(this).find('td:nth-child(3)').text().trim()
+                    var Title = $(this).find('td:nth-child(12)').text().trim()
+                    TitelJSON[FNSKU] = Title
+                })
+                MainTbl.TilteOnHistoryTbl.AddTitleToHistoryTbl(TitelJSON)
+            },
+            "AddTitleToHistoryTbl":(TitelJSON)=>{
+                let original= $('#table-inventory-history_wrapper > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > table:nth-child(1) > thead:nth-child(1) > tr:nth-child(1) > th:last-child')
+                if( $(original).hasClass("inventory-history-user-title") ){ return }
+
+                let klon = original.clone();
+                klon.addClass('inventory-history-user-title').html('<div>Title</div>')
+                original.after(klon);
+
+                var ZellenBreite = 0
+                $('#table-inventory-history > tbody:nth-child(2) > tr').each(function () {
+                    var FNSKU = $(this).find('td:nth-child(5)').text().trim()
+                    if( $(this).find('td.UserTitle').length == 1 ){return}
+                    if( TitelJSON[FNSKU] ){
+                        $(this).append(`<td class="UserTitle" >${TitelJSON[FNSKU]}</td>`)
+                    }else{
+                        $(this).append(`<td class="UserTitle" ></td>`)
+                    }
+
+                    let TitelBreite = $(this).find('td.UserTitle').first().width();
+                    if(ZellenBreite < TitelBreite){ ZellenBreite = TitelBreite}
+                })
+                $('.inventory-history-user-title').css('width', `${ZellenBreite}px`);
+            }
+        }
+    };
+    const ProductTbl = {
+        "Start":()=>{
+            ASIN = $('.a-span7 > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(2) ').text().trim()
+            if( $('.a-span7 > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(2) > th:nth-child(1) ').text().trim() == 'FNSku'){
+                FNSku = $('.a-span7 > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(2) > td:nth-child(2) ').text().trim()
+            }
+            ProductTbl.CopyBtn()
+            ProductTbl.PrintASIN.Start()
+            ProductTbl.InfoLinks()
+            ProductTbl.MoreInfos.AddButtons()
+        },
+        "CopyBtn":()=>{
+            $( ".a-span7 > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(2)").append(` <a id="${ASIN}"  title="Copy ${ASIN}"  class="btn_fast2"  href="#"> <img src="https://drive-render.corp.amazon.com/view/vbonfran@/ScriptPS/iconCopy.jpg" height="14"></a>`);
+            if( FNSku != ''){
+                $( ".a-span7 > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(2) > td:nth-child(2)").append(` <a id="${FNSku}" title="Copy ${FNSku}" class="btn_fast2" href="#"><img src="https://drive-render.corp.amazon.com/view/vbonfran@/ScriptPS/iconCopy.jpg" height="14"></a> `);
+            }
+
+            $(".btn_fast2").css({"background-color":"#FFFFFF","border-radius":"4px","text-align":"center","text-decoration":"none","display":"inline-block","font-size":"10px","border":"none","margin-left":"10px"});
+            $(".btn_fast2").click(function () {
+                var idASIN = $(this).attr('id');
+                const listener = function(ev) {
+                    ev.preventDefault();
+                    ev.clipboardData.setData('text/html', idASIN);
+                    ev.clipboardData.setData('text/plain', idASIN);
+                };
+                document.addEventListener('copy', listener);
+                document.execCommand('copy');
+                document.removeEventListener('copy', listener);
+                CommonFunctions.showToast(`Copied ${idASIN}`, "#4CAF50")
+            });
+        },
+        "PrintASIN":{
+            "Start":()=>{
+                ProductTbl.PrintASIN.newPrintmon.addBtn(); return;
+            },
+            "newPrintmon":{
+                "addBtn":()=>{
+                    var space = $('<span>&nbsp;&nbsp;&nbsp;</span>');
+                    var ASIN_Btn = $('<button >', { id: 'Asin_Btn', text: 'Print ASIN', title: `Print ${ASIN} over Printmon`, });
+                    var q2 = $('<input>', { type: 'number', id: 'AsinQuantity', value: 1, max: 25, min: 1, css: { width: '75px' } });
+                    $('.a-span7 > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(2)').append(space, ASIN_Btn, q2);
+                    var Title = $('.a-span7 > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(2) > td:nth-child(2) > a:nth-child(1)').text()
+
+                    if( FNSku != ''){
+                        var space2 = $('<span>&nbsp;&nbsp;&nbsp;</span>');
+                        var FNSku_Btn = $('<button >', {id: 'FnSku_Btn', text: 'Print FNSku', title: `Print ${FNSku} over Printmon`, });
+                        var q3 = $('<input>', { type: 'number', id: 'FnSkuQuantity', value: 1, max: 25, min: 1, css: { width: '75px' } });
+                        $('.a-span7 > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(2) > td:nth-child(2)').append(space2, FNSku_Btn, q3);
+                        Title = $('.a-span7 > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(3) > td:nth-child(2) > a:nth-child(1)').text()
+                    }
+
+                    $('#Asin_Btn').click( function() {
+                        ProductTbl.PrintASIN.newPrintmon.QuickPrint(ASIN, $('#AsinQuantity').val(), Title)
+                    })
+                    $('#FnSku_Btn').click( function() {
+                        ProductTbl.PrintASIN.newPrintmon.QuickPrint(FNSku, $('#FnSkuQuantity').val(), Title)
+                    })
+                },
+
+                "QuickPrint":(Asin, Quantity, Title)=>{
+                    getStatus(
+                        "http://localhost:5965/printer?action=print&type=barcode&" +
+                        "data=" + asciihex(Asin) +
+                        "&text=" + asciihex(Asin) +
+                        "&quantity=" + Quantity +
+                        "&badgeid=" + $.cookie("fcmenu-employeeId") +
+                        "&desc=" + asciihex(Title) +
+                        "&seq=" + genId(),
+                        Asin
+                    );
+                    function getStatus(Url, Asin, Print_Status) {
+                        var xmlhttp;
+                        xmlhttp = new XMLHttpRequest();
+                        xmlhttp.open("GET", Url, true);
+                        xmlhttp.send();
+                        xmlhttp.onreadystatechange = function () {
+                            if (xmlhttp.readyState == 4) {
+                                if (xmlhttp.responseText == "valid"){
+                                    Print_Status = "Successful";
+                                    CommonFunctions.showToast(`Printed ${Asin}`, "#4CAF50")}
+                                else if (xmlhttp.responseText == "invalid"){
+                                    Print_Status = "Unsuccessful (Printer Error)";
+                                    alert("Barcode: " + Asin + "\n\nFailed to print the barcode!\nPlease check to see if your printer is plugged in and turned on."); }
+                                else {
+                                    Print_Status = "Unsuccessful (Printmon Error)";
+                                    alert("Barcode: " + Asin + "\n\nFailed to print the barcode!\nPrintmon not installed!\nPrintmon is required is required to use this script."); }
+                            };
+                            $("search").focus();
+                        }
+                    }
+                    function genId() {
+                        var id1 = "";
+                        for (var i = 0; i < 10; i++){
+                            id1 += Math.floor(Math.random() * 9);
+                        }
+                        return id1;
+                    }
+                    function asciihex(str) {
+                        var text1 = "";
+                        for (var i = 0, l = str.length; i < l; i++) {
+                            var hex1 = Number(str.charCodeAt(i)).toString(16);
+                            text1 += hex1;
+                        }
+                        return text1;
+                    }
+                },
+            },
+        },
+        "InfoLinks":()=>{
+            var Price= $(".a-span7 > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(9) > td:nth-child(2)").text();
+            Price= Price.split(" ").pop();
+            if (!$.isNumeric(Price)) Price='';
+
+            $( ".a-span7 > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(2)").append(`
+                 <a style="margin-left:10px" class="btn_fast" target="_blank" href="https://t.corp.amazon.com/issues?q=%7B%22AND%22%3A%7B%22status%22%3A%7B%22OR%22%3A%5B%22Assigned%22%2C%7B%22OR%22%3A%5B%22Researching%22%2C%7B%22OR%22%3A%5B%22Work%20In%20Progress%22%2C%22Pending%22%5D%7D%5D%7D%5D%7D%2C%22AND%22%3A%7B%22keyword%22%3A%22(${ASIN})%22%2C%22isTicket%22%3A%22true%22%7D%7D%7D">SIM TT</a>
+                 <a style="margin-left:10px" class="btn_fast" target="_blank" href="https://box-web-dub.amazon.com/BoxRecBrowser/getBoxRecommendation?marketplaceId=4&marketplace-selector=4&warehouseId=${fcname}&asin=${ASIN}&shipOption=&fulfillmentBrandCodeString=&giftOption=NoGift&siocOverride=NONE&_packingBrands=on&_packingBrands=on&_packingBrands=on&_requiresConcealment=on&postalCode=">Box Rec</a>
+               `);
+            if( FNSku != ''){
+                $( ".a-span7 > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(2) > td:nth-child(2)").append(`
+                  <a style="margin-left:10px" class="btn_fast" target="_blank" href="https://t.corp.amazon.com/issues?q=%7B%22AND%22%3A%7B%22status%22%3A%7B%22OR%22%3A%5B%22Assigned%22%2C%7B%22OR%22%3A%5B%22Researching%22%2C%7B%22OR%22%3A%5B%22Work%20In%20Progress%22%2C%22Pending%22%5D%7D%5D%7D%5D%7D%2C%22AND%22%3A%7B%22keyword%22%3A%22(${FNSku})%22%2C%22isTicket%22%3A%22true%22%7D%7D%7D">SIM TT</a>
+               `);
+            }
+        },
+        "MoreInfos":{
+            "AddButtons": ()=>{
+                $('div.section-placeholder:nth-child(2) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > span:nth-child(2)').after('<span style="margin-left:6px;"><button id="ConfigBtn" >Config ⚙️</button></span>')
+                $('.a-span7 > table:nth-child(1) > tbody:nth-child(1)').append('<tr ><th><button id="InfoBtn" >More Info</button></th><td></td></tr>')
+                ProductTbl.MoreInfos.ProductConfig.Start();
+
+                $('#InfoBtn').click(function () {
+                    $(this).parent().parent().remove()
+                    ProductTbl.MoreInfos.PanDash.PanDashRequest();
+                    ProductTbl.MoreInfos.DrSku.DrSkuRequest();
+                    ProductTbl.MoreInfos.Csi.CsiRequest();
+                    ProductTbl.MoreInfos.Prep.PrepRequest();
+                    ProductTbl.MoreInfos.FUD.FudRequest();
+                    ProductTbl.MoreInfos.CatalogPrice();
+                })
+            },
+            "ProductConfig":{
+                "Start": async ()=>{
+                    var ConfigObj = await ProductTbl.MoreInfos.ProductConfig.LocalStorageItem();
+                    ProductTbl.MoreInfos.ProductConfig.HiddenRows(ConfigObj);
+
+                    $('#ConfigBtn').click(function () {
+                        ProductTbl.MoreInfos.ProductConfig.CreateConfigTbl(ConfigObj);
+                    })
+                },
+                "LocalStorageItem":()=>{
+                    var ConfigObj = JSON.parse(localStorage.getItem('FcResearchProductConfig'));
+                    if(ConfigObj == null){
+                        ConfigObj = []
+                        $('.a-span7 table:nth-child(1) > tbody:nth-child(1) > tr').each(function () {
+                            var KeyName = $(this).find('th:nth-child(1)').text().trim()
+                            if(KeyName == 'More Info'){return}
+                            ConfigObj.push({[KeyName]: 'show'})
+                        })
+                        localStorage.setItem('FcResearchProductConfig', JSON.stringify(ConfigObj));
+                    }else{
+                        ConfigObj = JSON.parse(localStorage.getItem('FcResearchProductConfig'))
+                    }
+                    return ConfigObj
+                },
+                "CreateConfigTbl":(ConfigObj)=>{
+                    var myHTML = '<div id="ConfigTbl">'
+                    myHTML += '<div class="overlay"></div>'
+                    myHTML += '<div class="infobox"><h4>Select the Information!</h4>'
+
+                    $(ConfigObj).each(function (Index) {
+                        const keys = Object.keys(this);
+                        var Checked = ''
+                        if(this[keys[0]] == 'show'){
+                            Checked = `checked="checked"`
+                            ProductTbl.MoreInfos.ProductConfig.HiddenRows(ConfigObj);
+                        }
+                        myHTML += `<div> <input type="checkbox" class="myCheckBox" ${Checked} CheckBoxRow="${Index}" > ${keys[0]} </div>`
+                    });
+                    myHTML += '<div><button id="CloseBtn" >Close</button></div>'
+                    myHTML += '</div> </div>'
+                    $('body').append(myHTML)
+
+                    $('.myCheckBox').click(function () {
+                        ProductTbl.MoreInfos.ProductConfig.isBoxChecked(this, ConfigObj);
+                    })
+
+                    $('#CloseBtn').click(function () {
+                        $('#ConfigTbl').remove()
+                    })
+                },
+                'isBoxChecked':(ChkBox, ConfigObj)=>{
+                    var isChecked = $(ChkBox).is(":checked")
+                    var CheckNummer = $(ChkBox).attr('CheckBoxRow')
+                    var CheckBoxText = $(ChkBox).parent().text().trim()
+
+                    if(isChecked){
+                        ConfigObj[CheckNummer][CheckBoxText] = 'show'
+                    }else{
+                        ConfigObj[CheckNummer][CheckBoxText] = ''
+                    }
+
+                    localStorage.setItem('FcResearchProductConfig', JSON.stringify(ConfigObj));
+                    ProductTbl.MoreInfos.ProductConfig.HiddenRows(ConfigObj);
+                },
+                "HiddenRows":(ConfigObj)=>{
+                    $('.a-span7 table:nth-child(1) > tbody:nth-child(1) > tr').each(function (Index , ThisRow) {
+                        var KeyName = $(this).find('th:nth-child(1)').text().trim()
+                        var InfoCell = $(this).find('td:nth-child(2)')
+                        var InfoCellText = $(this).find('td:nth-child(2)').text().trim()
+                        if(InfoCellText === 'true' ){InfoCell.append(' ✅')}
+                        if(InfoCellText === 'false' ){InfoCell.append(' ⛔')}
+
+                        $(ConfigObj).each(function (Index) {
+                            const keys = Object.keys(this);
+                            if(KeyName != keys[0]){return}
+                            if(this[keys[0]] == 'show'){
+                                $(ThisRow).show()
+                            }else{
+                                $(ThisRow).hide()
+                            }
+                        });
+                    })
+                },
+            },
+            "PanDash":{
+                "TimeForPandah":()=>{
+                    // Erstelle ein neues Date-Objekt mit der aktuellen UTC-Zeit
+                    let now = new Date();
+
+                    // Extrahiere die einzelnen Komponenten der UTC-Zeit
+                    let year = now.getUTCFullYear();
+                    let month = now.getUTCMonth() + 1; // Monate sind nullbasiert, daher +1
+                    let day = now.getUTCDate();
+                    let hours = now.getUTCHours();
+                    let minutes = now.getUTCMinutes();
+                    let seconds = now.getUTCSeconds();
+                    let milliseconds = now.getUTCMilliseconds();
+
+                    // Formatiere die Komponenten, um sicherzustellen, dass sie zweistellig sind
+                    month = month < 10 ? '0' + month : month;
+                    day = day < 10 ? '0' + day : day;
+                    hours = hours < 10 ? '0' + hours : hours;
+                    minutes = minutes < 10 ? '0' + minutes : minutes;
+                    seconds = seconds < 10 ? '0' + seconds : seconds;
+                    milliseconds = milliseconds < 100 ? (milliseconds < 10 ? '00' + milliseconds : '0' + milliseconds) : milliseconds;
+                    return `${year}${month}${day}${hours}${minutes}${seconds}${milliseconds}`;
+                },
+                "PanDashRequest": async ()=>{
+                    $('.a-span7 > table:nth-child(1) > tbody:nth-child(1)').append('<tr id="PanDash" style="white-space: nowrap;" ><th>PanDash Request</th><td><div class="loader"></div></td></tr>')
+
+                    refreshSiteContext();
+
+                    try {
+                    var TimeNow = await ProductTbl.MoreInfos.PanDash.TimeForPandah();
+                    var RestrictionLevel = await fetchPandashRestriction();
+
+                    let Marketplace = getPandashMarketplace();
+                    var PostData = `language=default&source=${RestrictionLevel}-hazmat-FC&marketPlaces=${Marketplace}&asins=${ASIN}&sidx=product.asin&rows=99999&page=1&sord=desc&isExportOnly=FALSE&fileName=${Login}_${RestrictionLevel}-hazmat-FC_default_${TimeNow}&fc=${fcname}&pandashservice=`
+                    var Response = await CommonFunctions.gmFetch.post(`https://pandash.amazon.com/GridServlet`, PostData)
+                    var PanDashObj = JSON.parse(Response.responseText);
+
+                    if(PanDashObj.error == "Invalid FC" ){
+                        $('#PanDash th').html(`PanDash<span id="PandashMarketplace" style="cursor: pointer; vertical-align: top;" >⚙️</span>`)
+                        $('#PanDash td').html('Request failed. Try again').css('background-color', 'red');
+                        return
+                    }
+
+                    if(!PanDashObj.rows || !PanDashObj.rows.length){
+                        var unfoundMsg = (PanDashObj.unfound && PanDashObj.unfound.join(', ')) || 'No hazmat data for this ASIN';
+                        $('#PanDash th').html(`Hazmat N/A <span id="Pandash_Marketplace" style="cursor: pointer; vertical-align: top;" >⚙️</span>`)
+                        $('#PanDash td').html(unfoundMsg).css('background-color', 'lightgrey');
+                        ProductTbl.MoreInfos.PanDash.bindMarketplacePicker();
+                        return
+                    }
+
+                    var HazmatLevel = PanDashObj.rows[0].level
+                    var Message = PanDashObj.rows[0].message
+                    var Color = hazmatLevelColor(HazmatLevel)
+
+                    $('#PanDash th').html(`Hazmat Level ${HazmatLevel} <span id="Pandash_Marketplace" style="cursor: pointer; vertical-align: top;" >⚙️</span>`)
+                    $('#PanDash td').html(Message).css('background-color', Color);
+
+                    ProductTbl.MoreInfos.PanDash.bindMarketplacePicker();
+                    } catch(err) {
+                        $('#PanDash td').html('PanDash request failed').css('background-color', 'red');
+                    }
+                },
+                "bindMarketplacePicker": ()=>{
+                    $('#Pandash_Marketplace, #PandashMarketplace').off('click').click(function () {
+                        let Marketplace = getPandashMarketplace();
+                        let newMarketplace = prompt("Choose your Marketplace like in Pandash. GB/IE/DE/FR/ES/IT/US ....", Marketplace);
+                        if(newMarketplace){
+                            $.cookie(`${fcname}_PandashMarketplace`, newMarketplace.toUpperCase(), { expires: 365 })
+                        }
+                    })
+                },
+            },
+            "DrSku":{
+                "DecodeBase64":(BaseCode)=>{
+                    if(BaseCode == null){return false}
+                    var decodedStr = atob(BaseCode);
+                    var ValueObj = JSON.parse(decodedStr);
+                    return ValueObj.value
+                },
+                "DrSkuRequest": async () =>{
+                    $('.a-span7 > table:nth-child(1) > tbody:nth-child(1)').append('<tr id="DrSku" ><th>DrSku Request</th><td><div class="loader"></div></td></tr>')
+
+                    var DrSku_URL = `https://dr-sku-iad.amazon.com/api/attributes/${fcname}/${ASIN}`
+                    let Response = (await CommonFunctions.gmFetch.get(DrSku_URL)).responseText;
+                    var DrSkuObj = JSON.parse(Response);
+                    var SIOC = ProductTbl.MoreInfos.DrSku.DecodeBase64(DrSkuObj.attributes.can_ship_in_original_container)
+                    var WhiteGlove = ProductTbl.MoreInfos.DrSku.DecodeBase64(DrSkuObj.attributes.is_white_glove_required)
+                    var ExpirationDated = ProductTbl.MoreInfos.DrSku.DecodeBase64(DrSkuObj.attributes.is_expiration_dated_product)
+                    var HeatSensitive = ProductTbl.MoreInfos.DrSku.DecodeBase64(DrSkuObj.attributes.is_heat_sensitive)
+
+                    $('#DrSku').before(`<tr><th>SIOC</th><td>${SIOC} ${SIOC ? ' ✅' : '⛔'}</td></tr>`)
+                    $('#DrSku').before(`<tr><th>WhiteGlove</th><td>${WhiteGlove} ${WhiteGlove ? ' ✅' : '⛔'}</td></tr>`)
+                    $('#DrSku').before(`<tr><th>Expiration Dated</th><td>${ExpirationDated} ${ExpirationDated ? ' ✅' : '⛔'}</td></tr>`)
+                    $('#DrSku').before(`<tr><th>Heat Sensitive</th><td>${HeatSensitive} ${HeatSensitive ? ' ✅' : '⛔'}</td></tr>`)
+                    $('#DrSku').remove()
+                },
+            },
+            "Csi":{
+                "CsiRequest": async ()=>{
+                    $('.a-span7 > table:nth-child(1) > tbody:nth-child(1)').append('<tr id="Csi" ><th>CSI Request</th><td><div class="loader"></div></td></tr>')
+                    var Csi_URL = `https://csi.amazon.com/view?view=simple_product_data_view&item_id=${ASIN}&marketplace_id=4&customer_id=&merchant_id=&sku=&fn_sku=&gcid=&fulfillment_channel_code=&listing_type=purchasable&submission_id=&order_id=&external_id=&search_string=&realm=USAmazon&region=NA&stage=prod&domain_id=&keyword=&submit=Show`
+                    let Response = await CommonFunctions.gmFetch.get(Csi_URL)
+                    if(Response.statusText == 'Unauthorized'){
+                        $('#Csi td:nth-child(2)').html('Midway Login required')
+                        return
+                    }
+
+                    var Petfood, Grocery, PackageLevel , UnitInSet = ''
+                    $('tbody tr', Response.responseText).each(function (x){
+                        var RowText = $(this).text().trim()
+                        var Value = $(this).find('td:nth-child(3)').text().trim()
+                        RowText.includes('pet_products') ? Petfood = true : ''
+                        RowText.includes('grocery') ? Grocery = true : ''
+                        RowText.includes('package_level') ? PackageLevel = Value.replace('more tools', '') : ''
+                        RowText.includes('each_unit_count') ? UnitInSet = Value.replace('more tools', '') : ''
+                    })
+
+                    Petfood ? $('#Csi').before(`<tr><th>Petfood</th><td>true ✅</td></tr>`) : ''
+                    Grocery ? $('#Csi').before(`<tr><th>Grocery</th><td>true ✅</td></tr>`) : ''
+                    PackageLevel != undefined ? $('#Csi').before(`<tr><th>Package Level</th><td>${PackageLevel}</td></tr>`) : ''
+                    PackageLevel == 'case' ? $('#Csi').before(`<tr><th>Units in Set</th><td>${UnitInSet}</td></tr>`) : ''
+                    $('#Csi').remove()
+                },
+
+            },
+            "Prep":{
+                "PrepRequest": async ()=>{
+                    $('.a-span7 > table:nth-child(1) > tbody:nth-child(1)').append('<tr id="Prep" ><th>Prep Request</th><td><div class="loader"></div></td></tr>')
+                    var Csi_URL = `https://prepmanager-dub.amazon.com/view/${ASIN}?region=EU`
+                    let Response = (await CommonFunctions.gmFetch.get(Csi_URL)).responseText;
+                    var PrepData = $('#instructions > ul:nth-child(3)', Response)
+                    if(PrepData.length == 0){
+                        PrepData = $('#instructions > p:nth-child(2)', Response)
+                    }
+                    $('#Prep th:nth-child(1)').html('Prep')
+                    $('#Prep td:nth-child(2)').html(PrepData)
+                },
+            },
+            "FUD":{
+                "FudRequest": async ()=>{
+                    $('.a-span7 > table:nth-child(1) > tbody:nth-child(1)').append('<tr id="FUD" ><th>FUD Request</th><td><div class="loader"></div></td></tr>')
+                    var FuDAPI = `https://aft-fud-reports.iad.amazon.com/fudService/reports/${fcname}.json`
+                    let Response = (await CommonFunctions.gmFetch.get(FuDAPI)).responseText
+                    try {
+                        FudObj = JSON.parse(Response);
+                        $('#FUD th:nth-child(1)').html('FUD')
+                        if(!Response.includes(Item)){ $('#FUD td:nth-child(2)').html('no FUD Unit'); return; }
+                        $('#FUD th:nth-child(1)').html('FUD')
+                        $('#FUD td:nth-child(2)').html('⚠️ FUD Unit ⚠️').addClass('fud-color')
+                        waitForKeyElements('#table-inventory tr:nth-child(1) td:nth-child(2)', ProductTbl.MoreInfos.FUD.AddDataToInventoryTbl );
+                    }
+                    catch(err) {
+                        console.log(`FUD Request failed:`, err)
+                    }
+                },
+                "AddDataToInventoryTbl":()=>{
+                    $('#table-inventory_wrapper tbody > tr').each( function(x){
+                        //if(x >= 1){return}  /////------------  debug---------\\\\\
+                        var ThisInvetoryRow = $(this)
+                        var Container = $(this).find('td:nth-child(1)').text().trim()
+                        var FnSku = $(this).find('td:nth-child(3)').text().trim()
+
+                        $(FudObj.reportEntityList).each( function(x){
+                            var scannableId = this.scannableId
+                            var fnSku = this.fnSku
+                            if(Container == scannableId && FnSku == fnSku){
+                                $(ThisInvetoryRow).find('td').addClass('fud-color')
+                                if($('.fud-label').length != 0){return}
+                                $('.aui-nav-search form').prepend('<span class="fud-label fud-color" >FUD found</span>')
+                            }
+                        })
+                    })
+                },
+            },
+            "CatalogPrice": async ()=>{
+                $('.a-span7 > table:nth-child(1) > tbody:nth-child(1)').append('<tr id="CatalogPrice" ><th>Catalog Price<span id="AmzMarketplace" style="cursor: pointer; vertical-align: top;" >⚙️</span></th><td><div class="loader"></div></td></tr>')
+
+                let Marketplace = $.cookie(`${fcname}_AmzMarketplace`) || "de";
+                $('#AmzMarketplace').click(function () {
+                    let newMarketplace = prompt("Choose your Marketplace.    com/co.uk/de ....", Marketplace);
+                    $.cookie(`${fcname}_AmzMarketplace`, newMarketplace, { expires: 365 })
+                })
+
+                var Catalog = `https://www.amazon.${Marketplace}/gp/product/${ASIN}`
+                let Response = (await CommonFunctions.gmFetch.get(Catalog)).responseText
+                var Price = $('#corePriceDisplay_desktop_feature_div .priceToPay', Response).first().text();
+                $('#CatalogPrice td').html(Price)
+            }
+        },
+    };
+    const InventoryTbl={
+        "Wait":{
+            "Wait_for_TableHead":()=>{
+                waitForKeyElements('[data-section-type="inventory"]',InventoryTbl.Wait.Wait_for_ItemTbl );
+            },
+            "Wait_for_ItemTbl":()=>{
+                waitForKeyElements('#table-inventory',InventoryTbl.Start );
+            },
+        },
+        "Start":()=>{
+            var Container = false
+            InventoryTbl.FCResearchAdjacentBins()
+
+            if(Item.startsWith('ts') || Item.startsWith('cs') || Item.startsWith('ch') || Item.startsWith('sp') || Item.startsWith('P-')){
+                ProductTbl.MoreInfos.FUD.FudRequest()
+                Container = true
+            }
+            InventoryTbl.MoreInfos.AddHTML(Container)
+            InventoryTbl.SortTbl()
+
+        },
+        "FCResearchAdjacentBins":()=>{
+            $('[data-section-type="inventory"] > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > span:last-child ').after('<button id="FloorBtn" style="margin-left:15px;" >Find my Floor</button>')
+            $('#FloorBtn').click(function () { findBins() })
+
+            function findBins() {
+                // Find bins via https://roboscout.amazon.com/app/adjacentbins/
+                // Example to show how to iterate over a table, make HTTP requests, and elements to the table.
+
+                // This example uses the "Results" table from https://roboscout.amazon.com/app/adjacentbins/
+                // Which is stupid because the table *has* adjacent bin IDs! But this is an example. Adjust as needed.
+                var binResultRows = document.querySelectorAll("#table-inventory tbody tr");
+                // ^ That finds the table with ID "bin_id_results_table", then finds all table rows ("tr")
+
+                if (binResultRows.length === 0) {
+                    console.log("No rows found in the bin results table.");
+                    return;
+                }
+
+                var warehouseElement = document.querySelector(".warehouse-id");
+                if (!warehouseElement) {
+                    console.log("No warehouse ID found");
+                    return;
+                }
+                var warehouseId = warehouseElement.textContent;
+
+                document.querySelector("#table-inventory").parentNode.style.height = "auto";
+                document.querySelector("#table-inventory").parentNode.style["max-height"] = "800px";
+
+                // Iterate every row
+                binResultRows.forEach(function(tr) {
+                    // Extract the Container
+                    var containerTD = tr.querySelector("td:nth-child(1)"); // 1st column of the results table: "Container"
+                    if (!containerTD || containerTD.classList.contains("had_adjacent_bins")) return;
+                    var containerID = containerTD.textContent;
+
+
+                    if(!containerID.startsWith('P-')){return}
+
+                    console.log(containerID)
+                    // Construct URL to fetch neighboring bins (via containerID and building).
+                    var url = "https://roboscout.amazon.com/ipa/kpps/get_neighboring_bins/?bin_id=" + containerID + "&building=" + warehouseId.substr(0,4);
+                    console.log(url)
+
+                    // Add a spinner to the column we are fetching.
+                    var spinneri = document.createElement("i");
+                    spinneri.className = "s-icon-status";
+                    var spinner = document.createElement("span");
+                    spinner.className = "loading adjacent_bin_finder_spinner";
+                    spinner.appendChild(spinneri);
+                    containerTD.appendChild(spinner);
+                    //containerTD.innerHTML += '<div class="loading adjacent_bin_finder_spinner"><i class="s-icon-status"></i></div>';
+
+                    // Make a web request to the URL.
+                    GM_xmlhttpRequest({
+                        method: "GET",
+                        url: url,
+                        // This is the "callback" when we get a response from roboscout:
+                        onload: function(response) {
+
+                            // Remove the spinner
+                            containerTD.removeChild(containerTD.querySelector('.adjacent_bin_finder_spinner'));
+
+                            var message = '';
+                            if (response.responseText.indexOf("Bad Request") === 0) {
+                                message = '<font color="red"><b>Error:</b> <i>' + response.responseText.substring(12) + '<i/></font>';
+                            } else {
+                                // Convert response to JSON object.
+                                // Details on format of response: https://paste.amazon.com/show/kmmcclai/1504345446
+                                var json = JSON.parse(response.responseText);
+                                var floor = json[containerID].floor;
+
+                                // Consruct message to insert into to the table.
+                                message = '<font color="green"><b>Floor:</b> <i>' + floor + '</i></font> <br/>';
+                            }
+
+                            // Add the message to the table cell we were iterating.
+                            containerTD.innerHTML += '<br/>' + message;
+                            containerTD.style.overflow = "auto";
+                            containerTD.style["white-space"] = "nowrap";
+
+                            // Mark the cell so we don't query it again.
+                            containerTD.classList.add("had_adjacent_bins");
+                        }
+                    });
+                });
+            }
+        },
+        "MoreInfos":{
+            "AddHTML" : (Container)=>{
+                $('#table-inventory_wrapper > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > table:nth-child(1) > thead:nth-child(1) > tr:nth-child(1) > th:nth-child(11)').html(`<th style="width:160px; text-align: center;" ><div >ProzessPath</div></th><th style="width:160px; text-align: center;" ><div >Cpt</div><th style="width:50px; text-align: center;" ><div>Con</div></th><th><div>Dwell</div></th><th><div class="Sort" style="margin:0px 15px 0px 15px;">Sort</div></th> <th><div class="HRV" style="margin:0px 15px 0px 15px;">HRV</div></th><th class="HazmatLevel" style="width:50px; text-align: center;" ><div>Hazmat</div></th> <th class="ExpiryDate" style="width:50px; text-align: center;" ><div>Expiry</div></th> <th class="Price" style="width:50px; text-align: center;" ><div>Price</div></th>`)
+                $('#table-inventory_wrapper tbody tr td:nth-child(11)').html(`<span style="text-align: center; display: inline-block; width: 160px;" >---</span> <span style="text-align: center; display: inline-block; width: 160px;" >---</span><span style="padding:0px 15px 0px 15px;; text-align: center;" >---</span><span style="padding: 0px 15px 0px 15px;" >---</span><span class="sortable Sort" style="padding:0px 15px 0px 15px;" >---</span> <span class="HRV" style="padding:0px 15px 0px 15px;" >---</span><span class="HazmatLevel" style="padding: 0px 15px 0px 15px;" >---</span> <span class="ExpiryDate" style="padding: 0px 15px 0px 15px;" >---</span> <span class="Price" style="padding: 0px 15px 0px 15px;" >---</span>`)
+                $('.Sort, .HRV, .HazmatLevel, .ExpiryDate, .Price').hide()
+
+                if( $('#table-inventory_wrapper tbody').text().includes('CUSTOMER_SHIPMENT') ){ InventoryTbl.MoreInfos.SearchShipment() }
+                if( $('#table-inventory_wrapper tbody').text().includes('TRANSSHIPMENT') ){ InventoryTbl.MoreInfos.SearchTranshipment() }
+
+                GM_addStyle(`.my-loader { width: 40px; aspect-ratio: 4; background: radial-gradient(circle closest-side,#000 50%,#0000) 0/calc(100%/3) 100% space; clip-path: inset(0 100% 0 0); animation: l1 1s steps(4) infinite; } @keyframes l1 {to{clip-path: inset(0 -34% 0 0)}}`)
+
+                if(Container){InventoryTbl.MoreInfos.Sort_HRV.addBtn() }
+                if(Container){InventoryTbl.MoreInfos.Hazmat.addHTML() }
+                if(Container){InventoryTbl.MoreInfos.Expiry.addButton() }
+                if(Container){InventoryTbl.MoreInfos.Price.addButton() }
+            },
+            "SearchShipment": async ()=>{
+                var Rodeo_URL = `https://rodeo-dub.amazon.com/${fcname}/SearchCSV?_enabledColumns=on&Excel=true&enabledColumns=OUTER_SCANNABLE_ID&shipmentType=CUSTOMER_SHIPMENTS&searchKey=${Item}`
+                let Response = (await CommonFunctions.gmFetch.get(Rodeo_URL)).responseText;
+                $('#table-inventory_wrapper tbody > tr').each(async function(){
+                    var ThisInvetoryRow = $(this)
+                    var Container = $(this).find('td:nth-child(1)').text().trim()
+                    var Consumer = $(this).find('td:nth-child(8)').text().trim()
+                    var ShipID = $(this).find('td:nth-child(9)').text().trim()
+
+                    if(!Consumer.includes('CUSTOMER_SHIPMENT')){return}
+                    var RodeoURL = 'https://rodeo-dub.amazon.com/'+fcname+'/Search?_enabledColumns=on&enabledColumns=ASIN_TITLES&enabledColumns=LPN&enabledColumns=OUTER_SCANNABLE_ID&searchKey=' + ShipID
+                    $(this).find('td:nth-child(9)').html('<a href="'+ RodeoURL +'">'+ ShipID +'</a>')
+
+                    $('tr', Response).each( function(){
+                        var ShipmentID = $(this).find('td:nth-child(1)').text().trim()
+                        var Cpt = $(this).find('td:nth-child(3)').text().trim()
+                        var ScannableID = $(this).find('td:nth-child(4)').text().trim()
+                        var Condition = $(this).find('td:nth-child(6)').text().trim()
+                        var PP = $(this).find('td:nth-child(9)').text().trim()
+                        var Dwell = $(this).find('td:nth-child(14)').text().trim()
+
+                        if(ShipmentID == ShipID && Container == ScannableID){
+                            ThisInvetoryRow.find('td:nth-child(11) > span:nth-child(1)').html(PP)
+                            ThisInvetoryRow.find('td:nth-child(11) > span:nth-child(2)').html(Cpt)
+                            ThisInvetoryRow.find('td:nth-child(11) > span:nth-child(3)').html(Condition)
+                            ThisInvetoryRow.find('td:nth-child(11) > span:nth-child(4)').html(Dwell)
+                        }
+                    })
+                })
+            },
+            "SearchTranshipment": async ()=>{
+                var URL = document.URL
+                var Item = URL.substr(URL.indexOf('results?s') + 10)
+                if(Item.includes('&profile')){ Item = Item.substr(0, Item.indexOf('&profile')) }
+                var Rodeo_URL = `https://rodeo-dub.amazon.com/${fcname}/SearchCSV?_enabledColumns=on&Excel=true&enabledColumns=OUTER_SCANNABLE_ID&shipmentType=TRANSSHIPMENTS&searchKey=${Item}`
+                let Response = (await CommonFunctions.gmFetch.get(Rodeo_URL)).responseText;
+                $('#table-inventory_wrapper tbody > tr').each(async function(x){
+                    var ThisInvetoryRow = $(this)
+                    var Container = $(this).find('td:nth-child(1)').text().trim()
+                    var FnSku = $(this).find('td:nth-child(3)').text().trim()
+                    var Consumer = $(this).find('td:nth-child(8)').text().trim()
+                    if(!Consumer.includes('TRANSSHIPMENT')){return}
+
+                    $('tr', Response).each( function(){
+                        var Warehouse = $(this).find('td:nth-child(2)').text().trim()
+                        var Fn_Sku = $(this).find('td:nth-child(3)').text().trim()
+                        var Cpt = $(this).find('td:nth-child(4)').text().trim()
+                        var PP = $(this).find('td:nth-child(5)').text().trim()
+                        var ScannableID = $(this).find('td:nth-child(7)').text().trim()
+                        var Dwell = $(this).find('td:nth-child(13)').text().trim()
+                        if(PP == ''){PP = Warehouse}
+                        if(Container == ScannableID && FnSku == Fn_Sku){
+                            ThisInvetoryRow.find('td:nth-child(11) > span:nth-child(1)').html(PP)
+                            ThisInvetoryRow.find('td:nth-child(11) > span:nth-child(2)').html(Cpt)
+                            ThisInvetoryRow.find('td:nth-child(11) > span:nth-child(4)').html(Dwell)
+                        }
+                    })
+                })
+            },
+            "Sort_HRV":{
+                "addBtn":()=>{
+                    $('[data-section-type="inventory"] > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1)').append('<input type="checkbox" id="SortHrvCheckBox" name="SortHrvCheckBox" style="margin-left:15px;" ><button id="SortHrvBtn" >Sort & HRV</button>')
+                    if( $.cookie("FcResearchSortHrv") == 'on' ){
+                        $('#SortHrvBtn').css('background-color', '#3bf544')
+                        $('#SortHrvCheckBox').prop('checked', true);
+                        InventoryTbl.MoreInfos.Sort_HRV.EachRow()
+                    }
+
+                    $('#SortHrvCheckBox').click(function () {
+                        if(this.checked){
+                            $('#SortHrvBtn').css('background-color', '#3bf544')
+                            $.cookie("FcResearchSortHrv", 'on', { expires: 365 })
+                            InventoryTbl.MoreInfos.Sort_HRV.EachRow()
+                        }else{
+                            $('#SortHrvBtn').css('background-color', '')
+                            $.cookie("FcResearchSortHrv", 'off', { expires: 365 })
+                        }
+                    })
+
+                    $('#SortHrvBtn').click(function () {
+                        InventoryTbl.MoreInfos.Sort_HRV.EachRow()
+                    })
+
+                },
+                "EachRow":()=>{
+                    $('.Sort, .HRV').show()
+                    $('#table-inventory > tbody:nth-child(2) > tr').each(async function (x) {
+                        var ASIN = $(this).find('td:nth-child(3)').text().trim(), SortCell = $(this).find('.Sort'), HrvCell = $(this).find('.HRV')
+                        InventoryTbl.MoreInfos.Sort_HRV.FcResearchRequest(ASIN, SortCell, HrvCell)
+                    })
+                },
+                "FcResearchRequest":async (ASIN, SortCell, HrvCell)=>{
+                    $(SortCell).html('').addClass("my-loader")
+                    $(HrvCell).html('').addClass("my-loader")
+
+                    var ProductURL = `http://fcresearch-${Region}.aka.amazon.com/${fcname}/results/product?s=${ASIN}`
+                    var Response = (await CommonFunctions.gmFetch.post(ProductURL)).responseText;
+
+                    $('tbody > tr', Response).each( function (x) {
+                        var ProductRow = $(this).text()
+                        if(ProductRow.includes('Sortable') || ProductRow.includes('Sortierbar') ){
+                            $(SortCell).html('').removeClass("my-loader")
+                            if(ProductRow.includes('true')){ SortCell.html('Sort ✅') }else{ SortCell.html('Sort ⛔') }
+                        }
+                        if(ProductRow.includes('Very High Value') || ProductRow.includes('Sehr hochwertig')){
+                            $(HrvCell).html('').removeClass("my-loader")
+                            if(ProductRow.includes('true')){ HrvCell.html('HRV ✅') }else{ HrvCell.html('HRV ⛔') }
+                        }
+                    })
+
+                }
+
+            },
+            "Hazmat":{
+                "addHTML":()=>{
+                    $('[data-section-type="inventory"] > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1)').append('<input type="checkbox" id="HazmatCheckBox" name="HazmatCheckBox" style="margin-left:15px;" ><button id="HazmatLvlBtn" >Hazmat</button><span id="PandashMarketplace" style="cursor: pointer; vertical-align: top;" >⚙️</span>')
+
+                    $('#PandashMarketplace').click(function () {
+                        let Marketplace = getPandashMarketplace();
+                        let newMarketplace = prompt("Choose your Marketplace like in Pandash. GB/IE/DE/FR/ES/IT/US ....", Marketplace);
+                        if(newMarketplace){
+                            $.cookie(`${fcname}_PandashMarketplace`, newMarketplace.toUpperCase(), { expires: 365 })
+                        }
+                    })
+
+                    if( $.cookie("FcResearchHazmat") == 'on' ){
+                        $('#HazmatLvlBtn').css('background-color', '#3bf544')
+                        $('#HazmatCheckBox').prop('checked', true);
+                        InventoryTbl.MoreInfos.Hazmat.EachRow()
+                    }
+
+                    $('#HazmatCheckBox').click(function () {
+                        if(this.checked){
+                            $('#HazmatLvlBtn').css('background-color', '#3bf544')
+                            $.cookie("FcResearchHazmat", 'on', { expires: 365 })
+                            InventoryTbl.MoreInfos.Hazmat.EachRow()
+                        }else{
+                            $('#HazmatLvlBtn').css('background-color', '')
+                            $.cookie("FcResearchHazmat", 'off', { expires: 365 })
+                        }
+                    })
+
+
+                    $('#HazmatLvlBtn').click(function () {
+                        InventoryTbl.MoreInfos.Hazmat.EachRow()
+                    })
+                },
+                "EachRow":()=>{
+                    $('.HazmatLevel').show()
+                    $('#table-inventory > tbody:nth-child(2) > tr').each(async function (x) {
+                        var ASIN = $(this).find('td:nth-child(2)').text().trim(), HazmatCell = $(this).find('.HazmatLevel')
+                        InventoryTbl.MoreInfos.Hazmat.PanDash.PanDashRequest(ASIN, HazmatCell)
+                    })
+                },
+                "PanDash":{
+                    "TimeForPandah":()=>{
+                        // Erstelle ein neues Date-Objekt mit der aktuellen UTC-Zeit
+                        let now = new Date();
+
+                        // Extrahiere die einzelnen Komponenten der UTC-Zeit
+                        let year = now.getUTCFullYear();
+                        let month = now.getUTCMonth() + 1; // Monate sind nullbasiert, daher +1
+                        let day = now.getUTCDate();
+                        let hours = now.getUTCHours();
+                        let minutes = now.getUTCMinutes();
+                        let seconds = now.getUTCSeconds();
+                        let milliseconds = now.getUTCMilliseconds();
+
+                        // Formatiere die Komponenten, um sicherzustellen, dass sie zweistellig sind
+                        month = month < 10 ? '0' + month : month;
+                        day = day < 10 ? '0' + day : day;
+                        hours = hours < 10 ? '0' + hours : hours;
+                        minutes = minutes < 10 ? '0' + minutes : minutes;
+                        seconds = seconds < 10 ? '0' + seconds : seconds;
+                        milliseconds = milliseconds < 100 ? (milliseconds < 10 ? '00' + milliseconds : '0' + milliseconds) : milliseconds;
+                        return `${year}${month}${day}${hours}${minutes}${seconds}${milliseconds}`;
+                    },
+                    "PanDashRequest": async (ASIN, HazmatCell)=>{
+                        $(HazmatCell).html('').addClass("my-loader")
+
+                        refreshSiteContext();
+                        var TimeNow = await InventoryTbl.MoreInfos.Hazmat.PanDash.TimeForPandah();
+                        var Response;
+
+                        try {
+                        var RestrictionLevel = await fetchPandashRestriction();
+                        var Marketplace = getPandashMarketplace();
+                        var PostData = `language=default&source=${RestrictionLevel}-hazmat-FC&marketPlaces=${Marketplace}&asins=${ASIN}&sidx=product.asin&rows=99999&page=1&sord=desc&isExportOnly=FALSE&fileName=${Login}_${RestrictionLevel}-hazmat-FC_default_${TimeNow}&fc=${fcname}&pandashservice=`
+                        Response = await CommonFunctions.gmFetch.post(`https://pandash.amazon.com/GridServlet`, PostData)
+
+                            var PanDashObj = JSON.parse(Response.responseText);
+                            if(PanDashObj.error == "Invalid FC" ){
+                                $(HazmatCell).removeClass("my-loader").html(`failed`)
+                                return
+                            }
+
+                            if(!PanDashObj.rows || !PanDashObj.rows.length){
+                                var unfoundMsg = (PanDashObj.unfound && PanDashObj.unfound[0]) || 'No hazmat data';
+                                $(HazmatCell).removeClass("my-loader").html(`N/A`).attr('title', unfoundMsg)
+                                return
+                            }
+
+                            var HazmatLevel = PanDashObj.rows[0].level, Message = PanDashObj.rows[0].message, Color = hazmatLevelColor(HazmatLevel)
+                            $(HazmatCell).removeClass("my-loader").html(`Level ${HazmatLevel}`).css('background-color', Color).attr('title',Message)
+                        }
+                        catch(err) {
+                            $(HazmatCell).removeClass("my-loader").html(`err`)
+                        }
+                    },
+                },
+
+            },
+            "Expiry":{
+                "addButton":()=>{
+                    $('[data-section-type="inventory"] > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1)').append('<input type="checkbox" id="ExpiryCheckBox" name="ExpiryCheckBox" style="margin-left:15px;" ><button id="ExpiryBtn"">Expiry</button><span id="CsiMarketplace" style="cursor: pointer; vertical-align: top;" >⚙️</span>')
+
+                    $('#CsiMarketplace').click(function () {
+                        let Marketplace = $.cookie(`${fcname}_CsiMarketplace`) || "4";
+                        let newMarketplace = prompt("Choose your Marketplace like in CSI. 1=.com / 3=.co.uk / 4=.de ...", Marketplace);
+                        $.cookie(`${fcname}_CsiMarketplace`, newMarketplace, { expires: 365 })
+                    })
+
+                    if( $.cookie("FcResearchExpiry") == 'on' ){
+                        $('#ExpiryBtn').css('background-color', '#3bf544')
+                        $('#ExpiryCheckBox').prop('checked', true);
+                        InventoryTbl.MoreInfos.Expiry.EachRow()
+                    }
+
+                    $('#ExpiryCheckBox').click(function () {
+                        if(this.checked){
+                            $('#ExpiryBtn').css('background-color', '#3bf544')
+                            $.cookie("FcResearchExpiry", 'on', { expires: 365 })
+                            InventoryTbl.MoreInfos.Expiry.EachRow()
+                        }else{
+                            $('#ExpiryBtn').css('background-color', '')
+                            $.cookie("FcResearchExpiry", 'off', { expires: 365 })
+                        }
+                    })
+
+
+                    $('#ExpiryBtn').click(function () {
+                        InventoryTbl.MoreInfos.Expiry.EachRow()
+                    })
+
+                },
+                "EachRow":()=>{
+                    $('.ExpiryDate').show()
+                    $('#table-inventory > tbody:nth-child(2) > tr').each(async function (x) {
+                        var ASIN = $(this).find('td:nth-child(2)').text().trim(), ExpiryCell = $(this).find('.ExpiryDate')
+                        InventoryTbl.MoreInfos.Expiry.CSI(ASIN, ExpiryCell)
+                    })
+                },
+                "CSI": async (ASIN, ExpiryCell)=>{
+                    $(ExpiryCell).html('').addClass("my-loader")
+                    let Marketplace = $.cookie(`${fcname}_CsiMarketplace`) || "4";
+                    let CSI_API = `https://csi.amazon.com/view?view=blame_o&item_id=${ASIN}&marketplace_id=${Marketplace}&customer_id=&merchant_id=&sku=&fn_sku=&gcid=&fulfillment_channel_code=&listing_type=purchasable&submission_id=&order_id=&external_id=&page_token_provided=false&search_string=is_expiration_dated_product&realm=USAmazon&region=NA&stage=prod&domain_id=&keyword=&submit=Show`
+                    let Response = (await CommonFunctions.gmFetch.get(CSI_API)).responseText;
+
+                    var hasDate = '---'
+                    $(' tr', Response).each( function(){
+                        var Name = $(this).find('td:nth-child(3)').text().trim()
+                        var Value = $(this).find('td:nth-child(4)').text().trim()
+
+                        if( Name.includes('is_expiration_dated_product') ){
+                            if(Value.includes('true')){hasDate = 'Expiry ✅'}
+                            if(Value.includes('false')){hasDate = 'Expiry ⛔'}
+                        }
+                    })
+                    $(ExpiryCell).removeClass("my-loader").html(hasDate)
+                }
+            },
+            "Price":{
+                "addButton":()=>{
+                    $('[data-section-type="inventory"] > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1)').append('<input type="checkbox" id="PriceCheckBox" name="PriceCheckBox" style="margin-left:15px;" ><button id="PriceBtn"">Price</button><span id="Amz_Marketplace" style="cursor: pointer; vertical-align: top;" >⚙️</span>')
+
+                    $('#Amz_Marketplace').click(function () {
+                    let Marketplace = $.cookie(`${fcname}_AmzMarketplace`) || "de";
+                        let newMarketplace = prompt("Choose your Marketplace.    com/co.uk/de ....", Marketplace);
+                        $.cookie(`${fcname}_AmzMarketplace`, newMarketplace, { expires: 365 })
+                    })
+
+
+                    if( $.cookie("FcResearchPrice") == 'on' ){
+                        $('#PriceBtn').css('background-color', '#3bf544')
+                        $('#PriceCheckBox').prop('checked', true);
+                        InventoryTbl.MoreInfos.Price.EachRow()
+                    }
+
+                    $('#PriceCheckBox').click(function () {
+                        if(this.checked){
+                            $('#PriceBtn').css('background-color', '#3bf544')
+                            $.cookie("FcResearchPrice", 'on', { expires: 365 })
+                            InventoryTbl.MoreInfos.Price.EachRow()
+                        }else{
+                            $('#PriceBtn').css('background-color', '')
+                            $.cookie("FcResearchPrice", 'off', { expires: 365 })
+                        }
+                    })
+
+                    $('#PriceBtn').click(function () {
+                        InventoryTbl.MoreInfos.Price.EachRow()
+                    })
+                },
+                "EachRow":()=>{
+                    $('.Price').show()
+                    $('#table-inventory > tbody:nth-child(2) > tr').each(async function (x) {
+                        var ASIN = $(this).find('td:nth-child(2)').text().trim(), PriceCell = $(this).find('.Price')
+                        InventoryTbl.MoreInfos.Price.AmzCatalog(ASIN, PriceCell)
+                    })
+                },
+                "AmzCatalog": async (ASIN, PriceCell)=>{
+                    let Marketplace = $.cookie(`${fcname}_AmzMarketplace`) || "de";
+                    var Catalog = `https://www.amazon.${Marketplace}/gp/product/${ASIN}`
+                    let Response = (await CommonFunctions.gmFetch.get(Catalog)).responseText
+                    var Price = $('#corePriceDisplay_desktop_feature_div .priceToPay', Response).first().text();
+                    $(PriceCell).html(Price)
+                }
+            },
+        },
+        "SortTbl":()=>{
+            let table = document.querySelector("#table-inventory tbody");
+
+            // Alle Zeilen (tr) der Tabelle in ein Array umwandeln
+            let rowsArray = Array.from(table.querySelectorAll("tr"));
+
+            // Sortieren der Zeilen basierend auf der ersten Spalte (td) in umgekehrter Reihenfolge
+            rowsArray.sort(function(rowA, rowB) {
+                // Textinhalt der ersten Zelle (td) jeder Zeile vergleichen
+                let cellA = rowA.querySelector("td:nth-child(8)").textContent.toLowerCase();
+                let cellB = rowB.querySelector("td:nth-child(8)").textContent.toLowerCase();
+
+                // Alphabetische Sortierung (Z-A)
+                //if (cellA < cellB) return 1;
+                //if (cellA > cellB) return -1;
+
+                if (cellA < cellB) return -1;
+                if (cellA > cellB) return 1;
+                return 0;
+            });
+
+            // Entfernen der alten Zeilen
+            table.innerHTML = "";
+
+            // Hinzufügen der sortierten Zeilen
+            rowsArray.forEach(function(row) {
+                table.appendChild(row);
+            });
+
+
+
+
+
+        },
+
+    };
+    const HistoryTbl = {
+        "Start": async ()=>{
+            await HistoryTbl.IdelTime.FCLM_Permission()
+            HistoryTbl.StartObserver1(document.querySelector('#inventory-history-status'))
+        },
+        "StartObserver1":(Table)=>{
+            //console.log('StartObserver1')
+            // MutationObserver konfigurieren
+            const observer = new MutationObserver(mutations => {
+                mutations.forEach(mutation => {
+                    if (mutation.addedNodes.length == 1) {
+                        HistoryTbl.Highligthing()
+                        if(FCLM_Check){ HistoryTbl.IdelTime.Start() }
+                        HistoryTbl.StartObserver2(document.querySelector('#table-inventory-history > tbody:nth-child(2)'))
+                    }
+                });
+            });
+            // Observer starten
+            observer.observe(Table, { childList: true, subtree: true });
+        },
+        "StartObserver2":(Table)=>{
+            //console.log('StartObserver2')
+            // MutationObserver konfigurieren
+            const observer = new MutationObserver(mutations => {
+                mutations.forEach(mutation => {
+
+                    if (mutation.addedNodes.length > 0) {
+                        HistoryTbl.Highligthing()
+                        if(FCLM_Check){ HistoryTbl.IdelTime.Start() }
+                    }
+                });
+            });
+            // Observer starten
+            observer.observe(Table, { childList: true, subtree: true });
+        },
+        "Highligthing":()=>{
+            $('#table-inventory-history > tbody:nth-child(2) > tr').each(function (x) {
+                var OP_Cell = $(this).find('td:nth-child(2)')
+                var RS_Cell = $(this).find('td:nth-child(3)')
+                if(RS_Cell.text().includes('M')){ OP_Cell.css({"backgroundColor":"red"}); RS_Cell.css({"backgroundColor":"red"}); };
+                if(RS_Cell.text().includes('F')){ OP_Cell.css({"backgroundColor":"yellowgreen"}); RS_Cell.css({"backgroundColor":"yellowgreen"}); };
+            })
+        },
+        "IdelTime":{
+            "FCLM_Permission": async ()=>{
+                FCLM_Check = $.cookie(`FCLM_${fcname}_${Login}`)
+                if(FCLM_Check == undefined){
+                    var FCLM_URL = `https://fclm-portal.amazon.com/employee/timeDetails?employeeId=${Login}&warehouseId=${fcname}`
+                    let Response = (await CommonFunctions.gmFetch.get(FCLM_URL)).responseText;
+                    var FindErrorMessage = $('.error-message', Response)
+                    FCLM_Check = (FindErrorMessage.length == 0) ? true : false;
+                    $.cookie(`FCLM_${fcname}_${Login}`, FCLM_Check, { expires: 12/24 }); // 12h
+                }
+            },
+            "Start": async ()=>{
+                var Employee = $(`#employee-status`).find('a')
+                if(Employee.length == 0){return}
+                $('#table-inventory-history > tbody:nth-child(2) > tr').each(function (x) {
+                    //if(x >= 4){return}
+                    if($(this).find('td:nth-child(1)').hasClass('IdleTime')){return}
+                    var Date = $(this).find('td:nth-child(1)').text()
+                    var PastDate = $(`#table-inventory-history > tbody:nth-child(2) > tr:nth-child(${x + 2}) td:nth-child(1)`).text()
+                    var difference = HistoryTbl.IdelTime.getTimeDifference(PastDate, Date);
+                    if(difference == 'NaN:NaN'){return}
+                    $(this).find('td:nth-child(1)').append(` (${difference})`).addClass('IdleTime')
+                })
+            },
+            "getTimeDifference":(date1, date2)=>{
+                // Datumswerte in Date-Objekte umwandeln
+                const d1 = new Date(date1);
+                const d2 = new Date(date2);
+
+                // Zeitunterschied in Millisekunden berechnen
+                const diffInMs = Math.abs(d1 - d2);
+
+                // Stunden und Minuten berechnen
+                const hours = Math.floor(diffInMs / (1000 * 60 * 60));
+                const minutes = Math.floor((diffInMs % (1000 * 60 * 60)) / (1000 * 60));
+                const formattedHours = String(hours).padStart(2, '0');
+                const formattedMinutes = String(minutes).padStart(2, '0');
+                return `${formattedHours}:${formattedMinutes}`
+            },
+        }
+    };
+    const ContainerHistoryTbl = {
+        "Start":()=>{
+            $('#table-container-history tr').each(function (x) {
+                //if(x >= 4){return}
+                var Date = $(this).find('td:nth-child(1)').text()
+                var PastDate = $(`#table-container-history  tr:nth-child(${x + 2}) td:nth-child(1)`).text()
+                var difference = ContainerHistoryTbl.getTimeDifference(PastDate, Date);
+                if(difference == 'NaN:NaN'){return}
+                $(this).find('td:nth-child(1)').append(` (${difference})`)
+            })
+        },
+        "getTimeDifference":(date1, date2)=>{
+            // Datumswerte in Date-Objekte umwandeln
+            const cleanedDate1 = date1.slice(0, -3).trim();
+            const cleanedDate2 = date2.slice(0, -3).trim();
+            const d1 = new Date(cleanedDate1);
+            const d2 = new Date(cleanedDate2);
+
+            // Zeitunterschied in Millisekunden berechnen
+            const diffInMs = Math.abs(d1 - d2);
+
+            // Stunden und Minuten berechnen
+            const hours = Math.floor(diffInMs / (1000 * 60 * 60));
+            const minutes = Math.floor((diffInMs % (1000 * 60 * 60)) / (1000 * 60));
+            const formattedHours = String(hours).padStart(2, '0');
+            const formattedMinutes = String(minutes).padStart(2, '0');
+            return `${formattedHours}:${formattedMinutes}`
+        },
+    }
+
+    class ToolController {
+        constructor(){ this.init(); }
+        async init(){
+            CommonFunctions.addCSS()
+            refreshSiteContext()
+            MainTbl.StartMain()
+            waitForKeyElements('.a-span7 > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(2)', ProductTbl.Start);
+            InventoryTbl.Wait.Wait_for_TableHead()
+
+            var historyTblStarted = false; // Flag-Variable
+            waitForKeyElements('#inventory-history-status', (element) => {
+                if (!historyTblStarted) { historyTblStarted = true; HistoryTbl.Start() }
+            });
+
+
+              waitForKeyElements('#table-container-history_wrapper > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > table:nth-child(1) > thead:nth-child(1) > tr:nth-child(1) > th:nth-child(1) > div:nth-child(1)', ContainerHistoryTbl.Start);
+
+            return
+            var ContainerHistoryTblStarted = false; // Flag-Variable
+            waitForKeyElements('#inventory-history-status', (element) => {
+                if (!ContainerHistoryTblStarted) { ContainerHistoryTblStarted = true; HistoryTbl.Start() }
+            });
+
+        }
+    };
+
+    new ToolController();
+
+    // Update check — Kelley Edition: log only, do NOT redirect (redirect overwrote local fixes)
+    var ScriptName = 'Extended%20FC%20Research%20-%20Kelley%20Edition';
+    (() => {
+        if(GM_getValue(ScriptName + '_updateDisabled')){ return; }
+        let lastUpdated = GM_getValue(ScriptName) ? parseInt(GM_getValue(ScriptName)) : 0;
+        if(Date.now() - lastUpdated > 72000000 && GM_info.scriptUpdateURL){
+            GM_xmlhttpRequest({
+                method: "GET", url: GM_info.scriptUpdateURL, revalidate: true, nocache: true,
+                onload: (response) => {
+                    GM_setValue(ScriptName, Date.now());
+                    let versionMtch = response.responseText.match(/\/\/\s+@version\s+([0-9.]+)/i);
+                    if(versionMtch && versionMtch[1] !== GM_info.script.version){
+                        console.log('[Kelley Edition] Remote script is', versionMtch[1], '— local is', GM_info.script.version, '(not auto-updating)');
+                    }
+                }
+            });
+        }
+    })();
+})();

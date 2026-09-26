@@ -1,0 +1,334 @@
+// ==UserScript==
+// @name         FC Quality — inventory adjustments week filter (MEM3)
+// @namespace    https://github.com/local/fcquality-week-filter
+// @version      1.1.0
+// @description  Button sets start/end dates to current Sun–Sat week, MEM3 when possible; Apply Filter + debug copy.
+// @match        https://fcquality.amazon.com/inventory_adjustments/*
+// @match        https://fcquality.amazon.com/en_US/inventory_adjustments/*
+// @grant        GM_setClipboard
+// @grant        GM_info
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const WAREHOUSE_ID = 'MEM3';
+
+  const DBG_MAX_LINES = 400;
+  var dbgLines = [];
+
+  function dbg(msg, detail) {
+    var extra = '';
+    if (detail !== undefined) {
+      try {
+        extra = typeof detail === 'string' ? detail : JSON.stringify(detail);
+      } catch (e) {
+        extra = String(detail);
+      }
+      if (extra.length > 2200) extra = extra.slice(0, 2200) + '…';
+    }
+    dbgLines.push(new Date().toISOString() + '\t' + msg + (extra ? '\t' + extra : ''));
+    if (dbgLines.length > DBG_MAX_LINES) dbgLines.splice(0, dbgLines.length - DBG_MAX_LINES);
+    console.log('[FCQualityWeek]', msg, detail !== undefined ? detail : '');
+  }
+
+  function sleep(ms) {
+    return new Promise(function (r) {
+      setTimeout(r, ms);
+    });
+  }
+
+  /** Local calendar week: Sunday .. Saturday (matches your example). */
+  function sundaySaturdayThisWeek(now) {
+    var d = now ? new Date(now) : new Date();
+    d.setHours(12, 0, 0, 0);
+    var dow = d.getDay();
+    var sun = new Date(d);
+    sun.setDate(d.getDate() - dow);
+    var sat = new Date(sun);
+    sat.setDate(sun.getDate() + 6);
+    return { sunday: sun, saturday: sat };
+  }
+
+  function fmtYMD(d) {
+    var y = d.getFullYear();
+    var m = String(d.getMonth() + 1).padStart(2, '0');
+    var day = String(d.getDate()).padStart(2, '0');
+    return y + '-' + m + '-' + day;
+  }
+
+  function filterFormLikelyVisible(div) {
+    if (!div) return false;
+    if (div.offsetParent !== null) return true;
+    var st = window.getComputedStyle(div);
+    return st.display !== 'none' && st.visibility !== 'hidden' && div.getClientRects().length > 0;
+  }
+
+  function setInputValueCompat(el, text) {
+    if (!el) return;
+    var proto = window.HTMLInputElement.prototype;
+    var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && desc.set) desc.set.call(el, text);
+    else el.value = text;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  /** Prefer jQuery UI datepicker when present (fcquality uses it). */
+  function setDatePickerField(inputEl, dateObj, label) {
+    if (!inputEl) {
+      dbg('setDate:no-input', label);
+      return false;
+    }
+    var str = fmtYMD(dateObj);
+    try {
+      var jq = typeof jQuery !== 'undefined' ? jQuery : typeof window.$ !== 'undefined' ? window.$ : null;
+      if (jq && jq.fn && jq.fn.datepicker) {
+        var $el = jq(inputEl);
+        if ($el.datepicker) {
+          $el.datepicker('setDate', dateObj);
+          dbg('setDate:datepicker-api', { label: label, value: str });
+          return true;
+        }
+      }
+    } catch (e) {
+      dbg('setDate:datepicker-api-error', { label: label, err: String(e) });
+    }
+    setInputValueCompat(inputEl, str);
+    dbg('setDate:value-fallback', { label: label, value: str });
+    return true;
+  }
+
+  function trySetWarehouseMem3() {
+    var sel =
+      document.querySelector('select[name="warehouse_id"]') ||
+      document.querySelector('select#warehouse_id') ||
+      document.querySelector('select[name*="warehouse"]');
+    if (!sel) {
+      dbg('warehouse:not-found');
+      return;
+    }
+    var opts = sel.options;
+    var i;
+    for (i = 0; i < opts.length; i++) {
+      if ((opts[i].value || '').toUpperCase() === WAREHOUSE_ID || (opts[i].text || '').indexOf(WAREHOUSE_ID) >= 0) {
+        sel.selectedIndex = i;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        dbg('warehouse:set', { index: i, value: opts[i].value });
+        return;
+      }
+    }
+    dbg('warehouse:mem3-option-not-found', { count: opts.length });
+  }
+
+  function gatherSnapshot() {
+    var parts = [];
+    parts.push('--- snapshot ---');
+    parts.push('href: ' + location.href);
+    parts.push('titleOpen: ' + !!document.querySelector('#drilldown_filter_title'));
+    var formDiv = document.querySelector('#drilldown_filter_form_div');
+    parts.push('formDivVisible-ish: ' + filterFormLikelyVisible(formDiv));
+    var s = document.querySelector('input[name="start_date"]');
+    var e = document.querySelector('input[name="end_date"]');
+    parts.push('start_date: ' + (s ? s.value : '(missing)'));
+    parts.push('end_date: ' + (e ? e.value : '(missing)'));
+    var wh = document.querySelector('select[name="warehouse_id"]');
+    if (wh) parts.push('warehouse_id: ' + wh.value);
+    return parts.join('\n');
+  }
+
+  function buildClipboardReport() {
+    var h = [];
+    h.push('=== FC Quality week-filter debug ===');
+    h.push('generatedAt: ' + new Date().toISOString());
+    h.push('href: ' + location.href);
+    try {
+      if (typeof GM_info !== 'undefined' && GM_info) {
+        h.push(
+          'tm: ' +
+            JSON.stringify({
+              scriptVersion: GM_info.script && GM_info.script.version,
+              tmVersion: GM_info.version
+            })
+        );
+      }
+    } catch (e) {
+      h.push('GM_info: unavailable');
+    }
+    h.push('--- log ---');
+    h.push(dbgLines.join('\n'));
+    h.push('');
+    h.push(gatherSnapshot());
+    h.push('=== end ===');
+    return h.join('\n');
+  }
+
+  function copyTextBestEffort(text, onDone) {
+    function done(ok) {
+      if (typeof onDone === 'function') onDone(ok);
+    }
+    function execFallback() {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        (document.body || document.documentElement).appendChild(ta);
+        ta.select();
+        done(document.execCommand('copy'));
+        ta.remove();
+      } catch (e) {
+        done(false);
+      }
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(
+        function () {
+          done(true);
+        },
+        function () {
+          try {
+            if (typeof GM_setClipboard === 'function') {
+              GM_setClipboard(text, 'text');
+              done(true);
+              return;
+            }
+          } catch (e2) {}
+          execFallback();
+        }
+      );
+      return;
+    }
+    try {
+      if (typeof GM_setClipboard === 'function') {
+        GM_setClipboard(text, 'text');
+        done(true);
+        return;
+      }
+    } catch (e3) {}
+    execFallback();
+  }
+
+  function installUi() {
+    if (document.getElementById('fcq-week-filter-wrap')) return;
+
+    var wrap = document.createElement('div');
+    wrap.id = 'fcq-week-filter-wrap';
+    wrap.style.cssText =
+      'display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-family:system-ui,Segoe UI,sans-serif;';
+
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = 'fcq-week-this-week-btn';
+    btn.textContent = 'This week (Sun–Sat)';
+    btn.title = 'Open filters, set dates to current week, MEM3 if listed, Apply Filter';
+    btn.style.cssText =
+      'cursor:pointer;font-size:13px;padding:6px 12px;border-radius:8px;border:1px solid #1a5f4a;background:#0f766e;color:#fff;font-weight:600;';
+
+    var dbgBtn = document.createElement('button');
+    dbgBtn.type = 'button';
+    dbgBtn.textContent = '📋';
+    dbgBtn.title = 'Copy debug log';
+    dbgBtn.style.cssText =
+      'cursor:pointer;width:32px;height:32px;border-radius:8px;border:1px solid rgba(0,0,0,.2);background:#fff;font-size:16px;line-height:1;padding:0;';
+
+    dbgBtn.addEventListener('click', function () {
+      dbg('ui:copy-debug');
+      copyTextBestEffort(buildClipboardReport(), function (ok) {
+        dbg('ui:clipboard', { ok: ok });
+        var prev = dbgBtn.textContent;
+        dbgBtn.textContent = ok ? '✓' : '✗';
+        setTimeout(function () {
+          dbgBtn.textContent = prev;
+        }, 900);
+      });
+    });
+
+    btn.addEventListener('click', function () {
+      applyThisWeek().catch(function (err) {
+        dbg('apply:error', err && err.message ? err.message : String(err));
+      });
+    });
+
+    wrap.appendChild(btn);
+    wrap.appendChild(dbgBtn);
+
+    var hint = document.createElement('span');
+    hint.textContent = 'MEM3';
+    hint.style.cssText = 'font-size:11px;color:#64748b;white-space:nowrap;';
+    wrap.appendChild(hint);
+
+    var title = document.querySelector('#drilldown_filter_title');
+    if (title && title.parentNode) {
+      var cluster = document.createElement('div');
+      cluster.id = 'fcq-week-filter-cluster';
+      cluster.style.cssText =
+        'display:flex;align-items:center;gap:12px;flex-wrap:wrap;width:100%;box-sizing:border-box;';
+      title.parentNode.insertBefore(cluster, title);
+      cluster.appendChild(title);
+      cluster.appendChild(wrap);
+      dbg('ui:mounted-next-to-filters');
+      return;
+    }
+
+    wrap.style.flexDirection = 'column';
+    wrap.style.alignItems = 'flex-end';
+    wrap.style.position = 'fixed';
+    wrap.style.bottom = '14px';
+    wrap.style.right = '14px';
+    wrap.style.zIndex = '2147483646';
+    document.body.appendChild(wrap);
+    dbg('ui:mounted-fallback-fixed');
+  }
+
+  async function applyThisWeek() {
+    dbg('apply:start');
+    var title = document.querySelector('#drilldown_filter_title');
+    var formDiv = document.querySelector('#drilldown_filter_form_div');
+    if (!title || !formDiv) {
+      dbg('apply:missing-filter-ui', { title: !!title, formDiv: !!formDiv });
+      return;
+    }
+
+    if (!filterFormLikelyVisible(formDiv)) {
+      dbg('apply:toggle-filter-open');
+      title.click();
+      await sleep(180);
+    }
+
+    trySetWarehouseMem3();
+    await sleep(80);
+
+    var range = sundaySaturdayThisWeek();
+    var startStr = fmtYMD(range.sunday);
+    var endStr = fmtYMD(range.saturday);
+    dbg('apply:computed-range', { start: startStr, end: endStr, warehouse: WAREHOUSE_ID });
+
+    var startInput = document.querySelector('input[name="start_date"]');
+    var endInput = document.querySelector('input[name="end_date"]');
+    setDatePickerField(startInput, range.sunday, 'start_date');
+    await sleep(60);
+    setDatePickerField(endInput, range.saturday, 'end_date');
+    await sleep(120);
+
+    dbg('apply:after-set', gatherSnapshot());
+
+    var submit =
+      document.querySelector('div.drilldown_filter_button_div input[type="submit"][name="commit"]') ||
+      document.querySelector('input[type="submit"][name="commit"]') ||
+      document.querySelector('input[value="Apply Filter"]');
+
+    if (!submit) {
+      dbg('apply:no-submit');
+      return;
+    }
+
+    dbg('apply:submit-click');
+    submit.click();
+    dbg('apply:done');
+  }
+
+  dbg('boot', { href: location.href });
+  installUi();
+})();

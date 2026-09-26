@@ -1,0 +1,1063 @@
+// ==UserScript==
+// @name         FCLM Portal — Table Copy + Nav
+// @namespace    https://fclm-portal.amazon.com/
+// @version      0.8.1
+// @description  Side navigation on all FCLM pages; table copy tools on Function Rollup reports.
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @author       Ruben
+// @match        https://fclm-portal.amazon.com/*
+// @grant        GM_setClipboard
+// @grant        GM_addStyle
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const CONFIG = {
+    copyFormat: 'csv',
+    quoteAllFields: false,
+    useHtmlClipboard: true,
+    includeHeaders: true,
+    columnMode: 'visible',
+    alwaysIncludeHeaders: [],
+    excludeHeaders: [],
+  };
+
+  const SIZE_CLASSES = ['size-small', 'size-medium', 'size-large', 'size-heavybulky', 'size-total'];
+  const IDENTITY_HEADERS = ['type', 'id', 'name', 'manager'];
+
+  function findTableByKey(key) {
+    if (key === 'summary') return $('#summary');
+    return $(`#${CSS.escape(key)}`);
+  }
+
+  /** tableId -> Set<columnIndex> */
+  const tableSelections = new Map();
+  const tableInitDone = new Set();
+  const selectionLoadedFromStorage = new Set();
+
+  function tableKey(table) {
+    return table.id || getTableLabel(table);
+  }
+
+  function getWarehouseId() {
+    return new URLSearchParams(location.search).get('warehouseId') || 'default';
+  }
+
+  /** Stable across URL date/time changes — warehouse + table id (e.g. function-4300000047) */
+  function storageKey(table) {
+    return `fclmCols:${getWarehouseId()}:${tableKey(table)}`;
+  }
+
+  function loadSavedSelection(table) {
+    const key = storageKey(table);
+    try {
+      if (typeof GM_getValue === 'function') {
+        const raw = GM_getValue(key, null);
+        if (raw) return JSON.parse(raw);
+      }
+      const ls = localStorage.getItem(key);
+      if (ls) return JSON.parse(ls);
+    } catch {
+      // ignore corrupt storage
+    }
+    return null;
+  }
+
+  function saveSelection(table) {
+    const key = storageKey(table);
+    const columns = buildColumnMap(table);
+    const headers = getCheckedColumnIndices(table)
+      .map((idx) => columns.find((c) => c.index === idx)?.header)
+      .filter(Boolean);
+
+    const payload = JSON.stringify({
+      headers,
+      tableId: tableKey(table),
+      warehouseId: getWarehouseId(),
+      savedAt: new Date().toISOString(),
+    });
+
+    if (typeof GM_setValue === 'function') GM_setValue(key, payload);
+    try {
+      localStorage.setItem(key, payload);
+    } catch {
+      // ignore quota errors
+    }
+  }
+
+  function applySavedSelection(table) {
+    const saved = loadSavedSelection(table);
+    if (!saved?.headers?.length) return false;
+
+    const headerSet = new Set(saved.headers);
+    const set = getSelectionSet(table, { skipLoad: true });
+    set.clear();
+    buildColumnMap(table).forEach((col) => {
+      if (headerSet.has(col.header)) set.add(col.index);
+    });
+    return true;
+  }
+
+  const NAV_COLLAPSED_KEY = 'fclmNavCollapsed';
+
+  function loadNavCollapsed() {
+    try {
+      if (typeof GM_getValue === 'function') {
+        const v = GM_getValue(NAV_COLLAPSED_KEY, null);
+        if (v !== null && v !== undefined) return v === true || v === 'true';
+      }
+      const ls = localStorage.getItem(NAV_COLLAPSED_KEY);
+      if (ls !== null) return ls === 'true';
+    } catch {
+      // ignore
+    }
+    return false;
+  }
+
+  function saveNavCollapsed(collapsed) {
+    if (typeof GM_setValue === 'function') GM_setValue(NAV_COLLAPSED_KEY, collapsed);
+    try {
+      localStorage.setItem(NAV_COLLAPSED_KEY, String(collapsed));
+    } catch {
+      // ignore
+    }
+  }
+
+  function applyNavCollapsedState(nav, collapsed) {
+    nav.classList.toggle('collapsed', collapsed);
+    const btn = $('.fclm-side-nav-toggle', nav);
+    if (btn) {
+      btn.textContent = collapsed ? '‹' : '›';
+      btn.title = collapsed ? 'Expand panel' : 'Collapse panel';
+    }
+  }
+
+  GM_addStyle(`
+    .fclm-copy-btn {
+      margin-left: 12px;
+      padding: 2px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid #0066c0;
+      border-radius: 4px;
+      background: #fff;
+      color: #0066c0;
+      vertical-align: middle;
+    }
+    .fclm-copy-btn:hover { background: #e7f1fa; }
+    .fclm-copy-btn.copied { background: #d4edda; border-color: #28a745; color: #155724; }
+
+    .fclm-debug-btn {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 99999;
+      padding: 10px 20px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      border: 2px solid #ff9900;
+      border-radius: 8px;
+      background: #232f3e;
+      color: #ff9900;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+    }
+    .fclm-debug-btn:hover { background: #37475a; }
+    .fclm-debug-btn.copied { background: #1a472a; border-color: #28a745; color: #28a745; }
+
+    .fclm-toast {
+      position: fixed;
+      bottom: 64px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 100000;
+      padding: 8px 16px;
+      background: #232f3e;
+      color: #fff;
+      border-radius: 6px;
+      font-size: 12px;
+      opacity: 0;
+      transition: opacity 0.2s;
+      pointer-events: none;
+    }
+    .fclm-toast.show { opacity: 1; }
+
+    .fclm-col-actions {
+      margin-left: 8px;
+      font-size: 11px;
+    }
+    .fclm-col-actions button {
+      margin-left: 4px;
+      padding: 1px 6px;
+      font-size: 11px;
+      cursor: pointer;
+      border: 1px solid #888;
+      border-radius: 3px;
+      background: #fff;
+    }
+    .fclm-col-actions button:hover { background: #eee; }
+
+    th.fclm-col-header {
+      white-space: nowrap;
+      vertical-align: bottom;
+    }
+    .fclm-col-cb {
+      display: block;
+      margin: 0 auto 2px;
+      cursor: pointer;
+      width: 14px;
+      height: 14px;
+    }
+    .fclm-col-label {
+      display: block;
+      font-size: inherit;
+    }
+
+    .fclm-side-nav {
+      position: fixed;
+      left: 0;
+      right: auto;
+      top: 48px;
+      width: 210px;
+      z-index: 99998;
+      background: #232f3e;
+      border-right: 2px solid #ff9900;
+      box-shadow: 3px 0 10px rgba(0,0,0,0.25);
+      font-family: inherit;
+      overflow: visible;
+    }
+    .fclm-side-nav-body {
+      max-height: calc(100vh - 120px);
+      overflow-y: auto;
+    }
+    .fclm-side-nav.collapsed {
+      width: 32px;
+    }
+    .fclm-side-nav.collapsed .fclm-side-nav-body { display: none; }
+    .fclm-side-nav.collapsed .fclm-side-nav-title { display: none; }
+    .fclm-side-nav.collapsed .fclm-side-nav-header {
+      justify-content: center;
+      padding: 6px 2px;
+      border-bottom: none;
+    }
+    .fclm-side-nav-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 10px;
+      border-bottom: 1px solid #37475a;
+      flex-shrink: 0;
+    }
+    .fclm-side-nav-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: #ff9900;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .fclm-side-nav-toggle {
+      flex-shrink: 0;
+      background: none;
+      border: 1px solid #555;
+      color: #ccc;
+      cursor: pointer;
+      border-radius: 3px;
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      font-size: 16px;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .fclm-side-nav-toggle:hover { background: #37475a; color: #fff; }
+    .fclm-side-nav-list { padding: 4px 0 8px; }
+    .fclm-side-nav-list a {
+      display: block;
+      padding: 9px 12px;
+      color: #eee;
+      text-decoration: none;
+      font-size: 12px;
+      line-height: 1.3;
+      border-left: 3px solid transparent;
+    }
+    .fclm-side-nav-list a:hover {
+      background: #37475a;
+      color: #fff;
+    }
+    .fclm-side-nav-list a.active {
+      background: #37475a;
+      border-left-color: #ff9900;
+      color: #ff9900;
+      font-weight: 600;
+    }
+  `);
+
+  function $(sel, root = document) {
+    return root.querySelector(sel);
+  }
+
+  function $$(sel, root = document) {
+    return [...root.querySelectorAll(sel)];
+  }
+
+  function text(el) {
+    return (el?.textContent ?? '').trim().replace(/\s+/g, ' ');
+  }
+
+  function showToast(msg, ms = 2500) {
+    let toast = $('.fclm-toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.className = 'fclm-toast';
+      document.body.appendChild(toast);
+    }
+    toast.textContent = msg;
+    toast.classList.add('show');
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(() => toast.classList.remove('show'), ms);
+  }
+
+  function copyPlainText(str) {
+    const normalized = str.replace(/\r?\n/g, '\r\n');
+    if (navigator.clipboard?.writeText) {
+      return navigator.clipboard.writeText(normalized).then(() => true).catch(() => fallbackCopy(normalized));
+    }
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(normalized, 'text');
+      return Promise.resolve(true);
+    }
+    return Promise.resolve(fallbackCopy(normalized));
+  }
+
+  async function copyForExcel(plainText, htmlTable) {
+    const normalized = plainText.replace(/\r?\n/g, '\r\n');
+    if (CONFIG.useHtmlClipboard && htmlTable && navigator.clipboard?.write) {
+      try {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            'text/plain': new Blob([normalized], { type: 'text/plain' }),
+            'text/html': new Blob([htmlTable], { type: 'text/html' }),
+          }),
+        ]);
+        return true;
+      } catch {
+        // fall through
+      }
+    }
+    return copyPlainText(normalized);
+  }
+
+  function fallbackCopy(str) {
+    const ta = document.createElement('textarea');
+    ta.value = str;
+    ta.style.cssText = 'position:fixed;left:-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  }
+
+  function flashButton(btn) {
+    btn.classList.add('copied');
+    btn.textContent = btn.dataset.copiedLabel || 'Copied!';
+    setTimeout(() => {
+      btn.classList.remove('copied');
+      btn.textContent = btn.dataset.defaultLabel || 'Copy';
+    }, 1500);
+  }
+
+  function getReportTables() {
+    const tables = [];
+    const summary = $('#summary');
+    if (summary) tables.push(summary);
+    $$('table[id^="function-"]').forEach((t) => tables.push(t));
+    return tables;
+  }
+
+  function isFunctionRollupPage() {
+    return /\/reports\/functionRollup/i.test(location.pathname);
+  }
+
+  function findElementById(id) {
+    if (!id) return null;
+    try {
+      return document.getElementById(id);
+    } catch {
+      return null;
+    }
+  }
+
+  function getElementNavLabel(el, fallback) {
+    if (!el) return fallback;
+    if (el.tagName === 'TABLE') {
+      const cap = $('caption', el);
+      if (cap) {
+        const clone = cap.cloneNode(true);
+        clone.querySelectorAll('.filter, .fclm-copy-btn, .fclm-col-actions').forEach((n) => n.remove());
+        const t = text(clone);
+        if (t) return t;
+      }
+    }
+    const heading = el.querySelector('caption, h1, h2, h3, h4');
+    if (heading) {
+      const t = text(heading);
+      if (t) return t;
+    }
+    return fallback;
+  }
+
+  /** In-page jump targets — works on any FCLM report with hash links or id'd tables. */
+  function getNavTargets() {
+    const items = [];
+    const seen = new Set();
+
+    const add = (id, label, el) => {
+      if (!id || !el || seen.has(id)) return;
+      seen.add(id);
+      items.push({
+        id,
+        label: (label || id).replace(/\s*\[\d+]\s*$/, '').trim() || id,
+        el,
+      });
+    };
+
+    const summary = $('#summary');
+    if (summary) add('summary', 'Summary', summary);
+
+    $$('a[href^="#"]').forEach((a) => {
+      const raw = (a.getAttribute('href') || '').trim();
+      if (!raw || raw === '#') return;
+      const id = raw.slice(1);
+      const el = findElementById(id);
+      if (!el) return;
+      const label = text(a) || getElementNavLabel(el, id);
+      add(id, label, el);
+    });
+
+    $$('table[id]').forEach((table) => {
+      add(table.id, getElementNavLabel(table, table.id), table);
+    });
+
+    return items;
+  }
+
+  function scrollToSection(id) {
+    const el = findElementById(id) || findTableByKey(id);
+    if (!el) return;
+
+    const y = el.getBoundingClientRect().top + window.scrollY - 8;
+    window.scrollTo({ top: y, behavior: 'smooth' });
+    history.replaceState(null, '', `#${id}`);
+
+    $$('.fclm-side-nav-list a').forEach((link) => {
+      link.classList.toggle('active', link.dataset.targetId === id);
+    });
+  }
+
+  function buildSideNav() {
+    let nav = $('.fclm-side-nav');
+    if (!nav) {
+      nav = document.createElement('nav');
+      nav.className = 'fclm-side-nav';
+      nav.setAttribute('aria-label', 'Page section navigation');
+      nav.innerHTML = `
+        <div class="fclm-side-nav-header">
+          <span class="fclm-side-nav-title">Jump to</span>
+          <button type="button" class="fclm-side-nav-toggle" title="Collapse panel">›</button>
+        </div>
+        <div class="fclm-side-nav-body">
+          <div class="fclm-side-nav-list"></div>
+        </div>`;
+      document.body.appendChild(nav);
+
+      $('.fclm-side-nav-toggle', nav).addEventListener('click', () => {
+        const collapsed = !nav.classList.contains('collapsed');
+        applyNavCollapsedState(nav, collapsed);
+        saveNavCollapsed(collapsed);
+      });
+    }
+
+    applyNavCollapsedState(nav, loadNavCollapsed());
+
+    const list = $('.fclm-side-nav-list', nav);
+    const targets = getNavTargets();
+    list.innerHTML = '';
+
+    if (targets.length === 0) {
+      nav.style.display = 'none';
+      return;
+    }
+    nav.style.display = '';
+
+    targets.forEach((item) => {
+      const a = document.createElement('a');
+      a.href = `#${item.id}`;
+      a.textContent = item.label;
+      a.title = item.label;
+      a.dataset.targetId = item.id;
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        scrollToSection(item.id);
+      });
+      list.appendChild(a);
+    });
+
+    const hash = (location.hash || '').replace(/^#/, '');
+    if (hash && targets.some((t) => t.id === hash)) {
+      setTimeout(() => scrollToSection(hash), 300);
+    }
+  }
+
+  function getTableLabel(table) {
+    const cap = $('caption', table);
+    if (!cap) return table.id || 'unknown';
+    const clone = cap.cloneNode(true);
+    clone.querySelectorAll('.filter, .fclm-copy-btn, .fclm-col-actions').forEach((n) => n.remove());
+    return text(clone) || table.id;
+  }
+
+  function getActiveSizeFilter(table) {
+    const cap = $('caption', table);
+    if (!cap) return 'unknown';
+    const selected = $('.filteroption.selected', cap);
+    if (!selected) return 'unknown';
+    const params = selected.getAttribute('filterparams') || '';
+    const match = params.match(/size-(\w+)/);
+    return match ? match[1] : params;
+  }
+
+  function isElementVisible(el) {
+    if (!el) return false;
+    let node = el;
+    while (node && node !== document.body) {
+      const style = window.getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      node = node.parentElement;
+    }
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return false;
+    return true;
+  }
+
+  function getBodyColCount(table) {
+    let max = 0;
+    $$('tbody tr', table).forEach((tr) => {
+      max = Math.max(max, tr.children.length);
+    });
+    return max;
+  }
+
+  function getSampleCell(table, colIndex) {
+    const row = $('tbody tr', table);
+    if (!row) return null;
+    return row.children[colIndex] || null;
+  }
+
+  function buildColumnMap(table) {
+    const headerRows = $$('thead tr', table);
+    if (headerRows.length === 0) return [];
+
+    const colCount = getBodyColCount(table);
+    const grid = headerRows.map(() => Array(colCount).fill(null));
+
+    headerRows.forEach((row, rowIdx) => {
+      let colIdx = 0;
+      $$('th', row).forEach((th) => {
+        while (colIdx < colCount && grid[rowIdx][colIdx] !== null) colIdx += 1;
+        const colspan = parseInt(th.getAttribute('colspan') || '1', 10);
+        const rowspan = parseInt(th.getAttribute('rowspan') || '1', 10);
+        const label = text(th);
+        for (let c = 0; c < colspan; c += 1) {
+          for (let r = 0; r < rowspan; r += 1) {
+            if (rowIdx + r < grid.length && colIdx + c < colCount) {
+              grid[rowIdx + r][colIdx + c] = label;
+            }
+          }
+        }
+        colIdx += colspan;
+      });
+    });
+
+    const columns = [];
+    for (let i = 0; i < colCount; i += 1) {
+      const parts = grid.map((row) => row[i]).filter(Boolean);
+      const unique = [...new Set(parts)];
+      columns.push({
+        index: i,
+        header: unique.join(' / ') || `Column ${i + 1}`,
+        headerParts: unique,
+      });
+    }
+    return columns;
+  }
+
+  function shouldIncludeColumn(col, table, activeSize) {
+    const headerLower = col.header.toLowerCase();
+    if (CONFIG.excludeHeaders.some((ex) => headerLower.includes(ex.toLowerCase()))) return false;
+    if (CONFIG.alwaysIncludeHeaders.some((inc) => headerLower.includes(inc.toLowerCase()))) return true;
+
+    const cell = getSampleCell(table, col.index);
+    switch (CONFIG.columnMode) {
+      case 'identity':
+        return IDENTITY_HEADERS.some((h) => headerLower.startsWith(h) || headerLower === h);
+      case 'all':
+        return true;
+      case 'size-filter':
+        if (!isColumnVisible(table, col.index)) return false;
+        return cellMatchesSizeFilter(cell, activeSize);
+      case 'visible':
+      default:
+        return isColumnVisible(table, col.index);
+    }
+  }
+
+  function isColumnVisible(table, colIndex) {
+    const bodyCell = getSampleCell(table, colIndex);
+    return bodyCell ? isElementVisible(bodyCell) : false;
+  }
+
+  function cellMatchesSizeFilter(cell, activeSize) {
+    if (!cell?.classList) return true;
+    const sizeClasses = SIZE_CLASSES.filter((c) => cell.classList.contains(c));
+    if (sizeClasses.length === 0) return true;
+    if (activeSize === 'total') return sizeClasses.includes('size-total');
+    return sizeClasses.includes(`size-${activeSize}`);
+  }
+
+  function getEligibleColumns(table) {
+    const activeSize = getActiveSizeFilter(table);
+    return buildColumnMap(table).filter((c) => shouldIncludeColumn(c, table, activeSize));
+  }
+
+  function getSelectionSet(table, opts = {}) {
+    const key = tableKey(table);
+    if (!tableSelections.has(key)) {
+      tableSelections.set(key, new Set());
+    }
+    if (!opts.skipLoad && !selectionLoadedFromStorage.has(key)) {
+      selectionLoadedFromStorage.add(key);
+      applySavedSelection(table);
+    }
+    return tableSelections.get(key);
+  }
+
+  /** Read which columns are checked — always from live DOM checkboxes */
+  function getCheckedColumnIndices(table) {
+    const activeSize = getActiveSizeFilter(table);
+    const columns = buildColumnMap(table);
+    const indices = [];
+
+    $$('.fclm-col-cb', table).forEach((cb) => {
+      if (!cb.checked) return;
+      const idx = parseInt(cb.dataset.colIndex, 10);
+      if (Number.isNaN(idx)) return;
+      const col = columns.find((c) => c.index === idx);
+      if (col && shouldIncludeColumn(col, table, activeSize)) indices.push(idx);
+    });
+
+    return indices;
+  }
+
+  function syncSelectionFromDom(table) {
+    const set = getSelectionSet(table, { skipLoad: true });
+    set.clear();
+    getCheckedColumnIndices(table).forEach((i) => set.add(i));
+    saveSelection(table);
+  }
+
+  function isColumnSelected(table, colIndex) {
+    const cb = $(`.fclm-col-cb[data-col-index="${colIndex}"]`, table);
+    if (cb) return cb.checked;
+    return getSelectionSet(table).has(colIndex);
+  }
+
+  function syncCheckboxesFromSelection(table) {
+    const selected = getSelectionSet(table);
+    $$('.fclm-col-cb', table).forEach((cb) => {
+      const idx = parseInt(cb.dataset.colIndex, 10);
+      cb.checked = selected.has(idx);
+    });
+    updateCopyButtonLabel(table);
+  }
+
+  function setAllColumns(table, checked) {
+    $$('.fclm-col-cb', table).forEach((cb) => {
+      cb.checked = checked;
+    });
+    syncSelectionFromDom(table);
+    updateCopyButtonLabel(table);
+  }
+
+  function clearSavedSelection(table) {
+    const key = storageKey(table);
+    if (typeof GM_setValue === 'function') GM_setValue(key, null);
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      // ignore
+    }
+    getSelectionSet(table, { skipLoad: true }).clear();
+    syncCheckboxesFromSelection(table);
+    showToast('Saved column picks cleared for this table');
+  }
+
+  function updateCopyButtonLabel(table) {
+    const btn = $('.fclm-copy-btn', $('caption', table));
+    if (!btn) return;
+    const eligible = getEligibleColumns(table);
+    const count = getCheckedColumnIndices(table).length;
+    btn.textContent = `Copy (${count}/${eligible.length})`;
+    btn.dataset.defaultLabel = btn.textContent;
+  }
+
+  /** Map leaf column index -> th in the bottom header row */
+  function getLeafHeaderCells(table) {
+    const headerRows = $$('thead tr', table);
+    if (headerRows.length === 0) return new Map();
+
+    const colCount = getBodyColCount(table);
+    const grid = headerRows.map(() => Array(colCount).fill(null));
+
+    headerRows.forEach((row, rowIdx) => {
+      let colIdx = 0;
+      $$('th', row).forEach((cell) => {
+        while (colIdx < colCount && grid[rowIdx][colIdx] !== null) colIdx += 1;
+        const colspan = parseInt(cell.getAttribute('colspan') || '1', 10);
+        const rowspan = parseInt(cell.getAttribute('rowspan') || '1', 10);
+        for (let c = 0; c < colspan; c += 1) {
+          for (let r = 0; r < rowspan; r += 1) {
+            if (rowIdx + r < grid.length && colIdx + c < colCount) {
+              grid[rowIdx + r][colIdx + c] = cell;
+            }
+          }
+        }
+        colIdx += colspan;
+      });
+    });
+
+    const lastRowIdx = headerRows.length - 1;
+    const map = new Map();
+    for (let c = 0; c < colCount; c += 1) {
+      const th = grid[lastRowIdx][c];
+      if (th) map.set(c, th);
+    }
+    return map;
+  }
+
+  function wireCheckbox(cb, table) {
+    const stop = (e) => {
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+    };
+    cb.addEventListener('mousedown', stop, true);
+    cb.addEventListener('click', stop, true);
+    cb.addEventListener('change', () => {
+      syncSelectionFromDom(table);
+      updateCopyButtonLabel(table);
+    });
+  }
+
+  function injectColumnCheckboxes(table) {
+    const leafHeaders = getLeafHeaderCells(table);
+    const eligible = getEligibleColumns(table);
+    const selected = getSelectionSet(table);
+
+    eligible.forEach((col) => {
+      const th = leafHeaders.get(col.index);
+      if (!th) return;
+
+      let cb = th.querySelector(':scope > .fclm-col-cb');
+      if (!cb) {
+        cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.className = 'fclm-col-cb';
+        cb.dataset.colIndex = String(col.index);
+        wireCheckbox(cb, table);
+        th.classList.add('fclm-col-header');
+        th.insertBefore(cb, th.firstChild);
+      }
+
+      cb.dataset.colIndex = String(col.index);
+      cb.checked = selected.has(col.index);
+      cb.title = `Copy: ${col.header}`;
+    });
+
+    syncSelectionFromDom(table);
+    updateCopyButtonLabel(table);
+  }
+
+  function injectColumnActionButtons(table) {
+    const caption = $('caption', table);
+    if (!caption || $('.fclm-col-actions', caption)) return;
+
+    const wrap = document.createElement('span');
+    wrap.className = 'fclm-col-actions';
+
+    const allBtn = document.createElement('button');
+    allBtn.type = 'button';
+    allBtn.textContent = 'All cols';
+    allBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setAllColumns(table, true);
+    });
+
+    const noneBtn = document.createElement('button');
+    noneBtn.type = 'button';
+    noneBtn.textContent = 'No cols';
+    noneBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setAllColumns(table, false);
+    });
+
+    const resetBtn = document.createElement('button');
+    resetBtn.type = 'button';
+    resetBtn.textContent = 'Reset saved';
+    resetBtn.title = 'Clear saved column picks for this table type';
+    resetBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      clearSavedSelection(table);
+    });
+
+    wrap.append(allBtn, noneBtn, resetBtn);
+    caption.appendChild(wrap);
+  }
+
+  function initTable(table) {
+    const key = tableKey(table);
+    const checkboxCount = $$('.fclm-col-cb', table).length;
+    const eligibleCount = getEligibleColumns(table).length;
+
+    if (tableInitDone.has(key) && checkboxCount >= eligibleCount && eligibleCount > 0) {
+      updateCopyButtonLabel(table);
+      return;
+    }
+
+    const caption = $('caption', table);
+    if (!caption) return;
+
+    if (!$('.fclm-copy-btn', caption)) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'fclm-copy-btn';
+      btn.dataset.defaultLabel = 'Copy (0/0)';
+      btn.dataset.copiedLabel = 'Copied!';
+      btn.title = 'Copy checked columns to clipboard';
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        copyTable(table, btn);
+      });
+      caption.appendChild(btn);
+    }
+
+    injectColumnActionButtons(table);
+    injectColumnCheckboxes(table);
+
+    if (!caption.dataset.fclmFilterWatch) {
+      caption.dataset.fclmFilterWatch = '1';
+      caption.addEventListener('click', (e) => {
+        if (!e.target.closest('.filteroption')) return;
+        const k = tableKey(table);
+        setTimeout(() => {
+          const t = findTableByKey(k) || table;
+          tableInitDone.delete(k);
+          initTable(t);
+        }, 250);
+      });
+    }
+
+    if ($$('.fclm-col-cb', table).length > 0 || eligibleCount === 0) {
+      tableInitDone.add(key);
+    }
+  }
+
+  function extractTableData(table) {
+    const label = getTableLabel(table);
+    const activeSize = getActiveSizeFilter(table);
+    const columns = buildColumnMap(table);
+    const checkedIndices = new Set(getCheckedColumnIndices(table));
+    const included = columns.filter((c) => checkedIndices.has(c.index));
+
+    const rows = $$('tbody tr', table).map((tr) => {
+      const cells = [...tr.children];
+      return included.map((col) => text(cells[col.index]));
+    });
+
+    return { label, tableId: table.id, activeSize, columns: included, rows };
+  }
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function buildHtmlCell(v) {
+    const s = String(v ?? '');
+    const trimmed = s.trim();
+    const escaped = escapeHtml(s);
+    const style = 'border:none;font-weight:normal;';
+
+    if (trimmed === '') {
+      return `<td style="${style}"></td>`;
+    }
+    // Leading zeros — keep as text
+    if (/^0\d+$/.test(trimmed)) {
+      return `<td style="${style}mso-number-format:'\\@';">${escaped}</td>`;
+    }
+    // Numbers — Excel x:num so they paste as numeric
+    if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+      return `<td style="${style}" x:num="${trimmed}">${escaped}</td>`;
+    }
+    // Names, labels, etc.
+    return `<td style="${style}mso-number-format:'\\@';">${escaped}</td>`;
+  }
+
+  function buildHtmlTable(data) {
+    const headers = data.columns.map((c) => c.header);
+    const parts = [
+      '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">',
+      '<head><meta charset="utf-8"><style>',
+      'table, td { border: none !important; font-weight: normal !important; }',
+      'td { padding: 0; }',
+      '</style></head><body><!--StartFragment-->',
+      '<table cellpadding="0" cellspacing="0" style="border-collapse:collapse;border:none;">',
+      '<tr>',
+      ...headers.map((h) => buildHtmlCell(h)),
+      '</tr>',
+    ];
+    data.rows.forEach((row) => {
+      parts.push('<tr>');
+      row.forEach((v) => parts.push(buildHtmlCell(v)));
+      parts.push('</tr>');
+    });
+    parts.push('</table><!--EndFragment--></body></html>');
+    return parts.join('');
+  }
+
+  function formatOutput(data) {
+    const headers = data.columns.map((c) => c.header);
+    const { copyFormat, includeHeaders, quoteAllFields } = CONFIG;
+
+    if (copyFormat === 'json') {
+      const records = data.rows.map((row) => {
+        const obj = {};
+        headers.forEach((h, i) => { obj[h] = row[i]; });
+        return obj;
+      });
+      return JSON.stringify({ table: data.label, tableId: data.tableId, sizeFilter: data.activeSize, rows: records }, null, 2);
+    }
+
+    const isCsv = copyFormat === 'csv';
+    const sep = isCsv ? ',' : '\t';
+    const escapeField = (v) => {
+      const s = String(v ?? '');
+      if (isCsv) {
+        if (quoteAllFields || /[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+        return s;
+      }
+      if (/[\t\n\r"]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+      return s;
+    };
+
+    const lines = [];
+    if (includeHeaders) lines.push(headers.map(escapeField).join(sep));
+    data.rows.forEach((row) => lines.push(row.map(escapeField).join(sep)));
+    return lines.join('\r\n');
+  }
+
+  async function copyTable(table, btn) {
+    const data = extractTableData(table);
+    if (data.columns.length === 0) {
+      showToast('No columns checked — use header checkboxes');
+      return;
+    }
+    const out = formatOutput(data);
+    const html = CONFIG.copyFormat !== 'json' ? buildHtmlTable(data) : null;
+    await copyForExcel(out, html);
+    flashButton(btn);
+    showToast(`Copied ${data.rows.length} rows × ${data.columns.length} cols`);
+  }
+
+  function buildDebugReport() {
+    const tables = getReportTables();
+    return JSON.stringify({
+      generatedAt: new Date().toISOString(),
+      url: location.href,
+      config: { ...CONFIG },
+      tables: tables.map((table) => {
+        const columns = buildColumnMap(table);
+        const checked = getCheckedColumnIndices(table);
+        const saved = loadSavedSelection(table);
+        return {
+          id: table.id,
+          label: getTableLabel(table),
+          storageKey: storageKey(table),
+          checkboxCount: $$('.fclm-col-cb', table).length,
+          columnsCopied: checked.length,
+          checkedIndices: checked,
+          savedHeaders: saved?.headers ?? [],
+          columns: columns.map((col) => ({
+            index: col.index,
+            header: col.header,
+            checked: isColumnSelected(table, col.index),
+          })),
+        };
+      }),
+    }, null, 2);
+  }
+
+  async function copyDebug(btn) {
+    await copyPlainText(buildDebugReport());
+    flashButton(btn);
+    showToast('Debug copied');
+  }
+
+  function init() {
+    buildSideNav();
+
+    if (isFunctionRollupPage()) {
+      getReportTables().forEach(initTable);
+
+      if (!$('.fclm-debug-btn')) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'fclm-debug-btn';
+        btn.textContent = 'Copy Debug Info';
+        btn.dataset.defaultLabel = 'Copy Debug Info';
+        btn.dataset.copiedLabel = 'Debug Copied!';
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          copyDebug(btn);
+        });
+        document.body.appendChild(btn);
+      }
+    }
+
+    setTimeout(() => {
+      buildSideNav();
+      if (isFunctionRollupPage()) getReportTables().forEach(initTable);
+    }, 600);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();

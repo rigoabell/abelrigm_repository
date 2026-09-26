@@ -1,0 +1,2386 @@
+// ==UserScript==
+// @name         AFT Edit Items — Job Automation
+// @namespace    aft-edit-items
+// @version      0.5.3
+// @description  Automate Edit Items workflow; FCResearch golden-format input; auto-confirm; live progress; copy/export results; detects restricted / transshipment / not-in-container (incl. "another container"); keeps history across reloads; marks LPN done pre-submit so reloads can't lose it; clicks Change Container at end. Collapsible panel.
+// @author       abelrigm
+// @match        https://aft-qt-na.aka.amazon.com/app/edititems*
+// @match        https://qt.na.aftx.amazonoperations.app/app/edititems*
+// @match        https://qt.eu.aftx.amazonoperations.app/app/edititems*
+// @match        https://qt.fe.aftx.amazonoperations.app/app/edititems*
+// @grant        GM_setClipboard
+// @grant        GM_addStyle
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_deleteValue
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // Timings are tuned aggressively for speed. Most "settle" delays were replaced with
+  // tighter polling via waitFor so we react as soon as the next step's element is in the DOM.
+  const CHAR_DELAY_MS = 2;        // was 8 — only used by char-by-char path (now unused for container/LPN)
+  const STEP_TIMEOUT_MS = 15000;
+  const POLL_MS = 50;             // was 120
+  const AFTER_SUBMIT_MS = 180;    // was 550
+  const AFTER_CLICK_MS = 100;     // was 350
+  const RESUME_DELAY_MS = 300;    // was 1200 — workflow DOM is usually ready by the time init runs
+  const STORAGE_KEY = 'aft_edit_automation_v2';
+  const PANEL_OPEN_KEY = 'aft_edit_panel_open';
+
+  function loadPanelOpen() {
+    try {
+      const v = GM_getValue(PANEL_OPEN_KEY, true);
+      return v !== false;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  function savePanelOpen(open) {
+    try {
+      GM_setValue(PANEL_OPEN_KEY, Boolean(open));
+    } catch (_) {}
+  }
+
+  function setPanelOpen(open) {
+    const panel = document.getElementById('aft-edit-panel');
+    const icon = document.getElementById('aft-edit-icon');
+    if (panel) panel.hidden = !open;
+    if (icon) icon.hidden = Boolean(open);
+    savePanelOpen(open);
+  }
+
+  const LPN_STATUS = {
+    PENDING: 'pending',
+    ACTIVE: 'active',
+    RESTRICTED: 'restricted',
+    TRANSSHIPMENT: 'transshipment',
+    NOT_IN_CONTAINER: 'not-in-container',
+    DONE: 'done',
+    SKIPPED: 'skipped',
+    ERROR: 'error',
+  };
+
+  const NEXT = {
+    ENTER_CONTAINER: 'enter-container',
+    ENTER_LPN: 'enter-lpn',
+    SELECT_UNSELLABLE: 'select-unsellable',
+    SELECT_CUSTOMER_DAMAGE: 'select-customer-damage',
+    CONFIRM: 'confirm',
+    CHANGE_CONTAINER: 'change-container',
+    DONE: 'done',
+  };
+
+  const STATES = {
+    IDLE: 'idle',
+    ENTER_CONTAINER: 'enter-container',
+    ENTER_LPNS: 'enter-lpns',
+    SELECT_UNSELLABLE: 'select-unsellable',
+    SELECT_CUSTOMER_DAMAGE: 'select-customer-damage',
+    CONFIRM: 'confirm',
+    CONFIRM_MANUAL: 'confirm-manual',
+    ENTER_NEXT_LPN: 'enter-next-lpn',
+    CHANGE_CONTAINER: 'change-container',
+    DONE: 'done',
+    STOPPED: 'stopped',
+    ERROR: 'error',
+  };
+
+  let jobQueue = [];
+  let jobIndex = 0;
+  let lpnIndex = 0;
+  let runGeneration = 0;
+  let currentState = STATES.IDLE;
+  let stateDetail = '';
+  let logLines = [];
+  let containerStepDone = false;
+  let runActive = false;
+  let nextAction = NEXT.DONE;
+  let resumeScheduled = false;
+  let lpnStatusRows = [];
+
+  function delay(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  function normalizeText(s) {
+    return (s || '').replace(/\s+/g, ' ').trim();
+  }
+
+  // Auto-confirm is always on in this version; helper kept for code symmetry / logs.
+  function isAutoConfirmEnabled() {
+    return true;
+  }
+
+  function log(msg) {
+    const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    logLines.push(line);
+    if (logLines.length > 80) logLines.shift();
+    const el = document.getElementById('aft-edit-log');
+    if (el) el.textContent = logLines.join('\n');
+    console.log('[AFT Edit]', msg);
+  }
+
+  function setUiStatus(text) {
+    const el = document.getElementById('aft-edit-status');
+    if (el) el.textContent = text;
+  }
+
+  function setState(state, detail) {
+    currentState = state;
+    stateDetail = detail || '';
+    const job = jobQueue[jobIndex];
+    const container = job?.containerId ?? '—';
+    const lpnTotal = job?.lpns?.length ?? 0;
+    setUiStatus(
+      `${state}${detail ? ` — ${detail}` : ''}\n` +
+        `Job ${jobIndex + 1}/${jobQueue.length} · ${container} · LPN ${lpnIndex + 1}/${lpnTotal}`
+    );
+    if (runActive) persistState();
+    updateResumeBanner();
+    renderStatusTable();
+  }
+
+  function buildLpnStatusRows(queue, previousRows) {
+    const prevMap = new Map((previousRows || []).map((r) => [r.key, r]));
+    const rows = [];
+    queue.forEach((job, jobIdx) => {
+      job.lpns.forEach((lpn, lpnIdx) => {
+        const key = `${job.containerId}\t${lpn}`;
+        const prev = prevMap.get(key);
+        rows.push({
+          key,
+          containerId: job.containerId,
+          lpn,
+          jobIndex: jobIdx,
+          lpnIndex: lpnIdx,
+          status: prev?.status || LPN_STATUS.PENDING,
+          message: prev?.message || '',
+        });
+      });
+    });
+    return rows;
+  }
+
+  function getStatusRow(jobIdx, lpnIdx) {
+    return lpnStatusRows.find(
+      (r) => r.jobIndex === jobIdx && r.lpnIndex === lpnIdx
+    );
+  }
+
+  function setStatusRow(jobIdx, lpnIdx, status, message) {
+    const row = getStatusRow(jobIdx, lpnIdx);
+    if (!row) return;
+    row.status = status;
+    row.message = message || '';
+    renderStatusTable();
+    if (runActive) persistState();
+  }
+
+  function setCurrentLpnStatus(status, message) {
+    setStatusRow(jobIndex, lpnIndex, status, message);
+  }
+
+  function statusLabel(status) {
+    const labels = {
+      pending: 'Pending',
+      active: 'In progress',
+      restricted: 'Restricted',
+      transshipment: 'Transshipment',
+      'not-in-container': 'Not in container',
+      done: 'Done',
+      skipped: 'Skipped',
+      error: 'Error',
+    };
+    return labels[status] || status;
+  }
+
+  function computeProgress() {
+    const total = lpnStatusRows.length;
+    if (!total) {
+      return { total: 0, done: 0, pct: 0, terminal: 0, edited: 0, pending: 0, active: 0 };
+    }
+    let done = 0;
+    let edited = 0;
+    let pending = 0;
+    let active = 0;
+    for (const row of lpnStatusRows) {
+      switch (row.status) {
+        case LPN_STATUS.DONE:
+          done += 1;
+          edited += 1;
+          break;
+        case LPN_STATUS.RESTRICTED:
+        case LPN_STATUS.TRANSSHIPMENT:
+        case LPN_STATUS.NOT_IN_CONTAINER:
+        case LPN_STATUS.SKIPPED:
+        case LPN_STATUS.ERROR:
+          done += 1;
+          break;
+        case LPN_STATUS.ACTIVE:
+          active += 1;
+          break;
+        case LPN_STATUS.PENDING:
+        default:
+          pending += 1;
+          break;
+      }
+    }
+    const pct = Math.round((done / total) * 100);
+    return { total, done, pct, edited, pending, active };
+  }
+
+  function renderProgress() {
+    const wrap = document.getElementById('aft-edit-progress-wrap');
+    const pctEl = document.getElementById('aft-edit-progress-pct');
+    const countsEl = document.getElementById('aft-edit-progress-counts');
+    const fillEl = document.getElementById('aft-edit-progress-fill');
+    const detailEl = document.getElementById('aft-edit-progress-detail');
+    const actionsEl = document.getElementById('aft-edit-results-actions');
+    if (!wrap) return;
+
+    const p = computeProgress();
+    if (!p.total) {
+      wrap.hidden = true;
+      if (actionsEl) actionsEl.hidden = true;
+      return;
+    }
+
+    wrap.hidden = false;
+    if (actionsEl) actionsEl.hidden = false;
+
+    if (pctEl) pctEl.textContent = `${p.pct}%`;
+    if (countsEl) countsEl.textContent = `${p.done} / ${p.total}`;
+    if (fillEl) fillEl.style.width = `${p.pct}%`;
+
+    if (detailEl) {
+      const job = jobQueue[jobIndex];
+      const currentLpn = job?.lpns?.[lpnIndex];
+      const lpnTotal = job?.lpns?.length ?? 0;
+      const parts = [];
+      parts.push(`${p.edited} edited`);
+      if (p.done - p.edited > 0) parts.push(`${p.done - p.edited} skipped/blocked`);
+      if (p.pending > 0) parts.push(`${p.pending} pending`);
+      if (runActive && job) {
+        parts.push(
+          `current: ${job.containerId} · LPN ${lpnIndex + 1}/${lpnTotal}` +
+            (currentLpn ? ` (${currentLpn})` : '')
+        );
+      }
+      detailEl.textContent = parts.join(' · ');
+    }
+  }
+
+  function renderStatusTable() {
+    const wrap = document.getElementById('aft-edit-status-wrap');
+    const tbody = document.getElementById('aft-edit-status-body');
+    if (!wrap || !tbody) {
+      renderProgress();
+      return;
+    }
+
+    tbody.textContent = '';
+    if (!lpnStatusRows.length) {
+      wrap.hidden = true;
+      renderProgress();
+      return;
+    }
+
+    wrap.hidden = false;
+    lpnStatusRows.forEach((row) => {
+      const tr = document.createElement('tr');
+      if (row.jobIndex === jobIndex && row.lpnIndex === lpnIndex && runActive) {
+        tr.className = 'aft-edit-row--current';
+      }
+
+      const tdC = document.createElement('td');
+      tdC.className = 'aft-edit-col-container';
+      tdC.textContent = row.containerId;
+
+      const tdL = document.createElement('td');
+      tdL.className = 'aft-edit-col-lpn';
+      tdL.textContent = row.lpn;
+
+      const tdS = document.createElement('td');
+      tdS.className = `aft-edit-col-status aft-edit-status--${row.status}`;
+      tdS.textContent = statusLabel(row.status);
+      if (row.message) {
+        tdS.title = row.message;
+      }
+
+      tr.append(tdC, tdL, tdS);
+      tbody.appendChild(tr);
+    });
+
+    renderProgress();
+  }
+
+  function initLpnStatusRows(queue, keepPrevious) {
+    lpnStatusRows = buildLpnStatusRows(queue, keepPrevious ? lpnStatusRows : null);
+    renderStatusTable();
+  }
+
+  function findNextPendingLpnIndex(afterIndex) {
+    const job = currentJob();
+    if (!job) return -1;
+    for (let i = afterIndex + 1; i < job.lpns.length; i += 1) {
+      const row = getStatusRow(jobIndex, i);
+      if (row?.status === LPN_STATUS.PENDING) return i;
+    }
+    return -1;
+  }
+
+  function skipRemainingPendingInCurrentJob(reason) {
+    const job = currentJob();
+    if (!job) return;
+    for (let i = 0; i < job.lpns.length; i += 1) {
+      const row = getStatusRow(jobIndex, i);
+      if (row?.status === LPN_STATUS.PENDING) {
+        setStatusRow(jobIndex, i, LPN_STATUS.SKIPPED, reason);
+      }
+    }
+  }
+
+  /**
+   * Classify an alert message into a blocking-alert kind. Order matters — most specific first.
+   * Returns one of: 'transshipment' | 'not-in-container' | 'restricted' | null.
+   *
+   * Confirmed AFT wording samples:
+   *   - "Item LPN… is not in the container."
+   *   - "Item LPN… has consumerType TRANSSHIPMENT, which has been restricted."
+   */
+  function classifyAlertText(text) {
+    if (!text) return null;
+    if (/trans-?ship|in[\s-]?transit|cross[\s-]?dock/i.test(text)) {
+      return 'transshipment';
+    }
+    // "not in the container" / "not in this container" / "not in container" / "not in <word> container"
+    if (/(not|n['o\u2019]?t)\s+in\s+(?:\w+\s+)?container/i.test(text)) return 'not-in-container';
+    if (/in\s+(a\s+different|another)\s+container/i.test(text)) return 'not-in-container';
+    if (
+      /does\s*n['o\u2019]?t\s+belong\s+(to\s+)?(this\s+|the\s+)?container/i.test(text) ||
+      /belongs?\s+to\s+(a\s+different|another)\s+container/i.test(text)
+    ) {
+      return 'not-in-container';
+    }
+    if (/wrong\s+container/i.test(text)) return 'not-in-container';
+    if (/restricted/i.test(text)) return 'restricted';
+    return null;
+  }
+
+  function getAlertSearchRoot() {
+    return (
+      getWorkflow() ||
+      document.getElementById('workspace') ||
+      document.getElementById('a-page') ||
+      document.body
+    );
+  }
+
+  /**
+   * Find an alert that blocks the current LPN edit. Returns { el, text, kind } or null.
+   *
+   * `kind`:
+   *   - 'restricted' / 'transshipment' / 'not-in-container' when the alert wording is recognized
+   *   - 'other-error' when an error/warning alert is visible but the wording is unknown
+   *
+   * If `expectedLpn` is provided and the alert mentions a *different* LPN, the alert is skipped
+   * (treated as stale signal from a previous LPN).
+   */
+  function findLpnBlockingAlert(expectedLpn) {
+    const root = getAlertSearchRoot();
+    if (!root) return null;
+
+    // Errors first (red), then warnings (yellow). a-alert-content is a wrapper used by both.
+    const selectors = [
+      '.a-alert-error .a-alert-content',
+      '.a-alert-error',
+      '.a-alert-warning .a-alert-content',
+      '.a-alert-warning',
+      '.a-alert-content',
+    ];
+    const seen = new Set();
+    for (const sel of selectors) {
+      for (const el of root.querySelectorAll(sel)) {
+        if (seen.has(el)) continue;
+        seen.add(el);
+        if (!isElementVisible(el)) continue;
+        const text = normalizeText(el.textContent);
+        if (!text) continue;
+
+        if (expectedLpn) {
+          const lpnMatch = text.match(/LPN[A-Z0-9]+/i);
+          if (lpnMatch && lpnMatch[0].toUpperCase() !== expectedLpn.toUpperCase()) {
+            continue;
+          }
+        }
+
+        const kind = classifyAlertText(text);
+        if (kind) return { el, text, kind };
+
+        // Unknown wording but it's an error-flavored alert — capture it generically so the row
+        // gets marked instead of the script silently sailing past it.
+        const isErrorish =
+          el.closest('.a-alert-error') || el.matches?.('.a-alert-error');
+        if (isErrorish) {
+          return { el, text, kind: 'other-error' };
+        }
+      }
+    }
+    return null;
+  }
+
+  // Kept for backward compatibility with the debug payload field name.
+  function findRestrictionAlert(expectedLpn) {
+    const hit = findLpnBlockingAlert(expectedLpn);
+    return hit && hit.kind === 'restricted' ? { el: hit.el, text: hit.text } : null;
+  }
+
+  const BLOCK_KIND_TO_STATUS = {
+    restricted: LPN_STATUS.RESTRICTED,
+    transshipment: LPN_STATUS.TRANSSHIPMENT,
+    'not-in-container': LPN_STATUS.NOT_IN_CONTAINER,
+    'other-error': LPN_STATUS.ERROR,
+  };
+
+  async function handleLpnBlocked(kind, lpn, alertText) {
+    const shortMsg = (alertText || '').slice(0, 160);
+    const status = BLOCK_KIND_TO_STATUS[kind] || LPN_STATUS.ERROR;
+    setCurrentLpnStatus(status, shortMsg);
+    log(`Blocked (${kind}): ${lpn} — ${shortMsg || '(no alert text)'}`);
+
+    const nextIdx = findNextPendingLpnIndex(lpnIndex);
+    if (nextIdx >= 0) {
+      lpnIndex = nextIdx;
+      containerStepDone = true;
+      markNextAndPersist(NEXT.ENTER_LPN);
+      log(`Trying next LPN in container: ${currentJob().lpns[lpnIndex]}`);
+
+      try {
+        const input = await waitForReadyTextInput(
+          getLpnInput,
+          `LPN input after ${kind}`,
+          8000
+        );
+        setNativeValue(input, '');
+        fireInput(input);
+        await delay(60);
+        return stepEnterLpns();
+      } catch (err) {
+        log(`After ${kind} retry: ${err.message}`);
+        persistState();
+        return;
+      }
+    }
+
+    log(`No more LPNs in this container (${kind}) — change container (hotkey d)`);
+    skipRemainingPendingInCurrentJob(`no more LPNs after ${kind}`);
+    return stepChangeContainer();
+  }
+
+  async function proceedAfterLpnSubmit(lpn) {
+    // Tight poll for ~600ms: react as soon as either the blocking alert or the
+    // Unsellable / Customer-Damage targets appear.
+    const deadline = performance.now() + 600;
+    while (performance.now() < deadline) {
+      const blocker = findLpnBlockingAlert(lpn);
+      if (blocker) return handleLpnBlocked(blocker.kind, lpn, blocker.text);
+      if (findUnsellableTarget() || findCustomerDamageTarget()) {
+        setCurrentLpnStatus(LPN_STATUS.ACTIVE, 'unsellable flow');
+        return stepSelectUnsellable();
+      }
+      await delay(POLL_MS);
+    }
+    return null;
+  }
+
+  function splitLpnsCell(raw) {
+    return (raw || '')
+      .split(/[,;]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  function parsePairLine(line) {
+    if (line.startsWith('#')) return null;
+
+    if (/^container\s*:/i.test(line)) {
+      return { containerId: line.replace(/^container\s*:/i, '').trim(), lpns: [] };
+    }
+    if (/^lpn\s*:/i.test(line)) {
+      return { containerId: '', lpns: [line.replace(/^lpn\s*:/i, '').trim()] };
+    }
+
+    if (/^container/i.test(line) && /^lpn/i.test(line.split(/\t/)[1] || '')) {
+      return null;
+    }
+
+    if (line.includes('\t')) {
+      const parts = line.split('\t').map((s) => s.trim()).filter(Boolean);
+      if (parts.length >= 2) {
+        return { containerId: parts[0], lpns: parts.slice(1).flatMap(splitLpnsCell) };
+      }
+    }
+
+    const pair = line.match(/^(\S+)\s+(LPN\S+)\s*$/i);
+    if (pair) {
+      return { containerId: pair[1], lpns: [pair[2]] };
+    }
+
+    if (line.includes(',')) {
+      const parts = line.split(',').map((s) => s.trim()).filter(Boolean);
+      if (parts.length >= 2 && looksLikeLpn(parts[1])) {
+        return { containerId: parts[0], lpns: parts.slice(1) };
+      }
+    }
+
+    if (looksLikeLpn(line)) {
+      return { containerId: '', lpns: [line] };
+    }
+
+    return { containerId: line, lpns: [] };
+  }
+
+  function parseJobInput(raw) {
+    const lines = (raw || '')
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    const jobs = [];
+    let current = null;
+
+    for (const line of lines) {
+      const parsed = parsePairLine(line);
+      if (!parsed) continue;
+
+      if (parsed.containerId && parsed.lpns.length) {
+        if (current?.containerId) jobs.push(current);
+        jobs.push({ containerId: parsed.containerId, lpns: parsed.lpns });
+        current = null;
+        continue;
+      }
+
+      if (parsed.containerId && !parsed.lpns.length) {
+        if (current?.containerId) jobs.push(current);
+        current = { containerId: parsed.containerId, lpns: [] };
+        continue;
+      }
+
+      if (!parsed.containerId && parsed.lpns.length) {
+        if (!current) current = { containerId: '', lpns: [] };
+        current.lpns.push(...parsed.lpns);
+        continue;
+      }
+    }
+
+    if (current?.containerId) jobs.push(current);
+    return jobs.filter((j) => j.containerId && j.lpns.length);
+  }
+
+  function looksLikeLpn(value) {
+    return /^LPN[A-Z0-9]+$/i.test(normalizeText(value));
+  }
+
+  function looksLikeContainer(value) {
+    const v = normalizeText(value);
+    if (!v) return false;
+    if (looksLikeLpn(v)) return false;
+    if (/^(cs|ts|tn|tx)[A-Za-z0-9]+$/i.test(v)) return true;
+    return /^[a-z]{2}[A-Za-z0-9]{5,}$/i.test(v) && !/^lpn/i.test(v);
+  }
+
+  function assertContainerValue(value, label) {
+    const v = normalizeText(value);
+    if (!v) throw new Error(`${label}: empty container`);
+    if (looksLikeLpn(v)) {
+      throw new Error(`${label}: "${v}" is an LPN, not a container`);
+    }
+    if (!looksLikeContainer(v)) {
+      log(`${label}: warning — "${v}" does not match usual container pattern`);
+    }
+    return v;
+  }
+
+  function assertLpnValue(value, label) {
+    const v = normalizeText(value);
+    if (!v) throw new Error(`${label}: empty LPN`);
+    if (looksLikeContainer(v) && !looksLikeLpn(v)) {
+      throw new Error(
+        `${label}: "${v}" looks like a container ID — refusing to type in LPN field`
+      );
+    }
+    if (!looksLikeLpn(v)) {
+      throw new Error(`${label}: "${v}" is not a valid LPN (expected LPN…)`);
+    }
+    return v;
+  }
+
+  function getActiveTextInput() {
+    const form = getPrimaryForm();
+    const inputs = getFormTextInputs(form);
+    return inputs[0] || null;
+  }
+
+  function inferScreenFromDom() {
+    if (findConfirmChangeTarget()) return 'confirm';
+    if (findCustomerDamageTarget() && !findUnsellableTarget()) {
+      return 'customer-damage';
+    }
+    if (findUnsellableTarget()) return 'unsellable';
+
+    const form = getPrimaryForm();
+    const inputs = getFormTextInputs(form);
+    if (inputs.length >= 2) return 'initial-form';
+
+    if (inputs.length === 1) {
+      const val = normalizeText(inputs[0].value);
+      if (val && looksLikeLpn(val)) return 'lpn-input';
+      if (val && looksLikeContainer(val)) return 'container-in-lpn-field';
+      if (findChangeContainerButton()) return 'lpn-input';
+      return 'container-input';
+    }
+
+    return 'unknown';
+  }
+
+  function resolveStartStep() {
+    const screen = inferScreenFromDom();
+    log(`Screen detect: ${screen}`);
+
+    if (screen === 'container-in-lpn-field') {
+      throw new Error(
+        'LPN box has a container ID in it — clear the field manually, then reset automation and Start again'
+      );
+    }
+
+    if (
+      screen === 'lpn-input' ||
+      screen === 'unsellable' ||
+      screen === 'customer-damage' ||
+      screen === 'confirm'
+    ) {
+      containerStepDone = true;
+      return 'lpn';
+    }
+
+    containerStepDone = false;
+    return 'container';
+  }
+
+  function syncAutomationToScreen() {
+    const screen = inferScreenFromDom();
+    const input = getActiveTextInput();
+    const val = normalizeText(input?.value);
+
+    if (screen === 'container-in-lpn-field') {
+      containerStepDone = false;
+      log(`Sync: container "${val}" stuck in LPN field — clear it manually`);
+      setUiStatus(`⚠ Container in LPN field: ${val}\nClear field manually, then Reset and Start again.`);
+      return screen;
+    }
+
+    if (
+      screen === 'lpn-input' ||
+      screen === 'unsellable' ||
+      screen === 'customer-damage' ||
+      screen === 'confirm'
+    ) {
+      containerStepDone = true;
+      log('Sync: past container step — will use LPN field only');
+    } else {
+      containerStepDone = false;
+      log('Sync: at container entry — will type container first');
+    }
+
+    setUiStatus(`Synced: ${screen}\ncontainerStepDone=${containerStepDone}`);
+    return screen;
+  }
+
+  function resetAutomationState() {
+    runGeneration += 1;
+    jobIndex = 0;
+    lpnIndex = 0;
+    containerStepDone = false;
+    runActive = false;
+    nextAction = NEXT.DONE;
+    lpnStatusRows = [];
+    renderStatusTable();
+    clearPersistedState();
+    setState(STATES.IDLE, 'automation reset');
+    log('Automation state reset (app workflow unchanged)');
+  }
+
+  function isTerminalState() {
+    // IDLE is *not* terminal — it's used both as initial state and as the transient state
+    // during resume (`setState(STATES.IDLE, 'resuming X')`). Treating it as terminal makes
+    // persistState() write `runActive=false` mid-resume, which kills auto-resume on the
+    // next reload (some AFT hosts double-reload during navigation).
+    return (
+      currentState === STATES.DONE ||
+      currentState === STATES.STOPPED ||
+      currentState === STATES.ERROR
+    );
+  }
+
+  function markNextAndPersist(action, { run = true } = {}) {
+    nextAction = action;
+    runActive = run && action !== NEXT.DONE;
+    persistState();
+  }
+
+  function persistState() {
+    const payload = {
+      scriptVersion: '0.5.3',
+      lpnStatusRows,
+      savedAt: new Date().toISOString(),
+      runActive: runActive && !isTerminalState(),
+      nextAction,
+      jobQueue,
+      jobIndex,
+      lpnIndex,
+      containerStepDone,
+      currentState,
+      stateDetail,
+      jobsText: document.getElementById('aft-edit-jobs')?.value ?? '',
+      logLines: logLines.slice(-40),
+    };
+
+    try {
+      GM_setValue(STORAGE_KEY, JSON.stringify(payload));
+    } catch (err) {
+      console.warn('[AFT Edit] persist failed', err);
+    }
+  }
+
+  function loadPersistedState() {
+    try {
+      const raw = GM_getValue(STORAGE_KEY, null);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch (err) {
+      console.warn('[AFT Edit] load failed', err);
+      return null;
+    }
+  }
+
+  function clearPersistedState() {
+    try {
+      GM_deleteValue(STORAGE_KEY);
+    } catch (err) {
+      console.warn('[AFT Edit] clear failed', err);
+    }
+  }
+
+  function restorePersistedToMemory(saved) {
+    if (!saved) return false;
+    jobQueue = Array.isArray(saved.jobQueue) ? saved.jobQueue : [];
+    jobIndex = saved.jobIndex ?? 0;
+    lpnIndex = saved.lpnIndex ?? 0;
+    containerStepDone = Boolean(saved.containerStepDone);
+    nextAction = saved.nextAction || NEXT.DONE;
+    runActive = Boolean(saved.runActive);
+    currentState = saved.currentState || STATES.IDLE;
+    stateDetail = saved.stateDetail || '';
+    logLines = Array.isArray(saved.logLines) ? saved.logLines : [];
+
+    const ta = document.getElementById('aft-edit-jobs');
+    if (ta && saved.jobsText) ta.value = saved.jobsText;
+
+    lpnStatusRows = Array.isArray(saved.lpnStatusRows)
+      ? saved.lpnStatusRows
+      : buildLpnStatusRows(jobQueue, null);
+    renderStatusTable();
+    return true;
+  }
+
+  function updateResumeBanner() {
+    const el = document.getElementById('aft-edit-resume-banner');
+    if (!el) return;
+    if (!runActive || nextAction === NEXT.DONE) {
+      el.hidden = true;
+      return;
+    }
+    const job = jobQueue[jobIndex];
+    el.hidden = false;
+    el.textContent =
+      `Saved — resumes after reload: job ${jobIndex + 1}/${jobQueue.length}` +
+      `${job ? ` (${job.containerId})` : ''} · LPN ${lpnIndex + 1} · next: ${nextAction}`;
+  }
+
+  function getWorkflow() {
+    return document.getElementById('workflow');
+  }
+
+  function getWorkspaceRoot() {
+    return (
+      document.getElementById('workspace') ||
+      document.getElementById('a-page') ||
+      document.body
+    );
+  }
+
+  function isElementVisible(el) {
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function findAllReturnButtons(root) {
+    const scope = root || getWorkspaceRoot();
+    return [...scope.querySelectorAll('input[data-aft-tool-hotkey="return"]')].filter(
+      isElementVisible
+    );
+  }
+
+  function getPrimaryForm() {
+    const workflow = getWorkflow();
+    if (!workflow) return null;
+    return (
+      workflow.querySelector('span form') ||
+      workflow.querySelector('form')
+    );
+  }
+
+  function getFormTextInputs(form) {
+    if (!form) return [];
+    const wrapperInputs = [...form.querySelectorAll(
+      'div.a-input-text-wrapper input[type="text"]'
+    )];
+    if (wrapperInputs.length) return wrapperInputs;
+    return [...form.querySelectorAll(':scope > div > input[type="text"]')];
+  }
+
+  function getContainerInput() {
+    if (containerStepDone) return null;
+
+    const screen = inferScreenFromDom();
+    if (
+      screen === 'lpn-input' ||
+      screen === 'unsellable' ||
+      screen === 'customer-damage' ||
+      screen === 'confirm' ||
+      screen === 'container-in-lpn-field'
+    ) {
+      return null;
+    }
+
+    const form = getPrimaryForm();
+    const inputs = getFormTextInputs(form);
+    if (inputs.length >= 2) return inputs[0];
+    if (screen === 'container-input' || screen === 'initial-form') return inputs[0] || null;
+    return null;
+  }
+
+  function getLpnInput() {
+    const screen = inferScreenFromDom();
+    const form = getPrimaryForm();
+    const inputs = getFormTextInputs(form);
+
+    if (screen === 'container-in-lpn-field') return null;
+    if (inputs.length >= 2) return inputs[1];
+
+    if (inputs.length === 1) {
+      const allowLpn =
+        containerStepDone ||
+        screen === 'lpn-input' ||
+        screen === 'unsellable' ||
+        screen === 'customer-damage';
+      if (allowLpn) return inputs[0];
+    }
+
+    return null;
+  }
+
+  function detectPhase() {
+    return inferScreenFromDom();
+  }
+
+  function findConfirmReturnButton() {
+    const buttons = findAllReturnButtons(getWorkspaceRoot());
+    const outsideWorkflow = buttons.filter((b) => !b.closest('#workflow'));
+    if (outsideWorkflow.length) return outsideWorkflow[0];
+    return buttons[0] || null;
+  }
+
+  function findReturnSubmitButton() {
+    const onConfirm = Boolean(findConfirmChangeTarget());
+    const buttons = findAllReturnButtons(getWorkspaceRoot());
+
+    if (!buttons.length) {
+      const workflow = getWorkflow();
+      return workflow?.querySelector('input[data-aft-tool-hotkey="return"]') || null;
+    }
+
+    if (onConfirm) {
+      const outsideWorkflow = buttons.filter((b) => !b.closest('#workflow'));
+      if (outsideWorkflow.length) return outsideWorkflow[0];
+    }
+
+    const inWorkflow = buttons.filter((b) => b.closest('#workflow'));
+    if (inWorkflow.length) return inWorkflow[0];
+
+    return buttons[0];
+  }
+
+  function findHeadingLabel(textMatch) {
+    const workflow = getWorkflow();
+    if (!workflow) return null;
+    const headings = workflow.querySelectorAll('h1.a-size-base, h1.a-size-large');
+    for (const h of headings) {
+      if (textMatch(normalizeText(h.textContent))) {
+        return h.closest('label') || h;
+      }
+    }
+    return null;
+  }
+
+  function findUnsellableTarget() {
+    return findHeadingLabel((t) => /^unsellable$/i.test(t));
+  }
+
+  function findConfirmChangeTarget() {
+    const workflow = getWorkflow();
+    if (!workflow) return null;
+    for (const h of workflow.querySelectorAll('h1.a-size-large')) {
+      if (/confirm change/i.test(normalizeText(h.textContent))) {
+        return h;
+      }
+    }
+    return null;
+  }
+
+  function findCustomerDamageTarget() {
+    const workflow = getWorkflow();
+    if (!workflow) return null;
+    const radio = workflow.querySelector('input[type="radio"][value="CUSTOMER_DAMAGE"]');
+    if (radio) return radio.closest('label') || radio;
+    for (const label of workflow.querySelectorAll('label')) {
+      if (/customer damage/i.test(normalizeText(label.textContent))) {
+        return label;
+      }
+    }
+    return null;
+  }
+
+  function findChangeContainerButton() {
+    const workflow = getWorkflow();
+    if (!workflow) return null;
+    return (
+      workflow.querySelector('input[data-aft-tool-hotkey="d"]') ||
+      workflow.querySelector('#a-autoid-1 input.a-button-input[type="submit"]')
+    );
+  }
+
+  function setNativeValue(el, value) {
+    const proto =
+      el instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (setter) setter.call(el, value);
+    else el.value = value;
+  }
+
+  function fireInput(el) {
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  async function typeCharacterByCharacter(el, text) {
+    if (!text) return;
+    el.focus();
+    setNativeValue(el, '');
+    fireInput(el);
+
+    for (const ch of text) {
+      setNativeValue(el, el.value + ch);
+      fireInput(el);
+      await delay(CHAR_DELAY_MS);
+    }
+  }
+
+  function setInputValueInstant(el, text) {
+    el.focus();
+    setNativeValue(el, text);
+    fireInput(el);
+  }
+
+  function inputMatches(el, expected) {
+    return normalizeText(el?.value) === normalizeText(expected);
+  }
+
+  async function ensureInputValue(el, value, { fast, label }) {
+    if (!value) {
+      throw new Error(`${label}: empty value to type`);
+    }
+
+    el.focus();
+    await delay(15);
+
+    if (fast) {
+      setInputValueInstant(el, value);
+    } else {
+      await typeCharacterByCharacter(el, value);
+    }
+
+    await delay(40);
+
+    if (!inputMatches(el, value)) {
+      log(`${label}: retry typing (fast)`);
+      setInputValueInstant(el, value);
+      await delay(40);
+    }
+
+    if (!inputMatches(el, value)) {
+      throw new Error(`${label}: could not set "${value}" (field has "${el.value}")`);
+    }
+
+    log(`${label}: typed "${value}"`);
+  }
+
+  function pressEnter(el) {
+    const opts = {
+      key: 'Enter',
+      code: 'Enter',
+      keyCode: 13,
+      which: 13,
+      bubbles: true,
+      cancelable: true,
+    };
+    el.dispatchEvent(new KeyboardEvent('keydown', opts));
+    el.dispatchEvent(new KeyboardEvent('keypress', opts));
+    el.dispatchEvent(new KeyboardEvent('keyup', opts));
+  }
+
+  async function activateClick(target) {
+    if (!target) return false;
+    const clickEl =
+      target.matches('input, button, label, h1')
+        ? target
+        : target.closest('label, button, input') || target;
+    clickEl.focus();
+    clickEl.click();
+    await delay(AFTER_CLICK_MS);
+    return true;
+  }
+
+  async function submitViaReturn(relatedInput, { preferConfirm = false } = {}) {
+    const btn = preferConfirm
+      ? findConfirmReturnButton() || findReturnSubmitButton()
+      : findReturnSubmitButton();
+
+    if (btn) {
+      const where = btn.closest('#workflow') ? 'workflow' : 'workspace';
+      log(`Submit: Return button (${where})`);
+      await activateClick(btn);
+      return true;
+    }
+
+    const form = relatedInput?.closest('form');
+    if (form?.requestSubmit) {
+      log('Submit: form.requestSubmit');
+      form.requestSubmit();
+      return true;
+    }
+
+    return false;
+  }
+
+  async function submitConfirmStep() {
+    const returnBtn = findConfirmReturnButton();
+    if (returnBtn) {
+      log('Confirm: click Return (workspace toolbar)');
+      await activateClick(returnBtn);
+      return true;
+    }
+
+    const heading = findConfirmChangeTarget();
+    if (heading) {
+      log('Confirm: Return not found — fallback submit');
+      const submitted = await submitViaReturn(heading, { preferConfirm: true });
+      if (!submitted) {
+        pressEnter(heading);
+        log('Confirm: Enter on heading');
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  async function fillInputAndSubmit(el, value, { fast = false, label = 'field' } = {}) {
+    if (!el) throw new Error(`${label}: input not found`);
+    await ensureInputValue(el, value, { fast, label });
+    await delay(30);
+
+    const submitted = await submitViaReturn(el);
+    if (!submitted) {
+      log('Submit: keyboard Enter fallback');
+      pressEnter(el);
+    }
+
+    await delay(AFTER_SUBMIT_MS);
+    return true;
+  }
+
+  function waitForReadyTextInput(getter, label) {
+    return waitFor(() => {
+      const input = getter();
+      if (!input) return null;
+      if (input.disabled) return null;
+      if (input.offsetParent === null && !input.closest('#workflow')) return null;
+      return input;
+    }, label);
+  }
+
+  function waitFor(getter, label, timeoutMs = STEP_TIMEOUT_MS) {
+    const gen = runGeneration;
+    const started = performance.now();
+
+    return new Promise((resolve, reject) => {
+      const tick = () => {
+        if (gen !== runGeneration) {
+          reject(new Error('stopped'));
+          return;
+        }
+        const result = getter();
+        if (result) {
+          resolve(result);
+          return;
+        }
+        if (performance.now() - started > timeoutMs) {
+          reject(new Error(`Timeout waiting for ${label}`));
+          return;
+        }
+        setTimeout(tick, POLL_MS);
+      };
+      tick();
+    });
+  }
+
+  async function waitAfterContainerSubmit(containerId) {
+    await waitFor(() => {
+      if (findUnsellableTarget()) return 'unsellable';
+      if (findCustomerDamageTarget()) return 'customer-damage';
+
+      const lpnInput = getLpnInput();
+      if (lpnInput) return lpnInput;
+
+      const form = getPrimaryForm();
+      const inputs = getFormTextInputs(form);
+      if (inputs.length >= 2) return inputs[1];
+
+      const single = inputs[0];
+      if (single) {
+        const val = normalizeText(single.value);
+        if (val === '' || (val !== containerId && looksLikeLpn(val) === false)) {
+          return single;
+        }
+      }
+      return null;
+    }, 'screen after container submit');
+  }
+
+  function currentJob() {
+    return jobQueue[jobIndex] || null;
+  }
+
+  function hasMoreJobs() {
+    return jobIndex < jobQueue.length - 1;
+  }
+
+  async function stepEnterContainer() {
+    const job = currentJob();
+    if (!job) return;
+
+    const screen = inferScreenFromDom();
+    if (screen === 'lpn-input' || screen === 'container-in-lpn-field') {
+      throw new Error(
+        'Already on LPN screen — reset automation (or click Done in the app) before typing container'
+      );
+    }
+
+    containerStepDone = false;
+    const containerId = assertContainerValue(job.containerId, 'Container');
+    setState(STATES.ENTER_CONTAINER, containerId);
+    log(`Container: ${containerId}`);
+
+    const input = await waitForReadyTextInput(getContainerInput, 'container input');
+    const fieldVal = normalizeText(input.value);
+    if (fieldVal && looksLikeLpn(fieldVal)) {
+      throw new Error('Container field has an LPN — reset workflow first');
+    }
+
+    markNextAndPersist(NEXT.ENTER_LPN);
+    await fillInputAndSubmit(input, containerId, {
+      fast: true,
+      label: 'Container',
+    });
+
+    containerStepDone = true;
+    markNextAndPersist(NEXT.ENTER_LPN);
+    try {
+      await waitAfterContainerSubmit(job.containerId);
+    } catch (err) {
+      log(`After container (page may reload): ${err.message}`);
+      persistState();
+      return;
+    }
+    log(`Container accepted, phase=${detectPhase()}`);
+
+    lpnIndex = 0;
+    if (!job.lpns.length) {
+      setState(STATES.CHANGE_CONTAINER, 'no LPNs — switching');
+      return stepChangeContainer();
+    }
+    return stepEnterLpns();
+  }
+
+  async function stepEnterLpns() {
+    const job = currentJob();
+    if (!job?.lpns?.length) return stepChangeContainer();
+
+    const lpn = assertLpnValue(job.lpns[lpnIndex], 'LPN');
+    const isSubsequent = lpnIndex > 0;
+
+    setState(
+      isSubsequent ? STATES.ENTER_NEXT_LPN : STATES.ENTER_LPNS,
+      lpn
+    );
+    log(`LPN field: ${lpn}`);
+
+    await waitFor(() => {
+      const input = getLpnInput();
+      if (!input) return null;
+      const val = normalizeText(input.value);
+      if (val && looksLikeContainer(val) && !looksLikeLpn(val)) return null;
+      if (val && val === normalizeText(job.containerId)) return null;
+      return input;
+    }, 'LPN input ready (empty, not container ID)');
+
+    const input = await waitForReadyTextInput(getLpnInput, 'LPN input (after container)');
+    const preVal = normalizeText(input.value);
+    if (preVal && looksLikeContainer(preVal) && !looksLikeLpn(preVal)) {
+      throw new Error(
+        `LPN field still has container "${preVal}" — reset workflow before continuing`
+      );
+    }
+
+    setCurrentLpnStatus(LPN_STATUS.ACTIVE, 'entering LPN');
+    markNextAndPersist(NEXT.SELECT_UNSELLABLE);
+    await fillInputAndSubmit(input, lpn, { fast: true, label: 'LPN' });
+
+    const proceeded = await proceedAfterLpnSubmit(lpn);
+    if (proceeded !== undefined && proceeded !== null) return proceeded;
+
+    try {
+      await waitFor(
+        () =>
+          findLpnBlockingAlert(lpn) ||
+          findUnsellableTarget() ||
+          findCustomerDamageTarget(),
+        'response after LPN',
+        4000
+      );
+      const blocker = findLpnBlockingAlert(lpn);
+      if (blocker) return handleLpnBlocked(blocker.kind, lpn, blocker.text);
+      return stepSelectUnsellable();
+    } catch (err) {
+      const blocker = findLpnBlockingAlert(lpn);
+      if (blocker) return handleLpnBlocked(blocker.kind, lpn, blocker.text);
+      log(`After LPN (page may reload): ${err.message}`);
+      persistState();
+      return;
+    }
+  }
+
+  async function stepSelectUnsellable() {
+    const job = currentJob();
+    const lpn = job?.lpns[lpnIndex];
+    if (lpn) {
+      const blocker = findLpnBlockingAlert(lpn);
+      if (blocker) return handleLpnBlocked(blocker.kind, lpn, blocker.text);
+    }
+
+    setState(STATES.SELECT_UNSELLABLE);
+    const target = await waitFor(findUnsellableTarget, 'Unsellable');
+    markNextAndPersist(NEXT.SELECT_CUSTOMER_DAMAGE);
+    await activateClick(target);
+    await submitViaReturn(target);
+    // Skip extra settle delay — stepSelectCustomerDamage opens with waitFor() which polls.
+    try {
+      return stepSelectCustomerDamage();
+    } catch (err) {
+      log(`After Unsellable (page may reload): ${err.message}`);
+      persistState();
+    }
+  }
+
+  async function stepSelectCustomerDamage() {
+    setState(STATES.SELECT_CUSTOMER_DAMAGE);
+    const target = await waitFor(findCustomerDamageTarget, 'Customer Damage');
+    markNextAndPersist(NEXT.CONFIRM);
+    await activateClick(target);
+    await submitViaReturn(target.closest('label') || target);
+    // Skip extra settle delay — stepConfirm opens with waitFor() which polls.
+    try {
+      return stepConfirm();
+    } catch (err) {
+      log(`After Customer Damage (page may reload): ${err.message}`);
+      persistState();
+    }
+  }
+
+  async function stepConfirm() {
+    const job = currentJob();
+    const confirmedLpnIndex = lpnIndex;
+    const confirmedLpn = job?.lpns[confirmedLpnIndex];
+
+    // Decide what to do AFTER this confirm. If there are more pending LPNs in the same
+    // container, type the next one. Otherwise click Change Container — even on the very
+    // last job, so the app lands cleanly on the next-container screen. stepChangeContainer
+    // detects end-of-queue and marks DONE after clicking the button.
+    let actionAfter = NEXT.CHANGE_CONTAINER;
+    const nextPending = findNextPendingLpnIndex(lpnIndex);
+    if (nextPending >= 0) {
+      lpnIndex = nextPending;
+      containerStepDone = true;
+      actionAfter = NEXT.ENTER_LPN;
+    }
+
+    // Confirm is the point of no return — we're about to click the confirm Return button.
+    // Mark the LPN as done BEFORE we persist + submit so a reload (which happens almost
+    // every time post-confirm) doesn't lose the status. If the submit fails, the catch
+    // path in runJobQueue downgrades to ERROR.
+    if (confirmedLpn) {
+      setStatusRow(jobIndex, confirmedLpnIndex, LPN_STATUS.DONE, 'confirmed');
+    }
+    markNextAndPersist(actionAfter);
+
+    await waitFor(findConfirmChangeTarget, 'Confirm change screen');
+
+    setState(STATES.CONFIRM, 'auto');
+    log('Auto-confirm — submitting');
+    const submitted = await submitConfirmStep();
+    if (!submitted) {
+      if (confirmedLpn) {
+        setStatusRow(
+          jobIndex,
+          confirmedLpnIndex,
+          LPN_STATUS.ERROR,
+          'auto-confirm failed — Return button not found'
+        );
+      }
+      throw new Error('Auto-confirm failed — Return button not found on confirm screen');
+    }
+    try {
+      await waitFor(
+        () => (findConfirmChangeTarget() ? null : true),
+        'confirm screen dismissed',
+        4000
+      );
+    } catch (_) {
+      log('Confirm heading still visible — Return may not have registered');
+    }
+    log('Confirmed change');
+
+    return continueAfterConfirm(actionAfter);
+  }
+
+  async function continueAfterConfirm(actionAfter) {
+    if (actionAfter === NEXT.ENTER_LPN) {
+      try {
+        return await stepEnterLpns();
+      } catch (err) {
+        log(`After confirm → LPN (reload ok): ${err.message}`);
+        persistState();
+        return;
+      }
+    }
+    if (actionAfter === NEXT.CHANGE_CONTAINER) {
+      return stepChangeContainer();
+    }
+
+    // No more LPNs and no more jobs — finalize by clicking Change Container so the app
+    // returns to a clean "next container" state.
+    return finalizeQueueAndClickChangeContainer('all jobs complete');
+  }
+
+  /**
+   * Final-step helper: click the Change Container (Done / hotkey d) button so the app
+   * lands on the next-container screen, then mark the run DONE. Keeps lpnStatusRows and
+   * the persisted snapshot intact so the user can copy/export results after the reload.
+   */
+  async function finalizeQueueAndClickChangeContainer(reasonDetail) {
+    setState(STATES.CHANGE_CONTAINER, 'finalizing');
+    log('Final container — clicking Change Container to clean up app state');
+
+    try {
+      const btn = await waitFor(
+        findChangeContainerButton,
+        'final change container button',
+        6000
+      );
+      await activateClick(btn);
+    } catch (err) {
+      log(`Final Change Container click skipped: ${err.message}`);
+    }
+
+    runActive = false;
+    markNextAndPersist(NEXT.DONE, { run: false });
+    // Keep persisted state — table history survives reloads. Only Reset clears it.
+    setState(STATES.DONE, reasonDetail || 'queue complete');
+    log('All jobs finished');
+    runGeneration += 1;
+  }
+
+  async function stepChangeContainer() {
+    setState(STATES.CHANGE_CONTAINER);
+    log('Requesting new container (Done / hotkey d)');
+
+    const btn = await waitFor(findChangeContainerButton, 'change container button');
+
+    containerStepDone = false;
+    jobIndex += 1;
+    lpnIndex = 0;
+
+    if (jobIndex >= jobQueue.length) {
+      runActive = false;
+      markNextAndPersist(NEXT.DONE, { run: false });
+      // Keep persisted state so the results table is restored after the reload.
+      setState(STATES.DONE, 'queue complete');
+      log('Queue complete');
+      runGeneration += 1;
+      await activateClick(btn);
+      return;
+    }
+
+    markNextAndPersist(NEXT.ENTER_CONTAINER);
+    await activateClick(btn);
+
+    try {
+      await waitFor(getContainerInput, 'container input for next job', 4000);
+      return stepEnterContainer();
+    } catch (err) {
+      log(`After change container (page may reload): ${err.message}`);
+      persistState();
+    }
+  }
+
+  async function runFromNextAction() {
+    switch (nextAction) {
+      case NEXT.ENTER_CONTAINER:
+        await stepEnterContainer();
+        break;
+      case NEXT.ENTER_LPN:
+        await stepEnterLpns();
+        break;
+      case NEXT.SELECT_UNSELLABLE:
+        await stepSelectUnsellable();
+        break;
+      case NEXT.SELECT_CUSTOMER_DAMAGE:
+        await stepSelectCustomerDamage();
+        break;
+      case NEXT.CONFIRM:
+        await stepConfirm();
+        break;
+      case NEXT.CHANGE_CONTAINER:
+        await stepChangeContainer();
+        break;
+      default: {
+        const startStep = resolveStartStep();
+        if (startStep === 'lpn') await stepEnterLpns();
+        else await stepEnterContainer();
+      }
+    }
+  }
+
+  /**
+   * On resume, the saved `nextAction` reflects what the script expected before the page reloaded.
+   * Usually the app is right where we left it and we just run the saved action. But in some cases
+   * the app has either advanced further (e.g. silently auto-confirmed an LPN) or rewound, and
+   * blindly running the saved step would hang on a button that isn't there.
+   *
+   * The contract here is conservative: **only override when the on-screen step is incompatible
+   * with the saved action.** When saved action and screen match (the common case), do nothing —
+   * the app *always* returns to the empty LPN input after a successful edit and we still need to
+   * type the next LPN for that container.
+   */
+  function reconcileNextActionWithScreen() {
+    if (!runActive || nextAction === NEXT.DONE) return;
+
+    const screen = inferScreenFromDom();
+    const job = currentJob();
+
+    const compatible =
+      (nextAction === NEXT.ENTER_CONTAINER && screen === 'container-input') ||
+      (nextAction === NEXT.ENTER_LPN && screen === 'lpn-input') ||
+      (nextAction === NEXT.SELECT_UNSELLABLE && screen === 'unsellable') ||
+      (nextAction === NEXT.SELECT_CUSTOMER_DAMAGE && screen === 'customer-damage') ||
+      (nextAction === NEXT.CONFIRM && screen === 'confirm') ||
+      // Change-Container button lives on the LPN screen, so lpn-input is compatible.
+      (nextAction === NEXT.CHANGE_CONTAINER && screen === 'lpn-input');
+
+    if (compatible) {
+      log(`Reconcile: screen=${screen} matches ${nextAction} — proceeding as saved.`);
+      return;
+    }
+
+    // Incompatible: align to the actual on-screen step.
+
+    if (screen === 'confirm') {
+      log(`Reconcile: screen=confirm, overriding ${nextAction} → ${NEXT.CONFIRM}`);
+      containerStepDone = true;
+      markNextAndPersist(NEXT.CONFIRM);
+      return;
+    }
+
+    if (screen === 'unsellable') {
+      log(`Reconcile: screen=unsellable, overriding ${nextAction} → ${NEXT.SELECT_UNSELLABLE}`);
+      containerStepDone = true;
+      markNextAndPersist(NEXT.SELECT_UNSELLABLE);
+      return;
+    }
+
+    if (screen === 'customer-damage') {
+      log(
+        `Reconcile: screen=customer-damage, overriding ${nextAction} → ${NEXT.SELECT_CUSTOMER_DAMAGE}`
+      );
+      containerStepDone = true;
+      markNextAndPersist(NEXT.SELECT_CUSTOMER_DAMAGE);
+      return;
+    }
+
+    if (screen === 'container-input') {
+      log(
+        `Reconcile: screen=container-input, overriding ${nextAction} → ${NEXT.ENTER_CONTAINER}`
+      );
+      containerStepDone = false;
+      markNextAndPersist(NEXT.ENTER_CONTAINER);
+      return;
+    }
+
+    if (screen === 'lpn-input') {
+      // We're on the LPN screen but saved action expected something else.
+      // The only safe inference is when the saved action was mid-LPN
+      // (SELECT_UNSELLABLE / SELECT_CUSTOMER_DAMAGE / CONFIRM). In that case the app either
+      // (a) confirmed the edit and returned us here, or (b) blocked the edit with an alert.
+      // Check for a blocking alert FIRST before assuming success.
+      const wasMidLpn =
+        nextAction === NEXT.SELECT_UNSELLABLE ||
+        nextAction === NEXT.SELECT_CUSTOMER_DAMAGE ||
+        nextAction === NEXT.CONFIRM;
+
+      if (wasMidLpn && job) {
+        const expectedLpn = job.lpns[lpnIndex];
+        const blocker = findLpnBlockingAlert(expectedLpn);
+        const row = getStatusRow(jobIndex, lpnIndex);
+
+        if (blocker) {
+          // The LPN was blocked, not confirmed.
+          const status = BLOCK_KIND_TO_STATUS[blocker.kind] || LPN_STATUS.ERROR;
+          if (row && row.status !== status) {
+            setStatusRow(
+              jobIndex,
+              lpnIndex,
+              status,
+              `${blocker.kind}: ${blocker.text.slice(0, 160)}`
+            );
+          }
+          log(
+            `Reconcile: blocking alert detected (${blocker.kind}) for "${expectedLpn}" — not confirmed`
+          );
+        } else if (row && row.status !== LPN_STATUS.DONE) {
+          // No alert → the app silently confirmed the edit.
+          setStatusRow(
+            jobIndex,
+            lpnIndex,
+            LPN_STATUS.DONE,
+            'confirmed by app (reconciled on resume)'
+          );
+          log(
+            `Reconcile: assuming "${expectedLpn}" was confirmed (saved=${nextAction}, screen=lpn-input, no alert)`
+          );
+        }
+
+        const nextPending = findNextPendingLpnIndex(lpnIndex);
+        if (nextPending >= 0) {
+          lpnIndex = nextPending;
+          containerStepDone = true;
+          log(`Reconcile: more LPNs pending in this container → ENTER_LPN (idx ${lpnIndex})`);
+          markNextAndPersist(NEXT.ENTER_LPN);
+          return;
+        }
+
+        if (hasMoreJobs()) {
+          containerStepDone = true;
+          log('Reconcile: no more LPNs in this container → CHANGE_CONTAINER');
+          markNextAndPersist(NEXT.CHANGE_CONTAINER);
+          return;
+        }
+
+        log('Reconcile: queue exhausted on resume → finalize with Change Container');
+        finalizeQueueAndClickChangeContainer(
+          'queue complete (reconciled on resume)'
+        );
+        return;
+      }
+
+      // Otherwise (saved was ENTER_CONTAINER / DONE / something else and screen is now lpn-input):
+      // align to ENTER_LPN for the *current* (still-pending) LPN. Do NOT mark it done.
+      log(`Reconcile: screen=lpn-input, overriding ${nextAction} → ${NEXT.ENTER_LPN}`);
+      containerStepDone = true;
+      markNextAndPersist(NEXT.ENTER_LPN);
+    }
+  }
+
+  async function resumeJobQueue() {
+    if (resumeScheduled || !runActive || nextAction === NEXT.DONE) return;
+    resumeScheduled = true;
+    const gen = ++runGeneration;
+
+    log(`Resuming after reload → ${nextAction} (job ${jobIndex + 1}/${jobQueue.length})`);
+    setState(STATES.IDLE, `resuming ${nextAction}`);
+
+    try {
+      await waitFor(() => getWorkflow(), 'workflow after reload', 20000);
+      await delay(RESUME_DELAY_MS);
+      syncAutomationToScreen();
+      reconcileNextActionWithScreen();
+      if (!runActive || nextAction === NEXT.DONE) {
+        runGeneration += 1;
+        return;
+      }
+      await runFromNextAction();
+    } catch (err) {
+      if (gen !== runGeneration) return;
+      setState(STATES.ERROR, err.message);
+      log(`Resume error: ${err.message}`);
+      persistState();
+      runGeneration += 1;
+    }
+  }
+
+  async function runJobQueue() {
+    const gen = ++runGeneration;
+    logLines = logLines.length ? logLines : [];
+    log(`Starting ${jobQueue.length} job(s) (auto-confirm always on)`);
+
+    try {
+      const startStep = resolveStartStep();
+      nextAction = startStep === 'lpn' ? NEXT.ENTER_LPN : NEXT.ENTER_CONTAINER;
+      runActive = true;
+      markNextAndPersist(nextAction);
+      if (startStep === 'lpn') {
+        log('Skipping container entry — already on LPN step');
+        await stepEnterLpns();
+      } else {
+        await stepEnterContainer();
+      }
+    } catch (err) {
+      if (gen !== runGeneration) return;
+      setCurrentLpnStatus(LPN_STATUS.ERROR, err.message);
+      setState(STATES.ERROR, err.message);
+      log(`Error: ${err.message}`);
+      persistState();
+      runGeneration += 1;
+    }
+  }
+
+  function stopAutomation() {
+    runGeneration += 1;
+    runActive = false;
+    markNextAndPersist(NEXT.DONE, { run: false });
+    // Keep persisted state + status rows so the user can still review and Copy/Export results.
+    // Only Reset clears the table.
+    renderStatusTable();
+    setState(STATES.STOPPED, 'stopped by user');
+    log('Stopped');
+  }
+
+  function buildDebugPayload() {
+    const form = getPrimaryForm();
+    const inputs = getFormTextInputs(form);
+    const ta = document.getElementById('aft-edit-jobs');
+    const parsedFromTextarea = ta ? parseJobInput(ta.value) : [];
+    const input = inputs[0];
+    const val = normalizeText(input?.value);
+    return {
+      script: { name: 'AFT Edit Items — Job Automation', version: '0.5.2' },
+      capturedAt: new Date().toISOString(),
+      page: { url: location.href, title: document.title },
+      automation: {
+        state: currentState,
+        detail: stateDetail,
+        jobIndex,
+        lpnIndex,
+        containerStepDone,
+        autoConfirm: isAutoConfirmEnabled(),
+        phase: detectPhase(),
+        inferredScreen: inferScreenFromDom(),
+        fieldLooksLike: val
+          ? looksLikeLpn(val)
+            ? 'lpn'
+            : looksLikeContainer(val)
+              ? 'container'
+              : 'unknown'
+          : 'empty',
+        queue: jobQueue,
+        parsedFromTextarea,
+        runActive,
+        nextAction,
+        persisted: loadPersistedState(),
+        lpnStatusRows,
+      },
+      domSnapshot: {
+        blockingAlert: (() => {
+          const hit = findLpnBlockingAlert(currentJob()?.lpns[lpnIndex]);
+          return hit ? { kind: hit.kind, text: hit.text } : null;
+        })(),
+        hasRestrictionAlert: Boolean(
+          findRestrictionAlert(currentJob()?.lpns[lpnIndex])
+        ),
+        workflowPresent: Boolean(getWorkflow()),
+        textInputCount: inputs.length,
+        inputValues: inputs.map((i) => i.value),
+        hasReturnButton: Boolean(findReturnSubmitButton()),
+        returnButtonCount: findAllReturnButtons(getWorkspaceRoot()).length,
+        hasConfirmReturnButton: Boolean(findConfirmReturnButton()),
+        hasUnsellable: Boolean(findUnsellableTarget()),
+        hasCustomerDamage: Boolean(findCustomerDamageTarget()),
+        hasConfirm: Boolean(findConfirmChangeTarget()),
+        hasChangeContainerBtn: Boolean(findChangeContainerButton()),
+      },
+      log: logLines,
+    };
+  }
+
+  function copyToClipboard(text) {
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(text, 'text');
+      return Promise.resolve();
+    }
+    return navigator.clipboard.writeText(text);
+  }
+
+  /**
+   * Build a human + spreadsheet friendly report of edited vs not-edited (container, LPN) pairs.
+   * - "Edited" = LPN_STATUS.DONE rows.
+   * - "Not edited" = everything else (restricted, skipped, error, active, pending), with reason.
+   * Returns {text, edited, notEdited} where text is what we put on the clipboard.
+   */
+  function buildResultsReport() {
+    const editedRows = [];
+    const notEditedRows = [];
+    for (const row of lpnStatusRows) {
+      const entry = {
+        containerId: row.containerId,
+        lpn: row.lpn,
+        status: row.status,
+        message: row.message || '',
+      };
+      if (row.status === LPN_STATUS.DONE) editedRows.push(entry);
+      else notEditedRows.push(entry);
+    }
+
+    const editedContainers = new Set(editedRows.map((r) => r.containerId));
+    const notEditedContainers = new Set(notEditedRows.map((r) => r.containerId));
+
+    const lines = [];
+    lines.push(
+      `Edit Items results — ${new Date().toISOString()}`,
+      `Edited rows: ${editedRows.length} (${editedContainers.size} container(s))`,
+      `Not edited rows: ${notEditedRows.length} (${notEditedContainers.size} container(s))`,
+      ''
+    );
+
+    lines.push(`=== Edited (${editedRows.length}) ===`);
+    lines.push('Container\tLPN');
+    if (editedRows.length) {
+      editedRows.forEach((r) => lines.push(`${r.containerId}\t${r.lpn}`));
+    } else {
+      lines.push('(none)');
+    }
+    lines.push('');
+
+    lines.push(`=== Not edited (${notEditedRows.length}) ===`);
+    lines.push('Container\tLPN\tReason');
+    if (notEditedRows.length) {
+      notEditedRows.forEach((r) => {
+        const reason = r.message
+          ? `${statusLabel(r.status)}: ${r.message}`
+          : statusLabel(r.status);
+        lines.push(`${r.containerId}\t${r.lpn}\t${reason}`);
+      });
+    } else {
+      lines.push('(none)');
+    }
+
+    return {
+      text: lines.join('\n'),
+      editedRows,
+      notEditedRows,
+      editedContainers: [...editedContainers],
+      notEditedContainers: [...notEditedContainers],
+    };
+  }
+
+  async function onCopyResultsClick(btn) {
+    if (!lpnStatusRows.length) {
+      flashButton(btn, 'No jobs yet', true);
+      return;
+    }
+    const report = buildResultsReport();
+    try {
+      await copyToClipboard(report.text);
+      flashButton(
+        btn,
+        `Copied: ${report.editedRows.length} edited / ${report.notEditedRows.length} not`,
+        false
+      );
+    } catch (err) {
+      console.error('[AFT Edit] copy results failed', err);
+      flashButton(btn, 'Copy failed', true);
+    }
+  }
+
+  function csvEscape(value) {
+    const s = String(value ?? '');
+    if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  }
+
+  function buildResultsCsv() {
+    const lines = ['Container,LPN,Result,Reason'];
+    for (const row of lpnStatusRows) {
+      const result = row.status === LPN_STATUS.DONE ? 'Edited' : 'Not edited';
+      const reason =
+        row.status === LPN_STATUS.DONE
+          ? ''
+          : row.message
+            ? `${statusLabel(row.status)}: ${row.message}`
+            : statusLabel(row.status);
+      lines.push(
+        [
+          csvEscape(row.containerId),
+          csvEscape(row.lpn),
+          csvEscape(result),
+          csvEscape(reason),
+        ].join(',')
+      );
+    }
+    return lines.join('\n');
+  }
+
+  function resultsExportFilename() {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    return `edit-items-results-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(
+      d.getDate()
+    )}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.csv`;
+  }
+
+  function downloadResultsCsv(csv) {
+    const blob = new Blob([`\ufeff${csv}`], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = resultsExportFilename();
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function onExportResultsClick(btn) {
+    if (!lpnStatusRows.length) {
+      flashButton(btn, 'No jobs yet', true);
+      return;
+    }
+    try {
+      downloadResultsCsv(buildResultsCsv());
+      flashButton(btn, 'CSV exported', false);
+    } catch (err) {
+      console.error('[AFT Edit] export results failed', err);
+      flashButton(btn, 'Export failed', true);
+    }
+  }
+
+  function flashButton(btn, msg, isError) {
+    const orig = btn.dataset.label || btn.textContent;
+    btn.textContent = msg;
+    btn.classList.toggle('aft-edit-btn--error', isError);
+    setTimeout(() => {
+      btn.textContent = orig;
+      btn.classList.remove('aft-edit-btn--error');
+    }, 2000);
+  }
+
+  function injectUi() {
+    if (document.getElementById('aft-edit-root')) return;
+
+    GM_addStyle(`
+      #aft-edit-root {
+        position: fixed;
+        left: 16px;
+        bottom: 16px;
+        z-index: 2147483646;
+        font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+      }
+      #aft-edit-icon {
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #3d6a4a, #5aa078);
+        color: #fff;
+        border: 1px solid #4a6a4a;
+        box-shadow: 0 4px 14px rgba(0,0,0,.4);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: .02em;
+        user-select: none;
+        transition: transform .12s ease, box-shadow .12s ease;
+      }
+      #aft-edit-icon:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 6px 18px rgba(0,0,0,.5);
+      }
+      #aft-edit-panel {
+        background: #1a241a;
+        color: #eee;
+        border: 1px solid #4a6a4a;
+        border-radius: 8px;
+        padding: 10px 12px;
+        box-shadow: 0 4px 20px rgba(0,0,0,.35);
+        width: 300px;
+        max-height: 75vh;
+        overflow: auto;
+      }
+      #aft-edit-panel .aft-edit-title-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 6px;
+        gap: 6px;
+      }
+      #aft-edit-panel .aft-edit-title {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: .04em;
+        text-transform: uppercase;
+        color: #9cb;
+        margin-bottom: 0;
+      }
+      #aft-edit-close {
+        width: 20px;
+        height: 20px;
+        border-radius: 4px;
+        border: none;
+        background: #6a2a2a;
+        color: #fff;
+        font-size: 13px;
+        font-weight: 700;
+        line-height: 1;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+      }
+      #aft-edit-close:hover { background: #8b3a3a; }
+      #aft-edit-status {
+        font-size: 11px;
+        color: #bdf;
+        white-space: pre-wrap;
+        margin-bottom: 8px;
+        line-height: 1.35;
+      }
+      #aft-edit-jobs {
+        width: 100%;
+        box-sizing: border-box;
+        min-height: 88px;
+        resize: vertical;
+        border-radius: 6px;
+        border: 1px solid #4a6a4a;
+        background: #0f140f;
+        color: #eee;
+        font-size: 11px;
+        padding: 6px 8px;
+        margin-bottom: 8px;
+        font-family: ui-monospace, Consolas, monospace;
+      }
+      #aft-edit-progress-wrap {
+        margin-bottom: 8px;
+      }
+      .aft-edit-progress-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 12px;
+        font-weight: 700;
+        color: #cde;
+        margin-bottom: 4px;
+      }
+      #aft-edit-progress-pct {
+        font-variant-numeric: tabular-nums;
+      }
+      #aft-edit-progress-counts {
+        color: #9df;
+        font-variant-numeric: tabular-nums;
+        font-weight: 600;
+      }
+      .aft-edit-progress-track {
+        height: 6px;
+        background: #0f140f;
+        border-radius: 4px;
+        overflow: hidden;
+        border: 1px solid #4a6a4a;
+        margin-bottom: 4px;
+      }
+      #aft-edit-progress-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #3d6a4a, #5aa078);
+        border-radius: 3px;
+        transition: width 0.15s ease-out;
+      }
+      #aft-edit-progress-detail {
+        font-size: 10px;
+        color: #9ab;
+        line-height: 1.3;
+        word-break: break-all;
+      }
+      #aft-edit-results-actions {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 8px;
+      }
+      #aft-edit-results-actions .aft-edit-btn {
+        flex: 1;
+        margin-bottom: 0;
+        font-size: 12px;
+        padding: 6px 8px;
+      }
+      .aft-edit-btn {
+        display: block;
+        width: 100%;
+        border: none;
+        border-radius: 6px;
+        padding: 8px 10px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        background: #3d6a4a;
+        color: #fff;
+        margin-bottom: 6px;
+      }
+      .aft-edit-btn:hover:not(:disabled) { background: #4d7a5a; }
+      .aft-edit-btn:disabled { opacity: .55; cursor: wait; }
+      .aft-edit-btn--secondary { background: #2a4a3a; font-size: 12px; }
+      .aft-edit-btn--danger { background: #6a3a3a; }
+      .aft-edit-btn--error { background: #8b3a3a !important; }
+      .aft-edit-hint {
+        font-size: 10px;
+        color: #8a9;
+        margin-bottom: 8px;
+        line-height: 1.35;
+      }
+      #aft-edit-status-wrap {
+        margin-bottom: 8px;
+        max-height: 160px;
+        overflow: auto;
+        border: 1px solid #4a6a4a;
+        border-radius: 6px;
+      }
+      #aft-edit-status-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 10px;
+      }
+      #aft-edit-status-table th {
+        position: sticky;
+        top: 0;
+        background: #252d25;
+        color: #9ab;
+        text-align: left;
+        padding: 4px 5px;
+        border-bottom: 1px solid #4a6a4a;
+      }
+      #aft-edit-status-table td {
+        padding: 4px 5px;
+        border-bottom: 1px solid #2a3a2a;
+        vertical-align: top;
+      }
+      .aft-edit-row--current td { background: #2a4030; }
+      .aft-edit-col-container { font-family: ui-monospace, Consolas, monospace; color: #cde; }
+      .aft-edit-col-lpn { font-family: ui-monospace, Consolas, monospace; color: #9f9; }
+      .aft-edit-status--pending { color: #9ab; }
+      .aft-edit-status--active { color: #9df; font-weight: 600; }
+      .aft-edit-status--restricted { color: #f96; }
+      .aft-edit-status--transshipment { color: #fb6; }
+      .aft-edit-status--not-in-container { color: #f86; }
+      .aft-edit-status--done { color: #9f9; }
+      .aft-edit-status--skipped { color: #888; }
+      .aft-edit-status--error { color: #f88; }
+    `);
+
+    const root = document.createElement('div');
+    root.id = 'aft-edit-root';
+
+    const panel = document.createElement('div');
+    panel.id = 'aft-edit-panel';
+
+    const titleRow = document.createElement('div');
+    titleRow.className = 'aft-edit-title-row';
+
+    const title = document.createElement('div');
+    title.className = 'aft-edit-title';
+    title.textContent = 'Edit Items Automation v0.5.3 (turbo)';
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.id = 'aft-edit-close';
+    closeBtn.title = 'Hide panel';
+    closeBtn.setAttribute('aria-label', 'Hide panel');
+    closeBtn.textContent = '\u00D7';
+    closeBtn.addEventListener('click', () => setPanelOpen(false));
+
+    titleRow.append(title, closeBtn);
+
+    const resumeBanner = document.createElement('div');
+    resumeBanner.id = 'aft-edit-resume-banner';
+    resumeBanner.className = 'aft-edit-hint';
+    resumeBanner.style.color = '#bd8';
+    resumeBanner.hidden = true;
+
+    const status = document.createElement('div');
+    status.id = 'aft-edit-status';
+    status.textContent = 'idle — paste jobs from FCResearch and Start';
+
+    const progressWrap = document.createElement('div');
+    progressWrap.id = 'aft-edit-progress-wrap';
+    progressWrap.hidden = true;
+
+    const progressHead = document.createElement('div');
+    progressHead.className = 'aft-edit-progress-head';
+
+    const pctEl = document.createElement('span');
+    pctEl.id = 'aft-edit-progress-pct';
+    pctEl.textContent = '0%';
+
+    const countsEl = document.createElement('span');
+    countsEl.id = 'aft-edit-progress-counts';
+    countsEl.textContent = '0 / 0';
+
+    progressHead.append(pctEl, countsEl);
+
+    const progressTrack = document.createElement('div');
+    progressTrack.className = 'aft-edit-progress-track';
+    const progressFill = document.createElement('div');
+    progressFill.id = 'aft-edit-progress-fill';
+    progressTrack.appendChild(progressFill);
+
+    const progressDetail = document.createElement('div');
+    progressDetail.id = 'aft-edit-progress-detail';
+
+    progressWrap.append(progressHead, progressTrack, progressDetail);
+
+    const resultsActions = document.createElement('div');
+    resultsActions.id = 'aft-edit-results-actions';
+    resultsActions.hidden = true;
+
+    const copyResultsBtn = document.createElement('button');
+    copyResultsBtn.type = 'button';
+    copyResultsBtn.className = 'aft-edit-btn aft-edit-btn--secondary';
+    copyResultsBtn.dataset.label = 'Copy results';
+    copyResultsBtn.textContent = copyResultsBtn.dataset.label;
+    copyResultsBtn.title =
+      'Copy a TSV report of edited and not-edited (container, LPN) pairs, including the reason each was not edited.';
+    copyResultsBtn.addEventListener('click', () =>
+      onCopyResultsClick(copyResultsBtn)
+    );
+
+    const exportResultsBtn = document.createElement('button');
+    exportResultsBtn.type = 'button';
+    exportResultsBtn.className = 'aft-edit-btn aft-edit-btn--secondary';
+    exportResultsBtn.dataset.label = 'Export results';
+    exportResultsBtn.textContent = exportResultsBtn.dataset.label;
+    exportResultsBtn.title =
+      'Download a CSV with Container, LPN, Result, Reason for every row.';
+    exportResultsBtn.addEventListener('click', () =>
+      onExportResultsClick(exportResultsBtn)
+    );
+
+    resultsActions.append(copyResultsBtn, exportResultsBtn);
+
+    const statusWrap = document.createElement('div');
+    statusWrap.id = 'aft-edit-status-wrap';
+    statusWrap.hidden = true;
+
+    const statusTable = document.createElement('table');
+    statusTable.id = 'aft-edit-status-table';
+
+    const statusThead = document.createElement('thead');
+    const statusHeadRow = document.createElement('tr');
+    ['Container', 'LPN', 'Status'].forEach((text) => {
+      const th = document.createElement('th');
+      th.textContent = text;
+      statusHeadRow.appendChild(th);
+    });
+    statusThead.appendChild(statusHeadRow);
+
+    const statusTbody = document.createElement('tbody');
+    statusTbody.id = 'aft-edit-status-body';
+
+    statusTable.append(statusThead, statusTbody);
+    statusWrap.appendChild(statusTable);
+
+    const textarea = document.createElement('textarea');
+    textarea.id = 'aft-edit-jobs';
+    textarea.placeholder =
+      'Paste from FCResearch "Copy for Edit Items":\n' +
+      'csXNO5Hj963\tLPNNB5GW21Q6S\n' +
+      'csXAWk7wGGq\tLPNNB5GW21Q6S';
+    textarea.spellcheck = false;
+    textarea.addEventListener('input', () => {
+      if (!runActive) {
+        jobQueue = parseJobInput(textarea.value);
+        initLpnStatusRows(jobQueue, false);
+      } else if (runActive) {
+        persistState();
+      }
+    });
+    textarea.addEventListener('paste', () => {
+      setTimeout(() => {
+        if (runActive) persistState();
+      }, 0);
+    });
+
+    const startBtn = document.createElement('button');
+    startBtn.type = 'button';
+    startBtn.className = 'aft-edit-btn';
+    startBtn.dataset.label = 'Start jobs';
+    startBtn.textContent = startBtn.dataset.label;
+    startBtn.addEventListener('click', () => {
+      jobQueue = parseJobInput(textarea.value);
+      if (!jobQueue.length) {
+        flashButton(startBtn, 'Parse failed', true);
+        return;
+      }
+      jobIndex = 0;
+      lpnIndex = 0;
+      containerStepDone = false;
+      runActive = true;
+      resumeScheduled = false;
+      try {
+        syncAutomationToScreen();
+      } catch (e) {
+        log(String(e));
+      }
+      initLpnStatusRows(jobQueue, false);
+      log(`Parsed ${jobQueue.length} job(s): ${jobQueue.map((j) => `${j.containerId}→${j.lpns[0]}`).join('; ')}`);
+      persistState();
+      runJobQueue();
+      flashButton(startBtn, 'Running…', false);
+    });
+
+    const stopBtn = document.createElement('button');
+    stopBtn.type = 'button';
+    stopBtn.className = 'aft-edit-btn aft-edit-btn--danger';
+    stopBtn.textContent = 'Stop';
+    stopBtn.addEventListener('click', () => stopAutomation());
+
+    const resetBtn = document.createElement('button');
+    resetBtn.type = 'button';
+    resetBtn.className = 'aft-edit-btn aft-edit-btn--secondary';
+    resetBtn.textContent = 'Reset automation';
+    resetBtn.addEventListener('click', () => resetAutomationState());
+
+    const debugBtn = document.createElement('button');
+    debugBtn.type = 'button';
+    debugBtn.className = 'aft-edit-btn aft-edit-btn--secondary';
+    debugBtn.dataset.label = 'Copy debug JSON';
+    debugBtn.textContent = debugBtn.dataset.label;
+    debugBtn.addEventListener('click', async () => {
+      try {
+        await copyToClipboard(JSON.stringify(buildDebugPayload(), null, 2));
+        flashButton(debugBtn, 'Copied', false);
+      } catch (e) {
+        flashButton(debugBtn, 'Copy failed', true);
+      }
+    });
+
+    panel.append(
+      titleRow,
+      resumeBanner,
+      status,
+      progressWrap,
+      resultsActions,
+      statusWrap,
+      textarea,
+      startBtn,
+      stopBtn,
+      resetBtn,
+      debugBtn
+    );
+
+    const icon = document.createElement('button');
+    icon.type = 'button';
+    icon.id = 'aft-edit-icon';
+    icon.title = 'Open Edit Items Automation';
+    icon.setAttribute('aria-label', 'Open Edit Items Automation');
+    icon.textContent = 'EI';
+    icon.addEventListener('click', () => setPanelOpen(true));
+
+    root.append(panel, icon);
+    document.body.appendChild(root);
+
+    setPanelOpen(loadPanelOpen());
+
+    renderProgress();
+  }
+
+  function init() {
+    injectUi();
+
+    const saved = loadPersistedState();
+    if (saved) {
+      restorePersistedToMemory(saved);
+      const shouldResume = saved.runActive && saved.nextAction !== NEXT.DONE;
+      if (shouldResume) {
+        log(
+          `Restored session — job ${jobIndex + 1}/${jobQueue.length}, next: ${nextAction}`
+        );
+        updateResumeBanner();
+        setTimeout(() => resumeJobQueue(), RESUME_DELAY_MS);
+      } else if (lpnStatusRows.length) {
+        log(`Restored history — ${lpnStatusRows.length} row(s) (not running)`);
+        setState(currentState || STATES.IDLE, stateDetail || 'history restored');
+      } else {
+        log('Ready on Edit Items page');
+      }
+    } else {
+      log('Ready on Edit Items page');
+    }
+
+    window.addEventListener('pagehide', persistState);
+    window.addEventListener('beforeunload', persistState);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();

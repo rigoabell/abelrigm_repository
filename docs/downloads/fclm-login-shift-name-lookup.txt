@@ -1,0 +1,516 @@
+// ==UserScript==
+// @name         FCLM Login Shift + Name Lookup
+// @namespace    ultimate-tampermonkey
+// @version      0.1.1
+// @description  Paste logins and look up full name and shift from FCLM employee details
+// @author       Cursor
+// @match        https://fclm-portal.amazon.com/*
+// @grant        GM_setClipboard
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const installationKey = '__fclmLoginShiftNameLookupInstalled';
+  const shiftLabels = ['Shift', 'Shift Pattern', 'Schedule', 'Shift Code'];
+
+  function normalizeLogins(value) {
+    return Array.from(
+      new Set(
+        (value ?? '')
+          .split(/[\s,;]+/)
+          .map((item) => item.trim())
+          .filter(Boolean)
+      )
+    );
+  }
+
+  function getCurrentWarehouseId() {
+    return new URL(window.location.href).searchParams.get('warehouseId') ?? '';
+  }
+
+  function createStyles() {
+    const style = document.createElement('style');
+    style.textContent = `
+      .tm-fclm-launcher {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        z-index: 2147483646;
+        border: none;
+        border-radius: 999px;
+        padding: 10px 14px;
+        background: #111827;
+        color: #f9fafb;
+        font: 600 13px/1.2 Arial, sans-serif;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.25);
+        cursor: pointer;
+      }
+      .tm-fclm-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(15, 23, 42, 0.55);
+      }
+      .tm-fclm-modal {
+        width: min(1040px, calc(100vw - 32px));
+        max-height: calc(100vh - 32px);
+        display: flex;
+        flex-direction: column;
+        border-radius: 16px;
+        overflow: hidden;
+        background: #ffffff;
+        box-shadow: 0 24px 60px rgba(15, 23, 42, 0.3);
+        font-family: Arial, sans-serif;
+      }
+      .tm-fclm-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 16px 18px;
+        border-bottom: 1px solid #e5e7eb;
+      }
+      .tm-fclm-title {
+        margin: 0;
+        color: #111827;
+        font: 700 18px/1.2 Arial, sans-serif;
+      }
+      .tm-fclm-close {
+        border: none;
+        background: transparent;
+        color: #6b7280;
+        font: 700 24px/1 Arial, sans-serif;
+        cursor: pointer;
+      }
+      .tm-fclm-content {
+        display: grid;
+        gap: 14px;
+        padding: 16px 18px 18px;
+        overflow: auto;
+      }
+      .tm-fclm-help {
+        margin: 0;
+        color: #4b5563;
+        font: 500 13px/1.4 Arial, sans-serif;
+      }
+      .tm-fclm-row {
+        display: grid;
+        gap: 10px;
+      }
+      .tm-fclm-label {
+        color: #111827;
+        font: 700 12px/1.2 Arial, sans-serif;
+      }
+      .tm-fclm-input,
+      .tm-fclm-textarea {
+        width: 100%;
+        border: 1px solid #cbd5e1;
+        border-radius: 12px;
+        padding: 12px;
+        box-sizing: border-box;
+        color: #111827;
+      }
+      .tm-fclm-input {
+        font: 600 13px/1.3 Arial, sans-serif;
+      }
+      .tm-fclm-textarea {
+        min-height: 96px;
+        resize: vertical;
+        font: 500 13px/1.45 Consolas, "Courier New", monospace;
+      }
+      .tm-fclm-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+      .tm-fclm-button {
+        border: none;
+        border-radius: 10px;
+        padding: 10px 14px;
+        background: #111827;
+        color: #f9fafb;
+        font: 600 13px/1.2 Arial, sans-serif;
+        cursor: pointer;
+      }
+      .tm-fclm-button[disabled] {
+        opacity: 0.65;
+        cursor: wait;
+      }
+      .tm-fclm-button.tm-fclm-secondary {
+        background: #e5e7eb;
+        color: #111827;
+      }
+      .tm-fclm-status {
+        min-height: 18px;
+        color: #6b7280;
+        font: 500 12px/1.4 Arial, sans-serif;
+      }
+      .tm-fclm-table-wrap {
+        overflow: auto;
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+      }
+      .tm-fclm-table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      .tm-fclm-table th,
+      .tm-fclm-table td {
+        padding: 10px 12px;
+        border-bottom: 1px solid #e5e7eb;
+        text-align: left;
+        vertical-align: top;
+        font: 500 13px/1.4 Arial, sans-serif;
+      }
+      .tm-fclm-table th {
+        position: sticky;
+        top: 0;
+        background: #f8fafc;
+        color: #111827;
+        font-weight: 700;
+      }
+      .tm-fclm-error {
+        color: #b91c1c;
+      }
+    `;
+    return style;
+  }
+
+  function getDefinitionValue(doc, labels) {
+    const terms = Array.from(doc.querySelectorAll('dt'));
+    for (const term of terms) {
+      const termText = term.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+      if (!labels.some((label) => termText.toLowerCase() === label.toLowerCase())) {
+        continue;
+      }
+
+      let sibling = term.nextElementSibling;
+      while (sibling && sibling.tagName !== 'DD') {
+        sibling = sibling.nextElementSibling;
+      }
+
+      const value = sibling?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+      if (value) {
+        return value;
+      }
+    }
+
+    return '';
+  }
+
+  function parseFullName(doc) {
+    const headerText = doc.querySelector('.fold-control')?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+    if (!headerText) {
+      return '';
+    }
+
+    const match = headerText.match(/^(.*?)\s*\(/);
+    return (match?.[1] ?? headerText).trim();
+  }
+
+  function parseShift(doc) {
+    const directMatch = getDefinitionValue(doc, shiftLabels);
+    if (directMatch) {
+      return directMatch;
+    }
+
+    const combinedText = doc.body?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+    const fallbackMatch = combinedText.match(
+      /\b(?:Shift|Shift Pattern|Schedule|Shift Code)\b\s*[:\-]?\s*([A-Z0-9][A-Z0-9 /\-]{0,40})/i
+    );
+    return fallbackMatch?.[1]?.trim() ?? '';
+  }
+
+  async function copyText(text) {
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(text, 'text');
+      return;
+    }
+
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+  }
+
+  async function fetchEmployeeDetails(login, warehouseId) {
+    const url = new URL('/employee/timeDetails', window.location.origin);
+    url.searchParams.set('warehouseId', warehouseId);
+    url.searchParams.set('employeeId', login);
+
+    const response = await fetch(url.toString(), {
+      credentials: 'include'
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const html = await response.text();
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const fullName = parseFullName(doc);
+    const shift = parseShift(doc);
+
+    return {
+      login,
+      fullName: fullName || 'Not found',
+      shift: shift || 'Not found'
+    };
+  }
+
+  function install() {
+    if (window[installationKey]) {
+      return;
+    }
+    window[installationKey] = true;
+
+    document.documentElement.appendChild(createStyles());
+
+    const launcher = document.createElement('button');
+    launcher.type = 'button';
+    launcher.className = 'tm-fclm-launcher';
+    launcher.textContent = 'Shift Lookup';
+
+    let overlay = null;
+
+    function closeOverlay() {
+      overlay?.remove();
+      overlay = null;
+    }
+
+    function openOverlay() {
+      if (overlay?.isConnected) {
+        return;
+      }
+
+      overlay = document.createElement('div');
+      overlay.className = 'tm-fclm-overlay';
+
+      const modal = document.createElement('div');
+      modal.className = 'tm-fclm-modal';
+
+      const header = document.createElement('div');
+      header.className = 'tm-fclm-header';
+
+      const title = document.createElement('h2');
+      title.className = 'tm-fclm-title';
+      title.textContent = 'FCLM Login Shift + Name Lookup';
+
+      const closeButton = document.createElement('button');
+      closeButton.type = 'button';
+      closeButton.className = 'tm-fclm-close';
+      closeButton.textContent = '×';
+      closeButton.addEventListener('click', closeOverlay);
+
+      header.appendChild(title);
+      header.appendChild(closeButton);
+
+      const content = document.createElement('div');
+      content.className = 'tm-fclm-content';
+
+      const help = document.createElement('p');
+      help.className = 'tm-fclm-help';
+      help.textContent = 'Enter a warehouse and paste one or more logins separated by commas, spaces, or new lines.';
+
+      const warehouseRow = document.createElement('div');
+      warehouseRow.className = 'tm-fclm-row';
+
+      const warehouseLabel = document.createElement('label');
+      warehouseLabel.className = 'tm-fclm-label';
+      warehouseLabel.textContent = 'Warehouse ID';
+
+      const warehouseInput = document.createElement('input');
+      warehouseInput.className = 'tm-fclm-input';
+      warehouseInput.value = getCurrentWarehouseId();
+      warehouseInput.placeholder = 'MEM3';
+
+      warehouseRow.appendChild(warehouseLabel);
+      warehouseRow.appendChild(warehouseInput);
+
+      const loginRow = document.createElement('div');
+      loginRow.className = 'tm-fclm-row';
+
+      const loginLabel = document.createElement('label');
+      loginLabel.className = 'tm-fclm-label';
+      loginLabel.textContent = 'Logins';
+
+      const loginInput = document.createElement('textarea');
+      loginInput.className = 'tm-fclm-textarea';
+      loginInput.placeholder = 'abelrigm\njdoe\nasmith';
+
+      loginRow.appendChild(loginLabel);
+      loginRow.appendChild(loginInput);
+
+      const actions = document.createElement('div');
+      actions.className = 'tm-fclm-actions';
+
+      const lookupButton = document.createElement('button');
+      lookupButton.type = 'button';
+      lookupButton.className = 'tm-fclm-button';
+      lookupButton.textContent = 'Lookup';
+
+      const copyDbButton = document.createElement('button');
+      copyDbButton.type = 'button';
+      copyDbButton.className = 'tm-fclm-button tm-fclm-secondary';
+      copyDbButton.textContent = 'Copy DB Logins';
+
+      const clearButton = document.createElement('button');
+      clearButton.type = 'button';
+      clearButton.className = 'tm-fclm-button tm-fclm-secondary';
+      clearButton.textContent = 'Clear';
+
+      actions.appendChild(lookupButton);
+      actions.appendChild(copyDbButton);
+      actions.appendChild(clearButton);
+
+      const status = document.createElement('div');
+      status.className = 'tm-fclm-status';
+      status.textContent = 'Enter logins to look up.';
+
+      const tableWrap = document.createElement('div');
+      tableWrap.className = 'tm-fclm-table-wrap';
+
+      const table = document.createElement('table');
+      table.className = 'tm-fclm-table';
+
+      const thead = document.createElement('thead');
+      thead.innerHTML = '<tr><th>Login</th><th>Full Name</th><th>Shift</th><th>Status</th></tr>';
+
+      const tbody = document.createElement('tbody');
+      table.appendChild(thead);
+      table.appendChild(tbody);
+      tableWrap.appendChild(table);
+      let lookupResults = [];
+
+      async function runLookup() {
+        const warehouseId = warehouseInput.value.trim();
+        const logins = normalizeLogins(loginInput.value);
+
+        tbody.replaceChildren();
+        lookupResults = [];
+
+        if (!warehouseId) {
+          status.textContent = 'Warehouse ID is required.';
+          return;
+        }
+
+        if (logins.length === 0) {
+          status.textContent = 'No logins entered.';
+          return;
+        }
+
+        lookupButton.disabled = true;
+        status.textContent = `Looking up ${logins.length} login${logins.length === 1 ? '' : 's'}...`;
+
+        try {
+          for (const login of logins) {
+            const row = document.createElement('tr');
+            row.innerHTML = `<td>${login}</td><td>Loading...</td><td>Loading...</td><td>Working</td>`;
+            tbody.appendChild(row);
+
+            try {
+              const result = await fetchEmployeeDetails(login, warehouseId);
+              row.children[1].textContent = result.fullName;
+              row.children[2].textContent = result.shift;
+              row.children[3].textContent = 'OK';
+              lookupResults.push(result);
+            } catch (error) {
+              row.children[1].textContent = 'Not found';
+              row.children[2].textContent = 'Not found';
+              row.children[3].textContent = error instanceof Error ? error.message : String(error);
+              row.children[3].className = 'tm-fclm-error';
+            }
+          }
+
+          status.textContent = `Finished ${logins.length} lookup${logins.length === 1 ? '' : 's'}.`;
+        } finally {
+          lookupButton.disabled = false;
+        }
+      }
+
+      lookupButton.addEventListener('click', runLookup);
+      copyDbButton.addEventListener('click', async () => {
+        const dbLogins = lookupResults
+          .filter((result) => /^db/i.test(result.shift))
+          .map((result) => result.login);
+
+        if (dbLogins.length === 0) {
+          status.textContent = 'No DB-shift logins found in the current results.';
+          return;
+        }
+
+        copyDbButton.disabled = true;
+        try {
+          await copyText(dbLogins.join('\n'));
+          status.textContent = `Copied ${dbLogins.length} DB login${dbLogins.length === 1 ? '' : 's'}.`;
+        } catch (error) {
+          status.textContent = `Copy failed: ${error instanceof Error ? error.message : String(error)}`;
+        } finally {
+          copyDbButton.disabled = false;
+        }
+      });
+      clearButton.addEventListener('click', () => {
+        loginInput.value = '';
+        tbody.replaceChildren();
+        lookupResults = [];
+        status.textContent = 'Enter logins to look up.';
+        loginInput.focus();
+      });
+
+      loginInput.addEventListener('keydown', (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+          runLookup();
+        }
+      });
+
+      overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) {
+          closeOverlay();
+        }
+      });
+
+      content.appendChild(help);
+      content.appendChild(warehouseRow);
+      content.appendChild(loginRow);
+      content.appendChild(actions);
+      content.appendChild(status);
+      content.appendChild(tableWrap);
+
+      modal.appendChild(header);
+      modal.appendChild(content);
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+      loginInput.focus();
+    }
+
+    launcher.addEventListener('click', openOverlay);
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && overlay?.isConnected) {
+        closeOverlay();
+      }
+    });
+
+    document.body.appendChild(launcher);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', install, { once: true });
+  } else {
+    install();
+  }
+})();

@@ -1,0 +1,851 @@
+// ==UserScript==
+// @name         FCLM Process Path Review
+// @namespace    http://tampermonkey.net/
+// @version      2.2
+// @description  UI for FCLM Portal Time Details with Path Analysis
+// @author       lsangvan
+// @match        https://*.amazon.com/*/timeDetails*
+// @match        https://fclm-portal.amazon.com/employee/ppaTimeDetails?nodeType=DS&warehouseId=*
+// @match        https://fclm-portal.amazon.com/employee/timeDetails?*
+// @match        https://fclm-portal.amazon.com/*/timeDetails*
+// @match        *fclm-portal.amazon.com/employee/*employeeId=*
+// @grant        GM_xmlhttpRequest
+// @require      https://code.jquery.com/jquery-3.6.0.min.js
+// @require      https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.1/moment.min.js
+// @connect      fclm-portal.amazon.com
+// @connect      ekarulf.corp.amazon.com
+// @connect      phonetool.amazon.com
+// @connect      sspot.iad.corp.amazon.com
+// ==/UserScript==
+
+/* globals $, moment */
+
+(function() {
+    'use strict';
+
+    const DEBUG = true;
+
+    const HTML_SELECTORS = {
+        timeTable: 'table.ganttChart',
+        clockSegments: 'tr.clock-seg',
+        functionSegments: 'tr.function-seg',
+        rightAlign: 'td.rightAlign',
+        directWork: 'tr.function-seg.direct',
+        indirectWork: 'tr.function-seg.indirect',
+        edited: 'tr.function-seg.edited'
+    };
+
+    const clocks = {
+        punch: {},
+        add: function(p) {
+            if (!this.punch.hasOwnProperty(p[0])) {
+                this.punch[p[0]] = {
+                    time: new Date(p[5]),
+                    type: p[4]
+                };
+            } else {
+                let d = new Date(p[5]);
+                if (d > this.punch[p[0]].time) {
+                    this.punch[p[0]].time = d;
+                    this.punch[p[0]].type = p[4];
+                }
+            }
+        },
+        getLastPunch: function(id) {
+            return (this.punch.hasOwnProperty(id) ? this.punch[id] : {type: '-', time: '-'});
+        }
+    };
+    const styleSheet = document.createElement('style');
+    styleSheet.textContent = `
+        @keyframes rainbow {
+            0% { border-color: #ff0000; }
+            14% { border-color: #ff8000; }
+            28% { border-color: #ffff00; }
+            42% { border-color: #00ff00; }
+            56% { border-color: #00ffff; }
+            70% { border-color: #0000ff; }
+            84% { border-color: #8000ff; }
+            100% { border-color: #ff0000; }
+        }
+
+        @keyframes rainbowGlow {
+            0% { box-shadow: 0 0 10px rgba(255,0,0,0.2); }
+            14% { box-shadow: 0 0 10px rgba(255,128,0,0.2); }
+            28% { box-shadow: 0 0 10px rgba(255,255,0,0.2); }
+            42% { box-shadow: 0 0 10px rgba(0,255,0,0.2); }
+            56% { box-shadow: 0 0 10px rgba(0,255,255,0.2); }
+            70% { box-shadow: 0 0 10px rgba(0,0,255,0.2); }
+            84% { box-shadow: 0 0 10px rgba(128,0,255,0.2); }
+            100% { box-shadow: 0 0 10px rgba(255,0,0,0.2); }
+        }
+
+        .clock-status {
+            font-weight: bold;
+        }
+
+        .clock-status.in {
+            color: #4CAF50;
+        }
+
+        .clock-status.out {
+            color: #f44336;
+        }
+
+        @keyframes badgeRainbow {
+            0% { border-color: #ff0000; }
+            14% { border-color: #ff8000; }
+            28% { border-color: #ffff00; }
+            42% { border-color: #00ff00; }
+            56% { border-color: #00ffff; }
+            70% { border-color: #0000ff; }
+            84% { border-color: #8000ff; }
+            100% { border-color: #ff0000; }
+        }
+
+        .badgePhoto {
+            padding: 3px !important;
+            border: 3px solid #ddd !important;
+            border-radius: 50% !important;
+            overflow: hidden !important;
+            animation: badgeRainbow 5s linear infinite !important;
+            transition: transform 0.3s ease !important;
+            width: 100px !important;
+            height: 100px !important;
+            display: block !important;
+        }
+
+        .badgePhoto:hover {
+            transform: scale(1.1) !important;
+        }
+
+        .badgePhoto img {
+            width: 100% !important;
+            height: 100% !important;
+            object-fit: cover !important;
+            border-radius: 50% !important;
+        }
+
+        .photo {
+            max-width: none !important;
+        }
+
+        .custom-time-details {
+            padding: 15px;
+            margin: 10px 0;
+            background: #fff;
+            border: 3px solid #ddd;
+            border-radius: 4px;
+            animation:
+                rainbow 5s linear infinite,
+                rainbowGlow 5s linear infinite;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            transition: all 0.3s ease;
+        }
+
+        .custom-time-details:hover {
+            transform: scale(1.005);
+            box-shadow: 0 0 15px rgba(0,0,0,0.2);
+        }
+
+        .custom-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 15px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+
+        .custom-button {
+            background: #0066cc;
+            color: white;
+            border: none;
+            padding: 6px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        .custom-button:hover {
+            background: #0052a3;
+        }
+
+        .custom-date {
+            padding: 5px 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+
+        .time-summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .summary-item {
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            border: 1px solid #dee2e6;
+        }
+
+        .summary-item:hover {
+            animation: rainbow 5s linear infinite;
+            transform: translateY(-2px);
+            transition: transform 0.3s ease;
+        }
+
+        .summary-label {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 5px;
+        }
+
+        .summary-value {
+            font-size: 14px;
+            color: #333;
+            font-weight: bold;
+        }
+
+        .path-analysis {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+
+        .path-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px;
+            border-bottom: 1px solid #dee2e6;
+            align-items: center;
+        }
+
+        .path-item:hover {
+            background: linear-gradient(
+                90deg,
+                rgba(255,0,0,0.05),
+                rgba(255,255,0,0.05),
+                rgba(0,255,0,0.05),
+                rgba(0,255,255,0.05),
+                rgba(0,0,255,0.05)
+            );
+            transition: background 0.3s ease;
+        }
+
+        .path-title {
+            font-weight: 500;
+            flex: 2;
+        }
+
+        .path-duration {
+            color: #666;
+            flex: 0 0 150px;
+            text-align: right;
+            margin-left: 20px;
+        }
+
+        .path-percentage {
+            color: #0066cc;
+            flex: 0 0 80px;
+            text-align: right;
+            font-weight: bold;
+        }
+    `;
+    document.head.appendChild(styleSheet);
+    function debugLog(...args) {
+        if (DEBUG) {
+            console.log(...args);
+        }
+    }
+
+    function createCustomTimeDetails() {
+        return `
+            <div class="custom-time-details">
+                <div class="custom-controls">
+                    <button class="custom-button" id="prevDay">Previous Day</button>
+                    <button class="custom-button" id="nextDay">Next Day</button>
+                    <button class="custom-button" id="today">Today</button>
+                    <input type="date" class="custom-date" id="dateSelector">
+                </div>
+                <div class="time-summary">
+                    <div class="summary-item">
+                        <div class="summary-label">Total Work Time</div>
+                        <div class="summary-value" id="totalTime">--</div>
+                    </div>
+                    <div class="summary-item">
+                        <div class="summary-label">OnClock/Paid Time</div>
+                        <div class="summary-value" id="onClockTime">--</div>
+                    </div>
+                    <div class="summary-item">
+                        <div class="summary-label">OffClock/UnPaid Time</div>
+                        <div class="summary-value" id="offClockTime">--</div>
+                    </div>
+                    <div class="summary-item">
+                        <div class="summary-label">Time Off Task</div>
+                        <div class="summary-value" id="timeOffTask">--</div>
+                    </div>
+                    <div class="summary-item">
+                        <div class="summary-label">Active Time</div>
+                        <div class="summary-value" id="activeTime">--</div>
+                    </div>
+                    <div class="summary-item">
+                        <div class="summary-label">Idle Time</div>
+                        <div class="summary-value" id="idleTime">--</div>
+                    </div>
+                </div>
+                <div class="path-analysis" id="pathAnalysis">
+                    <h3>Path Duration Summary</h3>
+                    <div id="pathList"></div>
+                </div>
+            </div>
+        `;
+    }
+
+    function updateClockStatus() {
+        const lastSegment = $('.clock-seg:last, tr[class*="clock"]:last');
+        const isClocked = lastSegment.hasClass('on-clock') || lastSegment.hasClass('ClockPaid');
+
+        const clockStatusHtml = `
+            <dt>Clock Status</dt>
+            <dd class="clock-status ${isClocked ? 'in' : 'out'}">
+                ${isClocked ? 'Clocked In' : 'Clocked Out'}
+            </dd>
+        `;
+
+        $('.list-side-by-side:first').append(clockStatusHtml);
+    }
+
+    function parseDuration(durationStr) {
+        try {
+            if (!durationStr) {
+                return 0;
+            }
+            const [minutes, seconds] = durationStr.split(':').map(Number);
+            if (isNaN(minutes) || isNaN(seconds)) {
+                return 0;
+            }
+            const totalMinutes = minutes + (seconds / 60);
+            return totalMinutes;
+        } catch (error) {
+            return 0;
+        }
+    }
+
+    function formatDuration(minutes) {
+        try {
+            if (minutes === 0) return '0h 0m';
+            const hours = Math.floor(minutes / 60);
+            const mins = Math.round(minutes % 60);
+            if (hours > 0) {
+                return `${hours}h ${mins}m`;
+            } else {
+                return `${mins}m`;
+            }
+        } catch (error) {
+            return '0h 0m';
+        }
+    }
+
+    function analyzePaths() {
+        const paths = {};
+        let totalWorkMinutes = 0;
+        let onClockMinutes = 0;
+        let offClockMinutes = 0;
+        let timeOffTaskMinutes = 0;
+        let activeMinutes = 0;
+        let idleMinutes = 0;
+
+        const timeSegments = $(HTML_SELECTORS.clockSegments);
+        timeSegments.each(function() {
+            const duration = $(this).find(HTML_SELECTORS.rightAlign).text().trim();
+            const minutes = parseDuration(duration);
+
+            if ($(this).hasClass('on-clock') || $(this).hasClass('paid')) {
+                onClockMinutes += minutes;
+            } else if ($(this).hasClass('off-clock') || $(this).hasClass('un-paid')) {
+                offClockMinutes += minutes;
+            }
+
+            totalWorkMinutes += minutes;
+        });
+
+        $(HTML_SELECTORS.functionSegments).each(function() {
+            const titleCell = $(this).find('td:first');
+            const durationCell = $(this).find(HTML_SELECTORS.rightAlign);
+
+            const titleText = titleCell.text().trim();
+            const duration = durationCell.text().trim();
+
+            if (titleText && duration) {
+                const minutes = parseDuration(duration);
+
+                if ($(this).hasClass('timeOffTask') || $(this).hasClass('Time Off Task')) {
+                    timeOffTaskMinutes += minutes;
+                } else if (($(this).hasClass('indirect') || $(this).hasClass('Indirect')) &&
+                           !($(this).hasClass('timeOffTask') || $(this).hasClass('Time Off Task'))) {
+                    idleMinutes += minutes;
+                } else if (titleText.includes('â™¦')) {
+                    const parts = titleText.split('â™¦');
+                    const path = parts[1]?.trim() || parts[0].trim();
+                    paths[path] = (paths[path] || 0) + minutes;
+                    activeMinutes += minutes;
+                }
+            }
+        });
+
+        const sortedPaths = Object.entries(paths)
+        .sort(([,a], [,b]) => b - a);
+
+        updatePathList(sortedPaths, activeMinutes);
+
+        $('#totalTime').text(formatDuration(totalWorkMinutes));
+        $('#onClockTime').text(formatDuration(onClockMinutes));
+        $('#offClockTime').text(formatDuration(offClockMinutes));
+        $('#timeOffTask').text(formatDuration(timeOffTaskMinutes));
+        $('#activeTime').text(formatDuration(activeMinutes));
+        $('#idleTime').text(formatDuration(idleMinutes));
+    }
+    function updatePathList(sortedPaths, totalActiveMinutes) {
+        const pathList = $('#pathList');
+
+        pathList.empty();
+
+        if (sortedPaths.length > 0) {
+            sortedPaths.forEach(([path, minutes]) => {
+                const percentage = totalActiveMinutes > 0 ? ((minutes / totalActiveMinutes) * 100).toFixed(1) : '0.0';
+                const formattedTime = formatDuration(minutes);
+
+                pathList.append(`
+                    <div class="path-item">
+                        <span class="path-title">${path}</span>
+                        <span class="path-duration">${formattedTime}</span>
+                        <span class="path-percentage">${percentage}%</span>
+                    </div>
+                `);
+            });
+        } else {
+            pathList.append('<div class="path-item">No paths found</div>');
+        }
+    }
+
+    function getPunchData() {
+        const params = new URLSearchParams(window.location.search);
+        const startTime = params.get('startTime');
+        const endTime = params.get('endTime');
+        const building = params.get('warehouseId');
+
+        if (!startTime || !endTime || !building) {
+            analyzePaths();
+            return;
+        }
+
+        const startDate = startTime.split('T')[0];
+        const endDate = endTime.split('T')[0];
+
+        const apiUrl = `https://fclm-portal.amazon.com/reports/employeeAttendance?reportFormat=CSV&warehouseId=${building}&spanType=Day&startDateDay=${startDate}`;
+
+        debugLog('Fetching punch data from:', apiUrl);
+
+        callApi(apiUrl, function(data) {
+            debugLog('Punch data received:', data);
+            const punchData = CSVToArray(data, ',');
+            punchData.forEach(punch => clocks.add(punch));
+
+            if (startDate !== endDate) {
+                const endApiUrl = `https://fclm-portal.amazon.com/reports/employeeAttendance?reportFormat=CSV&warehouseId=${building}&spanType=Day&startDateDay=${endDate}`;
+                debugLog('Fetching additional punch data from:', endApiUrl);
+                callApi(endApiUrl, function(endData) {
+                    debugLog('Additional punch data received:', endData);
+                    const endPunchData = CSVToArray(endData, ',');
+                    endPunchData.forEach(punch => clocks.add(punch));
+                    analyzePaths();
+                });
+            } else {
+                analyzePaths();
+            }
+        });
+    }
+
+    function callApi(url, callback) {
+        GM_xmlhttpRequest({
+            method: "GET",
+            url: url,
+            onload: function(response) {
+                debugLog('API response:', response.status, response.responseText.substring(0, 100) + '...');
+                if (callback) {
+                    callback(response.responseText);
+                }
+            },
+            onerror: function(error) {
+                console.error('API call failed:', error);
+            }
+        });
+    }
+
+    function CSVToArray(strData, strDelimiter) {
+        strDelimiter = (strDelimiter || ",");
+        var objPattern = new RegExp((
+            "(\\" + strDelimiter + "|\\r?\\n|\\r|^)" +
+            "(?:\"([^\"]*(?:\"\"[^\"]*)*)\"|" +
+            "([^\"\\" + strDelimiter + "\\r\\n]*))"
+        ), "gi");
+        var arrData = [[]];
+        var arrMatches = null;
+        while (arrMatches = objPattern.exec(strData)) {
+            var strMatchedDelimiter = arrMatches[1];
+            if (strMatchedDelimiter.length && (strMatchedDelimiter !== strDelimiter)) {
+                arrData.push([]);
+            }
+            var strMatchedValue;
+            if (arrMatches[2]) {
+                strMatchedValue = arrMatches[2].replace(new RegExp("\"\"", "g"), "\"");
+            } else {
+                strMatchedValue = arrMatches[3];
+            }
+            arrData[arrData.length - 1].push(strMatchedValue);
+        }
+        return arrData;
+    }
+
+    function initializeControls() {
+        try {
+            const params = new URLSearchParams(window.location.search);
+            const currentDate = params.get('startTime') ?
+                  moment(params.get('startTime')) :
+            moment();
+
+            $('#dateSelector').val(currentDate.format('YYYY-MM-DD'));
+
+            $('#prevDay').click(() => {
+                navigateToDate(currentDate.clone().subtract(1, 'days'));
+            });
+
+            $('#nextDay').click(() => {
+                navigateToDate(currentDate.clone().add(1, 'days'));
+            });
+
+            $('#today').click(() => {
+                navigateToDate(moment());
+            });
+
+            $('#dateSelector').change(function() {
+                const selectedDate = $(this).val();
+                navigateToDate(moment(selectedDate));
+            });
+        } catch (error) {
+            console.error('Error in initializeControls:', error);
+        }
+    }
+
+    function navigateToDate(date) {
+        try {
+            const params = new URLSearchParams(window.location.search);
+            let startTime, endTime;
+
+            if (params.get('nodeType') === 'DS') {
+                startTime = `${date.format('YYYY/MM/DD')}`;
+                endTime = date.clone().add(1, 'days').format('YYYY/MM/DD');
+                params.set('startDateIntraday', startTime);
+                params.set('endDateIntraday', endTime);
+            } else {
+                startTime = date.format('YYYY-MM-DDT00:00:00-0400');
+                endTime = date.clone().add(1, 'days').format('YYYY-MM-DDT00:00:00-0400');
+                params.set('startTime', startTime);
+                params.set('endTime', endTime);
+            }
+
+            window.location.search = params.toString();
+        } catch (error) {
+            console.error('Error in navigateToDate:', error);
+        }
+    }
+    function getDateDiff(startDate, endDate) {
+        var diffDate = new Date(endDate - startDate),
+            diffDays = diffDate.getDate(),
+            diffYears = diffDate.getYear() - 70,
+            diffMnths = diffDate.getMonth(),
+            diffText = "";
+        if (diffYears > 0) {
+            diffText = diffYears + (diffYears === 1 ? " year, " : " years, ");
+        }
+        if (diffMnths > 0) {
+            diffText += diffMnths + (diffMnths === 1 ? " month, " : " months, ");
+        }
+        if (diffDays > 0) {
+            diffText += diffDays + (diffDays === 1 ? " day" : " days");
+        }
+        return diffText.substring(0, diffText.length);
+    }
+
+    function displayTenure() {
+        let loginId = '';
+
+        try {
+            $('.employeeInfo dd').each(function() {
+                const text = $(this)
+                .clone()
+                .children()
+                .remove()
+                .end()
+                .text()
+                .trim();
+
+                if (text && /^[a-zA-Z0-9]+$/.test(text)) {
+                    loginId = text;
+                    return false;
+                }
+            });
+
+            if (!loginId) {
+                console.error('Could not find login ID');
+                // Continue with other functions even if login ID is not found
+                updateClockStatus();
+                handleSSpotIntegration();
+                return;
+            }
+
+            GM_xmlhttpRequest({
+                method: "GET",
+                url: `https://ekarulf.corp.amazon.com/cors/job-history/?login=${loginId}`,
+                headers: {
+                    "Accept": "application/json, text/javascript, */*; q=0.01",
+                    "X-Requested-With": "XMLHttpRequest"
+                },
+                onload: function(response) {
+                    try {
+                        const jobHistory = JSON.parse(response.responseText);
+                        if (jobHistory && jobHistory.length > 0) {
+                            const earliestJob = jobHistory.reduce((earliest, job) => {
+                                const currentStart = new Date(job.start_date);
+                                return earliest === null || currentStart < earliest ? currentStart : earliest;
+                            }, null);
+
+                            const tenure = getDateDiff(earliestJob, new Date());
+                            const tenureHtml = `
+                            <dt>Tenure</dt>
+                            <dd>${tenure}</dd>
+                        `;
+
+                        const shiftDt = $('dt:contains("Shift")');
+                        if (shiftDt.length) {
+                            $(tenureHtml).insertAfter(shiftDt.next('dd'));
+                        }
+                    }
+                } catch(e) {
+                    console.error('Error calculating tenure:', e);
+                } finally {
+                    // Execute these functions regardless of tenure calculation success
+                    updateClockStatus();
+                    fetchJobLevel(loginId);
+                    handleSSpotIntegration();
+                }
+            },
+            onerror: function(error) {
+                console.error('Error fetching job history:', error);
+                updateClockStatus();
+                fetchJobLevel(loginId);
+                handleSSpotIntegration();
+            }
+        });
+    } catch (error) {
+        console.error('Error in displayTenure:', error);
+        updateClockStatus();
+        handleSSpotIntegration();
+    }
+   }
+
+    function fetchJobLevel(loginId) {
+        if (!loginId) {
+            console.error('No login ID provided for job level fetch');
+            return;
+        }
+
+        GM_xmlhttpRequest({
+            method: "GET",
+            url: `https://phonetool.amazon.com/users/${loginId}.json`,
+            onload: function(response) {
+                try {
+                    const jsonResponse = JSON.parse(response.responseText);
+                    const jobLevel = jsonResponse.job_level;
+
+                    let displayedJobLevel;
+                    if (jobLevel > 1) {
+                        displayedJobLevel = jobLevel;
+                    } else if ($('.empDetailCard .agency').text().includes('--')) {
+                        displayedJobLevel = 1;
+                    } else {
+                        displayedJobLevel = 99;
+                    }
+
+                    const jobLevelHtml = `
+                    <dt>Job Level</dt>
+                    <dd>${displayedJobLevel}</dd>
+                `;
+
+                const tenureDt = $('dt:contains("Tenure")');
+                if (tenureDt.length) {
+                    $(jobLevelHtml).insertAfter(tenureDt.next('dd'));
+                } else {
+                    // Fallback insertion point if tenure element doesn't exist
+                    const shiftDt = $('dt:contains("Shift")');
+                    if (shiftDt.length) {
+                        $(jobLevelHtml).insertAfter(shiftDt.next('dd'));
+                    }
+                }
+            } catch (e) {
+                console.error('Error processing job level:', e);
+            }
+        },
+        onerror: function(error) {
+            console.error('Error fetching job level:', error);
+        }
+    });
+}
+
+
+
+    function handleSSpotIntegration() {
+        const params = new URLSearchParams(window.location.search);
+        const FC = params.get('warehouseId');
+        const empID = params.get('employeeId');
+
+        if (!FC || !empID) {
+            console.error('Missing FC or empID for SSpot integration');
+            return;
+        }
+
+        const dateHolder = new Date();
+        const today = dateHolder.toISOString().split('T')[0];
+
+        const sspotUrl = `https://sspot.iad.corp.amazon.com/api/sites/${FC}/associate-profiles?startDateTime=${today}T00%3A00%3A00&endDateTime=${today}T00%3A01%3A00&employeeIds=${empID}`;
+
+        debugLog('Fetching SSpot data from:', sspotUrl);
+
+        GM_xmlhttpRequest({
+            method: "GET",
+            url: sspotUrl,
+            onload: function(response) {
+                debugLog('SSpot response:', response.status, response.responseText.substring(0, 100) + '...');
+                processSSpotResponse(response, empID);
+            },
+            onerror: function(error) {
+                console.error('Error fetching SSpot data:', error);
+            }
+        });
+    }
+
+    function processSSpotResponse(response, empID) {
+        try {
+            if (response.status !== 200) throw new Error('Non-200 response from SSpot');
+
+            const jsonResponse = JSON.parse(response.responseText);
+            if (!jsonResponse[empID] || !jsonResponse[empID][0]) throw new Error('No data found');
+
+            const associateData = jsonResponse[empID][0].associate;
+            insertSSpotInfo(associateData.homeWorkGroup, associateData.crossTrainedWorkGroups);
+        } catch (error) {
+            console.error('Error processing SSpot response:', error);
+            insertSSpotError();
+        }
+    }
+
+    function insertSSpotInfo(homeWorkGroup, crossTrainedWorkGroups) {
+        const shiftDt = $('dt:contains("Shift")');
+        if (shiftDt.length === 0) {
+            console.error('Shift element not found for inserting SSpot info');
+            return;
+        }
+
+        const homeWorkGroupHtml = `
+            <dt>Home Work Group</dt>
+            <dd>${homeWorkGroup || 'N/A'}</dd>
+        `;
+        $(homeWorkGroupHtml).insertAfter(shiftDt.next('dd'));
+
+        const crossTrainedText = Array.isArray(crossTrainedWorkGroups) ?
+              crossTrainedWorkGroups.join(', ') :
+        (crossTrainedWorkGroups || 'None');
+
+        const crossTrainedHtml = `
+            <dt>Cross Trained Groups</dt>
+            <dd>${crossTrainedText}</dd>
+        `;
+        $('dt:contains("Home Work Group")').next('dd').after(crossTrainedHtml);
+    }
+
+    function insertSSpotError() {
+        const shiftDt = $('dt:contains("Shift")');
+        if (shiftDt.length === 0) {
+            console.error('Shift element not found for inserting SSpot error');
+            return;
+        }
+
+        const errorHtml = `
+            <dt>SSpot Status</dt>
+            <dd style="cursor: pointer; color: #0066cc;">Click to open Midway</dd>
+        `;
+
+        $(errorHtml).insertAfter(shiftDt.next('dd'));
+        $('dt:contains("SSpot Status")').next('dd').on('click', () => {
+            window.open('https://midway-auth.amazon.com/login#midway', '_blank');
+        });
+    }
+
+     function enhanceTimeDetails() {
+        try {
+            if ($('.custom-time-details').length > 0) return;
+
+            const foldRow = $('.fold-row').first();
+            const alternativeContainer = $('table').first();
+
+            if (foldRow.length === 0 && alternativeContainer.length === 0) {
+                setTimeout(enhanceTimeDetails, 1000);
+                return;
+            }
+
+            const customSection = createCustomTimeDetails();
+
+            if (foldRow.length > 0) {
+                foldRow.after(customSection);
+            } else {
+                alternativeContainer.before(customSection);
+            }
+
+            // Execute each function independently
+            Promise.all([
+                new Promise(resolve => {
+                    initializeControls();
+                    resolve();
+                }),
+                new Promise(resolve => {
+                    getPunchData();
+                    resolve();
+                }),
+                new Promise(resolve => {
+                    displayTenure();
+                    resolve();
+                })
+            ]).catch(error => {
+                console.error('Error in enhancement functions:', error);
+            });
+
+        } catch (error) {
+            console.error('Error in enhanceTimeDetails:', error);
+        }
+    }
+
+    function waitForDependencies() {
+        if (typeof $ !== 'undefined' && typeof moment !== 'undefined') {
+            enhanceTimeDetails();
+        } else {
+            setTimeout(waitForDependencies, 100);
+        }
+    }
+
+    waitForDependencies();
+})();
