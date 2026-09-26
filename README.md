@@ -1,6 +1,11 @@
 # abelrigm repository
 
+### 🌐 Live site → **https://rigoabell.github.io/abelrigm_repository/**
+
+[![Deploy Dev Hub to GitHub Pages](https://github.com/rigoabell/abelrigm_repository/actions/workflows/pages.yml/badge.svg)](https://github.com/rigoabell/abelrigm_repository/actions/workflows/pages.yml)
+
 Central hub for my developments, plus tooling to set up a fresh machine.
+👉 **[Open the Dev Hub website](https://rigoabell.github.io/abelrigm_repository/)** to browse projects and download a machine-setup script.
 
 ## Contents
 
