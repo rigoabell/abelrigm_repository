@@ -12,10 +12,10 @@ Central hub for the work: portfolio, tools built, and notes.
 - **`docs/` — Dev Hub website** (static, GitHub Pages ready).
   - **Portfolio** is the work: Amazon, tools developed, and other projects.
   - **Toolkit** lists tools built and ready to download.
-  - **Rig Setup** (`docs/rig-setup.html`) is one of those tools. It installs
-    Python, Node, and the other machine dependencies, and it shows how to run
-    the downloaded file (`bash ~/Downloads/rig-setup.sh` on Mac/Linux,
-    double-click `rig-setup.bat` on Windows).
+  - **Rig Setup** is a project on the Portfolio page, not its own site page.
+    That project installs Python, Node, and the other machine dependencies, and
+    it shows how to run the downloaded file (`bash ~/Downloads/rig-setup.sh` on
+    Mac/Linux, double-click `rig-setup.bat` on Windows).
   Everything in the browser stays on your machine; nothing is uploaded.
 - **`dev-setup/` — Rig Setup app.** A dependency-free (Python standard library)
   local web app that detects your OS and installs the developer tools you need,

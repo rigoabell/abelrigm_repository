@@ -54,25 +54,75 @@
           </article>
         </div>
 
-        <div class="work-block">
+        <div class="work-block" id="rig-setup">
           <h2>Tools developed</h2>
-          <p class="work-lead">Software built to support the work. Download and instructions live on each tool, not on this page.</p>
-          <div class="project-grid">
-            <article class="project-card">
-              <div class="project-head">
-                <span class="project-icon">&#128295;</span>
-                <span class="status status-live">Live</span>
+          <p class="work-lead">Software built to support the work. Rig Setup is a project here, on this page.</p>
+          <article class="project-card featured">
+            <div class="project-head">
+              <span class="project-icon">&#128295;</span>
+              <span class="status status-live">Live</span>
+            </div>
+            <h3>Rig Setup</h3>
+            <p class="project-desc">
+              Installs Python, Node, Git, and the other dependencies listed below.
+              Download the file, then run the step beside the button.
+            </p>
+          </article>
+
+          <section class="rig-panel card">
+            <div>
+              <p class="eyebrow">How to use it</p>
+              <h2>Get the dependencies</h2>
+              <ol class="rig-howto">
+                <li>Download the installer. It already includes every dependency below.</li>
+                <li>Run that one file. It skips anything already installed.</li>
+                <li>Open a new terminal so the new tools are on your PATH.</li>
+              </ol>
+            </div>
+            <div class="rig-actions">
+              <button type="button" class="btn btn-primary btn-lg" data-download="all" disabled>Download installer</button>
+              <div class="rig-next">
+                <span class="rig-next-label run-label">After it downloads</span>
+                <code class="rig-command run-step">Loading&hellip;</code>
               </div>
-              <h3>Rig Setup</h3>
-              <p class="project-desc">
-                A machine installer for Python, Node, Git, and the other dependencies
-                a fresh computer needs, with the steps to run it written on the tool page.
-              </p>
-              <div class="project-actions">
-                <a class="btn btn-outline btn-sm" href="rig-setup.html">View tool</a>
-                <a class="btn btn-outline btn-sm" href="toolkit.html">All tools</a>
+            </div>
+          </section>
+
+          <div class="setup card">
+            <p class="install-optional">Need fewer dependencies? Pick them here and download only those.</p>
+            <div class="setup-controls">
+              <div class="os-toggle" role="tablist" aria-label="Target operating system">
+                <button class="os-btn" data-os="auto">Auto-detect</button>
+                <button class="os-btn" data-os="linux">Linux</button>
+                <button class="os-btn" data-os="macos">macOS</button>
+                <button class="os-btn" data-os="windows">Windows</button>
               </div>
-            </article>
+              <div class="setup-search">
+                <input id="tool-search" type="search" placeholder="Search dependencies&hellip;" autocomplete="off" />
+              </div>
+              <div class="setup-buttons">
+                <button id="select-essential" class="btn btn-outline btn-sm">Essentials</button>
+                <button id="select-all" class="btn btn-outline btn-sm">Select all</button>
+                <button id="select-none" class="btn btn-outline btn-sm">Clear</button>
+              </div>
+            </div>
+            <p id="os-note" class="os-note"></p>
+            <div id="tool-catalog" class="tool-catalog">
+              <div class="loading">Loading dependencies&hellip;</div>
+            </div>
+            <div class="output">
+              <div class="output-head">
+                <div>
+                  <h3 id="output-title">Smaller installer</h3>
+                  <p id="output-sub" class="output-sub">Select dependencies to generate a smaller file.</p>
+                </div>
+                <div class="output-actions">
+                  <button id="copy-script" class="btn btn-outline btn-sm" disabled>Copy</button>
+                  <button id="download-script" class="btn btn-outline btn-sm" disabled>Download selected</button>
+                </div>
+              </div>
+              <pre id="script-preview" class="script-preview">// Choose a platform and dependencies above.</pre>
+            </div>
           </div>
         </div>
 
@@ -104,5 +154,6 @@
 
   <script src="assets/config.js"></script>
   <script src="assets/site.js"></script>
+  <script src="assets/app.js"></script>
 </body>
 </html>

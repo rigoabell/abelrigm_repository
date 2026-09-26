@@ -140,6 +140,7 @@ code {
 .setup { padding: 20px; }
 .install-optional { color: var(--muted); font-size: 13px; margin: 0 2px 8px; }
 .work-block { margin-bottom: 32px; }
+.work-block .rig-panel, .work-block .setup { margin-top: 16px; }
 .work-block h2 { margin: 0 0 6px; font-size: 22px; }
 .work-lead { margin: 0 0 14px; color: var(--muted); max-width: 720px; }
 .rig-howto { margin: 8px 0 0; padding-left: 18px; color: var(--text); }
