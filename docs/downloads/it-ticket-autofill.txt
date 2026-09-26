@@ -1,0 +1,1347 @@
+// ==UserScript==
+// @name         IT Ticket Autofill
+// @namespace    it-ticket-autofill
+// @version      1.1.9
+// @description  Auto-fill Create Incident: Other equipment, location, issue description, One Person Cannot Work.
+// @author       abelrigm
+// @match        *://*/*
+// @run-at       document-idle
+// @noframes
+// @grant        GM_openInTab
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_setClipboard
+// @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
+// ==/UserScript==
+
+/*
+  Install: Tampermonkey → Create new script → paste this file → Save.
+  Icon sits bottom-left, 2 inches up. Click it to open the panel.
+  Values persist across sites and sessions (GM storage).
+*/
+
+(function () {
+  "use strict";
+
+  const VERSION = "1.1.9";
+  const HOST_ID = "it-ticket-autofill-host";
+  const TICKET_URL =
+    "https://amazonots.service-now.com/esc?id=sc_cat_item&sys_id=9531047253230010fa75ddeeff7b1262";
+  const TICKET_SYS_ID = "9531047253230010fa75ddeeff7b1262";
+  const PENDING_TTL_MS = 90 * 1000;
+  const KEYS = {
+    config: "itt.config",
+    pending: "itt.pending",
+    lastRun: "itt.lastRun",
+    lastDebug: "itt.lastDebug",
+  };
+
+  const DESCRIPTION_FOOTER =
+    "CRITICAL ROUTING REQUIREMENT: Assign this incident exclusively to the local MEM3 IT team. Do not transfer, reassign, or escalate it to any other queue. Local MEM3 IT is already actively tracking this issue and is the correct owner. Sending this anywhere else will cause preventable site disruption, delayed resolution, and operational impact that is entirely unnecessary. This must remain with local MEM3 IT.";
+
+  const FIXED = {
+    equipment: "Other",
+    issue: "Other",
+    impact: "One Person Cannot Work",
+  };
+
+  const EQUIPMENT_SPEC = {
+    key: "equipment",
+    label: "Equipment type",
+    match: /what type of equipment/i,
+    required: true,
+  };
+  const LOCATION_SPEC = {
+    key: "location",
+    label: "Location",
+    match: /workstation or near a landmark|station id/i,
+    required: true,
+  };
+  const DESCRIPTION_SPEC = {
+    key: "description",
+    label: "Issue description",
+    match: /could you describe the issue/i,
+    required: true,
+  };
+  const IMPACT_SPEC = {
+    key: "impact",
+    label: "Impact",
+    match: /how many employees or workstations are immediately affected/i,
+    kind: "radio",
+    required: true,
+  };
+  const ISSUE_SPEC = {
+    key: "issue",
+    label: "Common issue",
+    match: /common issues/i,
+    kind: "reference",
+    required: false,
+  };
+
+  const DEBUG_FIELDS = [
+    EQUIPMENT_SPEC,
+    ISSUE_SPEC,
+    LOCATION_SPEC,
+    DESCRIPTION_SPEC,
+    IMPACT_SPEC,
+    { key: "contact", label: "Point of contact", match: /best point of contact/i },
+    { key: "building", label: "Building / home site", match: /which building|home site/i },
+    { key: "contactMethod", label: "Contact method", match: /preferred contact method/i },
+  ];
+
+  const DEFAULT_CONFIG = {
+    location: "",
+    description: "",
+    confirmSubmit: true,
+  };
+
+  if (window.top !== window.self) return;
+  if (document.getElementById(HOST_ID)) return;
+
+  const runLog = [];
+  let lastFillReport = null;
+  let statusTimer = 0;
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function nowIso() {
+    return new Date().toISOString();
+  }
+
+  function uw() {
+    return typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+  }
+
+  function gmGet(key, fallback) {
+    try {
+      if (typeof GM_getValue === "function") return GM_getValue(key, fallback);
+    } catch {
+      /* ignore */
+    }
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw == null) return fallback;
+      return JSON.parse(raw);
+    } catch {
+      return fallback;
+    }
+  }
+
+  function gmSet(key, value) {
+    try {
+      if (typeof GM_setValue === "function") {
+        GM_setValue(key, value);
+        return;
+      }
+    } catch {
+      /* ignore */
+    }
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function loadConfig() {
+    const saved = gmGet(KEYS.config, null);
+    const merged = {
+      ...DEFAULT_CONFIG,
+      ...(saved && typeof saved === "object" ? saved : {}),
+    };
+    if (!merged.location && saved?.station) merged.location = saved.station;
+    if (!merged.description && saved?.issue) merged.description = saved.issue;
+    return {
+      location: merged.location || "",
+      description: merged.description || "",
+      confirmSubmit: merged.confirmSubmit !== false,
+    };
+  }
+
+  function saveConfig(cfg) {
+    gmSet(KEYS.config, cfg);
+  }
+
+  function log(step, detail) {
+    runLog.push({ t: nowIso(), step, detail: detail == null ? null : detail });
+    if (runLog.length > 80) runLog.shift();
+  }
+
+  function cleanText(value) {
+    return String(value || "")
+      .replace(/\u00a0/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function stripRoutingNote(value) {
+    const text = String(value || "").trim();
+    const footer = DESCRIPTION_FOOTER;
+    if (!text) return "";
+    if (text.endsWith(footer)) return text.slice(0, -footer.length).trim();
+    const idx = text.lastIndexOf(footer);
+    if (idx >= 0) return (text.slice(0, idx) + text.slice(idx + footer.length)).trim();
+    return text;
+  }
+
+  function withRoutingNote(value) {
+    const body = stripRoutingNote(value);
+    if (!body) return DESCRIPTION_FOOTER;
+    return `${body}\n\n${DESCRIPTION_FOOTER}`;
+  }
+
+  function normMatch(value) {
+    return cleanText(value).toLowerCase();
+  }
+
+  function isTicketPage() {
+    try {
+      const url = new URL(location.href);
+      const hostOk = /amazonots\.service-now\.com/i.test(url.hostname);
+      const id = url.searchParams.get("id") || "";
+      const sysId = url.searchParams.get("sys_id") || "";
+      const hash = url.hash || "";
+      return (
+        hostOk &&
+        (id === "sc_cat_item" || /id=sc_cat_item/i.test(hash)) &&
+        (sysId === TICKET_SYS_ID || hash.includes(TICKET_SYS_ID))
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function queryAllDeep(root, selector) {
+    const out = [];
+    const visit = (node) => {
+      if (!node || !node.querySelectorAll) return;
+      try {
+        out.push(...node.querySelectorAll(selector));
+      } catch {
+        /* invalid selector in this root */
+      }
+      const els = node.querySelectorAll("*");
+      for (const el of els) {
+        if (el.shadowRoot) visit(el.shadowRoot);
+      }
+    };
+    visit(root);
+    return out;
+  }
+
+  function visible(el) {
+    if (!el || !el.getBoundingClientRect) return false;
+    const rect = el.getBoundingClientRect();
+    const style = el.ownerDocument?.defaultView?.getComputedStyle?.(el);
+    if (style && (style.display === "none" || style.visibility === "hidden")) return false;
+    return rect.width > 0 || rect.height > 0 || el.offsetParent != null;
+  }
+
+  function fieldContainer(label) {
+    return (
+      label.closest(
+        [
+          ".form-group",
+          ".form-field",
+          ".sp-form-field",
+          ".sc-field",
+          "sp-variable",
+          "sn-record-picker",
+          "[class*='form-group']",
+          "[class*='variable']",
+        ].join(",")
+      ) || label.parentElement
+    );
+  }
+
+  function findLabel(re) {
+    const nodes = [
+      ...document.querySelectorAll("label, .field-label, .control-label, legend, .sn-form-control-label"),
+      ...queryAllDeep(document, "label, .field-label, .control-label, legend"),
+    ];
+    const seen = new Set();
+    const matches = [];
+    for (const node of nodes) {
+      if (seen.has(node)) continue;
+      seen.add(node);
+      const text = cleanText(node.textContent);
+      if (!text || !re.test(text)) continue;
+      matches.push(node);
+    }
+    return (
+      matches.find((node) => /^sp_formfield_/.test(node.getAttribute("for") || "")) ||
+      matches[0] ||
+      null
+    );
+  }
+
+  function pickControl(container, label) {
+    const real =
+      container?.querySelector(
+        'select[id^="sp_formfield_"], textarea[id^="sp_formfield_"], input[id^="sp_formfield_"]:not(.select2-focusser)'
+      ) || null;
+    if (real) return real;
+    if (label && label.getAttribute("for")) {
+      const forId = label.getAttribute("for");
+      const byId = document.getElementById(forId);
+      if (byId) return byId;
+      const escaped =
+        typeof CSS !== "undefined" && CSS.escape
+          ? CSS.escape(forId)
+          : forId.replace(/([^a-zA-Z0-9_-])/g, "\\$1");
+      const deep = queryAllDeep(document, `#${escaped}`)[0];
+      if (deep) return deep;
+    }
+    if (!container) return null;
+    const radios = container.querySelectorAll('input[type="radio"]');
+    if (radios.length) return radios[0];
+    const candidates = [
+      ...container.querySelectorAll(
+        'select, textarea, input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]), [role="combobox"], .select2-container, sn-record-picker, now-record-picker, now-typeahead'
+      ),
+      ...queryAllDeep(
+        container,
+        'select, textarea, input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]), [role="combobox"]'
+      ),
+    ];
+    return candidates.find((el) => visible(el) || el.tagName === "SELECT") || candidates[0] || null;
+  }
+
+  function locateField(spec) {
+    const label = findLabel(spec.match);
+    if (!label) return { spec, label: null, container: null, control: null, kind: "missing" };
+    const container = fieldContainer(label);
+    const control = pickControl(container, label);
+    const kind = spec.kind || classify(container, control);
+    return { spec, label, container, control, kind };
+  }
+
+  function classify(container, control) {
+    if (container && container.querySelectorAll('input[type="radio"]').length > 1) return "radio";
+    if (!control) {
+      if (container?.querySelector("sn-record-picker, now-record-picker, .select2-container")) return "reference";
+      return "unknown";
+    }
+    if (control.matches?.("select")) return "select";
+    if (control.matches?.("textarea")) return "text";
+    if (control.matches?.('input[type="radio"]')) return "radio";
+    if (
+      control.matches?.(".select2-offscreen, .select2-focusser, .select2-container, [role='combobox']") ||
+      control.closest?.("sn-record-picker, now-record-picker, .select2-container")
+    ) {
+      return "reference";
+    }
+    if (control.matches?.("input")) return "text";
+    return (control.tagName || "unknown").toLowerCase();
+  }
+
+  function getAngular() {
+    try {
+      return uw().angular || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function getJQuery() {
+    try {
+      return uw().jQuery || uw().$ || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function angularApply(el) {
+    const ng = getAngular();
+    if (!ng || !el) return;
+    try {
+      const ae = ng.element(el);
+      const scope = ae.scope?.() || ae.isolateScope?.();
+      if (scope?.$applyAsync) scope.$applyAsync();
+      else if (scope?.$apply) {
+        try {
+          scope.$apply();
+        } catch {
+          /* digest in progress */
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function setNativeValue(el, value) {
+    const proto =
+      el instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype
+        : el instanceof HTMLSelectElement
+          ? HTMLSelectElement.prototype
+          : HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, "value");
+    if (desc?.set) desc.set.call(el, value);
+    else el.value = value;
+  }
+
+  function fireChange(el, value) {
+    try {
+      const ng = getAngular();
+      if (ng && el) {
+        const ae = ng.element(el);
+        ae.val?.(value);
+        ae.triggerHandler?.("input");
+        ae.triggerHandler?.("change");
+      }
+    } catch {
+      /* ignore */
+    }
+    try {
+      const jq = getJQuery();
+      if (jq && el) jq(el).val(value).trigger("input").trigger("change");
+    } catch {
+      /* ignore */
+    }
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Unidentified" }));
+    angularApply(el);
+  }
+
+  function optionTexts(select) {
+    return [...(select?.options || [])].map((opt) => cleanText(opt.textContent || opt.label || opt.value));
+  }
+
+  function matchOption(select, wanted) {
+    const want = normMatch(wanted);
+    if (!want) return null;
+    const opts = [...select.options];
+    const score = (opt) => {
+      const text = normMatch(opt.textContent || opt.label || "");
+      const val = normMatch(opt.value);
+      if (!text && !val) return 0;
+      if (text === want || val === want) return 3;
+      if (text.includes(want) || want.includes(text) || val.includes(want)) return 2;
+      return 0;
+    };
+    let best = null;
+    let bestScore = 0;
+    for (const opt of opts) {
+      const s = score(opt);
+      if (s > bestScore) {
+        best = opt;
+        bestScore = s;
+      }
+    }
+    return bestScore ? best : null;
+  }
+
+  function select2ContainerFor(select) {
+    if (!select) return null;
+    if (select.id) {
+      const byId = document.getElementById("s2id_" + select.id);
+      if (byId) return byId;
+    }
+    return (
+      select.closest(".form-group, .form-field, .sp-form-field")?.querySelector(".select2-container") ||
+      select.parentElement?.querySelector(".select2-container") ||
+      (select.previousElementSibling?.classList?.contains("select2-container") ? select.previousElementSibling : null)
+    );
+  }
+
+  function closeSelect2() {
+    try {
+      const jq = getJQuery();
+      if (jq) {
+        jq("#select2-drop-mask").mousedown();
+        jq("select.select2-offscreen").each(function closeOne() {
+          try {
+            jq(this).select2("close");
+          } catch {
+            /* ignore */
+          }
+        });
+      }
+    } catch {
+      /* ignore */
+    }
+    document.querySelector("#select2-drop-mask")?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+  }
+
+  function mouseClick(el) {
+    if (!el) return;
+    try {
+      el.focus();
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (typeof el.click === "function") el.click();
+    } catch {
+      /* ignore */
+    }
+    const opts = { bubbles: true, cancelable: true };
+    try {
+      el.dispatchEvent(new MouseEvent("mousedown", opts));
+    } catch {
+      /* ignore */
+    }
+    try {
+      el.dispatchEvent(new MouseEvent("mouseup", opts));
+    } catch {
+      /* ignore */
+    }
+    try {
+      el.dispatchEvent(new MouseEvent("click", opts));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function waitForOption(select, wanted, timeoutMs) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (select && matchOption(select, wanted)) return true;
+      await sleep(80);
+    }
+    return Boolean(select && matchOption(select, wanted));
+  }
+
+  function selectDisplayValue(select) {
+    const s2 = select2ContainerFor(select);
+    const chosen = cleanText(s2?.querySelector(".select2-chosen, .select2-selection__rendered")?.textContent || "");
+    if (chosen && !/^--/.test(chosen) && !/^select /i.test(chosen)) return chosen;
+    const opt = select?.selectedOptions?.[0];
+    return cleanText(opt?.textContent || "");
+  }
+
+  function openSelect2(select) {
+    const jq = getJQuery();
+    try {
+      if (jq && select && jq(select).data("select2")) {
+        jq(select).select2("open");
+        return true;
+      }
+    } catch {
+      /* click fallback */
+    }
+    const s2 = select2ContainerFor(select) || select2ContainerFor(select?.closest?.("div"));
+    const choice = s2?.querySelector(".select2-choice, .select2-selection") || s2;
+    if (choice) {
+      mouseClick(choice);
+      return true;
+    }
+    return false;
+  }
+
+  async function clickSelect2Option(wanted) {
+    const want = normMatch(wanted);
+    const started = Date.now();
+    const deadline = started + 2500;
+    let lastVisible = [];
+    while (Date.now() < deadline) {
+      const choices = visibleChoices();
+      lastVisible = choices.map((el) => cleanText(el.textContent)).slice(0, 24);
+      const hit = choices.find((el) => {
+        const text = normMatch(el.textContent);
+        return text === want || text.endsWith(want);
+      });
+      if (hit) {
+        const li = hit.closest("li") || hit;
+        try {
+          const jq = getJQuery();
+          if (jq) jq(li).mousedown();
+        } catch {
+          /* ignore */
+        }
+        mouseClick(li);
+        await sleep(120);
+        return { ok: true, set: cleanText(hit.textContent), via: "select2-click" };
+      }
+      const noMatches = lastVisible.some((t) => /^no matches/i.test(t));
+      if (noMatches && Date.now() - started > 400) break;
+      await sleep(80);
+    }
+    return {
+      ok: false,
+      reason: "select2 option not visible",
+      visible: lastVisible,
+    };
+  }
+
+  async function setSelect(select, wanted) {
+    await waitForOption(select, wanted, 4000);
+    const opt = select ? matchOption(select, wanted) : null;
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      closeSelect2();
+      await sleep(60);
+      openSelect2(select);
+      await sleep(180);
+      const clicked = await clickSelect2Option(wanted);
+      await sleep(120);
+      const shown = selectDisplayValue(select);
+      if (normMatch(shown) === normMatch(wanted) || normMatch(shown).includes(normMatch(wanted))) {
+        if (opt) fireChange(select, opt.value);
+        closeSelect2();
+        return { ok: true, set: shown, value: opt?.value, via: clicked.ok ? "select2-click" : "verified", attempt };
+      }
+    }
+
+    if (opt) {
+      const jq = getJQuery();
+      try {
+        if (jq) {
+          const $el = jq(select);
+          $el.val(opt.value);
+          if ($el.data("select2")) $el.select2("val", opt.value, true);
+          $el.trigger("change");
+        }
+      } catch {
+        /* ignore */
+      }
+      select.value = opt.value;
+      for (const o of select.options) o.selected = o === opt;
+      fireChange(select, opt.value);
+      await sleep(250);
+      const shown = selectDisplayValue(select);
+      if (normMatch(shown) === normMatch(wanted) || normMatch(shown).includes(normMatch(wanted))) {
+        return { ok: true, set: shown, value: opt.value, via: "select2-val" };
+      }
+      return { ok: false, reason: "equipment did not stick", set: shown || "-- None --", via: "native", value: opt.value };
+    }
+
+    return { ok: false, reason: "no matching option", options: optionTexts(select) };
+  }
+
+  function setText(input, wanted) {
+    input.focus();
+    setNativeValue(input, wanted);
+    fireChange(input, wanted);
+    return { ok: true, set: input.value };
+  }
+
+  function setRadio(container, wanted) {
+    const want = normMatch(wanted);
+    const radios = [...(container?.querySelectorAll('input[type="radio"]') || [])];
+    const labels = [...(container?.querySelectorAll("label") || [])];
+    const byLabel = labels.find((lab) => {
+      const text = normMatch(lab.textContent);
+      return text === want || text.includes(want) || want.includes(text);
+    });
+    let radio = null;
+    if (byLabel) {
+      radio =
+        byLabel.querySelector('input[type="radio"]') ||
+        (byLabel.htmlFor ? document.getElementById(byLabel.htmlFor) : null);
+    }
+    if (!radio) {
+      radio = radios.find((r) => {
+        const lab = r.closest("label") || container.querySelector(`label[for="${r.id}"]`);
+        const text = normMatch(lab?.textContent || r.value || r.getAttribute("aria-label"));
+        return text === want || text.includes(want);
+      });
+    }
+    if (!radio) {
+      return {
+        ok: false,
+        reason: "no matching radio",
+        options: labels.map((l) => cleanText(l.textContent)).filter(Boolean),
+      };
+    }
+    radio.click();
+    radio.checked = true;
+    fireChange(radio, radio.value);
+    return { ok: true, set: wanted };
+  }
+
+  function visibleChoices() {
+    const selectors = [
+      "#select2-drop .select2-result-label",
+      ".select2-results .select2-result-label",
+      ".select2-results li",
+      '[role="option"]',
+      ".dropdown-menu a",
+      ".dropdown-menu .dropdown-item",
+      ".sn-typeahead-item",
+      "now-popover [role='option']",
+      ".select2-result",
+    ];
+    const nodes = [];
+    for (const sel of selectors) {
+      nodes.push(...document.querySelectorAll(sel));
+      nodes.push(...queryAllDeep(document, sel));
+    }
+    const seen = new Set();
+    const out = [];
+    for (const el of nodes) {
+      if (seen.has(el) || !visible(el)) continue;
+      seen.add(el);
+      out.push(el);
+    }
+    return out;
+  }
+
+  async function setReference(field, wanted) {
+    closeSelect2();
+    await sleep(120);
+    const s2 =
+      select2ContainerFor(field.control) ||
+      field.container?.querySelector(".select2-container") ||
+      null;
+    const trigger =
+      s2?.querySelector(".select2-choice, .select2-selection") ||
+      s2 ||
+      field.container?.querySelector(".select2-choice, .select2-selection") ||
+      field.control;
+    if (field.control?.matches?.("select, .select2-offscreen")) openSelect2(field.control);
+    else mouseClick(trigger);
+    await sleep(350);
+
+    let clicked = await clickSelect2Option(wanted);
+    if (clicked.ok) return clicked;
+
+    const input =
+      document.querySelector("#select2-drop input.select2-input, .select2-drop-active input, .select2-search input, input.select2-focused") ||
+      field.container?.querySelector("input.select2-input");
+    if (input && visible(input)) {
+      input.focus();
+      setNativeValue(input, wanted);
+      fireChange(input, wanted);
+      await sleep(400);
+      clicked = await clickSelect2Option(wanted);
+      if (clicked.ok) return clicked;
+    }
+
+    const listed = visibleChoices()
+      .map((el) => cleanText(el.textContent))
+      .filter((t) => t && !/^no matches/i.test(t))
+      .slice(0, 16);
+    closeSelect2();
+    return {
+      ok: false,
+      skipped: true,
+      reason: "no typeahead match",
+      visible: listed,
+    };
+  }
+
+  async function waitForForm(timeoutMs) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (document.getElementById("sp_formfield_u_sub_category")) return true;
+      await sleep(250);
+    }
+    return false;
+  }
+
+  async function waitSelectPopulated(select, timeoutMs) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const real = [...(select?.options || [])].filter((o) => o.value && !/^--/.test(cleanText(o.textContent)));
+      if (real.length) return real;
+      await sleep(200);
+    }
+    return [...(select?.options || [])];
+  }
+
+  function currentControlValue(field) {
+    if (!field.container && !field.control) return "";
+    if (field.kind === "radio") {
+      const checked = field.container?.querySelector('input[type="radio"]:checked');
+      const lab =
+        checked?.closest("label") ||
+        (checked?.id ? field.container.querySelector(`label[for="${checked.id}"]`) : null);
+      return cleanText(lab?.textContent || checked?.value || "");
+    }
+    if (field.control?.matches?.("select")) return selectDisplayValue(field.control);
+    const s2 = select2ContainerFor(field.control) || field.container;
+    const chosen = s2?.querySelector(".select2-chosen, .select2-selection__rendered");
+    const chosenText = cleanText(chosen?.textContent || "");
+    if (chosenText && !/^lookup using list$/i.test(chosenText) && chosenText !== "×") {
+      return chosenText;
+    }
+    if (field.control?.matches?.("textarea")) return field.control.value || "";
+    if (field.control?.value && !/^[a-f0-9]{32}$/i.test(field.control.value)) {
+      return cleanText(field.control.value);
+    }
+    return "";
+  }
+
+  function scrapeOptions(field) {
+    if (field.kind === "select" && field.control?.options) {
+      return optionTexts(field.control).filter((t) => t && !/^--/.test(t));
+    }
+    if (field.kind === "radio") {
+      return [...(field.container?.querySelectorAll("label") || [])]
+        .map((l) => cleanText(l.textContent))
+        .filter((t) => t && !/how many employees/i.test(t));
+    }
+    return [];
+  }
+
+  function findSubmitButton() {
+    const exact = document.querySelector("#submit-btn, button#submit-btn[name='submit']");
+    if (exact) return exact;
+    const buttons = [
+      ...document.querySelectorAll("button, a.btn, input[type=submit], input[type=button]"),
+      ...queryAllDeep(document, "button, a.btn, input[type=submit]"),
+    ];
+    return (
+      buttons.find((btn) => /^\s*submit\s*$/i.test(cleanText(btn.textContent || btn.value || ""))) ||
+      document.querySelector("button[name='submit'], #submit, .btn-primary")
+    );
+  }
+
+  function snapshotFields() {
+    return DEBUG_FIELDS.map((spec) => {
+      const field = locateField(spec);
+      return {
+        key: spec.key,
+        labelWanted: spec.label,
+        labelFound: cleanText(field.label?.textContent || ""),
+        kind: field.kind,
+        controlTag: field.control?.tagName || null,
+        controlId: field.control?.id || null,
+        controlName: field.control?.getAttribute?.("name") || null,
+        controlType: field.control?.getAttribute?.("type") || null,
+        controlClass: field.control?.className || null,
+        value: currentControlValue(field),
+        options: scrapeOptions(field).slice(0, 40),
+      };
+    });
+  }
+
+  function collectAllLabels() {
+    const nodes = [
+      ...document.querySelectorAll("label, .field-label, .control-label, legend"),
+      ...queryAllDeep(document, "label, .field-label, .control-label, legend"),
+    ];
+    const seen = new Set();
+    const out = [];
+    for (const node of nodes) {
+      if (seen.has(node)) continue;
+      seen.add(node);
+      const text = cleanText(node.textContent);
+      if (!text) continue;
+      out.push({
+        text: text.slice(0, 160),
+        for: node.getAttribute("for"),
+      });
+      if (out.length >= 50) break;
+    }
+    return out;
+  }
+
+  function buildDebug(extra) {
+    const cfg = loadConfig();
+    const payload = {
+      script: { name: "IT Ticket Autofill", version: VERSION },
+      generatedAt: nowIso(),
+      href: location.href,
+      title: document.title,
+      isTicketPage: isTicketPage(),
+      hasAngular: Boolean(getAngular()),
+      hasJQuery: Boolean(getJQuery()),
+      formPresent: Boolean(findLabel(/what type of equipment/i)),
+      submitFound: Boolean(findSubmitButton()),
+      config: cfg,
+      pending: gmGet(KEYS.pending, null),
+      lastRun: gmGet(KEYS.lastRun, null),
+      lastFillReport,
+      log: runLog.slice(-40),
+      fields: isTicketPage() || extra?.forceFields ? snapshotFields() : [],
+      allLabels: isTicketPage() || extra?.forceFields ? collectAllLabels() : [],
+      headings: [...document.querySelectorAll("h1, h2, .panel-title, .cat-item-name")]
+        .slice(0, 12)
+        .map((el) => cleanText(el.textContent)),
+      extra: extra || null,
+    };
+    gmSet(KEYS.lastDebug, payload);
+    return payload;
+  }
+
+  async function copyDebug(extra) {
+    const payload = buildDebug(extra);
+    const text =
+      "IT Ticket Autofill — Copy Debug\n=== Paste everything below into the chat. ===\n" +
+      JSON.stringify(payload, null, 2);
+    try {
+      if (typeof GM_setClipboard === "function") {
+        GM_setClipboard(text, "text");
+        return true;
+      }
+    } catch {
+      /* fall through */
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function applyField(spec, wanted) {
+    const field = locateField(spec);
+    if (!field.label) {
+      return { key: spec.key, ok: false, reason: "label not found", kind: field.kind };
+    }
+    let result;
+    if (field.kind === "select") result = await setSelect(field.control, wanted);
+    else if (field.kind === "radio") result = setRadio(field.container, wanted);
+    else if (field.kind === "reference") result = await setReference(field, wanted);
+    else if (field.control?.classList?.contains("select2-offscreen") && field.control.matches("input")) {
+      result = await setReference(field, wanted);
+    } else if (field.kind === "text" || field.control?.matches?.("input, textarea")) result = setText(field.control, wanted);
+    else if (field.control?.matches?.("select")) result = await setSelect(field.control, wanted);
+    else result = { ok: false, reason: `unsupported kind ${field.kind}` };
+    return {
+      key: spec.key,
+      kind: field.kind,
+      wanted,
+      ...result,
+      after: currentControlValue(locateField(spec)),
+    };
+  }
+
+  async function waitForLabel(re, timeoutMs) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (findLabel(re)) return true;
+      await sleep(200);
+    }
+    return false;
+  }
+
+  async function fillDescription(text) {
+    await waitForLabel(DESCRIPTION_SPEC.match, 4000);
+    let field = locateField(DESCRIPTION_SPEC);
+    if (field.label) return applyField(DESCRIPTION_SPEC, text);
+
+    const issue = locateField(ISSUE_SPEC);
+    if (issue.control && (issue.kind === "text" || issue.control.matches?.("textarea, input:not([type=radio])"))) {
+      return applyField(ISSUE_SPEC, text);
+    }
+    if (issue.kind === "select" && issue.control) {
+      const other = await setSelect(issue.control, "Other");
+      await sleep(500);
+      await waitForLabel(DESCRIPTION_SPEC.match, 4000);
+      field = locateField(DESCRIPTION_SPEC);
+      if (field.label) {
+        const desc = await applyField(DESCRIPTION_SPEC, text);
+        return { ...desc, via: "common-issue-other" };
+      }
+      return {
+        ...other,
+        key: "description",
+        ok: other.ok,
+        reason: other.ok ? "set common issue Other; no description field found" : other.reason,
+        via: "common-issue-select",
+      };
+    }
+    return { key: "description", ok: false, reason: "description field not found", issueKind: issue.kind };
+  }
+
+  async function fillForm(cfg) {
+    const report = { startedAt: nowIso(), steps: [], ok: true, fixed: FIXED };
+    if (!isTicketPage()) {
+      report.ok = false;
+      report.error = "not on ticket page";
+      lastFillReport = report;
+      return report;
+    }
+    const ready = await waitForForm(20000);
+    if (!ready) {
+      report.ok = false;
+      report.error = "form not found";
+      lastFillReport = report;
+      return report;
+    }
+
+    let equipment = await applyField(EQUIPMENT_SPEC, FIXED.equipment);
+    if (!normMatch(equipment.after || "").includes("other")) {
+      await sleep(250);
+      equipment = await applyField(EQUIPMENT_SPEC, FIXED.equipment);
+    }
+    report.steps.push(equipment);
+    if (!equipment.ok || !normMatch(equipment.after || equipment.set || "").includes("other")) {
+      report.ok = false;
+      equipment.ok = false;
+      equipment.reason = equipment.reason || "equipment still -- None --";
+    }
+    closeSelect2();
+    await sleep(80);
+
+    report.steps.push({ key: "issue", skipped: true, reason: "leave common issue as-is" });
+
+    const location = await applyField(LOCATION_SPEC, cleanText(cfg.location));
+    report.steps.push(location);
+    if (!location.ok) report.ok = false;
+
+    const description = await fillDescription(withRoutingNote(cfg.description));
+    report.steps.push(description);
+    if (!description.ok) report.ok = false;
+
+    const impact = await applyField(IMPACT_SPEC, FIXED.impact);
+    report.steps.push(impact);
+    if (!impact.ok) report.ok = false;
+
+    report.finishedAt = nowIso();
+    lastFillReport = report;
+    gmSet(KEYS.lastRun, report);
+    log("fill", report);
+    return report;
+  }
+
+  function missingRequired(cfg) {
+    const missing = [];
+    if (!cleanText(cfg.location)) missing.push("Location");
+    if (!cleanText(cfg.description)) missing.push("Issue description");
+    return missing;
+  }
+
+  async function submitForm() {
+    const btn = findSubmitButton();
+    if (!btn) return { ok: false, reason: "submit button not found" };
+    btn.click();
+    log("submit-click", cleanText(btn.textContent || btn.value || "submit"));
+    return { ok: true };
+  }
+
+  function setPending(action) {
+    gmSet(KEYS.pending, { action, at: Date.now() });
+  }
+
+  function consumePending() {
+    const pending = gmGet(KEYS.pending, null);
+    gmSet(KEYS.pending, null);
+    if (!pending || !pending.action) return null;
+    if (Date.now() - Number(pending.at || 0) > PENDING_TTL_MS) return null;
+    return pending.action;
+  }
+
+  function goToTicket() {
+    if (typeof GM_openInTab === "function") {
+      GM_openInTab(TICKET_URL, { active: true, insert: true });
+      return;
+    }
+    window.open(TICKET_URL, "_blank", "noopener");
+  }
+
+  function mountUi() {
+    const host = document.createElement("div");
+    host.id = HOST_ID;
+    Object.assign(host.style, {
+      position: "fixed",
+      inset: "0",
+      zIndex: "2147483646",
+      pointerEvents: "none",
+    });
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
+      <style>
+        :host {
+          all: initial;
+          position: fixed !important;
+          inset: 0 !important;
+          z-index: 2147483646 !important;
+          display: block !important;
+          pointer-events: none !important;
+        }
+        * { box-sizing: border-box; font-family: Arial, sans-serif; }
+        .fab {
+          pointer-events: auto;
+          position: fixed;
+          left: 12px;
+          bottom: 2in;
+          z-index: 2147483646;
+          width: 40px;
+          height: 40px;
+          border: 0;
+          border-radius: 999px;
+          background: #1d4ed8;
+          color: #fff;
+          cursor: pointer;
+          box-shadow: 0 8px 20px rgba(15, 23, 42, .35);
+          display: grid;
+          place-items: center;
+        }
+        .fab svg { display: block; }
+        .fab:hover { background: #1e40af; }
+        .panel {
+          pointer-events: auto;
+          display: none;
+          position: fixed;
+          left: 12px;
+          bottom: calc(2in + 48px);
+          z-index: 2147483646;
+          width: min(380px, calc(100vw - 24px));
+          max-height: min(72vh, 640px);
+          overflow: auto;
+          background: #0f1720;
+          color: #e8eef5;
+          border: 1px solid #2c3c4e;
+          border-radius: 12px;
+          box-shadow: 0 16px 40px rgba(0,0,0,.4);
+          font: 13px/1.4 Arial, sans-serif;
+        }
+        .panel.open { display: flex; flex-direction: column; }
+        .body { padding: 10px 12px 12px; display: grid; gap: 8px; }
+        .heading { font-size: 15px; font-weight: 800; color: #f6fbff; padding: 2px 0 2px; }
+        label.field { display: grid; gap: 4px; color: #c5d4e3; font-size: 12px; font-weight: 700; }
+        input, textarea {
+          width: 100%; box-sizing: border-box; border: 1px solid #3b4a5c; border-radius: 8px;
+          background: #071018; color: #f6fbff; padding: 8px 10px; font: 13px/1.3 Arial, sans-serif;
+        }
+        textarea { min-height: 88px; resize: vertical; }
+        button.act {
+          border: 0; border-radius: 8px; padding: 8px 10px; cursor: pointer;
+          background: #314257; color: #d5e2ef; font-weight: 700; font-size: 12px;
+        }
+        button.warn { background: #b45309; color: #fff; }
+        .check { display: flex; align-items: center; gap: 8px; font-weight: 650; color: #d5e2ef; }
+        .check input { width: auto; }
+        .confirm-bar {
+          pointer-events: auto;
+          display: none;
+          position: fixed;
+          left: 12px;
+          bottom: calc(2in + 48px);
+          z-index: 2147483646;
+          width: min(260px, calc(100vw - 24px));
+          background: #0f1720;
+          color: #e8eef5;
+          border: 1px solid #2c3c4e;
+          border-radius: 12px;
+          box-shadow: 0 16px 40px rgba(0,0,0,.4);
+          padding: 10px 12px;
+          gap: 8px;
+          font: 13px/1.4 Arial, sans-serif;
+        }
+        .confirm-bar.open { display: flex; flex-direction: column; }
+        .confirm-msg { font-weight: 700; color: #d8ffe6; }
+      </style>
+      <button class="fab" id="fab" title="IT Ticket Autofill" aria-label="Open IT Ticket Autofill">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M4 9a2 2 0 0 0 2-2h12a2 2 0 0 0 2 2v6a2 2 0 0 0-2 2H6a2 2 0 0 0-2-2V9z"></path>
+          <path d="M9 8v8M15 8v8"></path>
+        </svg>
+      </button>
+      <div class="panel" id="panel">
+        <div class="body">
+          <div class="heading">IT Ticket Autofill</div>
+          <label class="field">Location
+            <input id="location" placeholder="e.g. waARE1_01_01, Column L9" />
+          </label>
+          <label class="field">Issue description
+            <textarea id="description" placeholder="What is wrong"></textarea>
+          </label>
+          <label class="check"><input id="confirmSubmit" type="checkbox" checked /> Confirm before submit (testing)</label>
+          <button class="act warn" id="submit">Fill &amp; Submit</button>
+          <button class="act" id="debug">Copy Debug</button>
+        </div>
+      </div>
+      <div class="confirm-bar" id="confirmBar">
+        <div class="confirm-msg">Form filled. Review the ticket, then submit.</div>
+        <button class="act warn" id="confirmYes">Submit</button>
+        <button class="act" id="confirmNo">Cancel</button>
+      </div>
+    `;
+    document.documentElement.appendChild(host);
+    const mo = new MutationObserver(() => {
+      if (!host.isConnected) document.documentElement.appendChild(host);
+    });
+    mo.observe(document.documentElement, { childList: true });
+
+    const panel = shadow.getElementById("panel");
+    const debugBtn = shadow.getElementById("debug");
+    const confirmBar = shadow.getElementById("confirmBar");
+
+    function setOpen(on) {
+      panel.classList.toggle("open", on);
+      if (on) confirmBar.classList.remove("open");
+    }
+
+    function scrollTicketIntoView() {
+      const el =
+        document.getElementById("sp_formfield_u_sub_category") ||
+        document.querySelector("h1, .cat-item-name, form");
+      try {
+        el?.scrollIntoView({ block: "start", behavior: "smooth" });
+      } catch {
+        /* ignore */
+      }
+    }
+
+    function askSubmitConfirm() {
+      setOpen(false);
+      confirmBar.classList.add("open");
+      return new Promise((resolve) => {
+        const finish = (ok) => {
+          confirmBar.classList.remove("open");
+          yes.removeEventListener("click", onYes);
+          no.removeEventListener("click", onNo);
+          resolve(ok);
+        };
+        const onYes = () => finish(true);
+        const onNo = () => finish(false);
+        const yes = shadow.getElementById("confirmYes");
+        const no = shadow.getElementById("confirmNo");
+        yes.addEventListener("click", onYes);
+        no.addEventListener("click", onNo);
+      });
+    }
+
+    function setStatus(msg, kind) {
+      log("ui", { msg, kind });
+      if (!debugBtn) return;
+      const copied = /debug copied|copied/i.test(msg || "");
+      const failed = /could not copy|copy failed/i.test(msg || "");
+      if (!copied && !failed) return;
+      debugBtn.textContent = failed ? "Copy failed" : "Copied";
+      clearTimeout(statusTimer);
+      statusTimer = setTimeout(() => {
+        debugBtn.textContent = "Copy Debug";
+      }, 2000);
+    }
+
+    function readUi() {
+      const cfg = loadConfig();
+      cfg.location = shadow.getElementById("location").value.trim();
+      cfg.description = shadow.getElementById("description").value.trim();
+      cfg.confirmSubmit = shadow.getElementById("confirmSubmit").checked;
+      return cfg;
+    }
+
+    function writeUi(cfg) {
+      shadow.getElementById("location").value = cfg.location || "";
+      shadow.getElementById("description").value = cfg.description || "";
+      shadow.getElementById("confirmSubmit").checked = cfg.confirmSubmit !== false;
+    }
+
+    function persistFromUi() {
+      const cfg = readUi();
+      saveConfig(cfg);
+      return cfg;
+    }
+
+    async function ensureTicketThen(action) {
+      persistFromUi();
+      if (isTicketPage()) return true;
+      setPending(action);
+      goToTicket();
+      return false;
+    }
+
+    async function afterFillConfirm(cfg) {
+      closeSelect2();
+      setOpen(false);
+      scrollTicketIntoView();
+      await sleep(400);
+      if (!cfg.confirmSubmit) return true;
+      return askSubmitConfirm();
+    }
+
+    async function runFill() {
+      const cfg = persistFromUi();
+      const missing = missingRequired(cfg);
+      if (missing.length) {
+        window.alert("Fill required: " + missing.join(", "));
+        return null;
+      }
+      if (!(await ensureTicketThen("fill"))) return null;
+      const report = await fillForm(cfg);
+      if (!report.ok) window.alert("Fill had errors. Copy Debug and paste it in chat.");
+      return report;
+    }
+
+    async function runSubmit() {
+      const cfg = persistFromUi();
+      const missing = missingRequired(cfg);
+      if (missing.length) {
+        window.alert("Fill required: " + missing.join(", "));
+        return;
+      }
+      if (!(await ensureTicketThen("submit"))) return;
+      const report = await fillForm(cfg);
+      if (!report.ok) {
+        window.alert("Did not submit — fill failed. Copy Debug.");
+        return;
+      }
+      if (!(await afterFillConfirm(cfg))) return;
+      const submitted = await submitForm();
+      if (!submitted.ok) window.alert(submitted.reason);
+    }
+
+    shadow.getElementById("fab").addEventListener("click", () => {
+      if (panel.classList.contains("open")) {
+        setOpen(false);
+        return;
+      }
+      writeUi(loadConfig());
+      setOpen(true);
+    });
+    for (const id of ["location", "description", "confirmSubmit"]) {
+      shadow.getElementById(id).addEventListener("change", persistFromUi);
+      shadow.getElementById(id).addEventListener("input", persistFromUi);
+    }
+    shadow.getElementById("submit").addEventListener("click", () => {
+      runSubmit().catch((err) => window.alert(String(err)));
+    });
+    shadow.getElementById("debug").addEventListener("click", async () => {
+      persistFromUi();
+      const ok = await copyDebug({ source: "panel" });
+      setStatus(ok ? "Debug copied. Paste it in chat." : "Could not copy debug.", ok ? "ok" : "bad");
+    });
+
+    writeUi(loadConfig());
+    setOpen(false);
+
+    if (typeof GM_registerMenuCommand === "function") {
+      GM_registerMenuCommand("IT Ticket: Fill form", () => {
+        runFill().catch((err) => window.alert(String(err)));
+      });
+      GM_registerMenuCommand("IT Ticket: Fill & Submit", () => {
+        runSubmit().catch((err) => window.alert(String(err)));
+      });
+      GM_registerMenuCommand("IT Ticket: Open panel", () => {
+        writeUi(loadConfig());
+        setOpen(true);
+      });
+      GM_registerMenuCommand("IT Ticket: Copy Debug", () => {
+        copyDebug({ source: "menu" }).then((ok) => setStatus(ok ? "Debug copied." : "Copy failed.", ok ? "ok" : "bad"));
+      });
+    }
+
+    return { setStatus, runFill, runSubmit, afterFillConfirm };
+  }
+
+  const ui = mountUi();
+
+  async function resumePending() {
+    if (!isTicketPage()) return;
+    const action = consumePending();
+    if (!action) return;
+    log("resume-pending", action);
+    await waitForForm(20000);
+    const cfg = loadConfig();
+    if (action === "fill" || action === "submit") {
+      const report = await fillForm(cfg);
+      if (!report.ok) {
+        window.alert("Pending fill failed. Copy Debug.");
+        return;
+      }
+      if (action === "fill") return;
+      if (!(await ui.afterFillConfirm(cfg))) return;
+      const submitted = await submitForm();
+      if (!submitted.ok) window.alert(submitted.reason);
+    }
+  }
+
+  resumePending().catch((err) => {
+    log("resume-error", String(err));
+    window.alert(String(err));
+  });
+})();

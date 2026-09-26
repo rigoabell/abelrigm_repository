@@ -1,0 +1,2091 @@
+// ==UserScript==
+// @name         Amazon Login Photo Lookup
+// @namespace    ultimate-tampermonkey
+// @version      0.9.3
+// @description  Look up Amazon employees in FCLM and view badge photos, names, badge numbers, and shifts in cards or a table
+// @author       Cursor
+// @match        https://*.amazon.com/*
+// @grant        GM_xmlhttpRequest
+// @connect      fclm-portal.amazon.com
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const installationKey = '__amazonLoginPhotoLookupInstalledV093';
+  const legacyInstallationKey = '__amazonLoginPhotoLookupInstalled';
+  const storageKey = '__amazonLoginPhotoLookupPanelState';
+  const shiftTypeNames = {
+    D: 'Day',
+    N: 'Night',
+    S: 'Swing',
+  };
+  const shiftDayPatterns = {
+    A: 'Sun–Wed (Front Half)',
+    B: 'Wed–Sat (Back Half)',
+    C: 'Mon/Tue/Thu/Fri (Donut)',
+    E: 'Mon–Fri',
+    F: 'Mon–Thu',
+    G: 'Sun–Thu',
+    H: 'Fri–Mon (Weekend)',
+    I: 'Sun/Mon/Thu/Fri',
+    J: 'Sun/Mon/Tue/Thu',
+    K: 'Tue–Fri',
+    L: 'Sat–Tue',
+    M: 'Tue–Sat',
+    N: 'Thu–Sun',
+    O: 'Thu–Mon',
+    P: 'Sun/Mon/Wed/Thu',
+    Q: 'Mon/Tue/Fri/Sat',
+    R: 'Sun/Mon/Tue/Fri',
+    S: 'Wed–Sun',
+    T: 'Sat–Wed',
+    U: 'Sun/Tue/Thu/Fri',
+    V: 'Sat/Sun/Tue/Wed',
+    W: 'Fri–Tue',
+    X: 'Mon/Thu/Fri/Sat',
+    Y: 'Tue/Wed/Fri/Sat',
+    Z: 'Mon/Wed/Fri/Sat',
+    1: 'Mon/Wed/Thu/Fri',
+    2: 'Sun/Mon/Thu/Sat',
+    3: 'Mon/Tue/Wed/Fri',
+  };
+  const fclmBaseUrl = 'https://fclm-portal.amazon.com/employee/timeDetails';
+  const defaultWarehouseId =
+    location.hostname === 'fclm-portal.amazon.com'
+      ? new URL(location.href).searchParams.get('warehouseId') || 'MEM3'
+      : 'MEM3';
+  const resultTableColumns = [
+    ['name', 'Name'],
+    ['clockStatus', 'Status'],
+    ['login', 'Login'],
+    ['employeeId', 'Employee ID'],
+    ['badgeNumber', 'Badge'],
+    ['shift', 'Shift'],
+    ['workSchedule', 'Work Schedule'],
+    ['lastPunch', 'Last Punch'],
+  ];
+  const crc32Table = (() => {
+    const table = new Uint32Array(256);
+    for (let index = 0; index < 256; index += 1) {
+      let value = index;
+      for (let bit = 0; bit < 8; bit += 1) {
+        value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+      }
+      table[index] = value >>> 0;
+    }
+    return table;
+  })();
+  let lastDebugPayload = {
+    version: '0.9.3',
+    generatedAt: null,
+    warehouseId: defaultWarehouseId,
+    logins: [],
+    attendanceRows: 0,
+    startedAt: null,
+    completedAt: null,
+    durationMs: null,
+    results: [],
+    errors: [],
+  };
+
+  function normalizeLoginInput(value) {
+    return Array.from(
+      new Set(
+        (value ?? '')
+          .split(/[\s,;]+/)
+          .map((item) => item.trim().toLowerCase())
+          .filter(Boolean)
+      )
+    );
+  }
+
+  function normalizeText(value) {
+    return (value ?? '').replace(/\s+/g, ' ').trim();
+  }
+
+  function decodeShiftCode(shiftCode) {
+    const normalized = normalizeText(shiftCode).toUpperCase();
+    const match = normalized.match(/^([DNS])([A-Z123])\d(?:T|-|$)/);
+    if (!match || !shiftTypeNames[match[1]] || !shiftDayPatterns[match[2]]) {
+      return {
+        known: false,
+        key: '',
+        type: 'Unknown',
+        days: 'Schedule not identified',
+        label: 'Schedule not identified',
+      };
+    }
+
+    const type = shiftTypeNames[match[1]];
+    const days = shiftDayPatterns[match[2]];
+    return {
+      known: true,
+      key: `${match[1]}:${match[2]}`,
+      type,
+      days,
+      label: `${type} · ${days}`,
+    };
+  }
+
+  function loadPanelState() {
+    try {
+      return JSON.parse(localStorage.getItem(storageKey) || 'null');
+    } catch {
+      return null;
+    }
+  }
+
+  function storePanelState(state) {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(state));
+    } catch {
+      // Ignore unavailable or full storage.
+    }
+  }
+
+  function clearPanelState() {
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {
+      // Ignore unavailable storage.
+    }
+  }
+
+  function createStyles() {
+    const style = document.createElement('style');
+    style.textContent = `
+      .tm-photo-launcher-v070 {
+        position: fixed;
+        right: 16px;
+        top: 50%;
+        bottom: auto;
+        width: 52px;
+        height: 52px;
+        z-index: 2147483646;
+        border: none;
+        border-radius: 999px;
+        padding: 0;
+        transform: translateY(-50%);
+        background: #2563eb;
+        color: #ffffff;
+        font: 600 24px/1 Arial, sans-serif;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.25);
+        cursor: pointer;
+      }
+      .tm-photo-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(15, 23, 42, 0.55);
+      }
+      .tm-photo-modal {
+        width: min(960px, calc(100vw - 32px));
+        max-height: calc(100vh - 32px);
+        display: flex;
+        flex-direction: column;
+        border-radius: 16px;
+        overflow: hidden;
+        background: #ffffff;
+        box-shadow: 0 24px 60px rgba(15, 23, 42, 0.3);
+        font-family: Arial, sans-serif;
+      }
+      .tm-photo-modal.is-table {
+        width: min(1240px, calc(100vw - 24px));
+      }
+      .tm-photo-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 16px 18px;
+        border-bottom: 1px solid #e5e7eb;
+      }
+      .tm-photo-title {
+        margin: 0;
+        color: #111827;
+        font: 700 18px/1.2 Arial, sans-serif;
+      }
+      .tm-photo-close {
+        border: none;
+        background: transparent;
+        color: #6b7280;
+        font: 700 24px/1 Arial, sans-serif;
+        cursor: pointer;
+      }
+      .tm-photo-content {
+        display: grid;
+        gap: 16px;
+        padding: 16px 18px 18px;
+        overflow: auto;
+      }
+      .tm-photo-help {
+        margin: 0;
+        color: #4b5563;
+        font: 500 13px/1.4 Arial, sans-serif;
+      }
+      .tm-photo-version-note {
+        margin: 0;
+        border-radius: 10px;
+        padding: 9px 11px;
+        background: #dbeafe;
+        color: #1e40af;
+        font: 700 12px/1.3 Arial, sans-serif;
+      }
+      .tm-photo-input {
+        min-height: 96px;
+        width: 100%;
+        resize: vertical;
+        border: 1px solid #cbd5e1;
+        border-radius: 12px;
+        padding: 12px;
+        color: #111827;
+        font: 500 13px/1.45 Consolas, "Courier New", monospace;
+        box-sizing: border-box;
+      }
+      .tm-photo-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+      .tm-photo-action {
+        border: none;
+        border-radius: 10px;
+        padding: 10px 14px;
+        background: #111827;
+        color: #f9fafb;
+        font: 600 13px/1.2 Arial, sans-serif;
+        cursor: pointer;
+      }
+      .tm-photo-action:disabled {
+        opacity: 0.55;
+        cursor: wait;
+      }
+      .tm-photo-action.tm-photo-secondary {
+        background: #e5e7eb;
+        color: #111827;
+      }
+      #tm-photo-copy-debug-v060 {
+        background: #f59e0b;
+        color: #111827;
+      }
+      .tm-photo-status {
+        min-height: 18px;
+        color: #6b7280;
+        font: 500 12px/1.4 Arial, sans-serif;
+      }
+      .tm-photo-progress {
+        height: 10px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: #e5e7eb;
+      }
+      .tm-photo-progress-bar {
+        width: 0;
+        height: 100%;
+        border-radius: inherit;
+        background: #2563eb;
+        transition: width 180ms ease;
+      }
+      .tm-photo-progress-text {
+        color: #4b5563;
+        font: 600 12px/1.4 Arial, sans-serif;
+      }
+      .tm-photo-filters {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+      .tm-photo-filter {
+        min-width: 170px;
+        border: 1px solid #cbd5e1;
+        border-radius: 10px;
+        padding: 9px 11px;
+        background: #ffffff;
+        color: #111827;
+        font: 600 12px/1.2 Arial, sans-serif;
+      }
+      .tm-photo-shift-filter {
+        position: relative;
+        min-width: 190px;
+      }
+      .tm-photo-shift-filter > summary {
+        cursor: pointer;
+        list-style: none;
+      }
+      .tm-photo-shift-options {
+        position: absolute;
+        top: calc(100% + 6px);
+        left: 0;
+        z-index: 5;
+        min-width: 220px;
+        max-height: 220px;
+        overflow: auto;
+        border: 1px solid #cbd5e1;
+        border-radius: 10px;
+        padding: 8px;
+        background: #ffffff;
+        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
+      }
+      .tm-photo-shift-option {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px;
+        color: #111827;
+        font: 500 12px/1.2 Arial, sans-serif;
+      }
+      .tm-photo-filter-mode {
+        display: flex;
+        overflow: hidden;
+        border: 1px solid #cbd5e1;
+        border-radius: 10px;
+      }
+      .tm-photo-filter-mode button {
+        border: none;
+        padding: 9px 11px;
+        background: #f8fafc;
+        color: #475569;
+        font: 700 12px/1.2 Arial, sans-serif;
+        cursor: pointer;
+      }
+      .tm-photo-filter-mode button.is-active {
+        background: #2563eb;
+        color: #ffffff;
+      }
+      .tm-photo-filter-hidden {
+        display: none !important;
+      }
+      .tm-photo-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(var(--tm-photo-card-min, 180px), 1fr));
+        gap: 14px;
+      }
+      .tm-photo-grid.tm-photo-filter-hidden {
+        display: none !important;
+      }
+      .tm-photo-size-control {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid #cbd5e1;
+        border-radius: 10px;
+        padding: 7px 10px;
+        color: #111827;
+        font: 600 12px/1.2 Arial, sans-serif;
+      }
+      .tm-photo-table-wrap {
+        overflow: auto;
+        max-height: min(560px, 58vh);
+        border: 1px solid #a6a6a6;
+        background: #ffffff;
+      }
+      .tm-photo-table {
+        width: max-content;
+        min-width: 100%;
+        border-collapse: collapse;
+        table-layout: auto;
+        font: 11px/1.2 Calibri, 'Segoe UI', Arial, sans-serif;
+        color: #000000;
+      }
+      .tm-photo-table .tm-excel-col-letter,
+      .tm-photo-table .tm-excel-corner,
+      .tm-photo-table .tm-excel-row-num {
+        background: #f0f0f0;
+        color: #5a5a5a;
+        font: 700 11px/1 Calibri, Arial, sans-serif;
+        text-align: center;
+        border: 1px solid #d0d0d0;
+        padding: 0 6px;
+        height: 20px;
+      }
+      .tm-photo-table .tm-excel-letter-row th {
+        position: sticky;
+        top: 0;
+        z-index: 3;
+      }
+      .tm-photo-table .tm-excel-field-row th {
+        position: sticky;
+        top: 20px;
+        z-index: 3;
+      }
+      .tm-photo-table .tm-excel-corner {
+        position: sticky;
+        left: 0;
+        z-index: 5;
+        min-width: 38px;
+        width: 38px;
+      }
+      .tm-photo-table .tm-excel-row-num {
+        position: sticky;
+        left: 0;
+        z-index: 2;
+        min-width: 38px;
+        width: 38px;
+      }
+      .tm-photo-table .tm-excel-field-row .tm-excel-row-num {
+        z-index: 4;
+        background: #f0f0f0;
+        color: #5a5a5a;
+      }
+      .tm-photo-table .tm-excel-field {
+        background: #4472c4;
+        color: #ffffff;
+        font: 700 11px/1.2 Calibri, Arial, sans-serif;
+        text-align: left;
+        white-space: nowrap;
+        border: 1px solid #2f5496;
+        padding: 4px 8px;
+      }
+      .tm-photo-table td {
+        border: 1px solid #b4b4b4;
+        padding: 3px 8px;
+        height: 20px;
+        color: #000000;
+        background: #ffffff;
+        white-space: nowrap;
+        vertical-align: middle;
+      }
+      .tm-photo-table tbody tr:nth-child(even) td {
+        background: #d6dce4;
+      }
+      .tm-photo-table tbody tr:nth-child(even) .tm-excel-row-num {
+        background: #f0f0f0;
+      }
+      .tm-photo-table td.tm-excel-status-in,
+      .tm-photo-table tbody tr:nth-child(even) td.tm-excel-status-in {
+        background: #c6efce;
+        color: #006100;
+        font-weight: 700;
+      }
+      .tm-photo-table td.tm-excel-status-out,
+      .tm-photo-table tbody tr:nth-child(even) td.tm-excel-status-out {
+        background: #ffc7ce;
+        color: #9c0006;
+        font-weight: 700;
+      }
+      .tm-photo-table td.tm-excel-status-unknown,
+      .tm-photo-table tr.is-error td.tm-excel-status-unknown,
+      .tm-photo-table tbody tr:nth-child(even) td.tm-excel-status-unknown {
+        background: #ffeb9c;
+        color: #9c5700;
+        font-weight: 700;
+      }
+      .tm-photo-table tr.is-error td:not(.tm-excel-status-unknown):not(.tm-excel-row-num) {
+        color: #9c0006;
+      }
+      .tm-photo-card {
+        display: grid;
+        align-content: start;
+        gap: 8px;
+        border: 1px solid #e5e7eb;
+        border-radius: 14px;
+        padding: 12px;
+        background: #f8fafc;
+      }
+      .tm-photo-card img {
+        width: 100%;
+        aspect-ratio: 3 / 4;
+        object-fit: cover;
+        border-radius: 10px;
+        background: #dbe4ee;
+      }
+      .tm-photo-login {
+        color: #111827;
+        font: 700 13px/1.3 Arial, sans-serif;
+        word-break: break-word;
+      }
+      .tm-photo-subtext {
+        color: #6b7280;
+        font: 500 12px/1.4 Arial, sans-serif;
+        word-break: break-word;
+      }
+      .tm-photo-details {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(110px, 100%), 1fr));
+        gap: 7px;
+        margin-top: 2px;
+      }
+      .tm-photo-detail {
+        min-width: 0;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 6px 7px;
+        background: #ffffff;
+      }
+      .tm-photo-detail-label {
+        display: block;
+        margin-bottom: 2px;
+        color: #64748b;
+        font: 700 9px/1.1 Arial, sans-serif;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+      .tm-photo-detail-value {
+        display: block;
+        color: #0f172a;
+        font: 600 11px/1.3 Arial, sans-serif;
+        overflow-wrap: anywhere;
+      }
+      .tm-photo-photo-error {
+        color: #b91c1c;
+      }
+      .tm-photo-error {
+        color: #b91c1c;
+      }
+      .tm-photo-clock {
+        width: fit-content;
+        border-radius: 999px;
+        padding: 4px 9px;
+        font: 700 11px/1.2 Arial, sans-serif;
+      }
+      .tm-photo-clock.in {
+        background: #dcfce7;
+        color: #166534;
+      }
+      .tm-photo-clock.out {
+        background: #fee2e2;
+        color: #991b1b;
+      }
+      .tm-photo-clock.unknown {
+        background: #fef3c7;
+        color: #92400e;
+      }
+    `;
+    return style;
+  }
+
+  function requestFclmPage(login) {
+    const url = new URL(fclmBaseUrl);
+    url.searchParams.set('warehouseId', defaultWarehouseId);
+    url.searchParams.set('employeeId', login);
+
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: url.href,
+        timeout: 30000,
+        onload(response) {
+          if (response.status < 200 || response.status >= 400) {
+            reject(new Error(`FCLM returned HTTP ${response.status}`));
+            return;
+          }
+          resolve(response.responseText);
+        },
+        onerror() {
+          reject(new Error('Could not connect to FCLM'));
+        },
+        ontimeout() {
+          reject(new Error('FCLM request timed out'));
+        },
+      });
+    });
+  }
+
+  function findDefinitionValue(documentNode, selector, labelPattern) {
+    const suppliedValue = normalizeText(
+      documentNode.querySelector(selector)?.textContent
+    );
+    if (suppliedValue) {
+      return suppliedValue;
+    }
+
+    for (const term of documentNode.querySelectorAll('dt')) {
+      if (labelPattern.test(normalizeText(term.textContent))) {
+        return normalizeText(term.nextElementSibling?.textContent);
+      }
+    }
+
+    return '';
+  }
+
+  function findShift(documentNode) {
+    return findDefinitionValue(
+      documentNode,
+      'dl.list-side-by-side:nth-of-type(2) > dd:nth-of-type(3)',
+      /^shift\b/i
+    );
+  }
+
+  function findBadgeNumber(documentNode) {
+    return findDefinitionValue(
+      documentNode,
+      'dl.list-side-by-side:nth-of-type(1) > dd:nth-of-type(3)',
+      /^badge(\s*(id|number|#))?$/i
+    );
+  }
+
+  function parseEmployeePage(html, requestedLogin) {
+    const documentNode = new DOMParser().parseFromString(html, 'text/html');
+    const photo = documentNode.querySelector('img.photo');
+    const title = documentNode.querySelector('td.title > span.fold-control');
+
+    if (!photo || !title) {
+      const isMidwayPage =
+        /midway/i.test(documentNode.title) ||
+        /sign in with midway/i.test(documentNode.body?.textContent ?? '');
+      throw new Error(
+        isMidwayPage
+          ? 'FCLM authentication is required; open FCLM and sign in first'
+          : 'Employee was not found in FCLM'
+      );
+    }
+
+    const titleText = normalizeText(title.textContent);
+    const loginMatch = titleText.match(/\(([^()]+)\)\s*$/);
+    const photoUrl = new URL(photo.getAttribute('src'), fclmBaseUrl).href;
+    const employeeId =
+      new URL(photoUrl).searchParams.get('employeeid') ||
+      new URL(photoUrl).searchParams.get('employeeId') ||
+      '';
+
+    return {
+      login: loginMatch?.[1] || requestedLogin,
+      name: loginMatch ? titleText.slice(0, loginMatch.index).trim() : titleText,
+      shift: findShift(documentNode) || 'Shift unavailable',
+      badgeNumber: findBadgeNumber(documentNode),
+      photoUrl,
+      employeeId,
+    };
+  }
+
+  async function lookupEmployee(login) {
+    const html = await requestFclmPage(login);
+    return parseEmployeePage(html, login);
+  }
+
+  function formatDateOnly(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+
+  function requestAttendanceCsv(queryDate) {
+    const url = new URL('https://fclm-portal.amazon.com/reports/employeeAttendance');
+    url.searchParams.set('reportFormat', 'CSV');
+    url.searchParams.set('warehouseId', defaultWarehouseId);
+    url.searchParams.set('spanType', 'Day');
+    url.searchParams.set('startDateDay', queryDate);
+
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: url.href,
+        timeout: 30000,
+        onload(response) {
+          if (response.status < 200 || response.status >= 300) {
+            reject(new Error(`Attendance report returned HTTP ${response.status}`));
+            return;
+          }
+          resolve(response.responseText);
+        },
+        onerror() {
+          reject(new Error('Could not load the attendance report'));
+        },
+        ontimeout() {
+          reject(new Error('Attendance report request timed out'));
+        },
+      });
+    });
+  }
+
+  function parseCsv(csv, delimiter = ',') {
+    const pattern = new RegExp(
+      `(\\${delimiter}|\\r?\\n|\\r|^)(?:"([^"]*(?:""[^"]*)*)"|([^"\\${delimiter}\\r\\n]*))`,
+      'gi'
+    );
+    const rows = [[]];
+    let match;
+
+    while ((match = pattern.exec(csv))) {
+      if (match[1].length && match[1] !== delimiter) {
+        rows.push([]);
+      }
+      rows[rows.length - 1].push(match[2] ? match[2].replace(/""/g, '"') : match[3]);
+    }
+
+    return rows;
+  }
+
+  async function fetchAttendanceRows() {
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const reports = await Promise.all(
+      [yesterday, today].map(async (date) => parseCsv(await requestAttendanceCsv(formatDateOnly(date))))
+    );
+    return reports.flat();
+  }
+
+  function normalizeName(value) {
+    return String(value ?? '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim()
+      .replace(/\s+/g, ' ');
+  }
+
+  function swapNameOrder(value) {
+    const parts = String(value ?? '')
+      .split(',')
+      .map((part) => part.trim())
+      .filter(Boolean);
+    return parts.length >= 2 ? `${parts.slice(1).join(' ')} ${parts[0]}` : value;
+  }
+
+  function normalizePunchType(value) {
+    const punchType = String(value ?? '').toLowerCase();
+
+    if (punchType.includes('out') || punchType.includes('meal start')) {
+      return { label: 'Clocked Out', className: 'out' };
+    }
+    if (
+      punchType.includes('in') ||
+      punchType.includes('meal end') ||
+      punchType.includes('return')
+    ) {
+      return { label: 'Clocked In', className: 'in' };
+    }
+    return {
+      label: value ? `Unknown (${value})` : 'Unknown',
+      className: 'unknown',
+    };
+  }
+
+  function determineClockStatus(employee, attendanceRows) {
+    const employeeKeys = new Set(
+      [employee.employeeId, employee.badgeNumber, employee.login]
+        .map((value) => String(value ?? '').trim().toLowerCase())
+        .filter(Boolean)
+    );
+    const employeeNames = new Set(
+      [employee.name, swapNameOrder(employee.name)].map(normalizeName).filter(Boolean)
+    );
+    let latestPunch = null;
+
+    for (const row of attendanceRows) {
+      if (!Array.isArray(row) || row.length < 6) {
+        continue;
+      }
+
+      const normalizedCells = row.map((cell) => String(cell ?? '').trim().toLowerCase());
+      const rowName = normalizeName(row[1]);
+      const matches =
+        normalizedCells.some((cell) => employeeKeys.has(cell)) || employeeNames.has(rowName);
+      if (!matches) {
+        continue;
+      }
+
+      const timestamp = new Date(String(row[5] ?? '').trim()).getTime();
+      if (Number.isNaN(timestamp)) {
+        continue;
+      }
+
+      if (!latestPunch || timestamp > latestPunch.timestamp) {
+        latestPunch = {
+          timestamp,
+          type: String(row[4] ?? '').trim(),
+          displayTime: String(row[5] ?? '').trim(),
+        };
+      }
+    }
+
+    if (!latestPunch) {
+      return {
+        label: 'Clocked Out',
+        className: 'out',
+        lastPunch: 'No recent punch found',
+      };
+    }
+
+    return {
+      ...normalizePunchType(latestPunch.type),
+      lastPunch: latestPunch.displayTime,
+    };
+  }
+
+  function formatError(error) {
+    return error instanceof Error ? error.message : String(error || 'Lookup failed');
+  }
+
+  function writeClipboard(text) {
+    if (navigator.clipboard?.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', 'readonly');
+    textarea.style.position = 'fixed';
+    textarea.style.top = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand('copy');
+    textarea.remove();
+    return copied ? Promise.resolve() : Promise.reject(new Error('Clipboard copy failed'));
+  }
+
+  function writeClipboardTable(html, text) {
+    if (navigator.clipboard?.write && typeof ClipboardItem === 'function') {
+      return navigator.clipboard.write([
+        new ClipboardItem({
+          'text/html': new Blob([html], { type: 'text/html' }),
+          'text/plain': new Blob([text], { type: 'text/plain' }),
+        }),
+      ]);
+    }
+
+    return writeClipboard(text);
+  }
+
+  function escapeXml(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function columnLetter(index) {
+    let position = index + 1;
+    let letter = '';
+    while (position > 0) {
+      const remainder = (position - 1) % 26;
+      letter = String.fromCharCode(65 + remainder) + letter;
+      position = Math.floor((position - 1) / 26);
+    }
+    return letter;
+  }
+
+  function concatBytes(parts) {
+    const total = parts.reduce((sum, part) => sum + part.length, 0);
+    const output = new Uint8Array(total);
+    let offset = 0;
+    for (const part of parts) {
+      output.set(part, offset);
+      offset += part.length;
+    }
+    return output;
+  }
+
+  function u16le(value) {
+    const bytes = new Uint8Array(2);
+    new DataView(bytes.buffer).setUint16(0, value, true);
+    return bytes;
+  }
+
+  function u32le(value) {
+    const bytes = new Uint8Array(4);
+    new DataView(bytes.buffer).setUint32(0, value, true);
+    return bytes;
+  }
+
+  function crc32(bytes) {
+    let crc = 0xffffffff;
+    for (let index = 0; index < bytes.length; index += 1) {
+      crc = crc32Table[(crc ^ bytes[index]) & 0xff] ^ (crc >>> 8);
+    }
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+
+  function createZip(files) {
+    const encoder = new TextEncoder();
+    const locals = [];
+    const centrals = [];
+    let offset = 0;
+
+    for (const file of files) {
+      const nameBytes = encoder.encode(file.name);
+      const data = typeof file.data === 'string' ? encoder.encode(file.data) : file.data;
+      const checksum = crc32(data);
+      const local = concatBytes([
+        u32le(0x04034b50),
+        u16le(20),
+        u16le(0),
+        u16le(0),
+        u16le(0),
+        u16le(0),
+        u32le(checksum),
+        u32le(data.length),
+        u32le(data.length),
+        u16le(nameBytes.length),
+        u16le(0),
+        nameBytes,
+        data,
+      ]);
+      const central = concatBytes([
+        u32le(0x02014b50),
+        u16le(20),
+        u16le(20),
+        u16le(0),
+        u16le(0),
+        u16le(0),
+        u16le(0),
+        u32le(checksum),
+        u32le(data.length),
+        u32le(data.length),
+        u16le(nameBytes.length),
+        u16le(0),
+        u16le(0),
+        u16le(0),
+        u16le(0),
+        u32le(0),
+        u32le(offset),
+        nameBytes,
+      ]);
+      locals.push(local);
+      centrals.push(central);
+      offset += local.length;
+    }
+
+    const centralDirectory = concatBytes(centrals);
+    const endRecord = concatBytes([
+      u32le(0x06054b50),
+      u16le(0),
+      u16le(0),
+      u16le(files.length),
+      u16le(files.length),
+      u32le(centralDirectory.length),
+      u32le(offset),
+      u16le(0),
+    ]);
+
+    return concatBytes([...locals, centralDirectory, endRecord]);
+  }
+
+  function getResultTableRecord(result) {
+    const workSchedule = result.workSchedule || decodeShiftCode(result.shift);
+    return {
+      login: result.login || '',
+      name: result.ok ? result.name || '' : '',
+      employeeId: result.ok ? result.employeeId || '' : '',
+      badgeNumber: result.ok ? result.badgeNumber || '' : '',
+      shift: result.ok ? result.shift || '' : '',
+      workSchedule: result.ok ? workSchedule.label || '' : '',
+      clockStatus: result.ok ? result.clockStatus || '' : result.error || 'Lookup failed',
+      lastPunch: result.ok ? result.lastPunch || '' : '',
+      photoUrl: result.ok ? result.photoUrl || '' : '',
+      resultStatus: result.ok ? 'OK' : result.error || 'Lookup failed',
+      clockStatusClass: result.clockStatusClass || 'unknown',
+      shiftCode: result.shift || '',
+      workScheduleKey: workSchedule.key || '',
+    };
+  }
+
+  function getExcelStatusColors(className) {
+    if (className === 'in') {
+      return { background: '#C6EFCE', color: '#006100' };
+    }
+    if (className === 'out') {
+      return { background: '#FFC7CE', color: '#9C0006' };
+    }
+    return { background: '#FFEB9C', color: '#9C5700' };
+  }
+
+  function buildTableCopyPayload(records) {
+    const headers = resultTableColumns.map(([, label]) => label);
+    const text = [headers, ...records.map((record) => resultTableColumns.map(([key]) => record[key]))]
+      .map((row) =>
+        row.map((cell) => String(cell ?? '').replace(/\t/g, ' ').replace(/\r?\n/g, ' ')).join('\t')
+      )
+      .join('\r\n');
+    const headerHtml = headers
+      .map(
+        (header) =>
+          `<th style="background:#4472C4;color:#FFFFFF;font:bold 11pt Calibri,Arial;border:1px solid #2F5496;padding:4px 8px;white-space:nowrap">${escapeHtml(
+            header
+          )}</th>`
+      )
+      .join('');
+    const htmlRows = records
+      .map((record, rowIndex) => {
+        const band = rowIndex % 2 === 1 ? '#D6DCE4' : '#FFFFFF';
+        const cells = resultTableColumns
+          .map(([key]) => {
+            if (key === 'clockStatus') {
+              const colors = getExcelStatusColors(record.clockStatusClass);
+              return `<td style="background:${colors.background};color:${colors.color};font:bold 11pt Calibri,Arial;border:1px solid #B4B4B4;padding:3px 8px;white-space:nowrap">${escapeHtml(
+                record[key]
+              )}</td>`;
+            }
+            return `<td style="background:${band};color:#000000;font:11pt Calibri,Arial;border:1px solid #B4B4B4;padding:3px 8px;white-space:nowrap">${escapeHtml(
+              record[key]
+            )}</td>`;
+          })
+          .join('');
+        return `<tr>${cells}</tr>`;
+      })
+      .join('');
+    const html = `<table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font:11pt Calibri,Arial"><thead><tr>${headerHtml}</tr></thead><tbody>${htmlRows}</tbody></table>`;
+    return { html, text };
+  }
+
+  function buildExcelWorkbook(records) {
+    const headerRow = resultTableColumns
+      .map(([, label], columnIndex) => {
+        const reference = `${columnLetter(columnIndex)}1`;
+        return `<c r="${reference}" s="1" t="inlineStr"><is><t xml:space="preserve">${escapeXml(
+          label
+        )}</t></is></c>`;
+      })
+      .join('');
+    const dataRows = records
+      .map((record, recordIndex) => {
+        const rowNumber = recordIndex + 2;
+        const bandStyle = recordIndex % 2 === 1 ? 3 : 2;
+        const cells = resultTableColumns
+          .map(([key], columnIndex) => {
+            const reference = `${columnLetter(columnIndex)}${rowNumber}`;
+            let style = bandStyle;
+            if (key === 'clockStatus') {
+              style =
+                record.clockStatusClass === 'in' ? 4 : record.clockStatusClass === 'out' ? 5 : 6;
+            }
+            return `<c r="${reference}" s="${style}" t="inlineStr"><is><t xml:space="preserve">${escapeXml(
+              record[key]
+            )}</t></is></c>`;
+          })
+          .join('');
+        return `<row r="${rowNumber}">${cells}</row>`;
+      })
+      .join('');
+    const columnWidths = [28, 14, 12, 14, 12, 14, 36, 20]
+      .map(
+        (width, index) =>
+          `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`
+      )
+      .join('');
+    const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="6"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FF006100"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FF9C0006"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FF9C5700"/><name val="Calibri"/></font></fonts><fills count="7"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF4472C4"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD6DCE4"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFC6EFCE"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFC7CE"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFEB9C"/></patternFill></fill></fills><borders count="2"><border/><border><left style="thin"><color rgb="FFB4B4B4"/></left><right style="thin"><color rgb="FFB4B4B4"/></right><top style="thin"><color rgb="FFB4B4B4"/></top><bottom style="thin"><color rgb="FFB4B4B4"/></bottom></border></borders><cellXfs count="7"><xf fontId="0" fillId="0" borderId="0"/><xf fontId="1" fillId="2" borderId="1" applyFont="1" applyFill="1" applyBorder="1"/><xf fontId="0" fillId="0" borderId="1" applyBorder="1"/><xf fontId="0" fillId="3" borderId="1" applyFill="1" applyBorder="1"/><xf fontId="3" fillId="4" borderId="1" applyFont="1" applyFill="1" applyBorder="1"/><xf fontId="4" fillId="5" borderId="1" applyFont="1" applyFill="1" applyBorder="1"/><xf fontId="5" fillId="6" borderId="1" applyFont="1" applyFill="1" applyBorder="1"/></cellXfs></styleSheet>`;
+    const zipBytes = createZip([
+      {
+        name: '[Content_Types].xml',
+        data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
+      },
+      {
+        name: '_rels/.rels',
+        data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+      },
+      {
+        name: 'xl/workbook.xml',
+        data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Photo Lookup" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+      },
+      {
+        name: 'xl/_rels/workbook.xml.rels',
+        data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+      },
+      {
+        name: 'xl/styles.xml',
+        data: styles,
+      },
+      {
+        name: 'xl/worksheets/sheet1.xml',
+        data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${columnWidths}</cols><sheetData><row r="1">${headerRow}</row>${dataRows}</sheetData></worksheet>`,
+      },
+    ]);
+
+    return new Blob([zipBytes], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.rel = 'noopener';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function formatCountdown(milliseconds) {
+    const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return minutes > 0 ? `${minutes}m ${String(seconds).padStart(2, '0')}s` : `${seconds}s`;
+  }
+
+  function createEmployeeDetails({ login, employeeId, badgeNumber, shift, workSchedule, lastPunch }) {
+    const details = document.createElement('div');
+    details.className = 'tm-photo-details';
+    const fields = [
+      ['Login', login],
+      ['Employee ID', employeeId || 'Unavailable'],
+      ['Badge', badgeNumber || 'Unavailable'],
+      ['Shift', shift || 'Unavailable'],
+      ['Work Schedule', workSchedule.label],
+      ['Last Punch', lastPunch || 'Unavailable'],
+    ];
+
+    for (const [labelText, valueText] of fields) {
+      const field = document.createElement('div');
+      field.className = 'tm-photo-detail';
+      const label = document.createElement('span');
+      label.className = 'tm-photo-detail-label';
+      label.textContent = labelText;
+      const value = document.createElement('span');
+      value.className = 'tm-photo-detail-value';
+      value.textContent = valueText;
+      field.append(label, value);
+      details.appendChild(field);
+    }
+
+    return details;
+  }
+
+  function createPhotoCard(login, attendancePromise) {
+    const card = document.createElement('div');
+    card.className = 'tm-photo-card';
+    card.dataset.login = login;
+    card.dataset.clockStatus = 'pending';
+    card.dataset.shift = '';
+
+    const loginLabel = document.createElement('div');
+    loginLabel.className = 'tm-photo-login';
+    loginLabel.textContent = login;
+
+    const subtext = document.createElement('div');
+    subtext.className = 'tm-photo-subtext';
+    subtext.textContent = 'Loading employee from FCLM...';
+
+    card.appendChild(loginLabel);
+    card.appendChild(subtext);
+
+    const completion = Promise.all([lookupEmployee(login), attendancePromise])
+      .then(([employee, attendanceRows]) => {
+        const image = document.createElement('img');
+        image.alt = `${employee.name} badge photo`;
+        image.src = employee.photoUrl;
+
+        const nameLabel = document.createElement('div');
+        nameLabel.className = 'tm-photo-login';
+        nameLabel.textContent = employee.name;
+
+        const clockStatus = determineClockStatus(employee, attendanceRows);
+        const workSchedule = decodeShiftCode(employee.shift);
+        const clockLabel = document.createElement('div');
+        clockLabel.className = `tm-photo-clock ${clockStatus.className}`;
+        clockLabel.textContent = clockStatus.label;
+        card.dataset.clockStatus = clockStatus.className;
+        card.dataset.shift = employee.shift;
+        card.dataset.workSchedule = workSchedule.key;
+
+        const details = createEmployeeDetails({
+          login: employee.login,
+          employeeId: employee.employeeId,
+          badgeNumber: employee.badgeNumber,
+          shift: employee.shift,
+          workSchedule,
+          lastPunch: clockStatus.lastPunch,
+        });
+
+        image.addEventListener('error', () => {
+          const photoError = document.createElement('div');
+          photoError.className = 'tm-photo-detail tm-photo-photo-error';
+          photoError.textContent = 'Photo unavailable';
+          details.appendChild(photoError);
+        });
+
+        card.replaceChildren(image, nameLabel, clockLabel, details);
+        return {
+          login,
+          ok: true,
+          name: employee.name,
+          employeeId: employee.employeeId,
+          badgeNumber: employee.badgeNumber,
+          shift: employee.shift,
+          photoUrl: employee.photoUrl,
+          workSchedule,
+          clockStatus: clockStatus.label,
+          clockStatusClass: clockStatus.className,
+          lastPunch: clockStatus.lastPunch,
+        };
+      })
+      .catch((error) => {
+        const message = formatError(error);
+        card.dataset.clockStatus = 'unknown';
+        subtext.classList.add('tm-photo-error');
+        subtext.textContent = message;
+        return { login, ok: false, error: message };
+      });
+
+    return { card, completion };
+  }
+
+  function createStoredPhotoCard(result) {
+    const card = document.createElement('div');
+    card.className = 'tm-photo-card';
+    card.dataset.login = result.login || '';
+    const workSchedule = result.workSchedule || decodeShiftCode(result.shift);
+    card.dataset.clockStatus = result.clockStatusClass || 'unknown';
+    card.dataset.shift = result.shift || '';
+    card.dataset.workSchedule = workSchedule.key;
+
+    if (!result.ok) {
+      const loginLabel = document.createElement('div');
+      loginLabel.className = 'tm-photo-login';
+      loginLabel.textContent = result.login;
+      const error = document.createElement('div');
+      error.className = 'tm-photo-subtext tm-photo-error';
+      error.textContent = result.error || 'Lookup failed';
+      card.append(loginLabel, error);
+      return card;
+    }
+
+    const image = document.createElement('img');
+    image.alt = `${result.name} badge photo`;
+    image.src = result.photoUrl;
+    const nameLabel = document.createElement('div');
+    nameLabel.className = 'tm-photo-login';
+    nameLabel.textContent = result.name;
+    const clockLabel = document.createElement('div');
+    clockLabel.className = `tm-photo-clock ${result.clockStatusClass}`;
+    clockLabel.textContent = result.clockStatus;
+    const details = createEmployeeDetails({
+      login: result.login,
+      employeeId: result.employeeId,
+      badgeNumber: result.badgeNumber,
+      shift: result.shift,
+      workSchedule,
+      lastPunch: result.lastPunch,
+    });
+    image.addEventListener('error', () => {
+      const photoError = document.createElement('div');
+      photoError.className = 'tm-photo-detail tm-photo-photo-error';
+      photoError.textContent = 'Photo unavailable';
+      details.appendChild(photoError);
+    });
+    card.append(image, nameLabel, clockLabel, details);
+    return card;
+  }
+
+  function install() {
+    if (window[installationKey]) {
+      return;
+    }
+    window[installationKey] = true;
+    window[legacyInstallationKey] = true;
+
+    document
+      .querySelectorAll('.tm-photo-launcher, .tm-photo-overlay')
+      .forEach((element) => element.remove());
+
+    document.documentElement.appendChild(createStyles());
+
+    const launcher = document.createElement('button');
+    launcher.id = 'tm-photo-launcher-v070';
+    launcher.type = 'button';
+    launcher.className = 'tm-photo-launcher-v070';
+    launcher.textContent = '📷';
+    launcher.title = 'Photo Lookup v0.9.3';
+    launcher.setAttribute('aria-label', 'Open Photo Lookup v0.9.3');
+
+    let overlay = null;
+    let activeRunId = 0;
+    let progressTimer = null;
+
+    function closeOverlay() {
+      if (overlay?.isConnected) {
+        overlay.style.display = 'none';
+      }
+    }
+
+    function openOverlay() {
+      if (overlay?.isConnected) {
+        overlay.style.display = 'flex';
+        return;
+      }
+
+      overlay = document.createElement('div');
+      overlay.className = 'tm-photo-overlay';
+
+      const modal = document.createElement('div');
+      modal.id = 'tm-photo-modal-v060';
+      modal.className = 'tm-photo-modal';
+
+      const header = document.createElement('div');
+      header.className = 'tm-photo-header';
+
+      const title = document.createElement('h2');
+      title.className = 'tm-photo-title';
+      title.textContent = 'FCLM Employee Photo Lookup — v0.9.3';
+
+      const closeButton = document.createElement('button');
+      closeButton.type = 'button';
+      closeButton.className = 'tm-photo-close';
+      closeButton.textContent = '×';
+      closeButton.setAttribute('aria-label', 'Close');
+      closeButton.addEventListener('click', closeOverlay);
+
+      header.appendChild(title);
+      header.appendChild(closeButton);
+
+      const content = document.createElement('div');
+      content.className = 'tm-photo-content';
+
+      const help = document.createElement('p');
+      help.className = 'tm-photo-help';
+      help.textContent = `Paste logins separated by commas, spaces, or new lines. Warehouse: ${defaultWarehouseId}.`;
+
+      const versionNote = document.createElement('p');
+      versionNote.className = 'tm-photo-version-note';
+      versionNote.textContent = 'v0.9.3 · Status column keeps red/green/yellow on every row';
+
+      const input = document.createElement('textarea');
+      input.className = 'tm-photo-input';
+      input.placeholder = 'bobqtoke\njdoe\nasmith';
+
+      const actions = document.createElement('div');
+      actions.className = 'tm-photo-actions';
+
+      const renderButton = document.createElement('button');
+      renderButton.type = 'button';
+      renderButton.className = 'tm-photo-action';
+      renderButton.textContent = 'Look Up Employees';
+
+      const clearButton = document.createElement('button');
+      clearButton.type = 'button';
+      clearButton.className = 'tm-photo-action tm-photo-secondary';
+      clearButton.textContent = 'Clear';
+
+      const copyDebugButton = document.createElement('button');
+      copyDebugButton.id = 'tm-photo-copy-debug-v060';
+      copyDebugButton.type = 'button';
+      copyDebugButton.className = 'tm-photo-action tm-photo-secondary';
+      copyDebugButton.textContent = 'Copy Debug JSON';
+
+      const copyLoginsButton = document.createElement('button');
+      copyLoginsButton.type = 'button';
+      copyLoginsButton.className = 'tm-photo-action tm-photo-secondary';
+      copyLoginsButton.textContent = 'Copy Visible Logins';
+
+      const copyTableButton = document.createElement('button');
+      copyTableButton.type = 'button';
+      copyTableButton.className = 'tm-photo-action tm-photo-secondary';
+      copyTableButton.textContent = 'Copy Table';
+
+      const exportExcelButton = document.createElement('button');
+      exportExcelButton.type = 'button';
+      exportExcelButton.className = 'tm-photo-action tm-photo-secondary';
+      exportExcelButton.textContent = 'Export Excel';
+
+      actions.appendChild(renderButton);
+      actions.appendChild(clearButton);
+      actions.appendChild(copyLoginsButton);
+      actions.appendChild(copyTableButton);
+      actions.appendChild(exportExcelButton);
+      actions.appendChild(copyDebugButton);
+
+      const status = document.createElement('div');
+      status.className = 'tm-photo-status';
+      status.textContent = 'Enter one or more logins.';
+
+      const progress = document.createElement('div');
+      progress.id = 'tm-photo-progress-v060';
+      progress.className = 'tm-photo-progress';
+      const progressBar = document.createElement('div');
+      progressBar.className = 'tm-photo-progress-bar';
+      progress.appendChild(progressBar);
+
+      const progressText = document.createElement('div');
+      progressText.className = 'tm-photo-progress-text';
+      progressText.textContent = '0 jobs queued.';
+      let expectedCompletionAt = null;
+
+      const filters = document.createElement('div');
+      filters.id = 'tm-photo-filters-v060';
+      filters.className = 'tm-photo-filters';
+
+      const clockFilter = document.createElement('select');
+      clockFilter.className = 'tm-photo-filter';
+      clockFilter.setAttribute('aria-label', 'Filter by clock status');
+      for (const [value, label] of [
+        ['', 'All clock statuses'],
+        ['in', 'Clocked In'],
+        ['out', 'Clocked Out'],
+        ['unknown', 'Unknown / Failed'],
+      ]) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        clockFilter.appendChild(option);
+      }
+
+      const shiftFilter = document.createElement('details');
+      shiftFilter.className = 'tm-photo-filter tm-photo-shift-filter';
+      const shiftFilterSummary = document.createElement('summary');
+      shiftFilterSummary.textContent = 'All identified shifts';
+      const shiftOptions = document.createElement('div');
+      shiftOptions.className = 'tm-photo-shift-options';
+      shiftFilter.append(shiftFilterSummary, shiftOptions);
+
+      const filterModeControl = document.createElement('div');
+      filterModeControl.className = 'tm-photo-filter-mode';
+      const shiftModeButton = document.createElement('button');
+      shiftModeButton.type = 'button';
+      shiftModeButton.textContent = 'Shifts';
+      const daysModeButton = document.createElement('button');
+      daysModeButton.type = 'button';
+      daysModeButton.textContent = 'Work Days';
+      filterModeControl.append(shiftModeButton, daysModeButton);
+
+      const workDaysFilter = document.createElement('details');
+      workDaysFilter.className = 'tm-photo-filter tm-photo-shift-filter tm-photo-filter-hidden';
+      const workDaysSummary = document.createElement('summary');
+      workDaysSummary.textContent = 'All work schedules';
+      const workDaysOptions = document.createElement('div');
+      workDaysOptions.className = 'tm-photo-shift-options';
+      workDaysFilter.append(workDaysSummary, workDaysOptions);
+      let filterMode = 'shift';
+      let viewMode = 'table';
+
+      const viewModeControl = document.createElement('div');
+      viewModeControl.className = 'tm-photo-filter-mode';
+      const photosViewButton = document.createElement('button');
+      photosViewButton.type = 'button';
+      photosViewButton.textContent = 'Cards';
+      const tableViewButton = document.createElement('button');
+      tableViewButton.type = 'button';
+      tableViewButton.textContent = 'Excel table';
+      viewModeControl.append(photosViewButton, tableViewButton);
+
+      const sizeControl = document.createElement('label');
+      sizeControl.className = 'tm-photo-size-control';
+      const sizeLabel = document.createElement('span');
+      sizeLabel.textContent = 'Photo size: 180px';
+      const sizeSlider = document.createElement('input');
+      sizeSlider.type = 'range';
+      sizeSlider.min = '120';
+      sizeSlider.max = '300';
+      sizeSlider.step = '20';
+      sizeSlider.value = '180';
+      sizeSlider.setAttribute('aria-label', 'Photo card size');
+      sizeControl.append(sizeLabel, sizeSlider);
+      actions.insertBefore(viewModeControl, copyLoginsButton);
+
+      filters.appendChild(clockFilter);
+      filters.appendChild(filterModeControl);
+      filters.appendChild(shiftFilter);
+      filters.appendChild(workDaysFilter);
+      filters.appendChild(sizeControl);
+
+      const grid = document.createElement('div');
+      grid.className = 'tm-photo-grid tm-photo-filter-hidden';
+
+      const tableWrap = document.createElement('div');
+      tableWrap.className = 'tm-photo-table-wrap';
+      const resultsTable = document.createElement('table');
+      resultsTable.className = 'tm-photo-table';
+      const tableHead = document.createElement('thead');
+      const letterRow = document.createElement('tr');
+      letterRow.className = 'tm-excel-letter-row';
+      const cornerCell = document.createElement('th');
+      cornerCell.className = 'tm-excel-corner';
+      letterRow.appendChild(cornerCell);
+      resultTableColumns.forEach((_, index) => {
+        const letterCell = document.createElement('th');
+        letterCell.className = 'tm-excel-col-letter';
+        letterCell.textContent = columnLetter(index);
+        letterRow.appendChild(letterCell);
+      });
+      const fieldRow = document.createElement('tr');
+      fieldRow.className = 'tm-excel-field-row';
+      const headerRowNumber = document.createElement('th');
+      headerRowNumber.className = 'tm-excel-row-num';
+      headerRowNumber.textContent = '1';
+      fieldRow.appendChild(headerRowNumber);
+      for (const [, label] of resultTableColumns) {
+        const headerCell = document.createElement('th');
+        headerCell.className = 'tm-excel-field';
+        headerCell.textContent = label;
+        fieldRow.appendChild(headerCell);
+      }
+      tableHead.append(letterRow, fieldRow);
+      const tableBody = document.createElement('tbody');
+      resultsTable.append(tableHead, tableBody);
+      tableWrap.appendChild(resultsTable);
+
+      function getSelectedShifts() {
+        return Array.from(shiftOptions.querySelectorAll('input:checked')).map(
+          (checkbox) => checkbox.value
+        );
+      }
+
+      function updateShiftSummary() {
+        const selectedShifts = getSelectedShifts();
+        shiftFilterSummary.textContent =
+          selectedShifts.length === 0
+            ? 'All identified shifts'
+            : `${selectedShifts.length} shift${selectedShifts.length === 1 ? '' : 's'} selected`;
+      }
+
+      function getSelectedWorkSchedules() {
+        return Array.from(workDaysOptions.querySelectorAll('input:checked')).map(
+          (checkbox) => checkbox.value
+        );
+      }
+
+      function updateWorkDaysSummary() {
+        const selectedSchedules = getSelectedWorkSchedules();
+        workDaysSummary.textContent =
+          selectedSchedules.length === 0
+            ? 'All work schedules'
+            : `${selectedSchedules.length} schedule${selectedSchedules.length === 1 ? '' : 's'} selected`;
+      }
+
+      function setFilterMode(mode) {
+        filterMode = mode === 'days' ? 'days' : 'shift';
+        shiftModeButton.classList.toggle('is-active', filterMode === 'shift');
+        daysModeButton.classList.toggle('is-active', filterMode === 'days');
+        shiftFilter.classList.toggle('tm-photo-filter-hidden', filterMode !== 'shift');
+        workDaysFilter.classList.toggle('tm-photo-filter-hidden', filterMode !== 'days');
+        applyFilters();
+      }
+
+      function setViewMode(mode) {
+        viewMode = mode === 'photos' ? 'photos' : 'table';
+        photosViewButton.classList.toggle('is-active', viewMode === 'photos');
+        tableViewButton.classList.toggle('is-active', viewMode === 'table');
+        grid.classList.toggle('tm-photo-filter-hidden', viewMode !== 'photos');
+        tableWrap.classList.toggle('tm-photo-filter-hidden', viewMode !== 'table');
+        sizeControl.classList.toggle('tm-photo-filter-hidden', viewMode !== 'photos');
+        grid.style.display = viewMode === 'photos' ? '' : 'none';
+        tableWrap.style.display = viewMode === 'table' ? '' : 'none';
+        modal.classList.toggle('is-table', viewMode === 'table');
+      }
+
+      function matchesFilters(dataset) {
+        const selectedShifts = new Set(getSelectedShifts());
+        const selectedSchedules = new Set(getSelectedWorkSchedules());
+        const clockMatches =
+          !clockFilter.value || dataset.clockStatus === clockFilter.value;
+        const scheduleMatches =
+          filterMode === 'shift'
+            ? selectedShifts.size === 0 || selectedShifts.has(dataset.shift)
+            : selectedSchedules.size === 0 ||
+              selectedSchedules.has(dataset.workSchedule);
+        return clockMatches && scheduleMatches;
+      }
+
+      function applyFilters() {
+        for (const card of grid.querySelectorAll('.tm-photo-card')) {
+          card.style.display = matchesFilters(card.dataset) ? '' : 'none';
+        }
+        for (const row of tableBody.querySelectorAll('tr')) {
+          row.style.display = matchesFilters(row.dataset) ? '' : 'none';
+        }
+      }
+
+      function createResultTableRow(result, rowNumber) {
+        const record = getResultTableRecord(result);
+        const row = document.createElement('tr');
+        row.dataset.login = record.login;
+        row.dataset.clockStatus = record.clockStatusClass;
+        row.dataset.shift = record.shiftCode;
+        row.dataset.workSchedule = record.workScheduleKey;
+        if (!result.ok) {
+          row.classList.add('is-error');
+        }
+        const rowNumberCell = document.createElement('th');
+        rowNumberCell.className = 'tm-excel-row-num';
+        rowNumberCell.textContent = String(rowNumber);
+        row.appendChild(rowNumberCell);
+        for (const [key] of resultTableColumns) {
+          const cell = document.createElement('td');
+          cell.textContent = record[key];
+          if (key === 'clockStatus') {
+            cell.classList.add(`tm-excel-status-${record.clockStatusClass}`);
+          }
+          row.appendChild(cell);
+        }
+        return row;
+      }
+
+      function syncResultsTable() {
+        tableBody.replaceChildren();
+        (lastDebugPayload.results || []).forEach((result, index) => {
+          tableBody.appendChild(createResultTableRow(result, index + 2));
+        });
+        applyFilters();
+      }
+
+      function getVisibleTableRecords() {
+        return (lastDebugPayload.results || [])
+          .map(getResultTableRecord)
+          .filter((record) =>
+            matchesFilters({
+              clockStatus: record.clockStatusClass,
+              shift: record.shiftCode,
+              workSchedule: record.workScheduleKey,
+            })
+          );
+      }
+
+      function refreshShiftFilter() {
+        const selectedShifts = new Set(getSelectedShifts());
+        const shifts = Array.from(grid.querySelectorAll('.tm-photo-card'))
+          .map((card) => card.dataset.shift)
+          .filter((shift) => shift && shift !== 'Shift unavailable');
+        const uniqueShifts = Array.from(new Set(shifts)).sort();
+        shiftOptions.replaceChildren();
+        for (const shift of uniqueShifts) {
+          const label = document.createElement('label');
+          label.className = 'tm-photo-shift-option';
+          const checkbox = document.createElement('input');
+          checkbox.type = 'checkbox';
+          checkbox.value = shift;
+          checkbox.checked = selectedShifts.has(shift);
+          const text = document.createElement('span');
+          text.textContent = shift;
+          label.append(checkbox, text);
+          shiftOptions.appendChild(label);
+        }
+        if (uniqueShifts.length === 0) {
+          const empty = document.createElement('div');
+          empty.className = 'tm-photo-shift-option';
+          empty.textContent = 'No shifts identified yet';
+          shiftOptions.appendChild(empty);
+        }
+        updateShiftSummary();
+      }
+
+      function refreshWorkDaysFilter() {
+        const selectedSchedules = new Set(getSelectedWorkSchedules());
+        const schedulesByKey = new Map();
+        for (const result of lastDebugPayload.results || []) {
+          if (!result.ok) {
+            continue;
+          }
+          const schedule = result.workSchedule || decodeShiftCode(result.shift);
+          if (schedule.known) {
+            schedulesByKey.set(schedule.key, schedule.label);
+          }
+        }
+
+        workDaysOptions.replaceChildren();
+        for (const [key, labelText] of Array.from(schedulesByKey.entries()).sort((a, b) =>
+          a[1].localeCompare(b[1])
+        )) {
+          const label = document.createElement('label');
+          label.className = 'tm-photo-shift-option';
+          const checkbox = document.createElement('input');
+          checkbox.type = 'checkbox';
+          checkbox.value = key;
+          checkbox.checked = selectedSchedules.has(key);
+          const text = document.createElement('span');
+          text.textContent = labelText;
+          label.append(checkbox, text);
+          workDaysOptions.appendChild(label);
+        }
+        if (schedulesByKey.size === 0) {
+          const empty = document.createElement('div');
+          empty.className = 'tm-photo-shift-option';
+          empty.textContent = 'No work schedules identified yet';
+          workDaysOptions.appendChild(empty);
+        }
+        updateWorkDaysSummary();
+      }
+
+      function applyPhotoSize(value) {
+        const size = Math.min(300, Math.max(120, Number(value) || 180));
+        sizeSlider.value = String(size);
+        sizeLabel.textContent = `Photo size: ${size}px`;
+        grid.style.setProperty('--tm-photo-card-min', `${size}px`);
+      }
+
+      function updateProgress(
+        completed,
+        total,
+        startedAt,
+        isComplete = false,
+        refreshEstimate = false
+      ) {
+        const percent = total === 0 ? 0 : Math.round((completed / total) * 100);
+        progressBar.style.width = `${percent}%`;
+        const elapsed = Date.now() - startedAt;
+
+        if (isComplete) {
+          progressText.textContent = `${completed}/${total} jobs complete in ${formatCountdown(elapsed)}.`;
+          return;
+        }
+        if (completed === 0) {
+          progressText.textContent = `0/${total} jobs complete · Calculating ETA...`;
+          return;
+        }
+
+        if (refreshEstimate || expectedCompletionAt === null) {
+          expectedCompletionAt = Date.now() + (elapsed / completed) * (total - completed);
+        }
+        const remainingMs = Math.max(0, expectedCompletionAt - Date.now());
+        const expectedAt = new Date(expectedCompletionAt);
+        progressText.textContent =
+          `${completed}/${total} jobs complete · ETA ${expectedAt.toLocaleTimeString()} ` +
+          `(${formatCountdown(remainingMs)} remaining)`;
+      }
+
+      function saveCurrentState() {
+        storePanelState({
+          inputValue: input.value,
+          clockFilter: clockFilter.value,
+          filterMode,
+          viewMode,
+          selectedShifts: getSelectedShifts(),
+          selectedWorkSchedules: getSelectedWorkSchedules(),
+          photoSize: sizeSlider.value,
+          statusText: status.textContent,
+          progressText: progressText.textContent,
+          progressWidth: progressBar.style.width,
+          debug: lastDebugPayload,
+        });
+      }
+
+      function restoreSavedState() {
+        const savedState = loadPanelState();
+        if (!savedState) {
+          return;
+        }
+
+        input.value = savedState.inputValue || '';
+        if (savedState.debug) {
+          lastDebugPayload = savedState.debug;
+        }
+        for (const result of savedState.debug?.results || []) {
+          grid.appendChild(createStoredPhotoCard(result));
+        }
+        syncResultsTable();
+        refreshShiftFilter();
+        refreshWorkDaysFilter();
+        clockFilter.value = savedState.clockFilter || '';
+        const savedShifts = new Set(
+          Array.isArray(savedState.selectedShifts)
+            ? savedState.selectedShifts
+            : [savedState.shiftFilter].filter(Boolean)
+        );
+        for (const checkbox of shiftOptions.querySelectorAll('input')) {
+          checkbox.checked = savedShifts.has(checkbox.value);
+        }
+        updateShiftSummary();
+        const savedSchedules = new Set(savedState.selectedWorkSchedules || []);
+        for (const checkbox of workDaysOptions.querySelectorAll('input')) {
+          checkbox.checked = savedSchedules.has(checkbox.value);
+        }
+        updateWorkDaysSummary();
+        setFilterMode(savedState.filterMode || 'shift');
+        applyPhotoSize(savedState.photoSize || 180);
+        applyFilters();
+        status.textContent = savedState.statusText || 'Saved results restored.';
+        progressText.textContent =
+          savedState.progressText ||
+          `${savedState.debug?.results?.length || 0} saved jobs restored.`;
+        progressBar.style.width =
+          savedState.progressWidth || (savedState.debug?.results?.length ? '100%' : '0%');
+      }
+
+      function renderEmployees() {
+        const logins = normalizeLoginInput(input.value);
+        grid.replaceChildren();
+        tableBody.replaceChildren();
+        activeRunId += 1;
+        const runId = activeRunId;
+        window.clearInterval(progressTimer);
+        progressTimer = null;
+        shiftOptions.replaceChildren();
+        workDaysOptions.replaceChildren();
+        clockFilter.value = '';
+        updateShiftSummary();
+        updateWorkDaysSummary();
+        setFilterMode('shift');
+        expectedCompletionAt = null;
+
+        if (logins.length === 0) {
+          status.textContent = 'No logins entered.';
+          progressBar.style.width = '0%';
+          progressText.textContent = '0 jobs queued.';
+          return;
+        }
+
+        const startedAt = Date.now();
+        let completed = 0;
+        renderButton.disabled = true;
+        lastDebugPayload = {
+          version: '0.9.3',
+          generatedAt: new Date().toISOString(),
+          warehouseId: defaultWarehouseId,
+          logins: [...logins],
+          attendanceRows: 0,
+          startedAt: new Date(startedAt).toISOString(),
+          completedAt: null,
+          durationMs: null,
+          results: [],
+          errors: [],
+        };
+        updateProgress(0, logins.length, startedAt);
+
+        const attendancePromise = fetchAttendanceRows().then((rows) => {
+          if (runId === activeRunId) {
+            lastDebugPayload.attendanceRows = rows.length;
+          }
+          return rows;
+        });
+        const completions = [];
+        for (const login of logins) {
+          const job = createPhotoCard(login, attendancePromise);
+          grid.appendChild(job.card);
+          completions.push(
+            job.completion.then((result) => {
+              if (runId !== activeRunId) {
+                return result;
+              }
+              completed += 1;
+              lastDebugPayload.results.push(result);
+              if (!result.ok) {
+                lastDebugPayload.errors.push({ login, error: result.error });
+              }
+              refreshShiftFilter();
+              refreshWorkDaysFilter();
+              syncResultsTable();
+              applyFilters();
+              updateProgress(completed, logins.length, startedAt, false, true);
+              saveCurrentState();
+              return result;
+            })
+          );
+        }
+
+        progressTimer = window.setInterval(() => {
+          if (runId === activeRunId) {
+            updateProgress(completed, logins.length, startedAt);
+          }
+        }, 1000);
+
+        Promise.all(completions).then(() => {
+          if (runId !== activeRunId) {
+            return;
+          }
+          window.clearInterval(progressTimer);
+          progressTimer = null;
+          renderButton.disabled = false;
+          const completedAt = new Date();
+          lastDebugPayload.generatedAt = completedAt.toISOString();
+          lastDebugPayload.completedAt = completedAt.toISOString();
+          lastDebugPayload.durationMs = Date.now() - startedAt;
+          updateProgress(completed, logins.length, startedAt, true);
+          const failures = lastDebugPayload.errors.length;
+          status.textContent = failures
+            ? `Completed with ${failures} failed lookup${failures === 1 ? '' : 's'}.`
+            : `Completed ${logins.length} employee lookup${logins.length === 1 ? '' : 's'}.`;
+          saveCurrentState();
+        });
+
+        status.textContent = `Looking up ${logins.length} employee${logins.length === 1 ? '' : 's'} in FCLM.`;
+        saveCurrentState();
+      }
+
+      setFilterMode('shift');
+      restoreSavedState();
+      setViewMode('table');
+      renderButton.addEventListener('click', renderEmployees);
+      clearButton.addEventListener('click', () => {
+        activeRunId += 1;
+        window.clearInterval(progressTimer);
+        progressTimer = null;
+        renderButton.disabled = false;
+        input.value = '';
+        grid.replaceChildren();
+        tableBody.replaceChildren();
+        clockFilter.value = '';
+        shiftOptions.replaceChildren();
+        workDaysOptions.replaceChildren();
+        updateShiftSummary();
+        updateWorkDaysSummary();
+        setFilterMode('shift');
+        setViewMode('table');
+        applyPhotoSize(180);
+        progressBar.style.width = '0%';
+        progressText.textContent = '0 jobs queued.';
+        status.textContent = 'Enter one or more logins.';
+        lastDebugPayload = {
+          version: '0.9.3',
+          generatedAt: null,
+          warehouseId: defaultWarehouseId,
+          logins: [],
+          attendanceRows: 0,
+          startedAt: null,
+          completedAt: null,
+          durationMs: null,
+          results: [],
+          errors: [],
+        };
+        clearPanelState();
+        input.focus();
+      });
+      copyDebugButton.addEventListener('click', async () => {
+        lastDebugPayload.generatedAt = new Date().toISOString();
+        try {
+          await writeClipboard(JSON.stringify(lastDebugPayload, null, 2));
+          status.textContent = 'Debug copied to clipboard.';
+        } catch (error) {
+          status.textContent = `Debug copy failed: ${formatError(error)}`;
+        }
+      });
+      copyLoginsButton.addEventListener('click', async () => {
+        const visibleLogins = Array.from(grid.querySelectorAll('.tm-photo-card'))
+          .filter((card) => card.style.display !== 'none')
+          .map((card) => card.dataset.login)
+          .filter(Boolean);
+
+        if (visibleLogins.length === 0) {
+          status.textContent = 'No visible logins to copy.';
+          return;
+        }
+
+        try {
+          await writeClipboard(visibleLogins.join('\n'));
+          status.textContent = `Copied ${visibleLogins.length} visible login${visibleLogins.length === 1 ? '' : 's'}.`;
+        } catch (error) {
+          status.textContent = `Login copy failed: ${formatError(error)}`;
+        }
+      });
+      copyTableButton.addEventListener('click', async () => {
+        const records = getVisibleTableRecords();
+        if (records.length === 0) {
+          status.textContent = 'No visible table rows to copy.';
+          return;
+        }
+
+        try {
+          const payload = buildTableCopyPayload(records);
+          await writeClipboardTable(payload.html, payload.text);
+          status.textContent = `Copied ${records.length} table row${records.length === 1 ? '' : 's'}.`;
+        } catch (error) {
+          status.textContent = `Table copy failed: ${formatError(error)}`;
+        }
+      });
+      exportExcelButton.addEventListener('click', () => {
+        const records = getVisibleTableRecords();
+        if (records.length === 0) {
+          status.textContent = 'No visible table rows to export.';
+          return;
+        }
+
+        const filename = `fclm-photo-lookup-${defaultWarehouseId}-${formatDateOnly(new Date())}.xlsx`;
+        downloadBlob(buildExcelWorkbook(records), filename);
+        status.textContent = `Exported ${records.length} row${records.length === 1 ? '' : 's'} to ${filename}.`;
+      });
+      clockFilter.addEventListener('change', () => {
+        applyFilters();
+        saveCurrentState();
+      });
+      shiftOptions.addEventListener('change', () => {
+        updateShiftSummary();
+        applyFilters();
+        saveCurrentState();
+      });
+      workDaysOptions.addEventListener('change', () => {
+        updateWorkDaysSummary();
+        applyFilters();
+        saveCurrentState();
+      });
+      shiftModeButton.addEventListener('click', () => {
+        setFilterMode('shift');
+        saveCurrentState();
+      });
+      daysModeButton.addEventListener('click', () => {
+        setFilterMode('days');
+        saveCurrentState();
+      });
+      photosViewButton.addEventListener('click', () => {
+        setViewMode('photos');
+        saveCurrentState();
+      });
+      tableViewButton.addEventListener('click', () => {
+        setViewMode('table');
+        saveCurrentState();
+      });
+      sizeSlider.addEventListener('input', () => {
+        applyPhotoSize(sizeSlider.value);
+        saveCurrentState();
+      });
+      input.addEventListener('input', saveCurrentState);
+
+      input.addEventListener('keydown', (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+          renderEmployees();
+        }
+      });
+
+      overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) {
+          closeOverlay();
+        }
+      });
+
+      content.appendChild(help);
+      content.appendChild(versionNote);
+      content.appendChild(input);
+      content.appendChild(actions);
+      content.appendChild(status);
+      content.appendChild(progress);
+      content.appendChild(progressText);
+      content.appendChild(filters);
+      content.appendChild(grid);
+      content.appendChild(tableWrap);
+
+      modal.appendChild(header);
+      modal.appendChild(content);
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+      input.focus();
+    }
+
+    launcher.addEventListener('click', openOverlay);
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && overlay?.isConnected) {
+        closeOverlay();
+      }
+    });
+
+    document.body.appendChild(launcher);
+
+    const removeLegacyUi = () => {
+      document.querySelectorAll('.tm-photo-launcher').forEach((element) => {
+        if (element !== launcher) {
+          element.remove();
+        }
+      });
+      document.querySelectorAll('.tm-photo-modal').forEach((element) => {
+        if (element.id !== 'tm-photo-modal-v060') {
+          element.closest('.tm-photo-overlay')?.remove();
+        }
+      });
+    };
+    removeLegacyUi();
+    new MutationObserver(removeLegacyUi).observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', install, { once: true });
+  } else {
+    install();
+  }
+})();

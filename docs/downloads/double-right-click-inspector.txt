@@ -1,0 +1,296 @@
+// ==UserScript==
+// @name         Double Right Click Inspector
+// @namespace    ultimate-tampermonkey
+// @version      0.1.0
+// @description  Copy element HTML and locators on double right click with a green ripple confirmation
+// @author       Cursor
+// @match        http://*/*
+// @match        https://*/*
+// @grant        GM_setClipboard
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const installationKey = '__doubleRightClickInspectorInstalled';
+  const doubleClickWindowMs = 350;
+
+  function copyTextToClipboard(text) {
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(text, 'text');
+      return Promise.resolve();
+    }
+
+    if (navigator.clipboard?.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', 'true');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    textarea.style.pointerEvents = 'none';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand('copy');
+    textarea.remove();
+
+    if (!copied) {
+      return Promise.reject(new Error('Clipboard copy failed.'));
+    }
+
+    return Promise.resolve();
+  }
+
+  function showSuccessRipple(clientX, clientY) {
+    const ripple = document.createElement('div');
+    ripple.setAttribute('aria-hidden', 'true');
+    ripple.style.position = 'fixed';
+    ripple.style.left = `${clientX}px`;
+    ripple.style.top = `${clientY}px`;
+    ripple.style.width = '18px';
+    ripple.style.height = '18px';
+    ripple.style.marginLeft = '-9px';
+    ripple.style.marginTop = '-9px';
+    ripple.style.borderRadius = '9999px';
+    ripple.style.border = '3px solid rgba(34, 197, 94, 0.95)';
+    ripple.style.background = 'rgba(34, 197, 94, 0.18)';
+    ripple.style.boxShadow = '0 0 0 0 rgba(34, 197, 94, 0.5)';
+    ripple.style.pointerEvents = 'none';
+    ripple.style.zIndex = '2147483647';
+    ripple.style.transition =
+      'transform 280ms ease-out, opacity 280ms ease-out, box-shadow 280ms ease-out';
+    ripple.style.transform = 'scale(0.35)';
+    ripple.style.opacity = '1';
+
+    document.body.appendChild(ripple);
+
+    requestAnimationFrame(() => {
+      ripple.style.transform = 'scale(4)';
+      ripple.style.opacity = '0';
+      ripple.style.boxShadow = '0 0 0 12px rgba(34, 197, 94, 0)';
+    });
+
+    window.setTimeout(() => {
+      ripple.remove();
+    }, 320);
+  }
+
+  function escapeIdentifier(value) {
+    if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+      return CSS.escape(value);
+    }
+
+    return value.replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char}`);
+  }
+
+  function isUniqueSelector(selector) {
+    try {
+      return document.querySelectorAll(selector).length === 1;
+    } catch {
+      return false;
+    }
+  }
+
+  function buildSegment(element) {
+    if (element.id) {
+      return `#${escapeIdentifier(element.id)}`;
+    }
+
+    const tagName = element.tagName.toLowerCase();
+    const classes = Array.from(element.classList)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((className) => `.${escapeIdentifier(className)}`)
+      .join('');
+
+    const baseSegment = `${tagName}${classes}`;
+    const parent = element.parentElement;
+
+    if (!parent) {
+      return baseSegment || tagName;
+    }
+
+    const siblingsOfSameType = Array.from(parent.children).filter(
+      (sibling) => sibling.tagName === element.tagName
+    );
+
+    if (siblingsOfSameType.length <= 1) {
+      return baseSegment || tagName;
+    }
+
+    const position = siblingsOfSameType.indexOf(element) + 1;
+    return `${baseSegment || tagName}:nth-of-type(${position})`;
+  }
+
+  function buildAbsoluteCssSegment(element) {
+    const tagName = element.tagName.toLowerCase();
+
+    if (element.id) {
+      return `${tagName}#${escapeIdentifier(element.id)}`;
+    }
+
+    const parent = element.parentElement;
+    if (!parent) {
+      return tagName;
+    }
+
+    const siblingsOfSameType = Array.from(parent.children).filter(
+      (sibling) => sibling.tagName === element.tagName
+    );
+
+    if (siblingsOfSameType.length <= 1) {
+      return tagName;
+    }
+
+    const position = siblingsOfSameType.indexOf(element) + 1;
+    return `${tagName}:nth-of-type(${position})`;
+  }
+
+  function escapeXPathLiteral(value) {
+    if (!value.includes('"')) {
+      return `"${value}"`;
+    }
+
+    if (!value.includes("'")) {
+      return `'${value}'`;
+    }
+
+    const parts = value.split('"').map((part) => `"${part}"`);
+    return `concat(${parts.join(', \'"\', ')})`;
+  }
+
+  function getCssSelector(element) {
+    const segments = [];
+    let current = element;
+
+    while (current && current !== document.documentElement) {
+      const segment = buildSegment(current);
+      segments.unshift(segment);
+
+      const candidateSelector = segments.join(' > ');
+      if (isUniqueSelector(candidateSelector)) {
+        return candidateSelector;
+      }
+
+      current = current.parentElement;
+    }
+
+    segments.unshift('html');
+    return segments.join(' > ');
+  }
+
+  function getCssPath(element) {
+    const segments = [];
+    let current = element;
+
+    while (current) {
+      segments.unshift(buildAbsoluteCssSegment(current));
+      current = current.parentElement;
+    }
+
+    return segments.join(' > ');
+  }
+
+  function getXPath(element) {
+    if (element.id) {
+      return `//*[@id=${escapeXPathLiteral(element.id)}]`;
+    }
+
+    const segments = [];
+    let current = element;
+
+    while (current && current.nodeType === Node.ELEMENT_NODE) {
+      const tagName = current.tagName.toLowerCase();
+      const currentTagName = current.tagName;
+      const parent = current.parentElement;
+
+      if (!parent) {
+        segments.unshift(`/${tagName}[1]`);
+        break;
+      }
+
+      const siblingsOfSameType = Array.from(parent.children).filter(
+        (sibling) => sibling.tagName === currentTagName
+      );
+      const index = siblingsOfSameType.indexOf(current) + 1;
+      segments.unshift(`/${tagName}[${index}]`);
+      current = parent;
+    }
+
+    return segments.join('');
+  }
+
+  function buildClipboardPayload(target) {
+    return [
+      'Inner HTML:',
+      target.innerHTML,
+      '',
+      'Outer HTML:',
+      target.outerHTML,
+      '',
+      'CSS Selector:',
+      getCssSelector(target),
+      '',
+      'CSS Path:',
+      getCssPath(target),
+      '',
+      'XPath:',
+      getXPath(target)
+    ].join('\n');
+  }
+
+  function install() {
+    if (window.top !== window.self) {
+      return;
+    }
+
+    if (window[installationKey]) {
+      return;
+    }
+    window[installationKey] = true;
+
+    let lastRightClick = {
+      time: 0,
+      element: null
+    };
+
+    document.addEventListener(
+      'pointerdown',
+      (event) => {
+        if (event.button !== 2) {
+          return;
+        }
+
+        const target = event.target instanceof Element ? event.target : null;
+        const now = Date.now();
+        const isDoubleRightClick =
+          !!target &&
+          lastRightClick.element === target &&
+          now - lastRightClick.time <= doubleClickWindowMs;
+
+        lastRightClick = {
+          time: now,
+          element: target
+        };
+
+        if (!isDoubleRightClick || !target) {
+          return;
+        }
+
+        void copyTextToClipboard(buildClipboardPayload(target))
+          .then(() => {
+            showSuccessRipple(event.clientX, event.clientY);
+          })
+          .catch(() => {
+            // No-op: clipboard failures should not break page interaction.
+          });
+      },
+      true
+    );
+  }
+
+  install();
+})();

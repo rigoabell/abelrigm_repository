@@ -1,0 +1,308 @@
+// ==UserScript==
+// @name         FCLM Hide Regional Banner
+// @namespace    https://github.com/local/fclm-down
+// @version      1.1.1
+// @description  Hide the "FCLM Regional Portals are now live" is-it-down announcement stripe
+// @author       FCLM Down
+// @match        *://*.amazon.com/*
+// @match        *://*.amazon.dev/*
+// @match        *://*.proxy.amazon.com/*
+// @run-at       document-start
+// @grant        GM_setClipboard
+// @grant        GM_addStyle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  /** Set true to show the debug panel. Or add ?fclm-debug to the URL. */
+  const DEBUG_ENABLED = false;
+  const DEBUG =
+    DEBUG_ENABLED ||
+    /(?:^|[?#&])fclm-debug(?:=1|$|&)/.test(location.search + location.hash);
+
+  const DEBUG_PREFIX = '[FCLM Banner Hider]';
+  const STRIPE_SELECTOR = 'div.is-it-down-stripe.level-one';
+  const STYLE_ID = 'fclm-hide-banner-style';
+  const PANEL_ID = 'fclm-hide-banner-debug-panel';
+
+  const state = {
+    startedAt: new Date().toISOString(),
+    removedCount: 0,
+    observerStarted: false,
+    styleInjected: false,
+    lastStripeSnapshot: null,
+    events: [],
+  };
+
+  function log(message, extra) {
+    if (!DEBUG) {
+      return;
+    }
+
+    const entry = {
+      time: new Date().toISOString(),
+      message,
+      extra: extra ?? null,
+    };
+    state.events.push(entry);
+
+    if (extra !== undefined) {
+      console.log(DEBUG_PREFIX, message, extra);
+    } else {
+      console.log(DEBUG_PREFIX, message);
+    }
+  }
+
+  function describeStripe(stripe) {
+    if (!stripe) {
+      return null;
+    }
+
+    return {
+      selector: STRIPE_SELECTOR,
+      className: stripe.className,
+      display: stripe.style.display || '(inline unset)',
+      textPreview: (stripe.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+      outerHTMLPreview: (stripe.outerHTML || '').slice(0, 240),
+    };
+  }
+
+  function buildDebugReport() {
+    const visibleStripes = Array.from(document.querySelectorAll(STRIPE_SELECTOR)).map(describeStripe);
+
+    return JSON.stringify(
+      {
+        script: 'FCLM Hide Regional Banner v1.1.0',
+        debugMode: DEBUG,
+        page: {
+          url: location.href,
+          title: document.title,
+          readyState: document.readyState,
+        },
+        runtime: {
+          startedAt: state.startedAt,
+          removedCount: state.removedCount,
+          styleInjected: state.styleInjected,
+          observerStarted: state.observerStarted,
+          lastStripeSnapshot: state.lastStripeSnapshot,
+          visibleStripesRemaining: visibleStripes,
+          recentEvents: state.events.slice(-20),
+        },
+        verdict:
+          visibleStripes.length === 0
+            ? 'SUCCESS — no matching banner elements remain in the DOM'
+            : 'PARTIAL — banner elements still present (see visibleStripesRemaining)',
+      },
+      null,
+      2
+    );
+  }
+
+  function hideCss() {
+    return `
+      ${STRIPE_SELECTOR} {
+        display: none !important;
+        visibility: hidden !important;
+        height: 0 !important;
+        max-height: 0 !important;
+        overflow: hidden !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: 0 !important;
+      }
+    `;
+  }
+
+  function debugPanelCss() {
+    return `
+      #${PANEL_ID} {
+        position: fixed;
+        right: 12px;
+        bottom: 12px;
+        z-index: 2147483647;
+        width: 320px;
+        padding: 10px 12px;
+        border-radius: 8px;
+        background: rgba(20, 24, 32, 0.94);
+        color: #f3f4f6;
+        font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      }
+
+      #${PANEL_ID} strong {
+        display: block;
+        margin-bottom: 6px;
+        color: #93c5fd;
+      }
+
+      #${PANEL_ID} button {
+        margin-top: 8px;
+        margin-right: 6px;
+        padding: 6px 8px;
+        border: 1px solid #475569;
+        border-radius: 6px;
+        background: #1e293b;
+        color: #f8fafc;
+        cursor: pointer;
+      }
+
+      #${PANEL_ID} button:hover {
+        background: #334155;
+      }
+    `;
+  }
+
+  function injectHideStyle() {
+    if (state.styleInjected || document.getElementById(STYLE_ID)) {
+      return;
+    }
+
+    const css = hideCss() + (DEBUG ? debugPanelCss() : '');
+
+    if (typeof GM_addStyle === 'function') {
+      GM_addStyle(css);
+      const marker = document.createElement('style');
+      marker.id = STYLE_ID;
+      marker.textContent = '';
+      (document.documentElement || document.head || document.body).appendChild(marker);
+    } else {
+      const style = document.createElement('style');
+      style.id = STYLE_ID;
+      style.textContent = css;
+      (document.documentElement || document.head || document.body).appendChild(style);
+    }
+
+    state.styleInjected = true;
+    log('Injected hide CSS');
+  }
+
+  function removeStripes() {
+    const stripes = document.querySelectorAll(STRIPE_SELECTOR);
+    if (stripes.length === 0) {
+      return 0;
+    }
+
+    stripes.forEach((stripe) => {
+      if (DEBUG) {
+        state.lastStripeSnapshot = describeStripe(stripe);
+        log('Removed banner stripe', state.lastStripeSnapshot);
+      }
+      stripe.remove();
+      state.removedCount += 1;
+    });
+
+    updatePanel();
+    return stripes.length;
+  }
+
+  function startObserver() {
+    if (state.observerStarted) {
+      return;
+    }
+
+    const root = document.documentElement || document.body;
+    if (!root) {
+      return;
+    }
+
+    const observer = new MutationObserver(() => {
+      removeStripes();
+    });
+
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+    });
+
+    state.observerStarted = true;
+    log('MutationObserver started');
+  }
+
+  function copyReport(report) {
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(report, 'text');
+      log('Debug report copied to clipboard via GM_setClipboard');
+      return;
+    }
+
+    navigator.clipboard.writeText(report).then(() => {
+      log('Debug report copied to clipboard via navigator.clipboard');
+    }).catch((error) => {
+      log('Clipboard copy failed', String(error));
+      console.log(DEBUG_PREFIX, 'Paste-ready report:\n', report);
+    });
+  }
+
+  function ensureDebugPanel() {
+    if (!DEBUG || !document.body) {
+      return;
+    }
+
+    if (document.getElementById(PANEL_ID)) {
+      updatePanel();
+      return;
+    }
+
+    const panel = document.createElement('div');
+    panel.id = PANEL_ID;
+    panel.innerHTML = `
+      <strong>FCLM Banner Hider (DEBUG)</strong>
+      <div id="${PANEL_ID}-status"></div>
+      <button type="button" id="${PANEL_ID}-copy">Copy debug report</button>
+      <button type="button" id="${PANEL_ID}-hide">Hide panel</button>
+    `;
+
+    document.body.appendChild(panel);
+
+    document.getElementById(`${PANEL_ID}-copy`).addEventListener('click', () => {
+      copyReport(buildDebugReport());
+      alert('Debug report copied. Paste it into chat to verify.');
+    });
+
+    document.getElementById(`${PANEL_ID}-hide`).addEventListener('click', () => {
+      panel.remove();
+    });
+
+    updatePanel();
+  }
+
+  function updatePanel() {
+    if (!DEBUG) {
+      return;
+    }
+
+    const status = document.getElementById(`${PANEL_ID}-status`);
+    if (!status) {
+      return;
+    }
+
+    const remaining = document.querySelectorAll(STRIPE_SELECTOR).length;
+    status.textContent =
+      `Removed: ${state.removedCount}\n` +
+      `Remaining matches: ${remaining}\n` +
+      `URL: ${location.hostname}\n` +
+      `Verdict: ${remaining === 0 ? 'SUCCESS' : 'STILL VISIBLE'}`;
+  }
+
+  function boot() {
+    log('Script booted', { url: location.href, debug: DEBUG });
+    removeStripes();
+    startObserver();
+    ensureDebugPanel();
+
+    if (DEBUG) {
+      log('Initial debug report ready');
+      console.log(DEBUG_PREFIX, 'Paste-ready report:\n', buildDebugReport());
+    }
+  }
+
+  log('Script loaded at document-start', { debug: DEBUG });
+  injectHideStyle();
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
+})();

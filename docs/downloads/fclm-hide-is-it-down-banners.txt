@@ -1,0 +1,85 @@
+// ==UserScript==
+// @name         FCLM Hide Is-It-Down Banners
+// @namespace    https://github.com/barcode-generator
+// @version      1.0.0
+// @description  Permanently hide FCLM is-it-down / reduced-capacity / regional-portal announcement stripes.
+// @author       Barcode Generator
+// @match        *://fclm-portal.amazon.com/*
+// @match        *://*.fclm-portal.amazon.com/*
+// @match        *://fclm-portal-iad.iad.proxy.amazon.com/*
+// @match        *://fclm-portal-dub.dub.proxy.amazon.com/*
+// @match        *://fclm-portal-nrt.nrt.proxy.amazon.com/*
+// @match        *://fclm-portal*.amazon.com/*
+// @match        *://*.proxy.amazon.com/*
+// @grant        GM_addStyle
+// @run-at       document-start
+// ==/UserScript==
+(function () {
+  'use strict';
+  const HIDE_SELECTORS = [
+    '.is-it-down-stripe',
+    '[class*="is-it-down-stripe"]',
+    'a.is-it-down-link',
+    '[class*="is-it-down-link"]',
+  ];
+  const BANNER_TEXT = /FCLM is at reduced capacity|FCLM Regional Portals are now live|Is FCLM Down\?/i;
+  GM_addStyle(`
+    .is-it-down-stripe,
+    [class*="is-it-down-stripe"],
+    a.is-it-down-link,
+    [class*="is-it-down-link"] {
+      display: none !important;
+      visibility: hidden !important;
+      height: 0 !important;
+      max-height: 0 !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      overflow: hidden !important;
+      pointer-events: none !important;
+    }
+  `);
+  function isBanner(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.matches?.(HIDE_SELECTORS.join(','))) return true;
+    const cls = el.className && String(el.className);
+    if (cls && /is-it-down/i.test(cls)) return true;
+    const text = el.textContent || '';
+    if (el.matches?.('div, aside, section, header') && BANNER_TEXT.test(text) && text.length < 4000) {
+      return true;
+    }
+    return false;
+  }
+  function scrub(root) {
+    const doc = root.ownerDocument || root;
+    if (!doc.querySelectorAll) return;
+    doc.querySelectorAll(HIDE_SELECTORS.join(',')).forEach((el) => el.remove());
+    const start = root.body || root;
+    if (!start?.querySelectorAll) return;
+    start.querySelectorAll('div, aside, section').forEach((el) => {
+      if (isBanner(el)) el.remove();
+    });
+  }
+  function start() {
+    scrub(document);
+    const obs = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        for (const node of m.addedNodes) {
+          if (node.nodeType !== 1) continue;
+          if (isBanner(node)) {
+            node.remove();
+            continue;
+          }
+          if (node.querySelectorAll) {
+            node.querySelectorAll(HIDE_SELECTORS.join(',')).forEach((el) => el.remove());
+            node.querySelectorAll('div, aside, section').forEach((el) => {
+              if (isBanner(el)) el.remove();
+            });
+          }
+        }
+      }
+    });
+    obs.observe(document.documentElement, { childList: true, subtree: true });
+  }
+  if (document.documentElement) start();
+  else document.addEventListener('DOMContentLoaded', start, { once: true });
+})();

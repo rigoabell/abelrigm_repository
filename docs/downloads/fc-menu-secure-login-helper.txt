@@ -1,0 +1,821 @@
+// ==UserScript==
+// @name         FC Menu secure login helper
+// @namespace    https://github.com/local/fc-menu-login
+// @version      1.3.1
+// @description  Redirect openid/basic login to secure/login; survey MC first option or typed response; badge, password, location.
+// @include      /^https:\/\/fcmenu-[a-z0-9-]+\.corp\.amazon\.com(\/.*)?$/
+// @run-at       document-start
+// @grant        GM_setClipboard
+// @grant        GM_info
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  /** Hosts like fcmenu-iad-regionalized.corp.amazon.com */
+  const FC_MENU_HOST = /^fcmenu-[a-z0-9-]+\.corp\.amazon\.com$/i.test(location.hostname);
+
+  if (!FC_MENU_HOST) return;
+
+  // Badge and password were removed before this copy was published.
+  const BADGE = '';
+  const PASSWORD = '';
+  const LOCATION = 'MEM3';
+  const SURVEY_RESPONSE = '1';
+  /** Prefer multiple-choice list before text box; ms to wait for first option to layout. */
+  const SURVEY_MC_WAIT_MS = 8000;
+  /** Second native `.click()` after synth; some handlers expect two activations. */
+  const SURVEY_MC_SECOND_CLICK = true;
+
+  const CHAR_DELAY_MS = 18;
+
+  const DBG_MAX_LINES = 450;
+  var dbgLines = [];
+
+  function dbg(msg, detail) {
+    var extra = '';
+    if (detail !== undefined) {
+      try {
+        extra = typeof detail === 'string' ? detail : JSON.stringify(detail);
+      } catch (e) {
+        extra = String(detail);
+      }
+      if (extra.length > 2500) extra = extra.slice(0, 2500) + '…';
+    }
+    var line = new Date().toISOString() + '\t' + msg + (extra ? '\t' + extra : '');
+    dbgLines.push(line);
+    if (dbgLines.length > DBG_MAX_LINES) {
+      dbgLines.splice(0, dbgLines.length - DBG_MAX_LINES);
+    }
+    console.log('[FCMenuDbg]', msg, detail !== undefined ? detail : '');
+  }
+
+  function scriptMetaHeader() {
+    var lines = [];
+    lines.push('=== FC Menu userscript debug export ===');
+    lines.push('generatedAt: ' + new Date().toISOString());
+    lines.push('href: ' + location.href);
+    lines.push('pathname: ' + pathnameNorm());
+    lines.push('ua: ' + (navigator.userAgent || '').slice(0, 240));
+    try {
+      if (typeof GM_info !== 'undefined' && GM_info) {
+        lines.push(
+          'tmScript: ' +
+            JSON.stringify({
+              scriptVersion: GM_info.script && GM_info.script.version,
+              tmVersion: GM_info.version,
+              injectMode: GM_info.injectInto
+            })
+        );
+      }
+    } catch (e) {
+      lines.push('GM_info: unavailable');
+    }
+    lines.push('notes: credential values are not logged; only lengths / steps.');
+    lines.push('--- event log ---');
+    return lines.join('\n');
+  }
+
+  function describeEl(el) {
+    if (!el || !el.tagName) return '(null)';
+    var tag = el.tagName.toLowerCase();
+    var id = el.id ? '#' + el.id : '';
+    var cls = el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).slice(0, 3).join('.') : '';
+    var typ = el.getAttribute && el.getAttribute('type');
+    var role = el.getAttribute && el.getAttribute('role');
+    var name = el.getAttribute && el.getAttribute('name');
+    var aria = el.getAttribute && el.getAttribute('aria-label');
+    var txt = '';
+    try {
+      txt = (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+    } catch (e2) {
+      txt = '';
+    }
+    return (
+      tag +
+      id +
+      cls +
+      ' type=' +
+      JSON.stringify(typ || '') +
+      ' name=' +
+      JSON.stringify(name || '') +
+      ' role=' +
+      JSON.stringify(role || '') +
+      ' aria=' +
+      JSON.stringify((aria || '').slice(0, 60)) +
+      ' text=' +
+      JSON.stringify(txt)
+    );
+  }
+
+  function gatherDOMSnapshot(context) {
+    var parts = [];
+    parts.push('--- DOM snapshot (' + (context || 'generic') + ') ---');
+    try {
+      parts.push('document.readyState: ' + document.readyState);
+      parts.push('activeElement: ' + describeEl(document.activeElement));
+
+      var inp = document.querySelector('#survey-response-input');
+      parts.push('#survey-response-input: ' + (inp ? 'found' : 'missing'));
+      if (inp) {
+        parts.push('survey input valueLen: ' + String((inp.value || '').length));
+        parts.push('survey input outerHTML (trunc): ' + (inp.outerHTML || '').slice(0, 420));
+        var f = inp.closest && inp.closest('form');
+        parts.push('closest form: ' + (f ? describeEl(f) : 'none'));
+      }
+
+      ['#survey-response-box', '#survey-content-box', '#survey-container', '#survey-body'].forEach(function (sel) {
+        var root = document.querySelector(sel);
+        parts.push(sel + ': ' + (root ? 'found' : 'missing'));
+      });
+
+      var roots = [
+        document.querySelector('#survey-container'),
+        document.querySelector('#survey-body'),
+        document.body
+      ].filter(Boolean);
+
+      var seen = new WeakSet();
+      roots.forEach(function (root, ri) {
+        if (!root || seen.has(root)) return;
+        seen.add(root);
+        var nodes = root.querySelectorAll('button, input, a[href], select, textarea, [role="button"]');
+        parts.push('interactive count (root ' + ri + '): ' + nodes.length);
+        var limit = 35;
+        var k;
+        for (k = 0; k < nodes.length && k < limit; k++) {
+          var n = nodes[k];
+          var vis = n.offsetParent !== null;
+          parts.push(
+            '  [' +
+              k +
+              '] visible=' +
+              vis +
+              ' disabled=' +
+              !!n.disabled +
+              ' ' +
+              describeEl(n) +
+              ' outerHTMLtrunc=' +
+              JSON.stringify((n.outerHTML || '').slice(0, 220))
+          );
+        }
+        if (nodes.length > limit) parts.push('  … +' + (nodes.length - limit) + ' more');
+      });
+    } catch (e) {
+      parts.push('snapshot error: ' + (e && e.message ? e.message : String(e)));
+    }
+    return parts.join('\n');
+  }
+
+  function buildClipboardReport(extraSnapshotLabel) {
+    var chunks = [];
+    chunks.push(scriptMetaHeader());
+    chunks.push(dbgLines.join('\n'));
+    chunks.push('');
+    chunks.push(gatherDOMSnapshot(extraSnapshotLabel || pathnameNorm()));
+    chunks.push('');
+    chunks.push('=== end ===');
+    return chunks.join('\n');
+  }
+
+  function copyTextBestEffort(text, onDone) {
+    function done(ok, err) {
+      if (typeof onDone === 'function') onDone(ok, err);
+    }
+
+    function execFallback() {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        (document.body || document.documentElement).appendChild(ta);
+        ta.select();
+        var ok = document.execCommand('copy');
+        ta.remove();
+        done(ok);
+      } catch (e) {
+        done(false, e);
+      }
+    }
+
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      navigator.clipboard.writeText(text).then(
+        function () {
+          done(true);
+        },
+        function () {
+          try {
+            if (typeof GM_setClipboard === 'function') {
+              GM_setClipboard(text, 'text');
+              done(true);
+              return;
+            }
+          } catch (e2) {
+            /* fall through */
+          }
+          execFallback();
+        }
+      );
+      return;
+    }
+
+    try {
+      if (typeof GM_setClipboard === 'function') {
+        GM_setClipboard(text, 'text');
+        done(true);
+        return;
+      }
+    } catch (e3) {
+      /* fall through */
+    }
+    execFallback();
+  }
+
+  function installDebugClipboardUi() {
+    if (document.getElementById('fc-menu-dbg-clip-wrap')) return;
+
+    function mount() {
+      if (document.getElementById('fc-menu-dbg-clip-wrap')) return;
+      var wrap = document.createElement('div');
+      wrap.id = 'fc-menu-dbg-clip-wrap';
+      wrap.style.cssText =
+        'position:fixed;bottom:10px;right:10px;z-index:2147483647;display:flex;gap:6px;align-items:center;font-family:system-ui,Segoe UI,sans-serif;';
+
+      var btn = document.createElement('button');
+      btn.id = 'fc-menu-dbg-clip-btn';
+      btn.type = 'button';
+      btn.title = 'Copy FC Menu userscript debug log + DOM snapshot to clipboard';
+      btn.textContent = '📋';
+      btn.style.cssText =
+        'cursor:pointer;width:34px;height:34px;border-radius:10px;border:1px solid rgba(0,0,0,.25);background:rgba(255,255,255,.92);box-shadow:0 2px 10px rgba(0,0,0,.18);font-size:18px;line-height:1;padding:0;';
+
+      var hint = document.createElement('span');
+      hint.textContent = 'debug';
+      hint.style.cssText =
+        'font-size:11px;color:rgba(0,0,0,.65);background:rgba(255,255,255,.85);padding:4px 8px;border-radius:999px;border:1px solid rgba(0,0,0,.12);user-select:none;';
+
+      btn.addEventListener('click', function () {
+        dbg('ui:copy-debug clicked');
+        var report = buildClipboardReport('manual-copy');
+        copyTextBestEffort(report, function (ok) {
+          dbg('ui:clipboard-copy-result', { ok: !!ok });
+          var prev = btn.textContent;
+          btn.textContent = ok ? '✓' : '✗';
+          setTimeout(function () {
+            btn.textContent = prev;
+          }, 900);
+        });
+      });
+
+      wrap.appendChild(btn);
+      wrap.appendChild(hint);
+      document.body.appendChild(wrap);
+      dbg('ui:debug-clipboard-mounted');
+    }
+
+    if (document.body) mount();
+    else document.addEventListener('DOMContentLoaded', mount, { once: true });
+  }
+
+  function pathnameNorm() {
+    let p = location.pathname || '/';
+    if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
+    return p;
+  }
+
+  dbg('boot', { href: location.href, path: pathnameNorm() });
+
+  /** Redirect /openid/login and /basic/login (and trailing-slash variants) to /secure/login */
+  function maybeRedirectToSecureLogin() {
+    const p = pathnameNorm();
+    if (p === '/openid/login' || p === '/basic/login') {
+      dbg('redirect:to-secure-login', { from: p });
+      const u = new URL(location.href);
+      u.pathname = '/secure/login';
+      u.hash = '';
+      location.replace(u.toString());
+      return true;
+    }
+    return false;
+  }
+
+  function sleep(ms) {
+    return new Promise(function (r) {
+      setTimeout(r, ms);
+    });
+  }
+
+  function waitForSelector(sel, timeoutMs) {
+    timeoutMs = timeoutMs || 60000;
+    dbg('waitForSelector:start', { sel: sel, timeoutMs: timeoutMs });
+    return new Promise(function (resolve, reject) {
+      var t0 = Date.now();
+      function tryNow() {
+        var el = document.querySelector(sel);
+        if (el) {
+          dbg('waitForSelector:found', { sel: sel, ms: Date.now() - t0, el: describeEl(el) });
+          resolve(el);
+          return;
+        }
+        if (Date.now() - t0 > timeoutMs) {
+          dbg('waitForSelector:timeout', { sel: sel });
+          reject(new Error('timeout:' + sel));
+          return;
+        }
+        requestAnimationFrame(tryNow);
+      }
+      if (document.readyState === 'loading') {
+        document.addEventListener(
+          'DOMContentLoaded',
+          function () {
+            tryNow();
+          },
+          { once: true }
+        );
+      } else {
+        tryNow();
+      }
+    });
+  }
+
+  /** Better compatibility with React / controlled inputs */
+  function setInputValue(el, nextValue) {
+    var proto = window.HTMLInputElement.prototype;
+    var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && desc.set) {
+      desc.set.call(el, nextValue);
+    } else {
+      el.value = nextValue;
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  async function typeInto(el, text, label) {
+    dbg('typeInto:start', { label: label || '', len: (text || '').length });
+    el.focus();
+    setInputValue(el, '');
+    var i;
+    for (i = 0; i < text.length; i++) {
+      setInputValue(el, text.slice(0, i + 1));
+      await sleep(CHAR_DELAY_MS);
+    }
+    dbg('typeInto:done', { label: label || '', len: (text || '').length });
+  }
+
+  function dispatchSyntheticEnter(el, label) {
+    dbg('dispatchSyntheticEnter', { label: label || '', target: describeEl(el) });
+    var evOpts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+    var kd = el.dispatchEvent(new KeyboardEvent('keydown', evOpts));
+    var kp = true;
+    try {
+      kp = el.dispatchEvent(new KeyboardEvent('keypress', evOpts));
+    } catch (e) {
+      kp = false;
+      dbg('dispatchSyntheticEnter:keypress-failed', String(e));
+    }
+    var ku = el.dispatchEvent(new KeyboardEvent('keyup', evOpts));
+    dbg('dispatchSyntheticEnter:results', { keydownDefaulted: kd, keypressDefaulted: kp, keyupDefaulted: ku });
+  }
+
+  /** Continue appears after React commits the typed answer; sync lookup often runs too early. */
+  function findSurveyWideContinueButton() {
+    var roots = [
+      document.querySelector('#survey-body'),
+      document.querySelector('#survey-container'),
+      document.body
+    ];
+    var i;
+    for (i = 0; i < roots.length; i++) {
+      var r = roots[i];
+      if (!r) continue;
+      var btn = r.querySelector('button.wide.continue') || r.querySelector('button.continue.wide');
+      if (btn) return btn;
+    }
+    return null;
+  }
+
+  /** Synthetic mouse chain; omit `view` — TM sandbox `window` breaks Firefox MouseEvent. */
+  function safeSynthMouseClickAt(el, cx, cy) {
+    if (!el || typeof cx !== 'number' || typeof cy !== 'number' || !isFinite(cx) || !isFinite(cy)) return;
+    var opts = {
+      bubbles: true,
+      cancelable: true,
+      clientX: cx,
+      clientY: cy,
+      button: 0,
+      buttons: 1
+    };
+    try {
+      el.dispatchEvent(new MouseEvent('mousedown', opts));
+      el.dispatchEvent(new MouseEvent('mouseup', opts));
+      el.dispatchEvent(new MouseEvent('click', opts));
+    } catch (e) {
+      dbg('mouseSynth:error', String(e));
+    }
+  }
+
+  function surveyContinueLayoutReady(btn) {
+    if (!btn) return false;
+    if (btn.offsetWidth >= 1 && btn.offsetHeight >= 1) return true;
+    var r = btn.getBoundingClientRect();
+    return r.width >= 1 && r.height >= 1;
+  }
+
+  async function activateSurveyWideContinueButton(btn, dbgPrefix, waitedMs) {
+    try {
+      btn.scrollIntoView({ block: 'center', inline: 'nearest' });
+    } catch (eScroll) {
+      try {
+        btn.scrollIntoView(true);
+      } catch (e2) {
+        /* ignore */
+      }
+    }
+    await sleep(140);
+    var r = btn.getBoundingClientRect();
+    dbg(dbgPrefix + ':wide-continue-activate', {
+      waitedMs: waitedMs,
+      node: describeEl(btn),
+      offsetParentNull: btn.offsetParent === null,
+      ow: btn.offsetWidth,
+      oh: btn.offsetHeight,
+      rect: { w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top), left: Math.round(r.left) }
+    });
+    try {
+      if (typeof btn.focus === 'function') {
+        btn.focus({ preventScroll: true });
+      }
+    } catch (eFocus) {
+      try {
+        btn.focus();
+      } catch (eF2) {
+        /* ignore */
+      }
+    }
+    await sleep(50);
+    btn.click();
+    if (r.width >= 1 && r.height >= 1) {
+      var cx = r.left + r.width / 2;
+      var cy = r.top + r.height / 2;
+      safeSynthMouseClickAt(btn, cx, cy);
+    }
+  }
+
+  async function waitAndClickSurveyWideContinue(dbgPrefix, timeoutMs) {
+    timeoutMs = timeoutMs || 12000;
+    var t0 = Date.now();
+    var lastDbg = 0;
+    var lastDbgLayout = 0;
+    while (Date.now() - t0 < timeoutMs) {
+      var btn = findSurveyWideContinueButton();
+      if (btn && !btn.disabled && surveyContinueLayoutReady(btn)) {
+        dbg(dbgPrefix + ':wide-continue-layout-ready', {
+          waitedMs: Date.now() - t0,
+          node: describeEl(btn),
+          ow: btn.offsetWidth,
+          oh: btn.offsetHeight
+        });
+        await activateSurveyWideContinueButton(btn, dbgPrefix, Date.now() - t0);
+        return true;
+      }
+      if (btn && btn.disabled && Date.now() - lastDbg > 1500) {
+        dbg(dbgPrefix + ':wide-continue-wait-enabled', { waitedMs: Date.now() - t0 });
+        lastDbg = Date.now();
+      }
+      if (btn && !btn.disabled && !surveyContinueLayoutReady(btn) && Date.now() - lastDbgLayout > 1800) {
+        var rb = btn.getBoundingClientRect();
+        dbg(dbgPrefix + ':wide-continue-wait-layout', {
+          waitedMs: Date.now() - t0,
+          ow: btn.offsetWidth,
+          oh: btn.offsetHeight,
+          rect: { w: Math.round(rb.width), h: Math.round(rb.height) }
+        });
+        lastDbgLayout = Date.now();
+      }
+      await sleep(75);
+    }
+    var tail = findSurveyWideContinueButton();
+    dbg(dbgPrefix + ':wide-continue-timeout', {
+      waitedMs: timeoutMs,
+      hasBtn: !!tail,
+      disabled: tail ? !!tail.disabled : null,
+      layoutReady: tail ? surveyContinueLayoutReady(tail) : null
+    });
+    return false;
+  }
+
+  /** FC Menu survey uses `button.wide.continue`; it may report offsetParent=null (still clickable). */
+  function clickSurveyWideContinue(dbgPrefix) {
+    var btn = findSurveyWideContinueButton();
+    if (!btn || btn.disabled) {
+      dbg(dbgPrefix + ':wide-continue-missing', { hasBtn: !!btn, disabled: btn ? !!btn.disabled : null });
+      return false;
+    }
+    if (!surveyContinueLayoutReady(btn)) {
+      var rx = btn.getBoundingClientRect();
+      dbg(dbgPrefix + ':wide-continue-not-laid-out', {
+        ow: btn.offsetWidth,
+        oh: btn.offsetHeight,
+        rect: { w: Math.round(rx.width), h: Math.round(rx.height) }
+      });
+      return false;
+    }
+    var r = btn.getBoundingClientRect();
+    dbg(dbgPrefix + ':wide-continue-click-sync', {
+      node: describeEl(btn),
+      offsetParentNull: btn.offsetParent === null,
+      rect: { w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top), left: Math.round(r.left) }
+    });
+    btn.click();
+    return true;
+  }
+
+  /** Survey markup often omits a wrapping form; try explicit buttons first. */
+  function clickSurveySubmitNear(el) {
+    dbg('clickSurveySubmitNear:start', { targetInput: describeEl(el) });
+    if (clickSurveyWideContinue('clickSurveySubmitNear')) return true;
+
+    var root =
+      (el.closest && el.closest('#survey-container')) ||
+      (el.closest && el.closest('#survey-body')) ||
+      document.body;
+    var box = (el.closest && el.closest('#survey-response-box')) || root;
+    var selectors = [
+      '#survey-response-box button[type="submit"]',
+      '#survey-response-box input[type="submit"]',
+      '#survey-response-box button',
+      '#survey-content-box button[type="submit"]',
+      '#survey-content-box input[type="submit"]',
+      '#survey-container button[type="submit"]',
+      '#survey-container input[type="submit"]',
+      '#survey-container form button[type="submit"]'
+    ];
+    var i;
+    for (i = 0; i < selectors.length; i++) {
+      var node = root.querySelector(selectors[i]);
+      var visible = !!(node && node.offsetParent !== null);
+      dbg('clickSurveySubmitNear:try-selector', {
+        selector: selectors[i],
+        hit: !!node,
+        visible: visible,
+        disabled: node ? !!node.disabled : null
+      });
+      if (node && !node.disabled && node.offsetParent !== null) {
+        dbg('clickSurveySubmitNear:click', { via: selectors[i], node: describeEl(node) });
+        node.click();
+        return true;
+      }
+    }
+    var fallback = box.querySelectorAll(
+      'button:not([disabled]), input[type="submit"]:not([disabled]), input[type="button"]:not([disabled])'
+    );
+    dbg('clickSurveySubmitNear:fallback-count', { count: fallback.length });
+    var j;
+    for (j = 0; j < fallback.length; j++) {
+      var n = fallback[j];
+      var label = (n.textContent || n.value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+      if (/continue/i.test(label) && !n.disabled) {
+        dbg('clickSurveySubmitNear:fallback-continue-text', {
+          label: label,
+          node: describeEl(n),
+          offsetParentNull: n.offsetParent === null
+        });
+        n.click();
+        return true;
+      }
+      if (n.offsetParent !== null) {
+        if (/cancel|back|skip|close/i.test(label)) {
+          dbg('clickSurveySubmitNear:skip-button', { label: label, node: describeEl(n) });
+          continue;
+        }
+        dbg('clickSurveySubmitNear:fallback-click', { label: label, node: describeEl(n) });
+        n.click();
+        return true;
+      }
+    }
+    dbg('clickSurveySubmitNear:no-click');
+    return false;
+  }
+
+  function submitEnter(el, label) {
+    var form = el.closest && el.closest('form');
+    dbg('submitEnter:start', { label: label || '', hasForm: !!form, target: describeEl(el) });
+    if (form && typeof form.requestSubmit === 'function') {
+      try {
+        dbg('submitEnter:requestSubmit');
+        form.requestSubmit();
+        return;
+      } catch (e) {
+        dbg('submitEnter:requestSubmit-error', String(e));
+      }
+    }
+    dispatchSyntheticEnter(el, label);
+    if (form && typeof form.submit === 'function') {
+      dbg('submitEnter:form.submit');
+      form.submit();
+    }
+  }
+
+  async function runBadgeStep() {
+    dbg('flow:badge-step');
+    var el = await waitForSelector('#badgeBarcodeId');
+    await typeInto(el, BADGE, 'badge');
+    submitEnter(el, 'badge');
+  }
+
+  async function runPasswordStep() {
+    dbg('flow:password-step');
+    var el = await waitForSelector('#password');
+    await typeInto(el, PASSWORD, 'password');
+    submitEnter(el, 'password');
+  }
+
+  async function runLocationStep() {
+    dbg('flow:location-step');
+    var el = await waitForSelector('#qlInput');
+    await typeInto(el, LOCATION, 'location');
+    submitEnter(el, 'location');
+  }
+
+  /** Multiple-choice survey: first `li.survey-option-item` under `#right-survey-options` (label text varies). */
+  async function waitForFirstSurveyMcOption(timeoutMs) {
+    timeoutMs = timeoutMs || SURVEY_MC_WAIT_MS;
+    dbg('survey:wait-mc-option:start', { timeoutMs: timeoutMs });
+    var t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      var wrap = document.querySelector('#right-survey-options');
+      if (wrap) {
+        var li = wrap.querySelector('li.survey-option-item');
+        if (!li) {
+          var ul = wrap.querySelector('ul');
+          if (ul) li = ul.querySelector(':scope > li');
+        }
+        if (li && surveyContinueLayoutReady(li)) {
+          dbg('survey:wait-mc-option:found', {
+            waitedMs: Date.now() - t0,
+            node: describeEl(li)
+          });
+          return li;
+        }
+      }
+      await sleep(75);
+    }
+    dbg('survey:wait-mc-option:none', { waitedMs: timeoutMs });
+    return null;
+  }
+
+  async function activateSurveyMcOption(li, dbgPrefix) {
+    try {
+      li.scrollIntoView({ block: 'center', inline: 'nearest' });
+    } catch (eScroll) {
+      try {
+        li.scrollIntoView(true);
+      } catch (e2) {
+        /* ignore */
+      }
+    }
+    await sleep(140);
+    var r = li.getBoundingClientRect();
+    dbg(dbgPrefix + ':mc-option-activate', {
+      node: describeEl(li),
+      offsetParentNull: li.offsetParent === null,
+      ow: li.offsetWidth,
+      oh: li.offsetHeight,
+      rect: { w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top), left: Math.round(r.left) }
+    });
+    try {
+      if (typeof li.focus === 'function') {
+        li.focus({ preventScroll: true });
+      }
+    } catch (eFocus) {
+      try {
+        li.focus();
+      } catch (eF2) {
+        /* ignore */
+      }
+    }
+    await sleep(40);
+    li.click();
+    if (r.width >= 1 && r.height >= 1) {
+      var cx = r.left + r.width / 2;
+      var cy = r.top + r.height / 2;
+      safeSynthMouseClickAt(li, cx, cy);
+      if (SURVEY_MC_SECOND_CLICK) {
+        await sleep(55);
+        dbg(dbgPrefix + ':mc-option-second-native-click');
+        try {
+          li.click();
+        } catch (e2) {
+          dbg(dbgPrefix + ':mc-option-second-click-error', String(e2));
+        }
+      }
+    }
+  }
+
+  /** Paths like /MEM3/survey */
+  function isSurveyPath(p) {
+    return /\/survey$/i.test(p);
+  }
+
+  async function runSurveyStep() {
+    dbg('flow:survey-step:start');
+    var textEl = null;
+    var form = null;
+    var mcLi = await waitForFirstSurveyMcOption(SURVEY_MC_WAIT_MS);
+
+    if (mcLi) {
+      dbg('flow:survey-step:path-mc-first-option');
+      await activateSurveyMcOption(mcLi, 'survey');
+      dbg('flow:survey-step:after-mc', gatherDOMSnapshot('survey-after-mc'));
+      await sleep(160);
+    } else {
+      dbg('flow:survey-step:path-text-fallback');
+      textEl = await waitForSelector('#survey-response-input');
+      await typeInto(textEl, SURVEY_RESPONSE, 'survey');
+      dbg('flow:survey-step:after-type', gatherDOMSnapshot('survey-after-type'));
+      await sleep(120);
+      textEl.focus();
+      form = textEl.closest && textEl.closest('form');
+    }
+
+    if (!form && textEl) {
+      form = textEl.closest && textEl.closest('form');
+    }
+
+    dbg('flow:survey-step:submit-phase', { hasForm: !!form, usedMcList: !!mcLi });
+    if (form && typeof form.requestSubmit === 'function') {
+      try {
+        dbg('survey:requestSubmit');
+        form.requestSubmit();
+        dbg('flow:survey-step:after-requestSubmit', gatherDOMSnapshot('survey-after-requestSubmit'));
+        return;
+      } catch (e) {
+        dbg('survey:requestSubmit-error', String(e));
+      }
+    }
+    try {
+      if (textEl) textEl.blur();
+    } catch (eBlur) {
+      /* ignore */
+    }
+    await sleep(80);
+    dbg('flow:survey-step:poll-wide-continue-start');
+    var clickAnchor = textEl || mcLi || document.querySelector('#survey-body');
+    var clicked = await waitAndClickSurveyWideContinue('survey:poll-wide-continue', 12000);
+    if (!clicked && clickAnchor) {
+      clicked = clickSurveySubmitNear(clickAnchor);
+    }
+    dbg('flow:survey-step:after-click-near', { clicked: clicked });
+    dbg('flow:survey-step:snapshot-after-click-near', gatherDOMSnapshot('survey-after-clickNear'));
+    if (!clicked && textEl) {
+      dispatchSyntheticEnter(textEl, 'survey');
+      if (form && typeof form.submit === 'function') {
+        dbg('survey:form.submit-fallback');
+        form.submit();
+      }
+      dbg('flow:survey-step:after-synthetic-enter', gatherDOMSnapshot('survey-after-synthetic-enter'));
+    }
+    dbg('flow:survey-step:end');
+  }
+
+  installDebugClipboardUi();
+
+  /* --- entry --- */
+  if (maybeRedirectToSecureLogin()) return;
+
+  var path = pathnameNorm();
+  dbg('route', { path: path });
+
+  function failLog(flow, err) {
+    dbg('flow:error', { flow: flow, message: err && err.message ? err.message : String(err) });
+    dbg('flow:error-stack', err && err.stack ? String(err.stack).slice(0, 4000) : '');
+  }
+
+  if (path === '/secure/login') {
+    runBadgeStep().catch(function (e) {
+      failLog('badge', e);
+    });
+    return;
+  }
+  if (path === '/password') {
+    runPasswordStep().catch(function (e) {
+      failLog('password', e);
+    });
+    return;
+  }
+  if (path === '/location') {
+    runLocationStep().catch(function (e) {
+      failLog('location', e);
+    });
+    return;
+  }
+  if (isSurveyPath(path)) {
+    runSurveyStep().catch(function (e) {
+      failLog('survey', e);
+    });
+    return;
+  }
+})();

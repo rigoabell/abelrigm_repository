@@ -1,0 +1,2868 @@
+// ==UserScript==
+// @name         Ultimate Tampermonkey
+// @namespace    ultimate-tampermonkey
+// @version      0.1.0
+// @description  Modular multi-site Tampermonkey foundation
+// @author       Cursor
+// @match        http://*/*
+// @match        https://*.quicksight.aws.amazon.com/*
+// @match        https://*/*
+// @match        https://example.com/*
+// @match        https://fclm-portal.amazon.com/*
+// @match        https://www.example.com/*
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_setClipboard
+// @run-at       document-idle
+// ==/UserScript==
+(function() {
+	//#region src/utils/runtime.ts
+	function onDocumentReady(callback) {
+		if (document.readyState === "loading") {
+			document.addEventListener("DOMContentLoaded", () => {
+				callback();
+			}, { once: true });
+			return;
+		}
+		callback();
+	}
+	async function safeRun(label, work, logger) {
+		try {
+			await work();
+		} catch (error) {
+			logger.error(`Unhandled error in ${label}`, error);
+		}
+	}
+	//#endregion
+	//#region src/core/router.ts
+	function escapePattern(value) {
+		return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	}
+	function wildcardToRegExp(pattern) {
+		const source = pattern.split("*").map(escapePattern).join(".*");
+		return new RegExp(`^${source}$`);
+	}
+	function matchesRule(url, rule) {
+		if (typeof rule === "function") return rule(url);
+		if (rule instanceof RegExp) return rule.test(url.href);
+		return wildcardToRegExp(rule).test(url.href);
+	}
+	function getRuntimeRules(site) {
+		return site.runtimeMatches?.length ? site.runtimeMatches : site.metadataMatches;
+	}
+	async function runMatchingSites(sites, context) {
+		const matchingSites = sites.filter((site) => getRuntimeRules(site).some((rule) => matchesRule(context.url, rule)));
+		if (matchingSites.length === 0) {
+			context.logger.debug("No site modules matched the current URL.", context.url.href);
+			return;
+		}
+		for (const site of matchingSites) {
+			const siteContext = {
+				...context,
+				logger: context.logger.child(site.id)
+			};
+			await safeRun(site.id, async () => {
+				siteContext.logger.info(`Running site module "${site.name}"`);
+				await site.run(siteContext);
+			}, siteContext.logger);
+		}
+	}
+	//#endregion
+	//#region src/utils/clipboard.ts
+	async function copyTextToClipboard(text) {
+		if (typeof GM_setClipboard === "function") {
+			GM_setClipboard(text, "text");
+			return;
+		}
+		if (navigator.clipboard?.writeText) {
+			await navigator.clipboard.writeText(text);
+			return;
+		}
+		const textarea = document.createElement("textarea");
+		textarea.value = text;
+		textarea.setAttribute("readonly", "true");
+		textarea.style.position = "fixed";
+		textarea.style.opacity = "0";
+		textarea.style.pointerEvents = "none";
+		document.body.appendChild(textarea);
+		textarea.select();
+		const copied = document.execCommand("copy");
+		textarea.remove();
+		if (!copied) throw new Error("Clipboard copy failed.");
+	}
+	//#endregion
+	//#region src/utils/data-table.ts
+	function formatCellValue(value) {
+		if (value === null || value === void 0) return "";
+		return String(value).replace(/\r?\n/g, " ").trim();
+	}
+	function escapeCsvValue(value) {
+		if (/[",\n]/.test(value)) return `"${value.replace(/"/g, "\"\"")}"`;
+		return value;
+	}
+	function serializeDataTable(columns, rows, format) {
+		const delimiter = format === "csv" ? "," : "	";
+		return [columns.map((column) => format === "csv" ? escapeCsvValue(column.label) : column.label).join(delimiter), ...rows.map((row) => columns.map((column) => {
+			const value = formatCellValue(row[column.key]);
+			return format === "csv" ? escapeCsvValue(value) : value;
+		}).join(delimiter))].join("\n");
+	}
+	async function copyDataTable(columns, rows) {
+		await copyTextToClipboard(serializeDataTable(columns, rows, "tsv"));
+	}
+	function exportDataTableCsv(filename, columns, rows) {
+		const csv = serializeDataTable(columns, rows, "csv");
+		const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+		const downloadUrl = URL.createObjectURL(blob);
+		const anchor = document.createElement("a");
+		anchor.href = downloadUrl;
+		anchor.download = filename;
+		anchor.click();
+		window.setTimeout(() => {
+			URL.revokeObjectURL(downloadUrl);
+		}, 1e3);
+	}
+	//#endregion
+	//#region src/sites/amazon-fclm/index.ts
+	var installationKey$3 = "__ultimateTmAmazonFclmInstalled";
+	var employeeDocumentCache = /* @__PURE__ */ new Map();
+	var processLauncherLinksStorageKey = "amazonFclm.processLauncher.links";
+	var processLauncherPositionStorageKey = "amazonFclm.processLauncher.position";
+	var preferredAuditCaptionMatchers = ["C-Return Audit [4300018934]", "WD Grading [4300006862]"];
+	var rosterLinkSelectors = [
+		"tbody tr td:nth-child(3) a[title=\"View Time Details\"]",
+		"tbody tr td:nth-child(3) a[href*=\"/employee/timeDetails\"]",
+		"tbody tr td a[title=\"View Time Details\"]",
+		"tbody tr td a[href*=\"/employee/timeDetails\"]"
+	];
+	var loginDdSelector = "table.empDetailCard dd";
+	var maxConcurrentAuditRequests = 6;
+	var requestTimeoutMs = 3e4;
+	var idleExportColumns = [
+		{
+			key: "associate",
+			label: "Associate"
+		},
+		{
+			key: "idle",
+			label: "Idle"
+		},
+		{
+			key: "clockedIn",
+			label: "Clocked In"
+		},
+		{
+			key: "idlePercentage",
+			label: "Idle %"
+		}
+	];
+	function createStyles$2() {
+		const style = document.createElement("style");
+		style.textContent = `
+    .ut-fclm-action-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: 10px;
+      vertical-align: middle;
+    }
+    .ut-fclm-action-button {
+      border: none;
+      min-height: 28px;
+      padding: 0 10px;
+      border-radius: 9px;
+      background: #0f172a;
+      color: #f8fafc;
+      font: 600 12px/1.2 Inter, "Segoe UI", Arial, sans-serif;
+      cursor: pointer;
+    }
+    .ut-fclm-action-button[disabled] {
+      opacity: 0.65;
+      cursor: wait;
+    }
+    .ut-fclm-action-button[data-variant="secondary"] {
+      background: #eef2f7;
+      color: #0f172a;
+    }
+    .ut-fclm-action-status {
+      color: #64748b;
+      font: 500 11px/1.2 Inter, "Segoe UI", Arial, sans-serif;
+    }
+    .ut-fclm-shift-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: 10px;
+      flex-wrap: wrap;
+      vertical-align: middle;
+    }
+    .ut-fclm-shift-button {
+      border: none;
+      min-height: 28px;
+      padding: 0 10px;
+      border-radius: 9px;
+      background: #eef2f7;
+      color: #0f172a;
+      font: 600 12px/1.2 Inter, "Segoe UI", Arial, sans-serif;
+      cursor: pointer;
+    }
+    .ut-fclm-shift-button[data-variant="primary"] {
+      background: #0f172a;
+      color: #f8fafc;
+    }
+    .ut-fclm-launcher-icon {
+      position: fixed;
+      width: 38px;
+      height: 38px;
+      border: none;
+      border-radius: 9999px;
+      background: rgba(15, 23, 42, 0.92);
+      color: #f8fafc;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
+      cursor: grab;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font: 600 15px/1 Inter, "Segoe UI Emoji", "Apple Color Emoji", sans-serif;
+      z-index: 2147483645;
+      user-select: none;
+      backdrop-filter: blur(10px);
+    }
+    .ut-fclm-launcher-icon:active {
+      cursor: grabbing;
+    }
+    .ut-fclm-launcher-panel {
+      position: fixed;
+      width: 304px;
+      max-height: 380px;
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.98);
+      color: #0f172a;
+      box-shadow: 0 14px 36px rgba(15, 23, 42, 0.12);
+      backdrop-filter: blur(12px);
+      z-index: 2147483645;
+      font: 500 12px/1.35 Inter, "Segoe UI", Arial, sans-serif;
+    }
+    .ut-fclm-launcher-panel[data-open="true"] {
+      display: flex;
+    }
+    .ut-fclm-launcher-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .ut-fclm-launcher-title {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+    .ut-fclm-launcher-shift {
+      color: #64748b;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .ut-fclm-launcher-links {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      overflow: auto;
+      padding-right: 2px;
+    }
+    .ut-fclm-launcher-empty {
+      padding: 10px;
+      border-radius: 10px;
+      background: #f8fafc;
+      color: #64748b;
+      text-align: center;
+    }
+    .ut-fclm-launcher-card {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 6px;
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      border-radius: 10px;
+      background: #fbfdff;
+    }
+    .ut-fclm-launcher-card[data-editing="false"] .ut-fclm-launcher-edit {
+      display: none;
+    }
+    .ut-fclm-launcher-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .ut-fclm-launcher-main {
+      flex: 1;
+      justify-content: flex-start;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .ut-fclm-launcher-input {
+      width: 100%;
+      min-height: 34px;
+      padding: 8px 10px;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 10px;
+      outline: none;
+      background: #f8fafc;
+      color: #0f172a;
+      box-sizing: border-box;
+      font: inherit;
+    }
+    .ut-fclm-launcher-input:focus {
+      border-color: rgba(16, 185, 129, 0.55);
+      box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.1);
+    }
+    .ut-fclm-launcher-button {
+      border: none;
+      min-height: 32px;
+      border-radius: 10px;
+      padding: 0 10px;
+      cursor: pointer;
+      background: #eef2f7;
+      color: #0f172a;
+      font: inherit;
+      font-weight: 600;
+    }
+    .ut-fclm-launcher-button[data-variant="primary"] {
+      background: #0f172a;
+      color: #f8fafc;
+    }
+    .ut-fclm-launcher-button[data-variant="ghost"] {
+      min-width: 32px;
+      padding: 0;
+      background: #f1f5f9;
+      color: #475569;
+    }
+    .ut-fclm-launcher-button[data-variant="icon"] {
+      min-width: 32px;
+      padding: 0;
+      background: #eef2f7;
+      color: #334155;
+      font-size: 13px;
+    }
+    .ut-fclm-launcher-button[data-variant="danger"] {
+      background: #fff1f2;
+      color: #e11d48;
+    }
+    .ut-fclm-launcher-form,
+    .ut-fclm-launcher-edit {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .ut-fclm-launcher-form {
+      padding-top: 6px;
+      border-top: 1px solid rgba(148, 163, 184, 0.12);
+    }
+    .ut-fclm-idle-panel {
+      display: inline-flex;
+      flex-direction: column;
+      gap: 8px;
+      margin: 0 0 10px;
+      padding: 10px 12px;
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      border-radius: 12px;
+      width: max-content;
+      max-width: min(760px, calc(100vw - 24px));
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.98));
+      box-shadow: 0 10px 26px rgba(15, 23, 42, 0.08);
+      font: 500 12px/1.35 Inter, "Segoe UI", Arial, sans-serif;
+      color: #0f172a;
+    }
+    .ut-fclm-idle-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .ut-fclm-idle-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .ut-fclm-idle-title {
+      font-weight: 700;
+      font-size: 12px;
+      letter-spacing: 0.01em;
+    }
+    .ut-fclm-idle-summary {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #334155;
+      flex-wrap: wrap;
+    }
+    .ut-fclm-idle-total {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 700;
+      color: #0f172a;
+      font-size: 12px;
+    }
+    .ut-fclm-idle-total-bubble,
+    .ut-fclm-idle-percent-bubble {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 26px;
+      padding: 0 10px;
+      border-radius: 9999px;
+      background: linear-gradient(135deg, #0f172a, #1e293b);
+      color: #f8fafc;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    .ut-fclm-idle-total-bubble {
+      min-height: 30px;
+      padding: 0 12px;
+      font-size: 14px;
+    }
+    .ut-fclm-idle-status {
+      color: #64748b;
+      font-size: 11px;
+    }
+    .ut-fclm-idle-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      width: 100%;
+    }
+    .ut-fclm-idle-row {
+      display: grid;
+      grid-template-columns: 78px 88px 76px;
+      gap: 8px;
+      align-items: center;
+      padding: 6px 0 0;
+    }
+    .ut-fclm-idle-row[data-role="header"] {
+      padding: 0 34px 0 0;
+      color: #64748b;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .ut-fclm-associate {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 7px 8px;
+      border-radius: 9px;
+      background: rgba(255, 255, 255, 0.86);
+      border: 1px solid rgba(148, 163, 184, 0.12);
+    }
+    .ut-fclm-associate[data-open="false"] .ut-fclm-idle-row {
+      display: none;
+    }
+    .ut-fclm-associate-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .ut-fclm-idle-cell-name {
+      min-width: 0;
+    }
+    .ut-fclm-idle-name {
+      display: block;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-weight: 600;
+      color: #0f172a;
+      text-decoration: none;
+    }
+    .ut-fclm-idle-name:hover {
+      text-decoration: underline;
+    }
+    .ut-fclm-idle-cell-number {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    .ut-fclm-idle-eye {
+      border: none;
+      min-width: 26px;
+      min-height: 26px;
+      padding: 0;
+      border-radius: 9999px;
+      background: #f1f5f9;
+      color: #334155;
+      cursor: pointer;
+      font: 500 13px/1 Inter, "Segoe UI Emoji", "Apple Color Emoji", sans-serif;
+    }
+  `;
+		return style;
+	}
+	function normalizeUrl$1(href) {
+		return new URL(href, window.location.origin).toString();
+	}
+	function cleanText(value) {
+		return (value ?? "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+	}
+	function normalizeInputUrl(value) {
+		const trimmedValue = value.trim();
+		if (!trimmedValue) return "";
+		try {
+			return new URL(trimmedValue, window.location.origin).toString();
+		} catch {
+			return "";
+		}
+	}
+	function createId$1() {
+		return `ut-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	}
+	function clamp$1(value, min, max) {
+		return Math.min(Math.max(value, min), max);
+	}
+	function formatIntradayDate(date) {
+		return `${date.getFullYear()}/${`${date.getMonth() + 1}`.padStart(2, "0")}/${`${date.getDate()}`.padStart(2, "0")}`;
+	}
+	function addDays(date, days) {
+		const nextDate = new Date(date);
+		nextDate.setDate(nextDate.getDate() + days);
+		return nextDate;
+	}
+	function getShiftWindows() {
+		const today = /* @__PURE__ */ new Date();
+		today.setHours(0, 0, 0, 0);
+		const yesterday = addDays(today, -1);
+		const tomorrow = addDays(today, 1);
+		return [
+			{
+				label: "Day",
+				start: today,
+				end: today
+			},
+			{
+				label: "Night",
+				start: today,
+				end: tomorrow
+			},
+			{
+				label: "Y Day",
+				start: yesterday,
+				end: yesterday
+			},
+			{
+				label: "Y Night",
+				start: yesterday,
+				end: today
+			}
+		];
+	}
+	function getCurrentShiftWindow() {
+		const now = /* @__PURE__ */ new Date();
+		const hour = now.getHours();
+		const today = new Date(now);
+		today.setHours(0, 0, 0, 0);
+		const yesterday = addDays(today, -1);
+		const tomorrow = addDays(today, 1);
+		if (hour >= 6 && hour < 18) return {
+			label: "Day",
+			start: today,
+			end: today
+		};
+		if (hour >= 18) return {
+			label: "Night",
+			start: today,
+			end: tomorrow
+		};
+		return {
+			label: "Night",
+			start: yesterday,
+			end: today
+		};
+	}
+	function buildShiftWindowUrl(sourceUrl, windowDefinition) {
+		const url = new URL(sourceUrl, window.location.origin);
+		const isNightShift = windowDefinition.label.includes("Night");
+		url.searchParams.set("spanType", "Intraday");
+		url.searchParams.set("reportFormat", "HTML");
+		url.searchParams.set("maxIntradayDays", "1");
+		url.searchParams.set("startDateIntraday", formatIntradayDate(windowDefinition.start));
+		url.searchParams.set("startHourIntraday", isNightShift ? "18" : "6");
+		url.searchParams.set("startMinuteIntraday", "0");
+		url.searchParams.set("endDateIntraday", formatIntradayDate(windowDefinition.end));
+		url.searchParams.set("endHourIntraday", isNightShift ? "6" : "18");
+		url.searchParams.set("endMinuteIntraday", "0");
+		return url.toString();
+	}
+	function applyShiftWindow(windowDefinition) {
+		window.location.href = buildShiftWindowUrl(window.location.href, windowDefinition);
+	}
+	function getDefaultLauncherPosition() {
+		return {
+			x: window.innerWidth - 120,
+			y: window.innerHeight - 72
+		};
+	}
+	async function loadProcessShortcuts(storage) {
+		return await storage.get(processLauncherLinksStorageKey, []) ?? [];
+	}
+	async function saveProcessShortcuts(storage, shortcuts) {
+		await storage.set(processLauncherLinksStorageKey, shortcuts);
+	}
+	async function loadLauncherPosition(storage) {
+		const fallbackPosition = getDefaultLauncherPosition();
+		return await storage.get(processLauncherPositionStorageKey, fallbackPosition) ?? fallbackPosition;
+	}
+	async function saveLauncherPosition(storage, position) {
+		await storage.set(processLauncherPositionStorageKey, position);
+	}
+	function applyLauncherPosition(icon, position) {
+		icon.style.left = `${position.x}px`;
+		icon.style.top = `${position.y}px`;
+	}
+	function computeLauncherPanelPosition(icon, panel) {
+		const iconRect = icon.getBoundingClientRect();
+		const panelWidth = panel.offsetWidth || 304;
+		const panelHeight = panel.offsetHeight || 380;
+		const gap = 4;
+		const left = clamp$1(iconRect.left + iconRect.width - panelWidth, 12, window.innerWidth - panelWidth - 12);
+		const preferredTop = iconRect.top - panelHeight - gap;
+		const fallbackTop = iconRect.bottom;
+		return {
+			left,
+			top: preferredTop >= 12 ? preferredTop : clamp$1(fallbackTop, 12, window.innerHeight - panelHeight - 12)
+		};
+	}
+	function getCurrentProcessLabel() {
+		for (const selector of [
+			"h1",
+			"h2",
+			".report-title",
+			".page-title",
+			"#control-panel strong",
+			"#control-panel .title"
+		]) {
+			const text = document.querySelector(selector)?.textContent?.trim();
+			if (text && text.length > 3) return text;
+		}
+		const warehouseId = new URLSearchParams(window.location.search).get("warehouseId");
+		const processId = new URLSearchParams(window.location.search).get("processId");
+		if (warehouseId && processId) return `${warehouseId} ${processId}`;
+		if (processId) return `Process ${processId}`;
+		return "Current process";
+	}
+	function createProcessLauncher(storage, logger) {
+		if (document.querySelector("[data-ut-fclm-process-launcher]")) return;
+		(async () => {
+			const [shortcuts, storedPosition] = await Promise.all([loadProcessShortcuts(storage), loadLauncherPosition(storage)]);
+			const icon = document.createElement("button");
+			const panel = document.createElement("div");
+			const header = document.createElement("div");
+			const titleGroup = document.createElement("div");
+			const title = document.createElement("div");
+			const shiftText = document.createElement("div");
+			const closeButton = document.createElement("button");
+			const linksContainer = document.createElement("div");
+			const form = document.createElement("div");
+			const nameInput = document.createElement("input");
+			const saveCurrentButton = document.createElement("button");
+			let currentPosition = {
+				x: clamp$1(storedPosition.x, 12, window.innerWidth - 56),
+				y: clamp$1(storedPosition.y, 12, window.innerHeight - 56)
+			};
+			let panelOpen = false;
+			let isDragging = false;
+			let movedDuringPointer = false;
+			let pointerOffsetX = 0;
+			let pointerOffsetY = 0;
+			icon.type = "button";
+			icon.className = "ut-fclm-launcher-icon";
+			icon.dataset.utFclmProcessLauncher = "true";
+			icon.textContent = "🕒";
+			icon.setAttribute("aria-label", "Open FCLM process launcher");
+			applyLauncherPosition(icon, currentPosition);
+			panel.className = "ut-fclm-launcher-panel";
+			panel.dataset.open = "false";
+			header.className = "ut-fclm-launcher-header";
+			title.textContent = "Process Launcher";
+			title.className = "ut-fclm-launcher-title";
+			shiftText.className = "ut-fclm-launcher-shift";
+			closeButton.className = "ut-fclm-launcher-button";
+			closeButton.dataset.variant = "ghost";
+			closeButton.type = "button";
+			closeButton.textContent = "×";
+			closeButton.setAttribute("aria-label", "Close process launcher");
+			linksContainer.className = "ut-fclm-launcher-links";
+			form.className = "ut-fclm-launcher-form";
+			nameInput.className = "ut-fclm-launcher-input";
+			nameInput.placeholder = "Process name";
+			saveCurrentButton.className = "ut-fclm-launcher-button";
+			saveCurrentButton.dataset.variant = "primary";
+			saveCurrentButton.type = "button";
+			saveCurrentButton.textContent = "Save current";
+			titleGroup.append(title, shiftText);
+			header.append(titleGroup, closeButton);
+			form.append(nameInput, saveCurrentButton);
+			panel.append(header, linksContainer, form);
+			function positionPanel() {
+				const { left, top } = computeLauncherPanelPosition(icon, panel);
+				panel.style.left = `${left}px`;
+				panel.style.top = `${top}px`;
+			}
+			function setPanelOpen(nextValue) {
+				panelOpen = nextValue;
+				panel.dataset.open = panelOpen ? "true" : "false";
+				if (panelOpen) {
+					shiftText.textContent = `Current shift: ${getCurrentShiftWindow().label}`;
+					nameInput.value = getCurrentProcessLabel();
+					positionPanel();
+				}
+			}
+			function openShortcut(targetUrl, openInNewTab) {
+				const shiftUrl = buildShiftWindowUrl(targetUrl, getCurrentShiftWindow());
+				if (openInNewTab) {
+					window.open(shiftUrl, "_blank", "noopener");
+					return;
+				}
+				window.location.href = shiftUrl;
+			}
+			async function persistShortcuts() {
+				await saveProcessShortcuts(storage, shortcuts);
+			}
+			function renderShortcuts() {
+				linksContainer.replaceChildren();
+				if (shortcuts.length === 0) {
+					const emptyState = document.createElement("div");
+					emptyState.className = "ut-fclm-launcher-empty";
+					emptyState.textContent = "No saved processes yet.";
+					linksContainer.appendChild(emptyState);
+					return;
+				}
+				for (const shortcut of shortcuts) {
+					const card = document.createElement("div");
+					const row = document.createElement("div");
+					const mainButton = document.createElement("button");
+					const openNewTabButton = document.createElement("button");
+					const editButton = document.createElement("button");
+					const deleteButton = document.createElement("button");
+					const editFields = document.createElement("div");
+					const shortcutNameInput = document.createElement("input");
+					const shortcutUrlInput = document.createElement("input");
+					let editing = false;
+					card.className = "ut-fclm-launcher-card";
+					card.dataset.editing = "false";
+					row.className = "ut-fclm-launcher-row";
+					shortcutNameInput.className = "ut-fclm-launcher-input";
+					shortcutNameInput.value = shortcut.name;
+					shortcutNameInput.placeholder = "Process name";
+					shortcutNameInput.addEventListener("input", () => {
+						shortcut.name = shortcutNameInput.value;
+						mainButton.textContent = shortcut.name || shortcut.url || "Open";
+						persistShortcuts();
+					});
+					shortcutUrlInput.className = "ut-fclm-launcher-input";
+					shortcutUrlInput.value = shortcut.url;
+					shortcutUrlInput.placeholder = "https://fclm-portal.amazon.com/reports/functionRollup?...";
+					shortcutUrlInput.addEventListener("change", () => {
+						const normalizedUrl = normalizeInputUrl(shortcutUrlInput.value);
+						if (!normalizedUrl) {
+							shortcutUrlInput.value = shortcut.url;
+							return;
+						}
+						shortcut.url = normalizedUrl;
+						shortcutUrlInput.value = normalizedUrl;
+						mainButton.title = normalizedUrl;
+						persistShortcuts();
+					});
+					mainButton.className = "ut-fclm-launcher-button ut-fclm-launcher-main";
+					mainButton.dataset.variant = "primary";
+					mainButton.type = "button";
+					mainButton.textContent = shortcut.name || shortcut.url || "Open";
+					mainButton.title = shortcut.url;
+					mainButton.addEventListener("click", () => {
+						openShortcut(shortcut.url, false);
+					});
+					openNewTabButton.className = "ut-fclm-launcher-button";
+					openNewTabButton.dataset.variant = "icon";
+					openNewTabButton.type = "button";
+					openNewTabButton.textContent = "➡️";
+					openNewTabButton.title = "Open current shift in new tab";
+					openNewTabButton.addEventListener("click", () => {
+						openShortcut(shortcut.url, true);
+					});
+					editButton.className = "ut-fclm-launcher-button";
+					editButton.dataset.variant = "icon";
+					editButton.type = "button";
+					editButton.textContent = "⚙️";
+					editButton.title = "Edit process";
+					editButton.addEventListener("click", () => {
+						editing = !editing;
+						card.dataset.editing = editing ? "true" : "false";
+					});
+					deleteButton.className = "ut-fclm-launcher-button";
+					deleteButton.dataset.variant = "danger";
+					deleteButton.type = "button";
+					deleteButton.textContent = "🗑️";
+					deleteButton.title = "Delete process";
+					deleteButton.addEventListener("click", () => {
+						const nextShortcuts = shortcuts.filter((item) => item.id !== shortcut.id);
+						shortcuts.splice(0, shortcuts.length, ...nextShortcuts);
+						persistShortcuts();
+						renderShortcuts();
+					});
+					editFields.className = "ut-fclm-launcher-edit";
+					editFields.append(shortcutNameInput, shortcutUrlInput);
+					row.append(mainButton, openNewTabButton, editButton, deleteButton);
+					card.append(row, editFields);
+					linksContainer.appendChild(card);
+				}
+			}
+			saveCurrentButton.addEventListener("click", () => {
+				const name = nameInput.value.trim() || getCurrentProcessLabel();
+				const url = normalizeInputUrl(window.location.href);
+				if (!url) return;
+				const duplicateShortcut = shortcuts.find((shortcut) => shortcut.url === url);
+				if (duplicateShortcut) duplicateShortcut.name = name;
+				else shortcuts.unshift({
+					id: createId$1(),
+					name,
+					url
+				});
+				persistShortcuts();
+				renderShortcuts();
+			});
+			icon.addEventListener("click", () => {
+				if (movedDuringPointer) {
+					movedDuringPointer = false;
+					return;
+				}
+				setPanelOpen(!panelOpen);
+			});
+			closeButton.addEventListener("click", () => {
+				setPanelOpen(false);
+			});
+			icon.addEventListener("pointerdown", (event) => {
+				isDragging = true;
+				movedDuringPointer = false;
+				pointerOffsetX = event.clientX - currentPosition.x;
+				pointerOffsetY = event.clientY - currentPosition.y;
+				icon.setPointerCapture(event.pointerId);
+			});
+			icon.addEventListener("pointermove", (event) => {
+				if (!isDragging) return;
+				const nextX = clamp$1(event.clientX - pointerOffsetX, 12, window.innerWidth - 56);
+				const nextY = clamp$1(event.clientY - pointerOffsetY, 12, window.innerHeight - 56);
+				if (Math.abs(nextX - currentPosition.x) > 2 || Math.abs(nextY - currentPosition.y) > 2) movedDuringPointer = true;
+				currentPosition = {
+					x: nextX,
+					y: nextY
+				};
+				applyLauncherPosition(icon, currentPosition);
+				if (panelOpen) positionPanel();
+			});
+			icon.addEventListener("pointerup", (event) => {
+				if (!isDragging) return;
+				isDragging = false;
+				icon.releasePointerCapture(event.pointerId);
+				saveLauncherPosition(storage, currentPosition);
+			});
+			icon.addEventListener("pointercancel", () => {
+				isDragging = false;
+			});
+			document.addEventListener("click", (event) => {
+				if (!panelOpen) return;
+				const targetNode = event.target;
+				if (targetNode && (panel.contains(targetNode) || icon.contains(targetNode))) return;
+				setPanelOpen(false);
+			});
+			document.addEventListener("keydown", (event) => {
+				if (event.key === "Escape") setPanelOpen(false);
+			});
+			window.addEventListener("resize", () => {
+				currentPosition = {
+					x: clamp$1(currentPosition.x, 12, window.innerWidth - 56),
+					y: clamp$1(currentPosition.y, 12, window.innerHeight - 56)
+				};
+				applyLauncherPosition(icon, currentPosition);
+				if (panelOpen) positionPanel();
+			});
+			renderShortcuts();
+			document.body.append(icon, panel);
+			logger.info("Installed FCLM process launcher.", { shortcutCount: shortcuts.length });
+		})().catch((error) => {
+			logger.error("Failed to install FCLM process launcher.", error);
+		});
+	}
+	function createShiftWindowButtons(logger) {
+		const controlRow = document.querySelector("td.cp-submit-row");
+		if (!controlRow || controlRow.querySelector("[data-ut-fclm-shift-row]")) return;
+		const shiftRow = document.createElement("span");
+		shiftRow.className = "ut-fclm-shift-row";
+		shiftRow.dataset.utFclmShiftRow = "true";
+		for (const windowDefinition of getShiftWindows()) {
+			const button = document.createElement("button");
+			button.className = "ut-fclm-shift-button";
+			button.type = "button";
+			button.textContent = windowDefinition.label;
+			if (windowDefinition.label === "Day") button.dataset.variant = "primary";
+			button.addEventListener("click", () => {
+				logger.info("Applying FCLM shift window.", { label: windowDefinition.label });
+				applyShiftWindow(windowDefinition);
+			});
+			shiftRow.appendChild(button);
+		}
+		controlRow.append(" ", shiftRow);
+	}
+	function getAuditTables() {
+		const allTables = Array.from(document.querySelectorAll("table"));
+		const preferredTables = allTables.filter((table) => {
+			const captionText = table.querySelector("caption")?.textContent?.trim() ?? "";
+			return preferredAuditCaptionMatchers.some((matcher) => captionText.includes(matcher)) && table.querySelector("a[href*=\"/employee/timeDetails\"]");
+		});
+		if (preferredTables.length > 0) return preferredTables;
+		return allTables.filter((table) => {
+			const captionText = table.querySelector("caption")?.textContent?.trim() ?? "";
+			return /audit/i.test(captionText) && table.querySelector("a[href*=\"/employee/timeDetails\"]");
+		});
+	}
+	function getEmployeeLinks(table) {
+		let anchors = [];
+		for (const selector of rosterLinkSelectors) {
+			anchors = Array.from(table.querySelectorAll(selector));
+			if (anchors.length > 0) break;
+		}
+		const deduped = /* @__PURE__ */ new Map();
+		for (const anchor of anchors) {
+			const href = normalizeUrl$1(anchor.getAttribute("href") ?? "");
+			if (!href || deduped.has(href)) continue;
+			deduped.set(href, {
+				href,
+				name: cleanText(anchor.textContent) || href,
+				originalIndex: deduped.size
+			});
+		}
+		return Array.from(deduped.values());
+	}
+	function parseDurationToSeconds(durationText) {
+		const normalized = cleanText(durationText);
+		if (!normalized) return 0;
+		const parts = normalized.split(":").map((part) => Number(part));
+		if (parts.some((part) => Number.isNaN(part))) return 0;
+		if (parts.length === 2) return parts[0] * 60 + parts[1];
+		if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+		return 0;
+	}
+	function formatSeconds(totalSeconds) {
+		const roundedSeconds = Math.max(0, Math.round(totalSeconds || 0));
+		const hours = Math.floor(roundedSeconds / 3600);
+		const minutes = Math.floor(roundedSeconds % 3600 / 60);
+		const seconds = roundedSeconds % 60;
+		if (hours > 0) return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+		return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+	}
+	function formatPercentage(numerator, denominator) {
+		if (!denominator) return "0.0%";
+		return `${(numerator / denominator * 100).toFixed(1)}%`;
+	}
+	async function fetchEmployeeDocument(employeeLink) {
+		const existingRequest = employeeDocumentCache.get(employeeLink.href);
+		if (existingRequest) return existingRequest;
+		const request = (async () => {
+			const controller = new AbortController();
+			const timeoutId = window.setTimeout(() => controller.abort(), requestTimeoutMs);
+			try {
+				const response = await fetch(employeeLink.href, {
+					credentials: "include",
+					signal: controller.signal
+				});
+				if (!response.ok) throw new Error(`Failed to load employee details: ${response.status}`);
+				const html = await response.text();
+				return new DOMParser().parseFromString(html, "text/html");
+			} finally {
+				window.clearTimeout(timeoutId);
+			}
+		})();
+		employeeDocumentCache.set(employeeLink.href, request);
+		return request;
+	}
+	function extractLoginFromDocument(doc) {
+		const loginValues = Array.from(doc.querySelectorAll(loginDdSelector)).map((element) => cleanText(element.textContent)).filter(Boolean);
+		for (const value of loginValues) if (/^[a-z0-9._-]{2,32}$/i.test(value)) return value;
+		return cleanText(doc.querySelector("dd")?.textContent) || null;
+	}
+	function extractDisplayLabelFromDocument(doc) {
+		return doc.querySelector("span.fold-control")?.textContent?.trim() ?? null;
+	}
+	function extractIdleMetricsFromDocument(doc) {
+		let idleSeconds = 0;
+		const functionSegments = Array.from(doc.querySelectorAll("tr.function-seg"));
+		for (const row of functionSegments) {
+			const className = row.className || "";
+			const text = cleanText(row.textContent);
+			const isIndirect = row.classList.contains("indirect") || /\bindirect\b/i.test(className) || /\bindirect\b/i.test(text);
+			const isTimeOffTask = row.classList.contains("timeOffTask") || /\btimeofftask\b/i.test(className) || /\btime off task\b/i.test(text);
+			if (!isIndirect || isTimeOffTask) continue;
+			const durationCell = row.querySelector("td.rightAlign") ?? row.querySelector("td:last-child");
+			idleSeconds += parseDurationToSeconds(cleanText(durationCell?.textContent));
+		}
+		let clockedInSeconds = 0;
+		const clockRows = Array.from(doc.querySelectorAll("tr.clock-seg"));
+		for (const row of clockRows) {
+			const className = row.className || "";
+			const text = cleanText(row.textContent);
+			if (!(row.classList.contains("on-clock") || /\bon-clock\b/i.test(className) || /\bonclock\b/i.test(text) || /\bonclock\/paid\b/i.test(text) || /\bonclock\/unpaid\b/i.test(text))) continue;
+			const durationCell = row.querySelector("td.rightAlign") ?? row.querySelector("td:last-child");
+			clockedInSeconds += parseDurationToSeconds(cleanText(durationCell?.textContent));
+		}
+		return {
+			idleSeconds,
+			clockedInSeconds,
+			idleTime: formatSeconds(idleSeconds),
+			clockedInTime: formatSeconds(clockedInSeconds),
+			idlePct: formatPercentage(idleSeconds, clockedInSeconds)
+		};
+	}
+	async function fetchAssociateAnalysis(employeeLink) {
+		try {
+			const employeeDocument = await fetchEmployeeDocument(employeeLink);
+			const metrics = extractIdleMetricsFromDocument(employeeDocument);
+			const login = extractLoginFromDocument(employeeDocument);
+			return {
+				employeeLink,
+				displayLabel: extractDisplayLabelFromDocument(employeeDocument) ?? `${employeeLink.name}${login ? ` (${login})` : ""}`,
+				login,
+				metrics,
+				error: null
+			};
+		} catch (error) {
+			return {
+				employeeLink,
+				displayLabel: employeeLink.name,
+				login: null,
+				metrics: null,
+				error
+			};
+		}
+	}
+	function createCopyButton(table, logger) {
+		const caption = table.querySelector("caption");
+		if (!caption || caption.querySelector("[data-ut-fclm-copy-logins]")) return;
+		const actionRow = document.createElement("span");
+		const button = document.createElement("button");
+		const status = document.createElement("span");
+		actionRow.className = "ut-fclm-action-row";
+		actionRow.dataset.utFclmCopyLogins = "true";
+		button.className = "ut-fclm-action-button";
+		button.type = "button";
+		button.textContent = "Copy logins";
+		status.className = "ut-fclm-action-status";
+		button.addEventListener("click", () => {
+			(async () => {
+				const employeeLinks = getEmployeeLinks(table);
+				if (employeeLinks.length === 0) {
+					status.textContent = "No names found";
+					return;
+				}
+				button.disabled = true;
+				button.textContent = "Copying...";
+				status.textContent = `${employeeLinks.length} records`;
+				try {
+					const results = await Promise.all(employeeLinks.map((employeeLink) => fetchAssociateAnalysis(employeeLink)));
+					const uniqueLogins = Array.from(new Set(results.map((result) => result.login).filter((login) => Boolean(login))));
+					await copyTextToClipboard(uniqueLogins.join("\n"));
+					button.textContent = "Copied";
+					status.textContent = `${uniqueLogins.length} logins`;
+					logger.info("Copied FCLM logins from audit table.", { copiedCount: uniqueLogins.length });
+				} catch (error) {
+					button.textContent = "Retry";
+					status.textContent = "Failed";
+					logger.error("Failed to copy FCLM logins from audit table.", error);
+				} finally {
+					button.disabled = false;
+					window.setTimeout(() => {
+						button.textContent = "Copy logins";
+					}, 1200);
+				}
+			})();
+		});
+		actionRow.append(button, status);
+		caption.append(" ", actionRow);
+	}
+	function createIdlePanel(table, logger) {
+		if (table.previousElementSibling?.matches("[data-ut-fclm-idle-panel]")) return;
+		const panel = document.createElement("section");
+		const header = document.createElement("div");
+		const title = document.createElement("div");
+		const actionGroup = document.createElement("div");
+		const refreshButton = document.createElement("button");
+		const copyButton = document.createElement("button");
+		const exportButton = document.createElement("button");
+		const summary = document.createElement("div");
+		const totalBadge = document.createElement("span");
+		const status = document.createElement("span");
+		const list = document.createElement("div");
+		let exportRows = [];
+		panel.className = "ut-fclm-idle-panel";
+		panel.dataset.utFclmIdlePanel = "true";
+		header.className = "ut-fclm-idle-header";
+		title.className = "ut-fclm-idle-title";
+		title.textContent = "Idle time";
+		actionGroup.className = "ut-fclm-idle-actions";
+		refreshButton.className = "ut-fclm-action-button";
+		refreshButton.type = "button";
+		refreshButton.textContent = "Refresh";
+		copyButton.className = "ut-fclm-action-button";
+		copyButton.dataset.variant = "secondary";
+		copyButton.type = "button";
+		copyButton.textContent = "Copy";
+		copyButton.disabled = true;
+		exportButton.className = "ut-fclm-action-button";
+		exportButton.dataset.variant = "secondary";
+		exportButton.type = "button";
+		exportButton.textContent = "Export";
+		exportButton.disabled = true;
+		summary.className = "ut-fclm-idle-summary";
+		totalBadge.className = "ut-fclm-idle-total";
+		totalBadge.innerHTML = `Total idle % <span class="ut-fclm-idle-total-bubble">--</span>`;
+		status.className = "ut-fclm-idle-status";
+		status.textContent = "Loading...";
+		list.className = "ut-fclm-idle-list";
+		const headerRow = document.createElement("div");
+		headerRow.className = "ut-fclm-idle-row";
+		headerRow.dataset.role = "header";
+		headerRow.innerHTML = `
+    <span class="ut-fclm-idle-cell-number">Idle</span>
+    <span class="ut-fclm-idle-cell-number">Clocked in</span>
+    <span class="ut-fclm-idle-cell-number">Idle %</span>
+  `;
+		list.appendChild(headerRow);
+		summary.append(totalBadge, status);
+		actionGroup.append(refreshButton, copyButton, exportButton);
+		header.append(title, actionGroup);
+		panel.append(header, summary, list);
+		table.before(panel);
+		async function runAnalysis() {
+			const employeeLinks = getEmployeeLinks(table);
+			if (employeeLinks.length === 0) {
+				exportRows = [];
+				copyButton.disabled = true;
+				exportButton.disabled = true;
+				const totalBubble = totalBadge.querySelector(".ut-fclm-idle-total-bubble");
+				if (totalBubble) totalBubble.textContent = "--";
+				status.textContent = "No names found";
+				list.replaceChildren(headerRow);
+				return;
+			}
+			refreshButton.disabled = true;
+			refreshButton.textContent = "Loading...";
+			status.textContent = `${employeeLinks.length} associates`;
+			list.replaceChildren(headerRow);
+			let nextIndex = 0;
+			let completedCount = 0;
+			const results = new Array(employeeLinks.length);
+			const workerCount = Math.min(maxConcurrentAuditRequests, employeeLinks.length);
+			async function worker() {
+				while (nextIndex < employeeLinks.length) {
+					const currentIndex = nextIndex;
+					nextIndex += 1;
+					results[currentIndex] = await fetchAssociateAnalysis(employeeLinks[currentIndex]);
+					completedCount += 1;
+					status.textContent = `Fetching... ${completedCount}/${employeeLinks.length}`;
+					await Promise.resolve();
+				}
+			}
+			await Promise.all(Array.from({ length: workerCount }, () => worker()));
+			let totalIdleSeconds = 0;
+			let totalClockedInSeconds = 0;
+			let successCount = 0;
+			const successfulResults = results.filter((result) => result.metrics).sort((left, right) => {
+				const leftPercentage = left.metrics && left.metrics.clockedInSeconds > 0 ? left.metrics.idleSeconds / left.metrics.clockedInSeconds : 0;
+				return (right.metrics && right.metrics.clockedInSeconds > 0 ? right.metrics.idleSeconds / right.metrics.clockedInSeconds : 0) - leftPercentage;
+			});
+			for (const result of successfulResults) {
+				if (!result.metrics) continue;
+				successCount += 1;
+				totalIdleSeconds += result.metrics.idleSeconds;
+				totalClockedInSeconds += result.metrics.clockedInSeconds;
+				const associate = document.createElement("div");
+				const associateHead = document.createElement("div");
+				const nameLink = document.createElement("a");
+				const eyeButton = document.createElement("button");
+				const row = document.createElement("div");
+				associate.className = "ut-fclm-associate";
+				associate.dataset.open = "true";
+				associateHead.className = "ut-fclm-associate-head";
+				nameLink.className = "ut-fclm-idle-name";
+				nameLink.href = result.employeeLink.href;
+				nameLink.target = "_blank";
+				nameLink.rel = "noopener noreferrer";
+				nameLink.textContent = result.displayLabel;
+				eyeButton.className = "ut-fclm-idle-eye";
+				eyeButton.type = "button";
+				eyeButton.textContent = "👁️";
+				eyeButton.title = "Hide associate details";
+				eyeButton.addEventListener("click", () => {
+					const isOpen = associate.dataset.open !== "false";
+					associate.dataset.open = isOpen ? "false" : "true";
+					eyeButton.textContent = isOpen ? "🙈" : "👁️";
+					eyeButton.title = isOpen ? "Show associate details" : "Hide associate details";
+				});
+				row.className = "ut-fclm-idle-row";
+				row.innerHTML = `
+        <span class="ut-fclm-idle-cell-number">${result.metrics.idleTime}</span>
+        <span class="ut-fclm-idle-cell-number">${result.metrics.clockedInTime}</span>
+        <span class="ut-fclm-idle-cell-number"><span class="ut-fclm-idle-percent-bubble">${result.metrics.idlePct}</span></span>
+      `;
+				associateHead.append(nameLink, eyeButton);
+				associate.append(associateHead, row);
+				list.appendChild(associate);
+			}
+			const failedCount = results.length - successCount;
+			const totalIdlePercentage = formatPercentage(totalIdleSeconds, totalClockedInSeconds);
+			const totalBubble = totalBadge.querySelector(".ut-fclm-idle-total-bubble");
+			if (totalBubble) totalBubble.textContent = totalIdlePercentage;
+			exportRows = [{
+				associate: "Total",
+				idle: formatSeconds(totalIdleSeconds),
+				clockedIn: formatSeconds(totalClockedInSeconds),
+				idlePercentage: totalIdlePercentage
+			}, ...successfulResults.map((result) => {
+				const metrics = result.metrics;
+				return {
+					associate: result.displayLabel,
+					idle: metrics.idleTime,
+					clockedIn: metrics.clockedInTime,
+					idlePercentage: metrics.idlePct
+				};
+			})];
+			copyButton.disabled = exportRows.length === 0;
+			exportButton.disabled = exportRows.length === 0;
+			status.textContent = failedCount > 0 ? `${successCount}/${results.length} loaded` : `${successCount} associates`;
+			refreshButton.disabled = false;
+			refreshButton.textContent = "Refresh";
+			logger.info("Calculated FCLM idle metrics.", {
+				associateCount: successCount,
+				failedCount,
+				totalIdlePercentage
+			});
+		}
+		refreshButton.addEventListener("click", () => {
+			runAnalysis().catch((error) => {
+				refreshButton.disabled = false;
+				refreshButton.textContent = "Refresh";
+				status.textContent = "Failed";
+				exportRows = [];
+				copyButton.disabled = true;
+				exportButton.disabled = true;
+				logger.error("Failed to calculate FCLM idle metrics.", error);
+			});
+		});
+		copyButton.addEventListener("click", () => {
+			if (exportRows.length === 0) return;
+			copyDataTable(idleExportColumns, exportRows).catch((error) => {
+				logger.error("Failed to copy FCLM idle table.", error);
+			});
+		});
+		exportButton.addEventListener("click", () => {
+			if (exportRows.length === 0) return;
+			exportDataTableCsv("fclm-idle-time.csv", idleExportColumns, exportRows);
+		});
+		runAnalysis().catch((error) => {
+			refreshButton.disabled = false;
+			refreshButton.textContent = "Refresh";
+			status.textContent = "Failed";
+			exportRows = [];
+			copyButton.disabled = true;
+			exportButton.disabled = true;
+			logger.error("Failed to calculate FCLM idle metrics.", error);
+		});
+	}
+	var amazonFclmModule = {
+		id: "amazon-fclm-audit-tools",
+		name: "Amazon FCLM Audit Tools",
+		description: "Adds Audit-table actions for Amazon FCLM reports.",
+		metadataMatches: ["https://fclm-portal.amazon.com/*"],
+		runtimeMatches: [(url) => url.hostname === "fclm-portal.amazon.com" && url.pathname === "/reports/functionRollup"],
+		run({ logger, storage }) {
+			const appWindow = window;
+			if (appWindow[installationKey$3]) {
+				logger.debug("Amazon FCLM audit tools already installed.");
+				return;
+			}
+			appWindow[installationKey$3] = true;
+			document.documentElement.appendChild(createStyles$2());
+			createProcessLauncher(storage, logger);
+			createShiftWindowButtons(logger);
+			const auditTables = getAuditTables();
+			for (const table of auditTables) {
+				createIdlePanel(table, logger);
+				createCopyButton(table, logger);
+			}
+			logger.info("Installed Amazon FCLM audit tools.", { auditTableCount: auditTables.length });
+		}
+	};
+	//#endregion
+	//#region src/sites/amazon-quicksight-apex/index.ts
+	var installationKey$2 = "__ultimateTmAmazonQuicksightApexInstalled";
+	var loginVisualTitle = "Pending APEX Engagements (Click Me To Filter)";
+	var summaryVisualTitle = "Disposition Level Accuracy Summary";
+	var accuracyColumns = [
+		{
+			key: "login",
+			label: "Login"
+		},
+		{
+			key: "sellableAccuracy",
+			label: "Sellable Accuracy %"
+		},
+		{
+			key: "unsellableAccuracy",
+			label: "Unsellable Accuracy %"
+		},
+		{
+			key: "lowerCategory",
+			label: "Lower Side"
+		},
+		{
+			key: "lowerAccuracy",
+			label: "Lower %"
+		}
+	];
+	function createStyles$1() {
+		const style = document.createElement("style");
+		style.textContent = `
+    .ut-qs-title-host {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .ut-qs-title-host > [data-automation-id="analysis_visual_title_label"] {
+      flex: 1;
+      min-width: 0;
+    }
+    .ut-qs-action-button {
+      border: none;
+      min-height: 30px;
+      padding: 0 10px;
+      border-radius: 10px;
+      background: #0f172a;
+      color: #f8fafc;
+      font: 600 12px/1.2 Inter, "Segoe UI", Arial, sans-serif;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .ut-qs-action-button[data-variant="secondary"] {
+      background: #eef2f7;
+      color: #0f172a;
+    }
+    .ut-qs-action-button[disabled] {
+      opacity: 0.6;
+      cursor: wait;
+    }
+    .ut-qs-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 8px;
+      padding: 10px 12px;
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      border-radius: 12px;
+      width: max-content;
+      max-width: min(760px, calc(100vw - 24px));
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.98));
+      box-shadow: 0 10px 26px rgba(15, 23, 42, 0.08);
+      font: 500 12px/1.35 Inter, "Segoe UI", Arial, sans-serif;
+      color: #0f172a;
+    }
+    .ut-qs-panel[data-collapsed="true"] .ut-qs-panel-body {
+      display: none;
+    }
+    .ut-qs-panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .ut-qs-panel-title {
+      font-weight: 700;
+      font-size: 12px;
+      letter-spacing: 0.01em;
+    }
+    .ut-qs-panel-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .ut-qs-panel-status {
+      color: #64748b;
+      font-size: 11px;
+      white-space: pre-wrap;
+    }
+    .ut-qs-table {
+      border-collapse: collapse;
+      min-width: 360px;
+    }
+    .ut-qs-table th,
+    .ut-qs-table td {
+      padding: 6px 8px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+      text-align: left;
+      white-space: nowrap;
+    }
+    .ut-qs-table th {
+      color: #475569;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .ut-qs-table td[data-align="right"] {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    .ut-qs-empty {
+      padding: 6px 0 0;
+      color: #64748b;
+    }
+  `;
+		return style;
+	}
+	function normalizeText(value) {
+		return (value ?? "").replace(/\s+/g, " ").trim();
+	}
+	function delay(ms) {
+		return new Promise((resolve) => {
+			window.setTimeout(resolve, ms);
+		});
+	}
+	function getVisualTitleLabel(titleText) {
+		return Array.from(document.querySelectorAll("[data-automation-id=\"analysis_visual_title_label\"]")).find((element) => {
+			const contextText = normalizeText(element.dataset.automationContext);
+			const renderedText = normalizeText(element.textContent);
+			const normalizedTitle = normalizeText(titleText);
+			return contextText === normalizedTitle || renderedText === normalizedTitle;
+		}) ?? null;
+	}
+	function getVisualBlock(titleText) {
+		return getVisualTitleLabel(titleText)?.closest("[id^=\"block-\"]") ?? null;
+	}
+	function getTitleContainer(titleText) {
+		return getVisualTitleLabel(titleText)?.closest(".visual-title-container") ?? null;
+	}
+	function getPrintableCellText(element) {
+		return element?.querySelector(".printable-cell")?.textContent?.trim() ?? element?.getAttribute("title")?.trim() ?? "";
+	}
+	function getRowCellText(loginBlock, rowPath, colPath) {
+		return getPrintableCellText(loginBlock.querySelector(`[data-automation-id^="sn-table-cell-"][data-col-path="${colPath}"][data-row-path="${rowPath}"]`));
+	}
+	function getLoginTargets() {
+		const loginBlock = getVisualBlock(loginVisualTitle);
+		if (!loginBlock) return [];
+		const cells = Array.from(loginBlock.querySelectorAll("[data-automation-id^=\"sn-table-cell-\"][data-col-path=\"1\"][data-row-path]"));
+		const dedupedCells = /* @__PURE__ */ new Map();
+		for (const cell of cells) {
+			const login = getPrintableCellText(cell);
+			if (!/^[a-z][a-z0-9_-]{2,}$/i.test(login)) continue;
+			const rowPath = cell.dataset.rowPath ?? `${dedupedCells.size}`;
+			const shiftCode = getRowCellText(loginBlock, rowPath, "2");
+			if (!/^d/i.test(shiftCode)) continue;
+			if (!dedupedCells.has(rowPath)) dedupedCells.set(rowPath, {
+				rowPath,
+				login
+			});
+		}
+		return Array.from(dedupedCells.entries()).sort((left, right) => Number(left[0]) - Number(right[0])).map(([, target]) => target);
+	}
+	function getLoginCell(target) {
+		const loginBlock = getVisualBlock(loginVisualTitle);
+		if (!loginBlock) return null;
+		const byRowPath = loginBlock.querySelector(`[data-automation-id^="sn-table-cell-"][data-col-path="1"][data-row-path="${target.rowPath}"]`);
+		if (byRowPath) return byRowPath;
+		return Array.from(loginBlock.querySelectorAll("[data-automation-id^=\"sn-table-cell-\"][data-col-path=\"1\"][data-row-path]")).find((cell) => getPrintableCellText(cell) === target.login) ?? null;
+	}
+	function getLoginTargetFromNode(node) {
+		const cell = (node instanceof Element ? node : node?.parentElement ?? null)?.closest("[data-automation-id^=\"sn-table-cell-\"][data-col-path=\"1\"][data-row-path]");
+		if (!cell) return null;
+		const loginBlock = getVisualBlock(loginVisualTitle);
+		if (!loginBlock || !loginBlock.contains(cell)) return null;
+		const login = getPrintableCellText(cell);
+		const rowPath = cell.dataset.rowPath ?? "";
+		if (!login || !rowPath) return null;
+		return {
+			login,
+			rowPath
+		};
+	}
+	function getErrorMessage(error) {
+		return error instanceof Error ? error.message : String(error);
+	}
+	function getSnapshotKey(snapshot) {
+		return snapshot ? `${snapshot.sellableAccuracy}|${snapshot.unsellableAccuracy}` : "";
+	}
+	function getApplicationTargets(cell) {
+		if (!cell) return [];
+		const targets = [];
+		let cursor = cell;
+		while (cursor) {
+			if (cursor.getAttribute("role") === "application" && !targets.includes(cursor)) targets.push(cursor);
+			cursor = cursor.parentElement;
+		}
+		return targets;
+	}
+	async function attemptKeyboardSelection(focusElement, dispatchElement, key) {
+		focusElement.scrollIntoView({
+			block: "center",
+			inline: "center"
+		});
+		await delay(120);
+		const previousTabIndex = focusElement.getAttribute("tabindex");
+		if (focusElement.tabIndex < 0) focusElement.tabIndex = 0;
+		try {
+			focusElement.focus({ preventScroll: true });
+		} catch {
+			focusElement.focus();
+		}
+		dispatchElement.dispatchEvent(new KeyboardEvent("keydown", {
+			bubbles: true,
+			cancelable: true,
+			composed: true,
+			key,
+			code: key === "Enter" ? "Enter" : "Space",
+			charCode: key === "Enter" ? 13 : 32,
+			keyCode: key === "Enter" ? 13 : 32,
+			which: key === "Enter" ? 13 : 32
+		}));
+		await delay(20);
+		dispatchElement.dispatchEvent(new KeyboardEvent("keypress", {
+			bubbles: true,
+			cancelable: true,
+			composed: true,
+			key,
+			code: key === "Enter" ? "Enter" : "Space",
+			charCode: key === "Enter" ? 13 : 32,
+			keyCode: key === "Enter" ? 13 : 32,
+			which: key === "Enter" ? 13 : 32
+		}));
+		await delay(20);
+		dispatchElement.dispatchEvent(new KeyboardEvent("keyup", {
+			bubbles: true,
+			cancelable: true,
+			composed: true,
+			key,
+			code: key === "Enter" ? "Enter" : "Space",
+			charCode: key === "Enter" ? 13 : 32,
+			keyCode: key === "Enter" ? 13 : 32,
+			which: key === "Enter" ? 13 : 32
+		}));
+		if (previousTabIndex === null) focusElement.removeAttribute("tabindex");
+		else focusElement.setAttribute("tabindex", previousTabIndex);
+	}
+	async function runKeyboardStrategies(target, previousSnapshot) {
+		const cell = getLoginCell(target);
+		if (!cell) return {
+			strategy: "missing-cell",
+			snapshot: null,
+			changedFromPrevious: false,
+			selectionEvidence: false,
+			timedOut: false
+		};
+		const beforeCellState = getCellState(cell);
+		const strategies = [{
+			label: "cell-key-enter",
+			run: async () => {
+				await attemptKeyboardSelection(cell, cell, "Enter");
+			}
+		}, {
+			label: "cell-key-space",
+			run: async () => {
+				await attemptKeyboardSelection(cell, cell, " ");
+			}
+		}];
+		for (const appTarget of getApplicationTargets(cell)) {
+			strategies.push({
+				label: "app-key-enter",
+				run: async () => {
+					await attemptKeyboardSelection(cell, appTarget, "Enter");
+				}
+			});
+			strategies.push({
+				label: "app-key-space",
+				run: async () => {
+					await attemptKeyboardSelection(cell, appTarget, " ");
+				}
+			});
+		}
+		let bestSameValueResult = null;
+		for (const strategy of strategies) {
+			await strategy.run();
+			const waitResult = await waitForAccuracySnapshot(previousSnapshot);
+			const selectionEvidence = beforeCellState !== getCellState(getLoginCell(target));
+			if (waitResult.snapshot && waitResult.changedFromPrevious) return {
+				strategy: strategy.label,
+				snapshot: waitResult.snapshot,
+				changedFromPrevious: true,
+				selectionEvidence,
+				timedOut: waitResult.timedOut
+			};
+			if (!bestSameValueResult && waitResult.snapshot && selectionEvidence && !waitResult.timedOut) bestSameValueResult = {
+				strategy: strategy.label,
+				snapshot: waitResult.snapshot,
+				changedFromPrevious: false,
+				selectionEvidence: true,
+				timedOut: false
+			};
+		}
+		return bestSameValueResult ?? {
+			strategy: "no-keyboard-strategy",
+			snapshot: readAccuracySnapshot(),
+			changedFromPrevious: false,
+			selectionEvidence: false,
+			timedOut: false
+		};
+	}
+	async function verifySameValueCapture(loginTargets, rows, target, candidateSnapshot) {
+		const candidateKey = getSnapshotKey(candidateSnapshot);
+		const anchorRow = rows.find((row) => parsePercentValue(row.sellableAccuracy) !== null && parsePercentValue(row.unsellableAccuracy) !== null && `${row.sellableAccuracy}|${row.unsellableAccuracy}` !== candidateKey);
+		if (!anchorRow) return false;
+		const anchorTarget = loginTargets.find((item) => item.login === anchorRow.login);
+		if (!anchorTarget) return false;
+		const movedAway = await runKeyboardStrategies(anchorTarget, candidateSnapshot);
+		if (!movedAway.snapshot || !movedAway.changedFromPrevious) return false;
+		const returned = await runKeyboardStrategies(target, movedAway.snapshot);
+		return getSnapshotKey(returned.snapshot) === candidateKey && returned.changedFromPrevious;
+	}
+	function readAccuracySnapshot() {
+		const summaryBlock = getVisualBlock(summaryVisualTitle);
+		if (!summaryBlock) return null;
+		const sellableAccuracy = getPrintableCellText(summaryBlock.querySelector("[data-col-path=\"0\"][data-row-path=\"0\"]"));
+		const unsellableAccuracy = getPrintableCellText(summaryBlock.querySelector("[data-col-path=\"0\"][data-row-path=\"1\"]"));
+		if (!sellableAccuracy || !unsellableAccuracy) return null;
+		return {
+			sellableAccuracy,
+			unsellableAccuracy
+		};
+	}
+	function parsePercentValue(value) {
+		const normalized = value.replace("%", "").trim();
+		const parsed = Number.parseFloat(normalized);
+		return Number.isFinite(parsed) ? parsed : null;
+	}
+	function buildAccuracyRow(login, sellableAccuracy, unsellableAccuracy) {
+		const sellableValue = parsePercentValue(sellableAccuracy);
+		const unsellableValue = parsePercentValue(unsellableAccuracy);
+		if (sellableValue === null || unsellableValue === null) return {
+			login,
+			sellableAccuracy,
+			unsellableAccuracy,
+			lowerCategory: "Unknown",
+			lowerAccuracy: ""
+		};
+		if (sellableValue === unsellableValue) return {
+			login,
+			sellableAccuracy,
+			unsellableAccuracy,
+			lowerCategory: "Tie",
+			lowerAccuracy: sellableAccuracy
+		};
+		const lowerIsSellable = sellableValue < unsellableValue;
+		return {
+			login,
+			sellableAccuracy,
+			unsellableAccuracy,
+			lowerCategory: lowerIsSellable ? "Sellable" : "Unsellable",
+			lowerAccuracy: lowerIsSellable ? sellableAccuracy : unsellableAccuracy
+		};
+	}
+	async function waitForAccuracySnapshot(previousSnapshot) {
+		const startedAt = Date.now();
+		const summaryRoot = getVisualBlock(summaryVisualTitle)?.parentElement ?? document.body;
+		let lastKey = "";
+		let stableCount = 0;
+		let mutationCount = 0;
+		const observer = new MutationObserver(() => {
+			mutationCount += 1;
+		});
+		if (summaryRoot) observer.observe(summaryRoot, {
+			childList: true,
+			subtree: true,
+			characterData: true,
+			attributes: true
+		});
+		await delay(400);
+		try {
+			while (Date.now() - startedAt < 12e3) {
+				const snapshot = readAccuracySnapshot();
+				if (snapshot) {
+					const key = `${snapshot.sellableAccuracy}|${snapshot.unsellableAccuracy}`;
+					if (key === lastKey) stableCount += 1;
+					else {
+						lastKey = key;
+						stableCount = 1;
+					}
+					const previousKey = previousSnapshot ? `${previousSnapshot.sellableAccuracy}|${previousSnapshot.unsellableAccuracy}` : "";
+					const changedFromPrevious = !previousSnapshot || key !== previousKey;
+					if (stableCount >= 2 && (changedFromPrevious || mutationCount > 0 && stableCount >= 2)) return {
+						snapshot,
+						mutationCount,
+						changedFromPrevious,
+						timedOut: false
+					};
+				}
+				await delay(150);
+			}
+			return {
+				snapshot: readAccuracySnapshot(),
+				mutationCount,
+				changedFromPrevious: false,
+				timedOut: true
+			};
+		} finally {
+			observer.disconnect();
+		}
+	}
+	function createResultsTable(rows) {
+		const wrap = document.createElement("div");
+		wrap.className = "ut-qs-table-wrap";
+		if (rows.length === 0) {
+			const emptyState = document.createElement("div");
+			emptyState.className = "ut-qs-empty";
+			emptyState.textContent = "No collected rows yet.";
+			wrap.appendChild(emptyState);
+			return wrap;
+		}
+		const table = document.createElement("table");
+		table.className = "ut-qs-table";
+		const thead = document.createElement("thead");
+		const headerRow = document.createElement("tr");
+		for (const column of accuracyColumns) {
+			const th = document.createElement("th");
+			th.textContent = column.label;
+			headerRow.appendChild(th);
+		}
+		thead.appendChild(headerRow);
+		const tbody = document.createElement("tbody");
+		for (const row of rows) {
+			const tr = document.createElement("tr");
+			const loginCell = document.createElement("td");
+			loginCell.textContent = row.login;
+			const sellableCell = document.createElement("td");
+			sellableCell.textContent = row.sellableAccuracy;
+			sellableCell.dataset.align = "right";
+			const unsellableCell = document.createElement("td");
+			unsellableCell.textContent = row.unsellableAccuracy;
+			unsellableCell.dataset.align = "right";
+			const lowerCategoryCell = document.createElement("td");
+			lowerCategoryCell.textContent = row.lowerCategory;
+			const lowerAccuracyCell = document.createElement("td");
+			lowerAccuracyCell.textContent = row.lowerAccuracy;
+			lowerAccuracyCell.dataset.align = "right";
+			tr.append(loginCell, sellableCell, unsellableCell, lowerCategoryCell, lowerAccuracyCell);
+			tbody.appendChild(tr);
+		}
+		table.append(thead, tbody);
+		wrap.appendChild(table);
+		return wrap;
+	}
+	function createCollectorMount(state, logger) {
+		const titleContainer = getTitleContainer(loginVisualTitle);
+		if (!titleContainer || titleContainer.querySelector("[data-ut-qs-collect-button]")) return null;
+		titleContainer.classList.add("ut-qs-title-host");
+		const actionButton = document.createElement("button");
+		actionButton.className = "ut-qs-action-button";
+		actionButton.type = "button";
+		actionButton.dataset.utQsCollectButton = "true";
+		actionButton.textContent = "Collect accuracies";
+		const panel = document.createElement("div");
+		panel.className = "ut-qs-panel";
+		panel.dataset.utQsCollectorPanel = "true";
+		const header = document.createElement("div");
+		header.className = "ut-qs-panel-header";
+		const title = document.createElement("div");
+		title.className = "ut-qs-panel-title";
+		title.textContent = "APEX accuracy capture";
+		const actions = document.createElement("div");
+		actions.className = "ut-qs-panel-actions";
+		const collapseButton = document.createElement("button");
+		collapseButton.className = "ut-qs-action-button";
+		collapseButton.dataset.variant = "secondary";
+		collapseButton.type = "button";
+		collapseButton.textContent = "Hide";
+		const status = document.createElement("span");
+		status.className = "ut-qs-panel-status";
+		const copyButton = document.createElement("button");
+		copyButton.className = "ut-qs-action-button";
+		copyButton.dataset.variant = "secondary";
+		copyButton.type = "button";
+		copyButton.textContent = "Copy";
+		const exportButton = document.createElement("button");
+		exportButton.className = "ut-qs-action-button";
+		exportButton.dataset.variant = "secondary";
+		exportButton.type = "button";
+		exportButton.textContent = "Export";
+		actions.append(collapseButton, copyButton, exportButton);
+		header.append(title, actions);
+		const body = document.createElement("div");
+		body.className = "ut-qs-panel-body";
+		const tableWrap = document.createElement("div");
+		body.append(status, tableWrap);
+		panel.append(header, body);
+		actionButton.addEventListener("click", () => {
+			const loginTargets = getLoginTargets();
+			if (loginTargets.length === 0) {
+				state.status = "No login rows found";
+				renderCollectorMount({
+					actionButton,
+					panel,
+					body,
+					status,
+					tableWrap,
+					copyButton,
+					exportButton,
+					collapseButton
+				}, state);
+				return;
+			}
+			(async () => {
+				state.rows = [];
+				state.armed = false;
+				state.processing = true;
+				state.collapsed = false;
+				state.previousSnapshot = readAccuracySnapshot();
+				state.status = `Auto capturing 0/${loginTargets.length}`;
+				renderCollectorMount({
+					actionButton,
+					panel,
+					body,
+					status,
+					tableWrap,
+					copyButton,
+					exportButton,
+					collapseButton
+				}, state);
+				for (let index = 0; index < loginTargets.length; index += 1) {
+					const target = loginTargets[index];
+					state.status = `Auto capturing ${index + 1}/${loginTargets.length}: ${target.login}`;
+					renderCollectorMount({
+						actionButton,
+						panel,
+						body,
+						status,
+						tableWrap,
+						copyButton,
+						exportButton,
+						collapseButton
+					}, state);
+					if (!getLoginCell(target)) {
+						state.rows.push({ ...buildAccuracyRow(target.login, "Missing cell", "Missing cell") });
+						continue;
+					}
+					try {
+						const isLastRow = index === loginTargets.length - 1;
+						const result = await runKeyboardStrategies(target, state.previousSnapshot);
+						const snapshot = result.snapshot;
+						const acceptedFirstRow = index === 0 && snapshot;
+						const acceptedChangedSnapshot = snapshot && result.changedFromPrevious;
+						const acceptedLastRow = snapshot && isLastRow && result.changedFromPrevious;
+						const acceptedVerifiedSameValue = snapshot && !result.changedFromPrevious && result.selectionEvidence && await verifySameValueCapture(loginTargets, state.rows, target, snapshot);
+						if (acceptedFirstRow || acceptedChangedSnapshot || acceptedLastRow || acceptedVerifiedSameValue) {
+							state.rows.push(buildAccuracyRow(target.login, snapshot.sellableAccuracy, snapshot.unsellableAccuracy));
+							state.previousSnapshot = snapshot;
+						} else {
+							state.rows.push(buildAccuracyRow(target.login, "No change", "No change"));
+							state.status = `Stopped on ${target.login}: summary did not verify`;
+							state.processing = false;
+							renderCollectorMount({
+								actionButton,
+								panel,
+								body,
+								status,
+								tableWrap,
+								copyButton,
+								exportButton,
+								collapseButton
+							}, state);
+							return;
+						}
+					} catch (error) {
+						logger.error("Failed to auto-capture QuickSight accuracy row.", error);
+						state.rows.push({ ...buildAccuracyRow(target.login, "Failed", "Failed") });
+						state.status = `Stopped on ${target.login}: ${getErrorMessage(error)}`;
+						state.processing = false;
+						renderCollectorMount({
+							actionButton,
+							panel,
+							body,
+							status,
+							tableWrap,
+							copyButton,
+							exportButton,
+							collapseButton
+						}, state);
+						return;
+					}
+					renderCollectorMount({
+						actionButton,
+						panel,
+						body,
+						status,
+						tableWrap,
+						copyButton,
+						exportButton,
+						collapseButton
+					}, state);
+				}
+				state.processing = false;
+				state.status = `Auto captured ${state.rows.length} logins`;
+				renderCollectorMount({
+					actionButton,
+					panel,
+					body,
+					status,
+					tableWrap,
+					copyButton,
+					exportButton,
+					collapseButton
+				}, state);
+			})().catch((error) => {
+				logger.error("Failed to run QuickSight auto capture.", error);
+				state.processing = false;
+				state.status = "Auto capture failed";
+				renderCollectorMount({
+					actionButton,
+					panel,
+					body,
+					status,
+					tableWrap,
+					copyButton,
+					exportButton,
+					collapseButton
+				}, state);
+			});
+		});
+		collapseButton.addEventListener("click", () => {
+			state.collapsed = !state.collapsed;
+			renderCollectorMount({
+				actionButton,
+				panel,
+				body,
+				status,
+				tableWrap,
+				copyButton,
+				exportButton,
+				collapseButton
+			}, state);
+		});
+		copyButton.addEventListener("click", () => {
+			if (state.rows.length === 0) return;
+			copyDataTable(accuracyColumns, state.rows).catch((error) => {
+				logger.error("Failed to copy QuickSight accuracy table.", error);
+			});
+		});
+		exportButton.addEventListener("click", () => {
+			if (state.rows.length === 0) return;
+			exportDataTableCsv("apex-accuracy-capture.csv", accuracyColumns, state.rows);
+		});
+		titleContainer.appendChild(actionButton);
+		titleContainer.parentElement?.appendChild(panel);
+		return {
+			actionButton,
+			panel,
+			body,
+			status,
+			tableWrap,
+			copyButton,
+			exportButton,
+			collapseButton
+		};
+	}
+	function renderCollectorMount(mount, state) {
+		mount.actionButton.disabled = state.processing;
+		mount.actionButton.textContent = state.processing ? "Auto capturing..." : "Capture accuracies";
+		mount.panel.dataset.collapsed = state.collapsed ? "true" : "false";
+		mount.status.textContent = state.status || "Ready";
+		mount.copyButton.disabled = state.rows.length === 0;
+		mount.exportButton.disabled = state.rows.length === 0;
+		mount.collapseButton.textContent = state.collapsed ? "Show" : "Hide";
+		mount.tableWrap.replaceChildren(createResultsTable(state.rows));
+	}
+	var amazonQuicksightApexModule = {
+		id: "amazon-quicksight-apex",
+		name: "Amazon QuickSight APEX Tools",
+		description: "Collects login-level accuracy metrics from the Pending APEX Engagements visual.",
+		metadataMatches: ["https://*.quicksight.aws.amazon.com/*"],
+		runtimeMatches: [(url) => url.hostname.endsWith("quicksight.aws.amazon.com") && url.pathname.includes("/dashboards/ed0061b1-143a-4b06-adf5-8bbe28d30023")],
+		run({ logger }) {
+			const appWindow = window;
+			if (appWindow[installationKey$2]) {
+				logger.debug("Amazon QuickSight APEX tools already installed.");
+				return;
+			}
+			appWindow[installationKey$2] = true;
+			document.documentElement.appendChild(createStyles$1());
+			const state = {
+				rows: [],
+				armed: false,
+				processing: false,
+				collapsed: false,
+				status: "Ready",
+				previousSnapshot: null
+			};
+			let mount = null;
+			let queued = false;
+			const ensureMounted = () => {
+				if (mount?.panel.isConnected && mount.actionButton.isConnected) {
+					renderCollectorMount(mount, state);
+					return;
+				}
+				const nextMount = createCollectorMount(state, logger);
+				if (!nextMount) return;
+				mount = nextMount;
+				renderCollectorMount(mount, state);
+				logger.info("Installed QuickSight APEX collector UI.");
+			};
+			const scheduleMount = () => {
+				if (queued) return;
+				queued = true;
+				window.setTimeout(() => {
+					queued = false;
+					ensureMounted();
+				}, 150);
+			};
+			scheduleMount();
+			document.addEventListener("pointerup", (event) => {
+				if (!state.armed || state.processing || !event.isTrusted) return;
+				const target = getLoginTargetFromNode(event.target);
+				if (!target || !mount) return;
+				state.processing = true;
+				state.status = `Capturing ${target.login}...`;
+				renderCollectorMount(mount, state);
+				(async () => {
+					try {
+						const waitResult = await waitForAccuracySnapshot(state.previousSnapshot);
+						const snapshot = waitResult.snapshot;
+						const acceptedSnapshot = snapshot && (waitResult.changedFromPrevious || waitResult.mutationCount > 0 || !state.previousSnapshot);
+						const nextRow = acceptedSnapshot ? buildAccuracyRow(target.login, snapshot.sellableAccuracy, snapshot.unsellableAccuracy) : buildAccuracyRow(target.login, "No update", "No update");
+						const existingIndex = state.rows.findIndex((row) => row.login === target.login);
+						if (existingIndex >= 0) state.rows.splice(existingIndex, 1, nextRow);
+						else state.rows.push(nextRow);
+						if (acceptedSnapshot) state.previousSnapshot = snapshot;
+						state.status = `Captured ${state.rows.length} logins`;
+					} catch (error) {
+						logger.error("Failed to capture QuickSight accuracy row.", error);
+						state.status = `Failed on ${target.login}`;
+					} finally {
+						state.processing = false;
+						if (mount) renderCollectorMount(mount, state);
+					}
+				})();
+			}, true);
+			const observer = new MutationObserver(() => {
+				scheduleMount();
+			});
+			if (document.body) observer.observe(document.body, {
+				childList: true,
+				subtree: true
+			});
+		}
+	};
+	//#endregion
+	//#region src/sites/example/index.ts
+	var exampleSiteModule = {
+		id: "example-homepage",
+		name: "Example.com Demo",
+		description: "Demonstrates the modular site registration pattern.",
+		metadataMatches: ["https://example.com/*", "https://www.example.com/*"],
+		async run({ dom, logger, storage }) {
+			const nextCount = (await storage.get("example.visitCount", 0) ?? 0) + 1;
+			await storage.set("example.visitCount", nextCount);
+			if (dom.query("[data-ultimate-tm-banner]")) {
+				logger.debug("Example banner already exists on the page.");
+				return;
+			}
+			const heading = await dom.waitFor("h1", { timeoutMs: 5e3 });
+			const banner = document.createElement("p");
+			banner.dataset.ultimateTmBanner = "true";
+			banner.textContent = `Ultimate Tampermonkey foundation active. Example visit #${nextCount}.`;
+			banner.style.marginTop = "12px";
+			banner.style.padding = "10px 14px";
+			banner.style.border = "1px solid #7c3aed";
+			banner.style.borderRadius = "8px";
+			banner.style.background = "#f5f3ff";
+			banner.style.color = "#4c1d95";
+			banner.style.fontWeight = "600";
+			heading.insertAdjacentElement("afterend", banner);
+			logger.info("Injected example banner.", { nextCount });
+		}
+	};
+	//#endregion
+	//#region src/sites/global-launcher/index.ts
+	var installationKey$1 = "__ultimateTmLauncherInstalled";
+	var linksStorageKey = "launcher.links";
+	var positionStorageKey = "launcher.position";
+	function getDefaultPosition() {
+		return {
+			x: window.innerWidth - 72,
+			y: window.innerHeight - 72
+		};
+	}
+	function createId() {
+		return `ut-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	}
+	function clamp(value, min, max) {
+		return Math.min(Math.max(value, min), max);
+	}
+	function normalizeUrl(value) {
+		const trimmedValue = value.trim();
+		if (!trimmedValue) return "";
+		if (/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(trimmedValue)) return trimmedValue;
+		return `https://${trimmedValue}`;
+	}
+	async function loadLinks(storage) {
+		return await storage.get(linksStorageKey, []) ?? [];
+	}
+	async function saveLinks(storage, links) {
+		await storage.set(linksStorageKey, links);
+	}
+	async function loadPosition(storage) {
+		const fallbackPosition = getDefaultPosition();
+		return await storage.get(positionStorageKey, fallbackPosition) ?? fallbackPosition;
+	}
+	async function savePosition(storage, position) {
+		await storage.set(positionStorageKey, position);
+	}
+	function applyIconPosition(icon, position) {
+		icon.style.left = `${position.x}px`;
+		icon.style.top = `${position.y}px`;
+	}
+	function computePanelPosition(icon, panel) {
+		const iconRect = icon.getBoundingClientRect();
+		const panelWidth = panel.offsetWidth || 292;
+		const panelHeight = panel.offsetHeight || 360;
+		const gap = 4;
+		const left = clamp(iconRect.left + iconRect.width - panelWidth, 12, window.innerWidth - panelWidth - 12);
+		const preferredTop = iconRect.top - panelHeight - gap;
+		const fallbackTop = iconRect.bottom;
+		return {
+			left,
+			top: preferredTop >= 12 ? preferredTop : clamp(fallbackTop, 12, window.innerHeight - panelHeight - 12)
+		};
+	}
+	function createStyles() {
+		const style = document.createElement("style");
+		style.textContent = `
+    .ut-launcher-icon {
+      position: fixed;
+      width: 40px;
+      height: 40px;
+      border: none;
+      border-radius: 9999px;
+      background: rgba(15, 23, 42, 0.92);
+      color: #f8fafc;
+      box-shadow: 0 8px 22px rgba(15, 23, 42, 0.18);
+      cursor: grab;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font: 600 16px/1 Inter, "Segoe UI", Arial, sans-serif;
+      z-index: 2147483646;
+      user-select: none;
+      backdrop-filter: blur(10px);
+    }
+    .ut-launcher-icon:active {
+      cursor: grabbing;
+    }
+    .ut-launcher-panel {
+      position: fixed;
+      width: 292px;
+      max-height: 360px;
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.98);
+      color: #0f172a;
+      box-shadow: 0 14px 36px rgba(15, 23, 42, 0.12);
+      backdrop-filter: blur(12px);
+      z-index: 2147483646;
+      font: 500 12px/1.35 Inter, "Segoe UI", Arial, sans-serif;
+    }
+    .ut-launcher-panel[data-open="true"] {
+      display: flex;
+    }
+    .ut-launcher-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .ut-launcher-title {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+    .ut-launcher-subtitle {
+      display: none;
+    }
+    .ut-launcher-links {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      overflow: auto;
+      padding-right: 2px;
+    }
+    .ut-launcher-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .ut-launcher-empty {
+      padding: 10px;
+      border-radius: 10px;
+      background: #f8fafc;
+      color: #64748b;
+      text-align: center;
+    }
+    .ut-launcher-card {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 6px;
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      border-radius: 10px;
+      background: #fbfdff;
+    }
+    .ut-launcher-card[data-editing="false"] .ut-launcher-edit {
+      display: none;
+    }
+    .ut-launcher-main {
+      flex: 1;
+      justify-content: flex-start;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .ut-launcher-input {
+      width: 100%;
+      min-height: 36px;
+      padding: 8px 10px;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 10px;
+      outline: none;
+      background: #f8fafc;
+      color: #0f172a;
+      box-sizing: border-box;
+      font: inherit;
+    }
+    .ut-launcher-input:focus {
+      border-color: rgba(16, 185, 129, 0.55);
+      box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.1);
+    }
+    .ut-launcher-actions {
+      display: flex;
+      gap: 6px;
+    }
+    .ut-launcher-button {
+      border: none;
+      min-height: 32px;
+      border-radius: 10px;
+      padding: 0 10px;
+      cursor: pointer;
+      background: #eef2f7;
+      color: #0f172a;
+      font: inherit;
+      font-weight: 600;
+    }
+    .ut-launcher-button:hover {
+      filter: brightness(0.98);
+    }
+    .ut-launcher-button[data-variant="primary"] {
+      background: #0f172a;
+      color: #f8fafc;
+    }
+    .ut-launcher-button[data-variant="accent"] {
+      background: #0f172a;
+      color: #f8fafc;
+    }
+    .ut-launcher-button[data-variant="danger"] {
+      background: #fff1f2;
+      color: #e11d48;
+    }
+    .ut-launcher-button[data-variant="ghost"] {
+      min-width: 32px;
+      padding: 0;
+      background: #f1f5f9;
+      color: #475569;
+    }
+    .ut-launcher-button[data-variant="icon"] {
+      min-width: 32px;
+      padding: 0;
+      background: #eef2f7;
+      color: #334155;
+      font-size: 13px;
+    }
+    .ut-launcher-form {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding-top: 6px;
+      border-top: 1px solid rgba(148, 163, 184, 0.12);
+    }
+    .ut-launcher-edit {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding-top: 2px;
+    }
+  `;
+		return style;
+	}
+	var globalLauncherModule = {
+		id: "global-ut-launcher",
+		name: "Global UT Launcher",
+		description: "Shows a draggable UT launcher with editable saved links.",
+		metadataMatches: ["http://*/*", "https://*/*"],
+		async run({ logger, storage }) {
+			if (window.top !== window.self) {
+				logger.debug("Skipping launcher inside an iframe.");
+				return;
+			}
+			const appWindow = window;
+			if (appWindow[installationKey$1]) {
+				logger.debug("Global UT launcher already installed.");
+				return;
+			}
+			appWindow[installationKey$1] = true;
+			const [links, storedPosition] = await Promise.all([loadLinks(storage), loadPosition(storage)]);
+			const style = createStyles();
+			const icon = document.createElement("button");
+			const panel = document.createElement("div");
+			const header = document.createElement("div");
+			const titleGroup = document.createElement("div");
+			const title = document.createElement("div");
+			const subtitle = document.createElement("div");
+			const closeButton = document.createElement("button");
+			const linksContainer = document.createElement("div");
+			const form = document.createElement("div");
+			const nameInput = document.createElement("input");
+			const urlInput = document.createElement("input");
+			const addButton = document.createElement("button");
+			let currentPosition = {
+				x: clamp(storedPosition.x, 12, window.innerWidth - 56),
+				y: clamp(storedPosition.y, 12, window.innerHeight - 56)
+			};
+			let panelOpen = false;
+			let isDragging = false;
+			let movedDuringPointer = false;
+			let pointerOffsetX = 0;
+			let pointerOffsetY = 0;
+			icon.type = "button";
+			icon.className = "ut-launcher-icon";
+			icon.textContent = "🏳️";
+			icon.setAttribute("aria-label", "Open Ultimate Tampermonkey launcher");
+			applyIconPosition(icon, currentPosition);
+			panel.className = "ut-launcher-panel";
+			panel.dataset.open = "false";
+			header.className = "ut-launcher-header";
+			titleGroup.className = "ut-launcher-title-group";
+			title.className = "ut-launcher-title";
+			title.textContent = "URL Launcher";
+			subtitle.className = "ut-launcher-subtitle";
+			subtitle.textContent = "";
+			closeButton.className = "ut-launcher-button";
+			closeButton.dataset.variant = "ghost";
+			closeButton.type = "button";
+			closeButton.textContent = "×";
+			closeButton.setAttribute("aria-label", "Close launcher");
+			linksContainer.className = "ut-launcher-links";
+			form.className = "ut-launcher-form";
+			nameInput.className = "ut-launcher-input";
+			nameInput.placeholder = "Link name";
+			urlInput.className = "ut-launcher-input";
+			urlInput.placeholder = "https://example.com";
+			addButton.className = "ut-launcher-button";
+			addButton.dataset.variant = "accent";
+			addButton.type = "button";
+			addButton.textContent = "Add link";
+			titleGroup.append(title, subtitle);
+			header.append(titleGroup, closeButton);
+			form.append(nameInput, urlInput, addButton);
+			panel.append(header, linksContainer, form);
+			function positionPanel() {
+				const { left, top } = computePanelPosition(icon, panel);
+				panel.style.left = `${left}px`;
+				panel.style.top = `${top}px`;
+			}
+			function setPanelOpen(nextValue) {
+				panelOpen = nextValue;
+				panel.dataset.open = panelOpen ? "true" : "false";
+				if (panelOpen) positionPanel();
+			}
+			function openUrl(targetUrl, openInNewTab) {
+				const normalizedUrl = normalizeUrl(targetUrl);
+				if (!normalizedUrl) return;
+				if (openInNewTab) {
+					window.open(normalizedUrl, "_blank", "noopener");
+					return;
+				}
+				window.location.href = normalizedUrl;
+			}
+			async function persistLinks() {
+				await saveLinks(storage, links);
+			}
+			function renderLinks() {
+				linksContainer.replaceChildren();
+				if (links.length === 0) {
+					const emptyState = document.createElement("div");
+					emptyState.className = "ut-launcher-empty";
+					emptyState.textContent = "No links yet. Add one below.";
+					linksContainer.appendChild(emptyState);
+					return;
+				}
+				for (const link of links) {
+					const card = document.createElement("div");
+					const row = document.createElement("div");
+					const mainButton = document.createElement("button");
+					const openNewTabButton = document.createElement("button");
+					const editButton = document.createElement("button");
+					const deleteButton = document.createElement("button");
+					const editFields = document.createElement("div");
+					const linkNameInput = document.createElement("input");
+					const linkUrlInput = document.createElement("input");
+					let editing = false;
+					card.className = "ut-launcher-card";
+					card.dataset.editing = "false";
+					row.className = "ut-launcher-row";
+					linkNameInput.className = "ut-launcher-input";
+					linkNameInput.value = link.name;
+					linkNameInput.placeholder = "Link name";
+					linkNameInput.addEventListener("input", () => {
+						link.name = linkNameInput.value;
+						mainButton.textContent = link.name || link.url || "Open";
+						persistLinks();
+					});
+					linkUrlInput.className = "ut-launcher-input";
+					linkUrlInput.value = link.url;
+					linkUrlInput.placeholder = "https://example.com";
+					linkUrlInput.addEventListener("input", () => {
+						link.url = linkUrlInput.value;
+						mainButton.textContent = link.name || link.url || "Open";
+						mainButton.title = link.url;
+						persistLinks();
+					});
+					mainButton.className = "ut-launcher-button ut-launcher-main";
+					mainButton.dataset.variant = "primary";
+					mainButton.type = "button";
+					mainButton.textContent = link.name || link.url || "Open";
+					mainButton.title = link.url;
+					mainButton.addEventListener("click", () => {
+						openUrl(link.url, false);
+					});
+					openNewTabButton.className = "ut-launcher-button";
+					openNewTabButton.dataset.variant = "icon";
+					openNewTabButton.type = "button";
+					openNewTabButton.textContent = "➡️";
+					openNewTabButton.title = "Open in new tab";
+					openNewTabButton.addEventListener("click", () => {
+						openUrl(link.url, true);
+					});
+					editButton.className = "ut-launcher-button";
+					editButton.dataset.variant = "icon";
+					editButton.type = "button";
+					editButton.textContent = "⚙️";
+					editButton.title = "Edit link";
+					editButton.addEventListener("click", () => {
+						editing = !editing;
+						card.dataset.editing = editing ? "true" : "false";
+					});
+					deleteButton.className = "ut-launcher-button";
+					deleteButton.dataset.variant = "danger";
+					deleteButton.type = "button";
+					deleteButton.textContent = "🗑️";
+					deleteButton.title = "Delete link";
+					deleteButton.addEventListener("click", () => {
+						const nextLinks = links.filter((item) => item.id !== link.id);
+						links.splice(0, links.length, ...nextLinks);
+						persistLinks();
+						renderLinks();
+					});
+					editFields.className = "ut-launcher-edit";
+					editFields.append(linkNameInput, linkUrlInput);
+					row.append(mainButton, openNewTabButton, editButton, deleteButton);
+					card.append(row, editFields);
+					linksContainer.appendChild(card);
+				}
+			}
+			addButton.addEventListener("click", () => {
+				const nextName = nameInput.value.trim();
+				const nextUrl = normalizeUrl(urlInput.value);
+				if (!nextName || !nextUrl) return;
+				links.unshift({
+					id: createId(),
+					name: nextName,
+					url: nextUrl
+				});
+				nameInput.value = "";
+				urlInput.value = "";
+				persistLinks();
+				renderLinks();
+			});
+			icon.addEventListener("click", () => {
+				if (movedDuringPointer) {
+					movedDuringPointer = false;
+					return;
+				}
+				setPanelOpen(!panelOpen);
+			});
+			closeButton.addEventListener("click", () => {
+				setPanelOpen(false);
+			});
+			icon.addEventListener("pointerdown", (event) => {
+				isDragging = true;
+				movedDuringPointer = false;
+				pointerOffsetX = event.clientX - currentPosition.x;
+				pointerOffsetY = event.clientY - currentPosition.y;
+				icon.setPointerCapture(event.pointerId);
+			});
+			icon.addEventListener("pointermove", (event) => {
+				if (!isDragging) return;
+				const nextX = clamp(event.clientX - pointerOffsetX, 12, window.innerWidth - 56);
+				const nextY = clamp(event.clientY - pointerOffsetY, 12, window.innerHeight - 56);
+				if (Math.abs(nextX - currentPosition.x) > 2 || Math.abs(nextY - currentPosition.y) > 2) movedDuringPointer = true;
+				currentPosition = {
+					x: nextX,
+					y: nextY
+				};
+				applyIconPosition(icon, currentPosition);
+				if (panelOpen) positionPanel();
+			});
+			icon.addEventListener("pointerup", (event) => {
+				if (!isDragging) return;
+				isDragging = false;
+				icon.releasePointerCapture(event.pointerId);
+				savePosition(storage, currentPosition);
+			});
+			icon.addEventListener("pointercancel", () => {
+				isDragging = false;
+			});
+			document.addEventListener("click", (event) => {
+				if (!panelOpen) return;
+				const targetNode = event.target;
+				if (targetNode && (panel.contains(targetNode) || icon.contains(targetNode))) return;
+				setPanelOpen(false);
+			});
+			document.addEventListener("keydown", (event) => {
+				if (event.key === "Escape") setPanelOpen(false);
+			});
+			window.addEventListener("resize", () => {
+				currentPosition = {
+					x: clamp(currentPosition.x, 12, window.innerWidth - 56),
+					y: clamp(currentPosition.y, 12, window.innerHeight - 56)
+				};
+				applyIconPosition(icon, currentPosition);
+				if (panelOpen) positionPanel();
+			});
+			renderLinks();
+			document.documentElement.appendChild(style);
+			document.body.append(icon, panel);
+			logger.info("Installed global UT launcher.");
+		}
+	};
+	//#endregion
+	//#region src/utils/feedback.ts
+	function showSuccessRipple(clientX, clientY) {
+		const ripple = document.createElement("div");
+		ripple.setAttribute("aria-hidden", "true");
+		ripple.style.position = "fixed";
+		ripple.style.left = `${clientX}px`;
+		ripple.style.top = `${clientY}px`;
+		ripple.style.width = "18px";
+		ripple.style.height = "18px";
+		ripple.style.marginLeft = "-9px";
+		ripple.style.marginTop = "-9px";
+		ripple.style.borderRadius = "9999px";
+		ripple.style.border = "3px solid rgba(34, 197, 94, 0.95)";
+		ripple.style.background = "rgba(34, 197, 94, 0.18)";
+		ripple.style.boxShadow = "0 0 0 0 rgba(34, 197, 94, 0.5)";
+		ripple.style.pointerEvents = "none";
+		ripple.style.zIndex = "2147483647";
+		ripple.style.transition = "transform 280ms ease-out, opacity 280ms ease-out, box-shadow 280ms ease-out";
+		ripple.style.transform = "scale(0.35)";
+		ripple.style.opacity = "1";
+		document.body.appendChild(ripple);
+		requestAnimationFrame(() => {
+			ripple.style.transform = "scale(4)";
+			ripple.style.opacity = "0";
+			ripple.style.boxShadow = "0 0 0 12px rgba(34, 197, 94, 0)";
+		});
+		window.setTimeout(() => {
+			ripple.remove();
+		}, 320);
+	}
+	//#endregion
+	//#region src/utils/selectors.ts
+	function escapeIdentifier(value) {
+		if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(value);
+		return value.replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char}`);
+	}
+	function isUniqueSelector(selector) {
+		try {
+			return document.querySelectorAll(selector).length === 1;
+		} catch {
+			return false;
+		}
+	}
+	function buildSegment(element) {
+		if (element.id) return `#${escapeIdentifier(element.id)}`;
+		const tagName = element.tagName.toLowerCase();
+		const baseSegment = `${tagName}${Array.from(element.classList).filter(Boolean).slice(0, 2).map((className) => `.${escapeIdentifier(className)}`).join("")}`;
+		const parent = element.parentElement;
+		if (!parent) return baseSegment || tagName;
+		const siblingsOfSameType = Array.from(parent.children).filter((sibling) => sibling.tagName === element.tagName);
+		if (siblingsOfSameType.length <= 1) return baseSegment || tagName;
+		const position = siblingsOfSameType.indexOf(element) + 1;
+		return `${baseSegment || tagName}:nth-of-type(${position})`;
+	}
+	function buildAbsoluteCssSegment(element) {
+		const tagName = element.tagName.toLowerCase();
+		if (element.id) return `${tagName}#${escapeIdentifier(element.id)}`;
+		const parent = element.parentElement;
+		if (!parent) return tagName;
+		const siblingsOfSameType = Array.from(parent.children).filter((sibling) => sibling.tagName === element.tagName);
+		if (siblingsOfSameType.length <= 1) return tagName;
+		return `${tagName}:nth-of-type(${siblingsOfSameType.indexOf(element) + 1})`;
+	}
+	function escapeXPathLiteral(value) {
+		if (!value.includes("\"")) return `"${value}"`;
+		if (!value.includes("'")) return `'${value}'`;
+		return `concat(${value.split("\"").map((part) => `"${part}"`).join(", '\"', ")})`;
+	}
+	function getCssSelector(element) {
+		const segments = [];
+		let current = element;
+		while (current && current !== document.documentElement) {
+			const segment = buildSegment(current);
+			segments.unshift(segment);
+			const candidateSelector = segments.join(" > ");
+			if (isUniqueSelector(candidateSelector)) return candidateSelector;
+			current = current.parentElement;
+		}
+		segments.unshift("html");
+		return segments.join(" > ");
+	}
+	function getCssPath(element) {
+		const segments = [];
+		let current = element;
+		while (current) {
+			segments.unshift(buildAbsoluteCssSegment(current));
+			current = current.parentElement;
+		}
+		return segments.join(" > ");
+	}
+	function getXPath(element) {
+		if (element.id) return `//*[@id=${escapeXPathLiteral(element.id)}]`;
+		const segments = [];
+		let current = element;
+		while (current && current.nodeType === Node.ELEMENT_NODE) {
+			const tagName = current.tagName.toLowerCase();
+			const currentTagName = current.tagName;
+			const parent = current.parentElement;
+			if (!parent) {
+				segments.unshift(`/${tagName}[1]`);
+				break;
+			}
+			const index = Array.from(parent.children).filter((sibling) => sibling.tagName === currentTagName).indexOf(current) + 1;
+			segments.unshift(`/${tagName}[${index}]`);
+			current = parent;
+		}
+		return segments.join("");
+	}
+	//#endregion
+	//#region src/sites/global-tools/index.ts
+	var installationKey = "__ultimateTmDoubleRightClickInstalled";
+	var doubleClickWindowMs = 350;
+	function buildClipboardPayload(target) {
+		return [
+			"Inner HTML:",
+			target.innerHTML,
+			"",
+			"Outer HTML:",
+			target.outerHTML,
+			"",
+			"CSS Selector:",
+			getCssSelector(target),
+			"",
+			"CSS Path:",
+			getCssPath(target),
+			"",
+			"XPath:",
+			getXPath(target)
+		].join("\n");
+	}
+	//#endregion
+	//#region src/sites/index.ts
+	var sites = [
+		globalLauncherModule,
+		{
+			id: "global-double-right-click-tools",
+			name: "Global Double Right Click Tools",
+			description: "Copies element HTML and locators on double right click and shows a success ripple.",
+			metadataMatches: ["http://*/*", "https://*/*"],
+			run({ logger }) {
+				if (window.top !== window.self) {
+					logger.debug("Skipping global tools inside an iframe.");
+					return;
+				}
+				const appWindow = window;
+				if (appWindow[installationKey]) {
+					logger.debug("Global double right click tools already installed.");
+					return;
+				}
+				appWindow[installationKey] = true;
+				let lastRightClick = {
+					time: 0,
+					element: null
+				};
+				document.addEventListener("pointerdown", (event) => {
+					if (event.button !== 2) return;
+					const target = event.target instanceof Element ? event.target : null;
+					const now = Date.now();
+					const isDoubleRightClick = !!target && lastRightClick.element === target && now - lastRightClick.time <= doubleClickWindowMs;
+					lastRightClick = {
+						time: now,
+						element: target
+					};
+					if (!isDoubleRightClick || !target) return;
+					(async () => {
+						await copyTextToClipboard(buildClipboardPayload(target));
+						showSuccessRipple(event.clientX, event.clientY);
+						logger.info("Copied full element inspection payload from double right click.", { cssSelector: getCssSelector(target) });
+					})().catch((error) => {
+						logger.error("Failed to copy full element inspection payload from double right click.", error);
+					});
+				}, true);
+				logger.info("Installed global double right click tools.");
+			}
+		},
+		amazonFclmModule,
+		amazonQuicksightApexModule,
+		exampleSiteModule
+	];
+	//#endregion
+	//#region src/utils/dom.ts
+	function createDomHelpers(logger) {
+		return {
+			query(selector, root = document) {
+				return root.querySelector(selector);
+			},
+			queryAll(selector, root = document) {
+				return Array.from(root.querySelectorAll(selector));
+			},
+			waitFor(selector, options) {
+				const root = options?.root ?? document;
+				const timeoutMs = options?.timeoutMs ?? 1e4;
+				const existingElement = root.querySelector(selector);
+				if (existingElement) return Promise.resolve(existingElement);
+				return new Promise((resolve, reject) => {
+					const timeoutId = window.setTimeout(() => {
+						observer.disconnect();
+						reject(/* @__PURE__ */ new Error(`Timed out waiting for selector: ${selector}`));
+					}, timeoutMs);
+					const observer = new MutationObserver(() => {
+						const element = root.querySelector(selector);
+						if (!element) return;
+						window.clearTimeout(timeoutId);
+						observer.disconnect();
+						resolve(element);
+					});
+					const observationTarget = root instanceof Document ? root.documentElement : root;
+					if (!observationTarget) {
+						window.clearTimeout(timeoutId);
+						reject(/* @__PURE__ */ new Error(`Cannot observe selector target for: ${selector}`));
+						return;
+					}
+					observer.observe(observationTarget, {
+						childList: true,
+						subtree: true
+					});
+					logger.debug(`Waiting for selector "${selector}"`, { timeoutMs });
+				});
+			}
+		};
+	}
+	//#endregion
+	//#region src/utils/log.ts
+	var APP_PREFIX = "UltimateTM";
+	function writeLog(level, scope, message, args) {
+		const prefix = `[${APP_PREFIX}:${scope}]`;
+		console[level](prefix, message, ...args);
+	}
+	function createLogger(scope) {
+		return {
+			child(childScope) {
+				return createLogger(`${scope}/${childScope}`);
+			},
+			debug(message, ...args) {
+				writeLog("debug", scope, message, args);
+			},
+			info(message, ...args) {
+				writeLog("info", scope, message, args);
+			},
+			warn(message, ...args) {
+				writeLog("warn", scope, message, args);
+			},
+			error(message, ...args) {
+				writeLog("error", scope, message, args);
+			}
+		};
+	}
+	//#endregion
+	//#region src/utils/storage.ts
+	function createStorage(namespace) {
+		function getKey(key) {
+			return `${namespace}:${key}`;
+		}
+		return {
+			async get(key, fallbackValue) {
+				const storageKey = getKey(key);
+				if (typeof GM_getValue === "function") return await Promise.resolve(GM_getValue(storageKey, fallbackValue)) ?? fallbackValue;
+				const rawValue = window.localStorage.getItem(storageKey);
+				if (rawValue === null) return fallbackValue;
+				return JSON.parse(rawValue);
+			},
+			async set(key, value) {
+				const storageKey = getKey(key);
+				if (typeof GM_setValue === "function") {
+					await Promise.resolve(GM_setValue(storageKey, value));
+					return;
+				}
+				window.localStorage.setItem(storageKey, JSON.stringify(value));
+			},
+			async remove(key) {
+				const storageKey = getKey(key);
+				if (typeof GM_deleteValue === "function") {
+					await Promise.resolve(GM_deleteValue(storageKey));
+					return;
+				}
+				window.localStorage.removeItem(storageKey);
+			}
+		};
+	}
+	//#endregion
+	//#region src/main.ts
+	var appLogger = createLogger("app");
+	var appContext = {
+		dom: createDomHelpers(appLogger.child("dom")),
+		logger: appLogger,
+		storage: createStorage("ultimate-tampermonkey"),
+		url: new URL(window.location.href)
+	};
+	onDocumentReady(() => safeRun("bootstrap", () => runMatchingSites(sites, appContext), appLogger));
+	//#endregion
+})();

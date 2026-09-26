@@ -1,0 +1,1841 @@
+// ==UserScript==
+// @name         FCResearch Container Rows / LPNs / Consumers
+// @namespace    ultimate-tampermonkey
+// @version      1.6.3
+// @description  Paste container IDs (MEM3), see rows/LPNs/consumers with pie charts, dashboard, export, persistence, and per-consumer copy actions
+// @author       Cursor
+// @match        https://qi-fcresearch-na.corp.amazon.com/*
+// @match        https://qi-fcresearch-eu.corp.amazon.com/*
+// @match        https://qi-fcresearch-fe.corp.amazon.com/*
+// @grant        GM_setClipboard
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const installationKey = '__fcresearchContainerSimpleInstalled';
+  const scriptVersion = '1.6.3';
+  const storageSchemaVersion = 1;
+  const defaultSite = 'MEM3';
+  const inventoryTableId = 'table-inventory';
+  const unownedConsumerValue = 'UNOWNED';
+  const storageKeyPrefix = 'fcresearch-container-simple:v1';
+  const consumerColorKeyPrefix = 'fcresearch-container-simple:consumer-colors:v2';
+
+  // Locked colors (must match pie legend): blue / red / orange / green.
+  const fixedConsumerColors = {
+    REVERSE_LOGISTICS: '#1d4ed8',
+    UNOWNED: '#dc2626',
+    TRANSSHIPMENT: '#d97706',
+    RECALL: '#059669'
+  };
+  const fixedConsumerColorSet = new Set(Object.values(fixedConsumerColors));
+
+  const consumerHeaderName = 'Consumer';
+  const consumerFallbackIndex = 7;
+
+  const lpnHeaderName = 'LPN';
+  const lpnFallbackIndex = 4;
+
+  const iframeWidthPx = 3600;
+  const iframeHeightPx = 900;
+  const iframeTimeoutMs = 5000;
+  const iframePollMs = 200;
+  const iframeStabilityMs = 700;
+
+  // Palette for unknown consumers only (excludes the four fixed legend colors).
+  const consumerPalette = [
+    '#7c3aed', '#0891b2', '#be185d', '#65a30d', '#ea580c', '#4f46e5', '#0d9488',
+    '#c026d3', '#ca8a04', '#9333ea', '#0e7490', '#a21caf'
+  ];
+
+  let consumerColorMap = {};
+
+  function storageKey() {
+    return `${storageKeyPrefix}:${window.location.origin}`;
+  }
+
+  function consumerColorStorageKey() {
+    return `${consumerColorKeyPrefix}:${window.location.origin}`;
+  }
+
+  function getFixedConsumerColor(consumerName) {
+    const key = normalizeText(consumerName).toUpperCase();
+    return fixedConsumerColors[key] ?? null;
+  }
+
+  function applyFixedConsumerColorsToMap(map) {
+    let changed = false;
+    for (const name of Object.keys(map)) {
+      const fixed = getFixedConsumerColor(name);
+      if (fixed && map[name] !== fixed) {
+        map[name] = fixed;
+        changed = true;
+      }
+    }
+    for (const [key, color] of Object.entries(fixedConsumerColors)) {
+      if (map[key] !== color) {
+        map[key] = color;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  function loadConsumerColorMap() {
+    try {
+      const raw = localStorage.getItem(consumerColorStorageKey());
+      const data = raw ? JSON.parse(raw) : {};
+      const map = data && typeof data === 'object' ? { ...data } : {};
+      applyFixedConsumerColorsToMap(map);
+      return map;
+    } catch {
+      const map = {};
+      applyFixedConsumerColorsToMap(map);
+      return map;
+    }
+  }
+
+  function saveConsumerColorMap() {
+    applyFixedConsumerColorsToMap(consumerColorMap);
+    try {
+      localStorage.setItem(consumerColorStorageKey(), JSON.stringify(consumerColorMap));
+    } catch {
+      // Ignore quota errors.
+    }
+  }
+
+  function paletteColorAt(index) {
+    return consumerPalette[index % consumerPalette.length];
+  }
+
+  function getConsumerColor(consumer) {
+    const name = normalizeText(consumer) || '(empty)';
+    const fixed = getFixedConsumerColor(name);
+    if (fixed) return fixed;
+    if (consumerColorMap[name]) return consumerColorMap[name];
+    ensureConsumerColors([name]);
+    return consumerColorMap[name] || paletteColorAt(0);
+  }
+
+  function ensureConsumerColors(consumers) {
+    const names = Array.from(
+      new Set(consumers.map((c) => normalizeText(c) || '(empty)').filter(Boolean))
+    ).sort((a, b) => a.localeCompare(b));
+
+    let changed = applyFixedConsumerColorsToMap(consumerColorMap);
+    const usedColors = new Set(Object.values(consumerColorMap));
+
+    for (const name of names) {
+      const fixed = getFixedConsumerColor(name);
+      if (fixed) {
+        if (consumerColorMap[name] !== fixed) {
+          consumerColorMap[name] = fixed;
+          changed = true;
+        }
+        continue;
+      }
+      if (consumerColorMap[name]) continue;
+
+      let idx = 0;
+      while (
+        (usedColors.has(paletteColorAt(idx)) || fixedConsumerColorSet.has(paletteColorAt(idx))) &&
+        idx < consumerPalette.length * 20
+      ) {
+        idx += 1;
+      }
+      const color = paletteColorAt(idx);
+      consumerColorMap[name] = color;
+      usedColors.add(color);
+      changed = true;
+    }
+
+    if (changed) saveConsumerColorMap();
+  }
+
+  function lifetimeJobsKey() {
+    return `${storageKeyPrefix}:lifetime-jobs:${window.location.origin}`;
+  }
+
+  function loadLifetimeJobCount() {
+    try {
+      const n = parseInt(localStorage.getItem(lifetimeJobsKey()), 10);
+      return Number.isFinite(n) && n >= 0 ? n : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  function saveLifetimeJobCount(count) {
+    try {
+      localStorage.setItem(lifetimeJobsKey(), String(count));
+    } catch {
+      // Ignore.
+    }
+  }
+
+  function formatMmSs(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return '—';
+    const totalSec = Math.ceil(ms / 1000);
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  function formatClockTime(msFromNow) {
+    if (!Number.isFinite(msFromNow) || msFromNow < 0) return '—';
+    return new Date(Date.now() + msFromNow).toLocaleTimeString([], {
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+  }
+
+  function computeRunMetrics(runState) {
+    const { total, doneCount, currentStartedAt, durationsMs } = runState;
+    const fallbackPerStepMs = iframeTimeoutMs * 0.6;
+    const avgMs =
+      durationsMs.length > 0
+        ? durationsMs.reduce((a, b) => a + b, 0) / durationsMs.length
+        : fallbackPerStepMs;
+
+    const currentElapsed = Date.now() - currentStartedAt;
+    const currentRemaining = Math.max(0, avgMs - currentElapsed);
+    const upcoming = Math.max(0, total - doneCount - 1);
+    const remainingMs = currentRemaining + upcoming * avgMs;
+
+    const fractionalProgress =
+      total > 0
+        ? Math.min(1, (doneCount + Math.min(1, currentElapsed / Math.max(1, avgMs))) / total)
+        : 0;
+
+    const stepDisplay = Math.min(total, doneCount + 1);
+    const calculating = durationsMs.length === 0;
+
+    return {
+      avgMs,
+      remainingMs,
+      fractionalProgress,
+      stepDisplay,
+      calculating,
+      percent: fractionalProgress * 100
+    };
+  }
+
+  function collectConsumersFromResults(results) {
+    const names = new Set();
+    for (const result of results) {
+      for (const entry of result.breakdown || []) {
+        names.add(entry.consumer);
+      }
+      for (const row of result.rows || []) {
+        names.add(row.consumer);
+      }
+    }
+    return Array.from(names);
+  }
+
+  function normalizeText(value) {
+    return (value ?? '').replace(/\s+/g, ' ').trim();
+  }
+
+  function normalizeContainers(value) {
+    return Array.from(
+      new Set(
+        (value ?? '')
+          .split(/[\s,;]+/)
+          .map((item) => item.trim())
+          .filter(Boolean)
+      )
+    );
+  }
+
+  function isUnownedConsumer(consumer) {
+    return normalizeText(consumer).toUpperCase() === unownedConsumerValue;
+  }
+
+  function isValidInventoryResult(result) {
+    return result.ok && !result.noInventory && result.rowCount > 0;
+  }
+
+  function classifyContainerForConsumer(result, consumerName) {
+    if (!isValidInventoryResult(result)) return 'none';
+    const target = normalizeText(consumerName);
+    let matchCount = 0;
+    for (const row of result.rows) {
+      if (normalizeText(row.consumer) === target) matchCount += 1;
+    }
+    if (matchCount === 0) return 'none';
+    if (matchCount === result.rowCount) return 'full';
+    return 'partial';
+  }
+
+  function classifyContainer(result) {
+    return classifyContainerForConsumer(result, unownedConsumerValue);
+  }
+
+  function collectContainers100PercentForConsumer(results, consumer) {
+    const list = [];
+    for (const result of results) {
+      if (classifyContainerForConsumer(result, consumer) === 'full') {
+        list.push(result.container);
+      }
+    }
+    return list.sort((a, b) => a.localeCompare(b));
+  }
+
+  function collectContainersPartialForConsumer(results, consumer) {
+    const list = [];
+    for (const result of results) {
+      if (classifyContainerForConsumer(result, consumer) === 'partial') {
+        list.push(result.container);
+      }
+    }
+    return list.sort((a, b) => a.localeCompare(b));
+  }
+
+  function collectLpnsForConsumer(results, consumer) {
+    const target = normalizeText(consumer);
+    const set = new Set();
+    for (const result of results) {
+      if (!isValidInventoryResult(result)) continue;
+      for (const row of result.rows) {
+        if (normalizeText(row.consumer) !== target) continue;
+        if (row.lpn && row.lpn !== '(empty)') set.add(row.lpn);
+      }
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }
+
+  function loadPersistedState() {
+    try {
+      const raw = localStorage.getItem(storageKey());
+      if (!raw) return null;
+      const data = JSON.parse(raw);
+      if (!data || data.schemaVersion !== storageSchemaVersion) return null;
+      return {
+        containerInput: typeof data.containerInput === 'string' ? data.containerInput : '',
+        results: Array.isArray(data.results) ? data.results : [],
+        savedAt: data.savedAt || null,
+        overlayDismissed: data.overlayDismissed === true
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function savePersistedState(containerInput, results, options = {}) {
+    try {
+      const previous = loadPersistedState();
+      const overlayDismissed =
+        options.overlayDismissed !== undefined
+          ? options.overlayDismissed
+          : (previous?.overlayDismissed ?? false);
+
+      localStorage.setItem(
+        storageKey(),
+        JSON.stringify({
+          schemaVersion: storageSchemaVersion,
+          savedAt: new Date().toISOString(),
+          containerInput,
+          results,
+          overlayDismissed
+        })
+      );
+    } catch {
+      // Quota or private mode — ignore.
+    }
+  }
+
+  function setOverlayDismissed(dismissed) {
+    const saved = loadPersistedState();
+    savePersistedState(saved?.containerInput ?? '', saved?.results ?? [], {
+      overlayDismissed: dismissed
+    });
+  }
+
+  function clearPersistedState() {
+    try {
+      localStorage.removeItem(storageKey());
+    } catch {
+      // Ignore.
+    }
+  }
+
+  function escapeCsvCell(value) {
+    const text = (value ?? '').toString().replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    if (/[",\n]/.test(text)) {
+      return `"${text.replace(/"/g, '""')}"`;
+    }
+    return text;
+  }
+
+  function containerStatusLabel(result) {
+    if (!result.ok) return result.errorMessage || 'error';
+    if (result.noInventory) return 'NO INVENTORY (history only)';
+    return 'OK';
+  }
+
+  function buildExportCsv(results) {
+    const header = [
+      'Container',
+      'Row',
+      'LPN',
+      'Consumer',
+      'Container Row Count',
+      'Container LPN Count',
+      'Container Status',
+      'URL'
+    ];
+    const rows = [];
+
+    for (const result of results) {
+      const status = containerStatusLabel(result);
+      const rowCount = result.rowCount ?? 0;
+      const lpnCount = result.lpnCount ?? 0;
+
+      if (!result.ok || result.noInventory || !Array.isArray(result.rows) || result.rows.length === 0) {
+        rows.push([
+          result.container,
+          '',
+          '',
+          '',
+          String(rowCount),
+          String(lpnCount),
+          status,
+          result.url
+        ]);
+        continue;
+      }
+
+      result.rows.forEach((row, index) => {
+        rows.push([
+          result.container,
+          String(index + 1),
+          row.lpn,
+          row.consumer,
+          String(rowCount),
+          String(lpnCount),
+          status,
+          result.url
+        ]);
+      });
+    }
+
+    return [header, ...rows]
+      .map((cells) => cells.map(escapeCsvCell).join(','))
+      .join('\n');
+  }
+
+  function downloadTextFile(filename, text, mimeType) {
+    const blob = new Blob([text], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function exportAllResults(results) {
+    const csv = buildExportCsv(results);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const filename = `fcresearch-container-export-${stamp}.csv`;
+    downloadTextFile(filename, csv, 'text/csv;charset=utf-8');
+    return { filename, rowLines: csv.split('\n').length - 1 };
+  }
+
+  async function copyText(text) {
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(text, 'text');
+      return;
+    }
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+  }
+
+  function buildDashboardSummary(results) {
+    let totalRows = 0;
+    let totalLpns = 0;
+    let okCount = 0;
+    let errorCount = 0;
+    let noInventoryCount = 0;
+    const consumerCounts = new Map();
+    const unownedLpns = collectLpnsForConsumer(results, unownedConsumerValue);
+    const fullUnowned = collectContainers100PercentForConsumer(results, unownedConsumerValue);
+    const partialUnowned = collectContainersPartialForConsumer(results, unownedConsumerValue);
+
+    for (const result of results) {
+      if (!result.ok) {
+        errorCount += 1;
+        continue;
+      }
+      if (result.noInventory) {
+        noInventoryCount += 1;
+        continue;
+      }
+      okCount += 1;
+      totalRows += result.rowCount;
+      totalLpns += result.lpnCount;
+      for (const entry of result.breakdown || []) {
+        consumerCounts.set(
+          entry.consumer,
+          (consumerCounts.get(entry.consumer) ?? 0) + entry.count
+        );
+      }
+    }
+
+    const pooledBreakdown = Array.from(consumerCounts.entries())
+      .map(([consumer, count]) => ({
+        consumer,
+        count,
+        percent: totalRows > 0 ? (count / totalRows) * 100 : 0
+      }))
+      .sort((a, b) => b.count - a.count || a.consumer.localeCompare(b.consumer));
+
+    return {
+      containerCount: results.length,
+      okCount,
+      errorCount,
+      noInventoryCount,
+      totalRows,
+      totalLpns,
+      unownedLpnCount: unownedLpns.length,
+      fullUnownedCount: fullUnowned.length,
+      partialUnownedCount: partialUnowned.length,
+      pooledBreakdown
+    };
+  }
+
+  function buildResultsUrl(site, container) {
+    return new URL(
+      `/${encodeURIComponent(site)}/results?s=${encodeURIComponent(container)}`,
+      window.location.origin
+    ).toString();
+  }
+
+  function getHeaderInfo(table) {
+    return Array.from(table.querySelectorAll('thead th')).map((cell, index) => ({
+      index,
+      id: cell.id || '',
+      ariaLabel: cell.getAttribute('aria-label') ?? '',
+      text: normalizeText(cell.textContent)
+    }));
+  }
+
+  function resolveColumn(headerInfo, idFrag, ariaFrag, headerName, fallbackIndex) {
+    const idLower = idFrag.toLowerCase();
+    const ariaLower = ariaFrag.toLowerCase();
+    const textLower = headerName.toLowerCase();
+
+    const byId = headerInfo.find((h) => h.id.toLowerCase().includes(idLower));
+    if (byId) return byId.index;
+
+    const byAria = headerInfo.find((h) => h.ariaLabel.toLowerCase().includes(ariaLower));
+    if (byAria) return byAria.index;
+
+    const byText = headerInfo.find((h) => h.text.toLowerCase() === textLower);
+    if (byText) return byText.index;
+
+    return fallbackIndex;
+  }
+
+  function getRowCells(row) {
+    return Array.from(row.children);
+  }
+
+  function isDataTablesEmptyRow(row) {
+    if (row.classList.contains('dataTables_empty')) return true;
+    const first = row.querySelector('td');
+    return !!first?.classList.contains('dataTables_empty');
+  }
+
+  function isResponsiveChildRow(row) {
+    return row.classList.contains('child');
+  }
+
+  function getDataRows(table) {
+    return Array.from(table.querySelectorAll('tbody tr')).filter(
+      (row) => !isDataTablesEmptyRow(row) && !isResponsiveChildRow(row)
+    );
+  }
+
+  function extractRows(table, consumerIndex, lpnIndex) {
+    const out = [];
+    for (const row of getDataRows(table)) {
+      const cells = getRowCells(row);
+      if (cells.length === 0) continue;
+      const consumer = normalizeText(cells[consumerIndex]?.textContent ?? '') || '(empty)';
+      const lpn = normalizeText(cells[lpnIndex]?.textContent ?? '') || '(empty)';
+      out.push({ consumer, lpn });
+    }
+    return out;
+  }
+
+  function countUniqueLpns(rows) {
+    const set = new Set();
+    for (const row of rows) {
+      if (row.lpn && row.lpn !== '(empty)') set.add(row.lpn);
+    }
+    return set.size;
+  }
+
+  function aggregateConsumers(rows) {
+    const counts = new Map();
+    for (const row of rows) {
+      counts.set(row.consumer, (counts.get(row.consumer) ?? 0) + 1);
+    }
+    const total = rows.length;
+    return Array.from(counts.entries())
+      .map(([consumer, count]) => ({
+        consumer,
+        count,
+        percent: total > 0 ? (count / total) * 100 : 0
+      }))
+      .sort((a, b) => b.count - a.count || a.consumer.localeCompare(b.consumer));
+  }
+
+  function inventorySignature(table) {
+    const rows = table.querySelectorAll('tbody tr');
+    let bodyTextLen = 0;
+    for (const cell of table.querySelectorAll('tbody td')) {
+      bodyTextLen += normalizeText(cell.textContent).length;
+    }
+    return { rowCount: rows.length, bodyTextLen };
+  }
+
+  function containersKey(containers) {
+    return containers.join('\n');
+  }
+
+  function loadRenderedDoc(url, options = {}) {
+    const { isAborted } = options;
+    return new Promise((resolve, reject) => {
+      const iframe = document.createElement('iframe');
+      iframe.className = 'tm-fcs-loader-frame';
+      iframe.setAttribute('aria-hidden', 'true');
+      iframe.src = url;
+
+      let done = false;
+      let pollTimer = null;
+      let timeoutTimer = null;
+      let lastSig = null;
+      let stableSince = 0;
+
+      function cleanup() {
+        done = true;
+        if (pollTimer) clearTimeout(pollTimer);
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        iframe.remove();
+      }
+
+      function checkAborted() {
+        if (typeof isAborted === 'function' && isAborted()) {
+          cleanup();
+          reject(new Error('Aborted'));
+          return true;
+        }
+        return false;
+      }
+
+      function tick() {
+        if (done) return;
+        if (checkAborted()) return;
+        let idoc;
+        try {
+          idoc = iframe.contentDocument;
+        } catch (err) {
+          cleanup();
+          reject(err);
+          return;
+        }
+        if (!idoc) {
+          pollTimer = setTimeout(tick, iframePollMs);
+          return;
+        }
+
+        const table = idoc.getElementById(inventoryTableId);
+        if (table) {
+          const rows = table.querySelectorAll('tbody tr');
+          if (rows.length === 1 && isDataTablesEmptyRow(rows[0])) {
+            cleanup();
+            resolve({ idoc, empty: true });
+            return;
+          }
+          const sig = inventorySignature(table);
+          if (sig.rowCount > 0 && sig.bodyTextLen > 0) {
+            const key = `${sig.rowCount}:${sig.bodyTextLen}`;
+            const now = Date.now();
+            if (key === lastSig) {
+              if (now - stableSince >= iframeStabilityMs) {
+                cleanup();
+                resolve({ idoc, empty: false });
+                return;
+              }
+            } else {
+              lastSig = key;
+              stableSince = now;
+            }
+          }
+        }
+        pollTimer = setTimeout(tick, iframePollMs);
+      }
+
+      iframe.addEventListener('load', () => {
+        pollTimer = setTimeout(tick, iframePollMs);
+      });
+
+      iframe.addEventListener('error', () => {
+        cleanup();
+        reject(new Error('iframe failed to load'));
+      });
+
+      timeoutTimer = setTimeout(() => {
+        if (done) return;
+        if (checkAborted()) return;
+        let idoc;
+        try {
+          idoc = iframe.contentDocument;
+        } catch {
+          idoc = null;
+        }
+        cleanup();
+        if (idoc) resolve({ idoc, empty: false, timedOut: true });
+        else reject(new Error(`iframe timeout after ${iframeTimeoutMs}ms`));
+      }, iframeTimeoutMs);
+
+      document.body.appendChild(iframe);
+    });
+  }
+
+  async function lookupContainer(container, options = {}) {
+    const url = buildResultsUrl(defaultSite, container);
+    try {
+      const { idoc, empty } = await loadRenderedDoc(url, options);
+      const table = idoc.getElementById(inventoryTableId);
+      if (!table) {
+        return {
+          container,
+          url,
+          ok: true,
+          noInventory: true,
+          rows: [],
+          rowCount: 0,
+          lpnCount: 0,
+          breakdown: []
+        };
+      }
+      if (empty) {
+        return {
+          container,
+          url,
+          ok: true,
+          noInventory: false,
+          rows: [],
+          rowCount: 0,
+          lpnCount: 0,
+          breakdown: []
+        };
+      }
+      const headerInfo = getHeaderInfo(table);
+      const consumerIndex = resolveColumn(headerInfo, 'consumer', 'consumer', consumerHeaderName, consumerFallbackIndex);
+      const lpnIndex = resolveColumn(headerInfo, 'lpn', 'lpn', lpnHeaderName, lpnFallbackIndex);
+      const rows = extractRows(table, consumerIndex, lpnIndex);
+      return {
+        container,
+        url,
+        ok: true,
+        noInventory: false,
+        rows,
+        rowCount: rows.length,
+        lpnCount: countUniqueLpns(rows),
+        breakdown: aggregateConsumers(rows)
+      };
+    } catch (error) {
+      return {
+        container,
+        url,
+        ok: false,
+        noInventory: false,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        rows: [],
+        rowCount: 0,
+        lpnCount: 0,
+        breakdown: []
+      };
+    }
+  }
+
+  function polarToCartesian(cx, cy, r, angleDeg) {
+    const rad = ((angleDeg - 90) * Math.PI) / 180;
+    return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+  }
+
+  function describeArc(cx, cy, r, startAngle, endAngle) {
+    const start = polarToCartesian(cx, cy, r, endAngle);
+    const end = polarToCartesian(cx, cy, r, startAngle);
+    const large = endAngle - startAngle <= 180 ? '0' : '1';
+    return `M ${cx} ${cy} L ${start.x} ${start.y} A ${r} ${r} 0 ${large} 0 ${end.x} ${end.y} Z`;
+  }
+
+  function appendPieSlice(svg, cx, cy, r, startAngle, endAngle, fill, title) {
+    const slice = endAngle - startAngle;
+    if (slice <= 0) return;
+
+    // SVG arcs collapse to nothing at 360° — draw a full circle instead.
+    if (slice >= 359.5) {
+      const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circle.setAttribute('cx', String(cx));
+      circle.setAttribute('cy', String(cy));
+      circle.setAttribute('r', String(r));
+      circle.setAttribute('fill', fill);
+      if (title) circle.setAttribute('title', title);
+      svg.appendChild(circle);
+      return;
+    }
+
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', describeArc(cx, cy, r, startAngle, endAngle));
+    path.setAttribute('fill', fill);
+    if (title) path.setAttribute('title', title);
+    svg.appendChild(path);
+  }
+
+  function buildPieChart(breakdown, size) {
+    const wrap = document.createElement('div');
+    wrap.className = 'tm-fcs-pie-wrap';
+
+    if (breakdown.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'tm-fcs-pie-empty';
+      empty.textContent = 'No data';
+      wrap.appendChild(empty);
+      return wrap;
+    }
+
+    ensureConsumerColors(breakdown.map((e) => e.consumer));
+
+    const cx = size / 2;
+    const cy = size / 2;
+    const r = size / 2 - 4;
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
+    svg.setAttribute('width', String(size));
+    svg.setAttribute('height', String(size));
+    svg.classList.add('tm-fcs-pie-svg');
+
+    let angle = 0;
+    breakdown.forEach((entry, index) => {
+      const isLast = index === breakdown.length - 1;
+      let slice = (entry.percent / 100) * 360;
+      if (isLast && breakdown.length > 1) {
+        slice = Math.max(slice, 360 - angle);
+      }
+      const fill = getConsumerColor(entry.consumer);
+      const title = `${entry.consumer}: ${entry.count} (${entry.percent.toFixed(1)}%)`;
+      appendPieSlice(svg, cx, cy, r, angle, angle + slice, fill, title);
+      angle += slice;
+    });
+
+    wrap.appendChild(svg);
+
+    const legend = document.createElement('ul');
+    legend.className = 'tm-fcs-legend';
+    breakdown.forEach((entry) => {
+      const li = document.createElement('li');
+      const swatch = document.createElement('span');
+      swatch.className = 'tm-fcs-swatch';
+      swatch.style.background = getConsumerColor(entry.consumer);
+      const label = document.createElement('span');
+      label.textContent = `${entry.consumer} · ${entry.percent.toFixed(0)}% (${entry.count})`;
+      li.appendChild(swatch);
+      li.appendChild(label);
+      legend.appendChild(li);
+    });
+    wrap.appendChild(legend);
+    return wrap;
+  }
+
+  function buildKpi(num, label, warn) {
+    const wrap = document.createElement('div');
+    wrap.className = 'tm-fcs-kpi';
+    const numEl = document.createElement('span');
+    numEl.className = 'tm-fcs-kpi-num' + (warn ? ' tm-fcs-kpi-warn' : '');
+    numEl.textContent = num;
+    const labelEl = document.createElement('span');
+    labelEl.className = 'tm-fcs-kpi-label';
+    labelEl.textContent = label;
+    wrap.append(numEl, labelEl);
+    return wrap;
+  }
+
+  function buildDashRow(entry) {
+    const row = document.createElement('div');
+    row.className = 'tm-fcs-dash-row';
+    const label = document.createElement('div');
+    label.className = 'tm-fcs-dash-label';
+    label.textContent = entry.consumer;
+    const bar = document.createElement('div');
+    bar.className = 'tm-fcs-dash-bar';
+    const fill = document.createElement('div');
+    fill.className = 'tm-fcs-dash-bar-fill';
+    fill.style.width = `${Math.max(0, Math.min(100, entry.percent)).toFixed(1)}%`;
+    fill.style.background = getConsumerColor(entry.consumer);
+    bar.appendChild(fill);
+    const pct = document.createElement('div');
+    pct.className = 'tm-fcs-dash-pct';
+    pct.textContent = `${entry.percent.toFixed(1)}%`;
+    const count = document.createElement('div');
+    count.className = 'tm-fcs-dash-count';
+    count.textContent = String(entry.count);
+    row.append(label, bar, pct, count);
+    return row;
+  }
+
+  async function runCopyAction(onStatus, label, items) {
+    if (items.length === 0) {
+      onStatus(`No ${label} in current results.`);
+      return;
+    }
+    try {
+      await copyText(items.join('\n'));
+      onStatus(`Copied ${items.length} ${label}.`);
+    } catch (error) {
+      onStatus(`Copy failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  function buildConsumerCopyButton(text, consumer, collector, results, onStatus) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tm-fcs-dash-copy-btn';
+    btn.textContent = text;
+    btn.addEventListener('click', () => {
+      runCopyAction(onStatus, text.toLowerCase(), collector(results, consumer));
+    });
+    return btn;
+  }
+
+  function buildConsumerCopySidebar(results, consumers, onStatus) {
+    const sidebar = document.createElement('div');
+    sidebar.className = 'tm-fcs-dash-copy-sidebar';
+
+    const sidebarTitle = document.createElement('div');
+    sidebarTitle.className = 'tm-fcs-dash-section-title';
+    sidebarTitle.textContent = 'Copy by consumer';
+    sidebar.appendChild(sidebarTitle);
+
+    const scroll = document.createElement('div');
+    scroll.className = 'tm-fcs-dash-copy-scroll';
+
+    if (consumers.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'tm-fcs-muted';
+      empty.textContent = 'No consumers in results yet.';
+      scroll.appendChild(empty);
+    }
+
+    for (const consumer of consumers) {
+      const group = document.createElement('div');
+      group.className = 'tm-fcs-dash-copy-group';
+
+      const heading = document.createElement('div');
+      heading.className = 'tm-fcs-dash-copy-heading';
+      const swatch = document.createElement('span');
+      swatch.className = 'tm-fcs-swatch';
+      swatch.style.background = getConsumerColor(consumer);
+      const name = document.createElement('span');
+      name.textContent = consumer;
+      heading.append(swatch, name);
+      group.appendChild(heading);
+
+      const actions = document.createElement('div');
+      actions.className = 'tm-fcs-dash-copy-actions';
+      actions.appendChild(
+        buildConsumerCopyButton(
+          `Copy Containers of 100% ${consumer}`,
+          consumer,
+          collectContainers100PercentForConsumer,
+          results,
+          onStatus
+        )
+      );
+      actions.appendChild(
+        buildConsumerCopyButton(
+          `Copy Container Partial ${consumer}`,
+          consumer,
+          collectContainersPartialForConsumer,
+          results,
+          onStatus
+        )
+      );
+      actions.appendChild(
+        buildConsumerCopyButton(
+          `Copy All LPNs ${consumer}`,
+          consumer,
+          collectLpnsForConsumer,
+          results,
+          onStatus
+        )
+      );
+      group.appendChild(actions);
+      scroll.appendChild(group);
+    }
+
+    sidebar.appendChild(scroll);
+    return sidebar;
+  }
+
+  function renderDashboard(dashboardEl, results, onStatus) {
+    dashboardEl.replaceChildren();
+    if (results.length === 0) {
+      dashboardEl.classList.remove('tm-fcs-dashboard-visible');
+      return;
+    }
+
+    dashboardEl.classList.add('tm-fcs-dashboard-visible');
+    const summary = buildDashboardSummary(results);
+    const statusHandler =
+      typeof onStatus === 'function' ? onStatus : () => {};
+
+    const kpis = document.createElement('div');
+    kpis.className = 'tm-fcs-dash-kpis';
+    kpis.appendChild(buildKpi(String(summary.containerCount), 'Containers'));
+    kpis.appendChild(buildKpi(String(summary.totalRows), 'Total Rows'));
+    kpis.appendChild(buildKpi(String(summary.totalLpns), 'Total LPNs'));
+    kpis.appendChild(
+      buildKpi(String(summary.unownedLpnCount), 'Unowned LPNs', summary.unownedLpnCount > 0)
+    );
+    kpis.appendChild(
+      buildKpi(String(summary.fullUnownedCount), 'Unowned Containers', summary.fullUnownedCount > 0)
+    );
+    kpis.appendChild(
+      buildKpi(
+        String(summary.partialUnownedCount),
+        'Partially Unowned',
+        summary.partialUnownedCount > 0
+      )
+    );
+    if (summary.noInventoryCount > 0) {
+      kpis.appendChild(buildKpi(String(summary.noInventoryCount), 'No Inventory'));
+    }
+    if (summary.errorCount > 0) {
+      kpis.appendChild(
+        buildKpi(`${summary.okCount}/${summary.containerCount}`, 'OK', true)
+      );
+    }
+    dashboardEl.appendChild(kpis);
+
+    const consumers = summary.pooledBreakdown.map((e) => e.consumer);
+    const split = document.createElement('div');
+    split.className = 'tm-fcs-dash-split';
+
+    const main = document.createElement('div');
+    main.className = 'tm-fcs-dash-main';
+
+    if (summary.pooledBreakdown.length > 0) {
+      const title = document.createElement('div');
+      title.className = 'tm-fcs-dash-section-title';
+      title.textContent = 'Consumer rollup (all containers)';
+      main.appendChild(title);
+
+      const rollup = document.createElement('div');
+      rollup.className = 'tm-fcs-dash-rollup';
+      for (const entry of summary.pooledBreakdown) {
+        rollup.appendChild(buildDashRow(entry));
+      }
+      main.appendChild(rollup);
+
+      const pieRow = document.createElement('div');
+      pieRow.className = 'tm-fcs-dash-pie-row';
+      pieRow.appendChild(buildPieChart(summary.pooledBreakdown, 120));
+      main.appendChild(pieRow);
+    } else {
+      const empty = document.createElement('div');
+      empty.className = 'tm-fcs-muted';
+      empty.textContent = 'No consumer breakdown available.';
+      main.appendChild(empty);
+    }
+
+    split.append(main, buildConsumerCopySidebar(results, consumers, statusHandler));
+    dashboardEl.appendChild(split);
+  }
+
+  function renderCard(result) {
+    const card = document.createElement('article');
+    card.className = 'tm-fcs-card';
+
+    const head = document.createElement('div');
+    head.className = 'tm-fcs-card-head';
+
+    const link = document.createElement('a');
+    link.href = result.url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = result.container;
+    head.appendChild(link);
+
+    if (!result.ok) {
+      const err = document.createElement('span');
+      err.className = 'tm-fcs-msg';
+      err.textContent = result.errorMessage || 'error';
+      head.appendChild(err);
+      card.appendChild(head);
+      return card;
+    }
+
+    if (result.noInventory) {
+      const msg = document.createElement('span');
+      msg.className = 'tm-fcs-muted';
+      msg.textContent = 'no inventory (history only)';
+      head.appendChild(msg);
+      card.appendChild(head);
+      return card;
+    }
+
+    const cls = classifyContainer(result);
+    if (cls === 'full') {
+      const tag = document.createElement('span');
+      tag.className = 'tm-fcs-tag tm-fcs-tag-unowned';
+      tag.textContent = 'UNOWNED';
+      head.appendChild(tag);
+    } else if (cls === 'partial') {
+      const tag = document.createElement('span');
+      tag.className = 'tm-fcs-tag tm-fcs-tag-partial';
+      tag.textContent = 'PARTIAL UNOWNED';
+      head.appendChild(tag);
+    }
+
+    const rowsStat = document.createElement('span');
+    rowsStat.className = 'tm-fcs-stat';
+    rowsStat.innerHTML = `<span>Rows</span> ${result.rowCount}`;
+
+    const lpnStat = document.createElement('span');
+    lpnStat.className = 'tm-fcs-stat';
+    lpnStat.innerHTML = `<span>LPNs</span> ${result.lpnCount}`;
+
+    head.append(rowsStat, lpnStat);
+    card.appendChild(head);
+
+    const body = document.createElement('div');
+    body.className = 'tm-fcs-card-body';
+
+    const tableWrap = document.createElement('div');
+    tableWrap.className = 'tm-fcs-rows-scroll';
+    const table = document.createElement('table');
+    table.className = 'tm-fcs-rows-table';
+    table.innerHTML = '<thead><tr><th>#</th><th>LPN</th><th>Consumer</th></tr></thead>';
+    const tbody = document.createElement('tbody');
+    result.rows.forEach((row, i) => {
+      const tr = document.createElement('tr');
+      if (isUnownedConsumer(row.consumer)) tr.classList.add('tm-fcs-row-unowned');
+      const tdNum = document.createElement('td');
+      tdNum.textContent = String(i + 1);
+      const tdLpn = document.createElement('td');
+      tdLpn.className = 'tm-fcs-lpn';
+      tdLpn.textContent = row.lpn;
+      const tdConsumer = document.createElement('td');
+      tdConsumer.className = 'tm-fcs-consumer';
+      tdConsumer.textContent = row.consumer;
+      tr.append(tdNum, tdLpn, tdConsumer);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    tableWrap.appendChild(table);
+
+    body.append(tableWrap, buildPieChart(result.breakdown, 140));
+    card.appendChild(body);
+    return card;
+  }
+
+  function createStyles() {
+    const style = document.createElement('style');
+    style.textContent = `
+      .tm-fcs-launcher {
+        position: fixed; right: 16px; bottom: 16px; z-index: 2147483646;
+        border: none; border-radius: 999px; padding: 10px 14px;
+        background: #111827; color: #f9fafb; font: 600 13px/1.2 Arial, sans-serif;
+        box-shadow: 0 8px 24px rgba(15,23,42,.25); cursor: pointer;
+      }
+      .tm-fcs-overlay {
+        position: fixed; inset: 0; z-index: 2147483647;
+        display: flex; align-items: center; justify-content: center;
+        background: rgba(15,23,42,.55);
+      }
+      .tm-fcs-modal {
+        width: min(1200px, calc(100vw - 32px));
+        max-height: calc(100vh - 32px);
+        display: flex; flex-direction: column;
+        border-radius: 16px; overflow: hidden; background: #fff;
+        box-shadow: 0 24px 60px rgba(15,23,42,.3);
+        font-family: Arial, sans-serif;
+      }
+      .tm-fcs-header {
+        display: flex; justify-content: space-between; align-items: baseline;
+        padding: 10px 14px; border-bottom: 1px solid #e5e7eb;
+      }
+      .tm-fcs-title { margin: 0; font: 700 14px/1.2 Arial; color: #111827; }
+      .tm-fcs-sub { color: #6b7280; font: 500 11px/1 Arial; margin-left: 6px; }
+      .tm-fcs-close {
+        border: none; background: transparent; color: #6b7280;
+        font: 700 20px/1 Arial; cursor: pointer;
+      }
+      .tm-fcs-content { padding: 12px 14px 14px; overflow: auto; display: grid; gap: 10px; }
+      .tm-fcs-textarea {
+        width: 100%; min-height: 72px; border: 1px solid #cbd5e1; border-radius: 10px;
+        padding: 8px 10px; box-sizing: border-box; font: 500 13px/1.45 Consolas, monospace;
+      }
+      .tm-fcs-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+      .tm-fcs-btn {
+        border: none; border-radius: 8px; padding: 7px 12px;
+        background: #111827; color: #f9fafb; font: 600 12px/1.2 Arial; cursor: pointer;
+      }
+      .tm-fcs-btn[disabled] { opacity: .65; cursor: wait; }
+      .tm-fcs-btn.tm-fcs-secondary { background: #e5e7eb; color: #111827; }
+      .tm-fcs-btn.tm-fcs-export { background: #1e40af; }
+      .tm-fcs-btn.tm-fcs-stop { background: #b91c1c; color: #fff; }
+      .tm-fcs-btn.tm-fcs-stop[disabled] { background: #fca5a5; color: #fff; opacity: 1; }
+      .tm-fcs-btn.tm-fcs-clear {
+        background: #b91c1c; color: #fff; margin-left: auto;
+      }
+      .tm-fcs-status { color: #6b7280; font: 500 12px/1.4 Arial; min-height: 18px; }
+      .tm-fcs-progress {
+        display: none; gap: 10px; padding: 12px 14px;
+        background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 12px;
+      }
+      .tm-fcs-progress.tm-fcs-progress-visible { display: grid; }
+      .tm-fcs-progress-top {
+        display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 16px;
+        color: #1e3a8a; font: 600 12px/1.3 Arial; font-variant-numeric: tabular-nums;
+      }
+      .tm-fcs-progress-top-right { color: #6b7280; font-weight: 500; }
+      .tm-fcs-progress-bar {
+        height: 18px; background: #dbeafe; border-radius: 9px; overflow: hidden;
+        box-shadow: inset 0 1px 2px rgba(30, 58, 138, 0.12);
+      }
+      .tm-fcs-progress-bar-fill {
+        height: 100%; min-width: 0;
+        background: linear-gradient(90deg, #1d4ed8 0%, #3b82f6 100%);
+        border-radius: 9px; transition: width 0.12s linear;
+      }
+      .tm-fcs-progress-metrics {
+        display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: end;
+      }
+      @media (max-width: 520px) {
+        .tm-fcs-progress-metrics { grid-template-columns: 1fr; }
+      }
+      .tm-fcs-countdown-block { display: grid; gap: 2px; }
+      .tm-fcs-countdown-label {
+        color: #6b7280; font: 600 10px/1 Arial; text-transform: uppercase; letter-spacing: .06em;
+      }
+      .tm-fcs-countdown-value {
+        color: #1e3a8a; font: 700 32px/1 Consolas, "Courier New", monospace;
+        font-variant-numeric: tabular-nums; letter-spacing: -0.02em;
+      }
+      .tm-fcs-eta-block { display: grid; gap: 4px; text-align: right; }
+      @media (max-width: 520px) { .tm-fcs-eta-block { text-align: left; } }
+      .tm-fcs-eta-line {
+        color: #1e3a8a; font: 600 14px/1.3 Arial; font-variant-numeric: tabular-nums;
+      }
+      .tm-fcs-eta-sub { color: #6b7280; font: 500 11px/1.3 Arial; }
+      .tm-fcs-progress-lifetime {
+        color: #6b7280; font: 500 11px/1.3 Arial; text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      .tm-fcs-dashboard {
+        display: none; gap: 10px; padding: 10px 12px;
+        background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 10px;
+      }
+      .tm-fcs-dashboard.tm-fcs-dashboard-visible { display: grid; }
+      .tm-fcs-dash-kpis {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px;
+      }
+      .tm-fcs-kpi {
+        display: grid; gap: 2px; padding: 8px 10px;
+        background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+      }
+      .tm-fcs-kpi-num {
+        color: #111827; font: 700 18px/1.2 Arial; font-variant-numeric: tabular-nums;
+      }
+      .tm-fcs-kpi-num.tm-fcs-kpi-warn { color: #b91c1c; }
+      .tm-fcs-kpi-label {
+        color: #6b7280; font: 500 10px/1 Arial; text-transform: uppercase; letter-spacing: .04em;
+      }
+      .tm-fcs-dash-section-title {
+        color: #111827; font: 700 11px/1.2 Arial; text-transform: uppercase; letter-spacing: .04em;
+      }
+      .tm-fcs-dash-rollup { display: grid; gap: 6px; }
+      .tm-fcs-dash-row {
+        display: grid; grid-template-columns: minmax(120px, 200px) 1fr 52px 44px;
+        gap: 10px; align-items: center;
+      }
+      .tm-fcs-dash-label { font: 600 12px/1.3 Arial; word-break: break-all; }
+      .tm-fcs-dash-bar { height: 8px; background: #e5e7eb; border-radius: 4px; overflow: hidden; }
+      .tm-fcs-dash-bar-fill { height: 100%; background: #1d4ed8; }
+      .tm-fcs-dash-pct { font: 700 12px/1.3 Arial; text-align: right; font-variant-numeric: tabular-nums; }
+      .tm-fcs-dash-count { color: #6b7280; font: 500 11px/1.3 Arial; text-align: right; }
+      .tm-fcs-dash-split {
+        display: grid; grid-template-columns: 2fr 1fr; gap: 12px; align-items: start;
+      }
+      @media (max-width: 800px) {
+        .tm-fcs-dash-split { grid-template-columns: 1fr; }
+      }
+      .tm-fcs-dash-main { display: grid; gap: 8px; min-width: 0; }
+      .tm-fcs-dash-copy-sidebar {
+        display: grid; gap: 8px; min-width: 0;
+        border-left: 1px solid #e5e7eb; padding-left: 12px;
+      }
+      @media (max-width: 800px) {
+        .tm-fcs-dash-copy-sidebar {
+          border-left: none; padding-left: 0;
+          border-top: 1px solid #e5e7eb; padding-top: 12px;
+        }
+      }
+      .tm-fcs-dash-copy-scroll {
+        max-height: 280px; overflow-y: auto; display: grid; gap: 12px;
+        padding-right: 6px;
+      }
+      .tm-fcs-dash-copy-group {
+        display: grid; gap: 6px; padding-bottom: 10px;
+        border-bottom: 1px solid #e5e7eb;
+      }
+      .tm-fcs-dash-copy-group:last-child { border-bottom: none; padding-bottom: 0; }
+      .tm-fcs-dash-copy-heading {
+        display: flex; align-items: center; gap: 6px;
+        font: 700 12px/1.3 Arial; color: #111827; word-break: break-all;
+      }
+      .tm-fcs-dash-copy-actions { display: grid; gap: 5px; }
+      .tm-fcs-dash-copy-btn {
+        width: 100%; border: 1px solid #cbd5e1; border-radius: 8px;
+        padding: 6px 8px; background: #fff; color: #1e3a8a;
+        font: 600 11px/1.35 Arial; text-align: left; cursor: pointer;
+      }
+      .tm-fcs-dash-copy-btn:hover { background: #eff6ff; border-color: #93c5fd; }
+      .tm-fcs-dash-pie-row { display: flex; justify-content: center; }
+      .tm-fcs-results { display: grid; gap: 12px; }
+      .tm-fcs-card { border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden; }
+      .tm-fcs-card-head {
+        display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: baseline;
+        padding: 10px 12px; background: #f8fafc; border-bottom: 1px solid #e5e7eb;
+      }
+      .tm-fcs-card-head a { color: #1d4ed8; font-weight: 700; text-decoration: none; }
+      .tm-fcs-card-head a:hover { text-decoration: underline; }
+      .tm-fcs-stat { font: 600 13px/1.3 Arial; color: #111827; }
+      .tm-fcs-stat span { color: #6b7280; font-weight: 500; }
+      .tm-fcs-tag {
+        display: inline-block; padding: 1px 6px; border-radius: 6px;
+        font: 700 9px/1.4 Arial; letter-spacing: .04em;
+      }
+      .tm-fcs-tag-unowned { background: #fee2e2; color: #991b1b; }
+      .tm-fcs-tag-partial { background: #ffedd5; color: #9a3412; }
+      .tm-fcs-card-body {
+        display: grid; grid-template-columns: 1fr 220px; gap: 12px; padding: 10px 12px;
+      }
+      @media (max-width: 720px) { .tm-fcs-card-body { grid-template-columns: 1fr; } }
+      .tm-fcs-rows-table { width: 100%; border-collapse: collapse; font: 500 12px/1.4 Arial; }
+      .tm-fcs-rows-table th, .tm-fcs-rows-table td {
+        padding: 6px 8px; border-bottom: 1px solid #f1f5f9; text-align: left;
+      }
+      .tm-fcs-rows-table th {
+        position: sticky; top: 0; background: #fff; color: #6b7280;
+        font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+      }
+      .tm-fcs-rows-table tr.tm-fcs-row-unowned { background: #fef2f2; }
+      .tm-fcs-rows-scroll { max-height: 280px; overflow: auto; }
+      .tm-fcs-lpn { font-family: Consolas, monospace; font-size: 12px; }
+      .tm-fcs-consumer { font-weight: 600; }
+      .tm-fcs-pie-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+      .tm-fcs-pie-svg { display: block; }
+      .tm-fcs-pie-empty { color: #9ca3af; font: 500 12px Arial; padding: 24px; }
+      .tm-fcs-legend {
+        margin: 0; padding: 0; list-style: none; width: 100%;
+        display: grid; gap: 4px; font: 500 11px/1.3 Arial;
+      }
+      .tm-fcs-legend li { display: flex; align-items: center; gap: 6px; }
+      .tm-fcs-swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+      .tm-fcs-msg { color: #b91c1c; font: 500 13px Arial; }
+      .tm-fcs-muted { color: #6b7280; }
+      .tm-fcs-loader-frame {
+        position: fixed; top: 0; left: 0;
+        width: ${iframeWidthPx}px; height: ${iframeHeightPx}px;
+        border: 0; opacity: 0; pointer-events: none; z-index: -1;
+      }
+    `;
+    return style;
+  }
+
+  function install() {
+    if (window[installationKey]) return;
+    window[installationKey] = true;
+
+    consumerColorMap = loadConsumerColorMap();
+
+    document.documentElement.appendChild(createStyles());
+
+    const persisted = loadPersistedState();
+    const shouldAutoOpen = !!(
+      persisted &&
+      persisted.results.length > 0 &&
+      !persisted.overlayDismissed
+    );
+
+    const launcher = document.createElement('button');
+    launcher.type = 'button';
+    launcher.className = 'tm-fcs-launcher';
+    launcher.textContent = 'Container Lookup';
+    launcher.title = `FCResearch simple lookup v${scriptVersion} (${defaultSite})`;
+
+    let overlay = null;
+
+    function closeOverlay(userDismissed = false) {
+      try {
+        overlay?.__cleanup?.();
+      } catch {
+        // Ignore cleanup errors.
+      }
+      overlay?.remove();
+      overlay = null;
+      if (userDismissed) {
+        setOverlayDismissed(true);
+      }
+    }
+
+    function openOverlay() {
+      if (overlay?.isConnected) return;
+      setOverlayDismissed(false);
+
+      overlay = document.createElement('div');
+      overlay.className = 'tm-fcs-overlay';
+
+      const modal = document.createElement('div');
+      modal.className = 'tm-fcs-modal';
+
+      const header = document.createElement('div');
+      header.className = 'tm-fcs-header';
+      const title = document.createElement('h2');
+      title.className = 'tm-fcs-title';
+      title.textContent = 'Container rows & consumers';
+      const sub = document.createElement('span');
+      sub.className = 'tm-fcs-sub';
+      sub.textContent = `${defaultSite} · v${scriptVersion}`;
+      title.appendChild(sub);
+      const closeBtn = document.createElement('button');
+      closeBtn.type = 'button';
+      closeBtn.className = 'tm-fcs-close';
+      closeBtn.textContent = '×';
+      closeBtn.addEventListener('click', () => closeOverlay(true));
+      header.append(title, closeBtn);
+
+      const content = document.createElement('div');
+      content.className = 'tm-fcs-content';
+
+      const input = document.createElement('textarea');
+      input.className = 'tm-fcs-textarea';
+      input.placeholder =
+        'Paste container IDs (one per line, or comma/space separated). Ctrl+Enter to start.';
+
+      const actions = document.createElement('div');
+      actions.className = 'tm-fcs-actions';
+
+      const startBtn = document.createElement('button');
+      startBtn.type = 'button';
+      startBtn.className = 'tm-fcs-btn';
+      startBtn.textContent = 'Start';
+      startBtn.title = 'Start or resume container lookups';
+
+      const stopBtn = document.createElement('button');
+      stopBtn.type = 'button';
+      stopBtn.className = 'tm-fcs-btn tm-fcs-stop';
+      stopBtn.textContent = 'Stop';
+      stopBtn.title = 'Stop after the current container finishes';
+      stopBtn.disabled = true;
+
+      const exportBtn = document.createElement('button');
+      exportBtn.type = 'button';
+      exportBtn.className = 'tm-fcs-btn tm-fcs-export';
+      exportBtn.textContent = 'Export All';
+      exportBtn.title = 'Download all results as a CSV file (one row per inventory line)';
+
+      const clearBtn = document.createElement('button');
+      clearBtn.type = 'button';
+      clearBtn.className = 'tm-fcs-btn tm-fcs-clear';
+      clearBtn.textContent = 'Clear';
+      clearBtn.title = 'Clear container list and results (consumer colors are kept)';
+
+      actions.append(startBtn, stopBtn, exportBtn, clearBtn);
+
+      const status = document.createElement('div');
+      status.className = 'tm-fcs-status';
+
+      const progressPanel = document.createElement('div');
+      progressPanel.className = 'tm-fcs-progress';
+
+      const progressTop = document.createElement('div');
+      progressTop.className = 'tm-fcs-progress-top';
+      const progressStepEl = document.createElement('span');
+      const progressAvgEl = document.createElement('span');
+      progressAvgEl.className = 'tm-fcs-progress-top-right';
+      progressTop.append(progressStepEl, progressAvgEl);
+
+      const progressBarWrap = document.createElement('div');
+      progressBarWrap.className = 'tm-fcs-progress-bar';
+      const progressBarFill = document.createElement('div');
+      progressBarFill.className = 'tm-fcs-progress-bar-fill';
+      progressBarWrap.appendChild(progressBarFill);
+
+      const progressMetrics = document.createElement('div');
+      progressMetrics.className = 'tm-fcs-progress-metrics';
+
+      const countdownBlock = document.createElement('div');
+      countdownBlock.className = 'tm-fcs-countdown-block';
+      const countdownLabel = document.createElement('span');
+      countdownLabel.className = 'tm-fcs-countdown-label';
+      countdownLabel.textContent = 'Time remaining';
+      const countdownValue = document.createElement('div');
+      countdownValue.className = 'tm-fcs-countdown-value';
+      countdownValue.textContent = '—';
+      countdownBlock.append(countdownLabel, countdownValue);
+
+      const etaBlock = document.createElement('div');
+      etaBlock.className = 'tm-fcs-eta-block';
+      const etaLine = document.createElement('div');
+      etaLine.className = 'tm-fcs-eta-line';
+      const etaSub = document.createElement('div');
+      etaSub.className = 'tm-fcs-eta-sub';
+      etaBlock.append(etaLine, etaSub);
+
+      progressMetrics.append(countdownBlock, etaBlock);
+
+      const progressLifetime = document.createElement('div');
+      progressLifetime.className = 'tm-fcs-progress-lifetime';
+
+      progressPanel.append(
+        progressTop,
+        progressBarWrap,
+        progressMetrics,
+        progressLifetime
+      );
+
+      const dashboard = document.createElement('div');
+      dashboard.className = 'tm-fcs-dashboard';
+
+      const results = document.createElement('div');
+      results.className = 'tm-fcs-results';
+
+      let lookupResults = [];
+      let runSession = null;
+      let runState = null;
+      let runTickTimer = null;
+      let lifetimeJobCount = loadLifetimeJobCount();
+
+      function renderProgressPanel() {
+        if (!runState) {
+          progressPanel.classList.remove('tm-fcs-progress-visible');
+          return;
+        }
+
+        progressPanel.classList.add('tm-fcs-progress-visible');
+        const m = computeRunMetrics(runState);
+        const done = runState.doneCount;
+        const total = runState.total;
+        const label = runState.currentLabel ? ` · ${runState.currentLabel}` : '';
+
+        progressStepEl.textContent = m.calculating
+          ? `Job ${m.stepDisplay} of ${total}${label} · estimating…`
+          : `Job ${m.stepDisplay} of ${total}${label} · ${done} done`;
+
+        progressAvgEl.textContent = m.calculating
+          ? 'calibrating pace…'
+          : `avg ${formatMmSs(m.avgMs)} / job · ${Math.round(m.percent)}%`;
+
+        progressBarFill.style.width = `${m.percent.toFixed(1)}%`;
+
+        countdownValue.textContent = m.calculating ? '…' : formatMmSs(m.remainingMs);
+
+        etaLine.textContent = m.calculating
+          ? 'ETA calculating…'
+          : `ETA ${formatMmSs(m.remainingMs)}`;
+        etaSub.textContent = m.calculating
+          ? 'Finish time will appear after the first job completes'
+          : `Finishes ~ ${formatClockTime(m.remainingMs)}`;
+
+        progressLifetime.textContent = `${lifetimeJobCount.toLocaleString()} total jobs completed (all time)`;
+      }
+
+      function startRun(total, alreadyDone = 0) {
+        runState = {
+          total,
+          doneCount: alreadyDone,
+          currentStartedAt: Date.now(),
+          durationsMs: [],
+          currentLabel: '',
+          aborted: false
+        };
+        if (runTickTimer) clearInterval(runTickTimer);
+        runTickTimer = setInterval(renderProgressPanel, 100);
+        renderProgressPanel();
+      }
+
+      function setRunControlsRunning(running) {
+        startBtn.disabled = running;
+        stopBtn.disabled = !running;
+      }
+
+      function recordJobStep() {
+        if (!runState) return;
+        const now = Date.now();
+        runState.durationsMs.push(now - runState.currentStartedAt);
+        runState.doneCount += 1;
+        runState.currentStartedAt = now;
+        lifetimeJobCount += 1;
+        saveLifetimeJobCount(lifetimeJobCount);
+      }
+
+      function endRun() {
+        if (runTickTimer) {
+          clearInterval(runTickTimer);
+          runTickTimer = null;
+        }
+        runState = null;
+        renderProgressPanel();
+      }
+
+      overlay.__cleanup = () => {
+        if (runState) runState.aborted = true;
+        if (runSession) runSession.running = false;
+        endRun();
+        setRunControlsRunning(false);
+      };
+
+      function renderAll(persistStatus) {
+        ensureConsumerColors(collectConsumersFromResults(lookupResults));
+        renderDashboard(dashboard, lookupResults, (msg) => {
+          status.textContent = msg;
+        });
+        results.replaceChildren();
+        for (const result of lookupResults) {
+          results.appendChild(renderCard(result));
+        }
+        if (persistStatus) {
+          savePersistedState(input.value, lookupResults);
+        }
+      }
+
+      function initResumeSessionFromResults() {
+        const containers = normalizeContainers(input.value);
+        if (containers.length === 0 || lookupResults.length >= containers.length) return;
+        const prefixOk = lookupResults.every((r, i) => r.container === containers[i]);
+        if (!prefixOk) return;
+        runSession = {
+          containers,
+          nextIndex: lookupResults.length,
+          key: containersKey(containers),
+          running: false
+        };
+      }
+
+      function restoreFromStorage() {
+        const saved = loadPersistedState();
+        if (!saved) return false;
+        input.value = saved.containerInput;
+        lookupResults = saved.results;
+        renderAll(false);
+        initResumeSessionFromResults();
+        if (saved.savedAt) {
+          let msg = `Restored ${lookupResults.length} result${lookupResults.length === 1 ? '' : 's'} (saved ${new Date(saved.savedAt).toLocaleString()}).`;
+          if (runSession && runSession.nextIndex < runSession.containers.length) {
+            msg += ` Press Start to resume (${runSession.containers.length - runSession.nextIndex} left).`;
+          }
+          status.textContent = msg;
+        }
+        return lookupResults.length > 0;
+      }
+
+      async function runLookup() {
+        if (runSession?.running) return;
+
+        const containers = normalizeContainers(input.value);
+        if (containers.length === 0) {
+          status.textContent = 'No containers entered.';
+          return;
+        }
+
+        const key = containersKey(containers);
+        const canResume =
+          runSession &&
+          !runSession.running &&
+          runSession.nextIndex < runSession.containers.length &&
+          runSession.key === key;
+
+        if (canResume) {
+          status.textContent = `Resuming at container ${runSession.nextIndex + 1} of ${containers.length}…`;
+        } else {
+          runSession = { containers, nextIndex: 0, key, running: false };
+          lookupResults = [];
+          renderAll(false);
+          status.textContent = `Starting ${containers.length} container${containers.length === 1 ? '' : 's'}…`;
+        }
+
+        runSession.running = true;
+        setRunControlsRunning(true);
+        const started = Date.now();
+        const isAborted = () => runState?.aborted === true;
+        startRun(containers.length, runSession.nextIndex);
+
+        try {
+          for (let i = runSession.nextIndex; i < containers.length; i++) {
+            if (isAborted()) break;
+
+            const container = containers[i];
+            runState.currentLabel = container;
+            status.textContent = `[${i + 1}/${containers.length}] ${container}…`;
+            renderProgressPanel();
+
+            let result;
+            try {
+              result = await lookupContainer(container, { isAborted });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              if (message === 'Aborted') break;
+              result = {
+                container,
+                url: buildResultsUrl(defaultSite, container),
+                ok: false,
+                noInventory: false,
+                errorMessage: message,
+                rows: [],
+                rowCount: 0,
+                lpnCount: 0,
+                breakdown: []
+              };
+            }
+
+            if (isAborted()) break;
+
+            lookupResults.push(result);
+            runSession.nextIndex = i + 1;
+            recordJobStep();
+            renderAll(true);
+            renderProgressPanel();
+          }
+
+          const sec = ((Date.now() - started) / 1000).toFixed(1);
+          const aborted = isAborted();
+          const completed = runSession.nextIndex;
+          if (aborted) {
+            status.textContent =
+              `Stopped at ${completed}/${containers.length} container${containers.length === 1 ? '' : 's'} after ${sec}s. Press Start to resume.`;
+          } else if (completed >= containers.length) {
+            status.textContent =
+              `Done — ${containers.length} job${containers.length === 1 ? '' : 's'} in ${sec}s (saved).`;
+          }
+        } finally {
+          if (runSession) runSession.running = false;
+          endRun();
+          setRunControlsRunning(false);
+        }
+      }
+
+      startBtn.addEventListener('click', runLookup);
+
+      stopBtn.addEventListener('click', () => {
+        if (!runState || !runSession?.running) return;
+        runState.aborted = true;
+        status.textContent = 'Stopping… current container will finish, then the run halts.';
+      });
+
+      exportBtn.addEventListener('click', () => {
+        if (lookupResults.length === 0) {
+          status.textContent = 'Run Start first, then Export All.';
+          return;
+        }
+        try {
+          const { filename, rowLines } = exportAllResults(lookupResults);
+          status.textContent = `Exported ${rowLines} data row${rowLines === 1 ? '' : 's'} → ${filename}`;
+        } catch (error) {
+          status.textContent = `Export failed: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      });
+
+      clearBtn.addEventListener('click', () => {
+        if (runState) runState.aborted = true;
+        if (runSession) runSession.running = false;
+        endRun();
+        runSession = null;
+        input.value = '';
+        lookupResults = [];
+        clearPersistedState();
+        renderAll(false);
+        setRunControlsRunning(false);
+        status.textContent = 'Cleared results. Consumer colors unchanged.';
+        input.focus();
+      });
+
+      let saveInputTimer = null;
+      input.addEventListener('input', () => {
+        if (saveInputTimer) clearTimeout(saveInputTimer);
+        saveInputTimer = setTimeout(() => {
+          savePersistedState(input.value, lookupResults);
+        }, 400);
+      });
+
+      input.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+          e.preventDefault();
+          runLookup();
+        }
+      });
+
+      setRunControlsRunning(false);
+
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) closeOverlay(true);
+      });
+
+      content.append(input, actions, status, progressPanel, dashboard, results);
+      modal.append(header, content);
+      overlay.append(modal);
+      document.body.append(overlay);
+
+      if (restoreFromStorage()) {
+        // already rendered
+      } else if (persisted?.containerInput) {
+        input.value = persisted.containerInput;
+      }
+
+      input.focus();
+    }
+
+    launcher.addEventListener('click', openOverlay);
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && overlay?.isConnected) closeOverlay(true);
+    });
+
+    document.body.appendChild(launcher);
+
+    if (shouldAutoOpen) {
+      openOverlay();
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', install, { once: true });
+  } else {
+    install();
+  }
+})();

@@ -1,0 +1,1443 @@
+// ==UserScript==
+// @name         Peculiar Line Flush
+// @namespace    peculiar-line-flush
+// @version      2.7.1
+// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the SOS Report Upload Folder.
+// @author       abelrigm
+// @match        https://peculiar-inventory-na.aka.corp.amazon.com/*
+// @connect      amazon-my.sharepoint.com
+// @run-at       document-idle
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_addValueChangeListener
+// @grant        GM_removeValueChangeListener
+// @grant        GM_openInTab
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setClipboard
+// @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
+// ==/UserScript==
+
+/*
+  Firefox + Tampermonkey — multi-user Line Flush
+
+  Each operator scans in the panel. Each person gets their own daily file in:
+    Documents / IOL Assignments / SOS Report Upload Folder
+  Example: LineFlush_2026-08-28_abelrigm.csv
+
+  1. Install this script (replace any older Peculiar Line Flush copy).
+  2. Open Peculiar MEM3, finish Midway, leave that tab open.
+  3. Open the SOS folder once in Firefox so Microsoft 365 cookies work.
+  4. Scan into the panel box and press Enter.
+  5. Do not open today’s file in Excel while you are still scanning (it locks).
+     Open it when the shift is done.
+*/
+
+(function () {
+  "use strict";
+
+  const VERSION = "2.7.1";
+  const PECULIAR_URL = "https://peculiar-inventory-na.aka.corp.amazon.com/MEM3/overview";
+  const SP_SITE = "https://amazon-my.sharepoint.com/personal/abelrigm_amazon_com";
+  const SOS_FOLDER =
+    "/personal/abelrigm_amazon_com/Documents/IOL Assignments/SOS Report Upload Folder";
+  const SOS_FOLDER_URL =
+    "https://amazon-my.sharepoint.com/personal/abelrigm_amazon_com/Documents/IOL%20Assignments/SOS%20Report%20Upload%20Folder";
+  const HEARTBEAT_MS = 4000;
+  const HEARTBEAT_STALE_MS = 12000;
+  const LOOKUP_TIMEOUT_MS = 20000;
+  const KEYS = {
+    heartbeat: "plf.heartbeat",
+    request: "plf.request",
+    response: "plf.response",
+    session: "plf.sosSession",
+    history: "plf.scanHistory",
+  };
+  const HEADERS = [
+    "Container ID",
+    "Scanned At",
+    "Scanner",
+    "Container Type",
+    "Total Units",
+    "Oldest Units Age",
+    "Parent Container",
+    "Parent Type",
+    "Grandparent Container",
+    "Line Age",
+    "FcSku",
+    "Quantity",
+    "Owner",
+    "Disposition",
+    "Status",
+    "Notes",
+  ];
+
+  const host = location.hostname;
+  const isPeculiar = /peculiar-inventory/i.test(host);
+  const isTop = window.top === window.self;
+
+  let lastError = "";
+  let lastDebug = null;
+  const recent = [];
+  const sosCache = { alias: "", day: "", name: "", rows: null };
+  let digestVal = "";
+  let digestExp = 0;
+  let scanQueueLen = 0;
+  let fileOk = false;
+
+  function clip(s, n) {
+    const t = String(s ?? "");
+    return t.length > n ? t.slice(0, n) + "…" : t;
+  }
+
+  function nowIso() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+
+  function dayStamp() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  function nonce() {
+    return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  function cellText(value) {
+    if (value == null || value === "") return "";
+    return String(value).replace(/\u00a0/g, " ").trim();
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function csvCell(value) {
+    const s = String(value ?? "");
+    if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  }
+
+  function toCsv(rows) {
+    return "\uFEFF" + rows.map((row) => row.map(csvCell).join(",")).join("\r\n") + "\r\n";
+  }
+
+  function parseCsv(text) {
+    const raw = String(text || "").replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    if (!raw.trim()) return [];
+    const rows = [];
+    let row = [];
+    let cell = "";
+    let inQuotes = false;
+    for (let i = 0; i < raw.length; i++) {
+      const ch = raw[i];
+      if (inQuotes) {
+        if (ch === '"' && raw[i + 1] === '"') {
+          cell += '"';
+          i += 1;
+        } else if (ch === '"') inQuotes = false;
+        else cell += ch;
+      } else if (ch === '"') inQuotes = true;
+      else if (ch === ",") {
+        row.push(cell);
+        cell = "";
+      } else if (ch === "\n") {
+        row.push(cell);
+        rows.push(row);
+        row = [];
+        cell = "";
+      } else cell += ch;
+    }
+    if (cell || row.length) {
+      row.push(cell);
+      rows.push(row);
+    }
+    return rows.filter((r) => r.some((c) => String(c).trim()));
+  }
+
+  function parseAgeDays(raw) {
+    const s = cellText(raw).toLowerCase().replace(/,/g, " ");
+    if (!s) return null;
+    let days = 0;
+    let hit = false;
+    const d = s.match(/(\d+(?:\.\d+)?)\s*d(?:ays?)?\b/);
+    const h = s.match(/(\d+(?:\.\d+)?)\s*h(?:ours?)?\b/);
+    const m = s.match(/(\d+(?:\.\d+)?)\s*m(?:in(?:utes?)?)?\b/);
+    if (d) {
+      days += Number(d[1]);
+      hit = true;
+    }
+    if (h) {
+      days += Number(h[1]) / 24;
+      hit = true;
+    }
+    if (m) {
+      days += Number(m[1]) / 1440;
+      hit = true;
+    }
+    if (hit) return days;
+    const n = s.match(/^(\d+(?:\.\d+)?)/);
+    return n ? Number(n[1]) : null;
+  }
+
+  function ageTone(days) {
+    if (days == null || Number.isNaN(days)) {
+      return { bg: "#1c2a3a", fg: "#d5e2ef", border: "#3d536b", label: "—", pct: 0 };
+    }
+    let h;
+    if (days <= 3) h = 142 - (days / 3) * 44;
+    else if (days <= 5) h = 98 - ((days - 3) / 2) * 50;
+    else h = 48 - Math.min(1, (days - 5) / 4) * 48;
+    const s = 72;
+    const l = h > 35 && h < 85 ? 46 : 34;
+    return {
+      bg: `hsl(${Math.round(h)}, ${s}%, ${l}%)`,
+      fg: l >= 42 ? "#142018" : "#f4fff6",
+      border: `hsl(${Math.round(h)}, ${s}%, ${Math.max(18, l - 14)}%)`,
+      label: days <= 3 ? "GOOD" : days <= 5 ? "CAUTION" : "ALERT",
+      pct: Math.max(2, Math.min(98, (days / 10) * 100)),
+    };
+  }
+
+  function splitIdType(raw) {
+    const s = cellText(raw);
+    const m = s.match(/^(\S+)\s*\[([^\]]+)\]\s*$/);
+    if (m) return { id: m[1], type: m[2] };
+    if (/^none$/i.test(s)) return { id: "", type: "" };
+    return { id: s, type: "" };
+  }
+
+  function idsMatch(a, b) {
+    return cellText(a).toLowerCase() === cellText(b).toLowerCase();
+  }
+
+  function textHasId(text, id) {
+    const needle = cellText(id).toLowerCase();
+    return Boolean(needle) && String(text || "").toLowerCase().includes(needle);
+  }
+
+  function fieldLine(text, label) {
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const withColon = new RegExp("^" + escaped + "\\s*:\\s*(.*)$", "i");
+    const sameLine = new RegExp("^" + escaped + "\\s+(\\S.*)$", "i");
+    const labelOnly = new RegExp("^" + escaped + "\\s*:?\\s*$", "i");
+    const lines = String(text || "")
+      .split(/\n/)
+      .map((l) => l.replace(/\u00a0/g, " ").trim());
+    for (let i = 0; i < lines.length; i++) {
+      const colon = lines[i].match(withColon);
+      if (colon && colon[1]) return colon[1].trim();
+      const same = lines[i].match(sameLine);
+      if (same && same[1] && !labelOnly.test(lines[i])) return same[1].trim();
+      if (labelOnly.test(lines[i])) {
+        for (let j = i + 1; j < lines.length; j++) {
+          if (lines[j]) return lines[j];
+        }
+      }
+    }
+    return "";
+  }
+
+  function parseInventoryLine(line) {
+    const raw = cellText(line);
+    if (raw.includes("\t")) {
+      const parts = raw.split("\t").map((p) => p.trim());
+      if (parts.length >= 5 && /^\d+$/.test(parts[2])) {
+        return {
+          age: parts[0],
+          fcSku: parts[1],
+          quantity: parts[2],
+          owner: parts[3],
+          disposition: parts[4],
+        };
+      }
+    }
+    const parts = raw.split(/\s+/);
+    if (parts.length < 5) return null;
+    const disposition = parts.pop();
+    const owner = parts.pop();
+    const quantity = parts.pop();
+    const fcSku = parts.pop();
+    const age = parts.join(" ");
+    if (!/^\d+$/.test(quantity)) return null;
+    if (/^showing$/i.test(age) || /^filter:?$/i.test(age) || /^age$/i.test(age)) return null;
+    return { age, fcSku, quantity, owner, disposition };
+  }
+
+  function parseInventory(text) {
+    const lines = String(text || "")
+      .split(/\n/)
+      .map((l) => l.replace(/\u00a0/g, " ").trim())
+      .filter(Boolean);
+    const idx = lines.findIndex((l) => /FcSku/i.test(l) && /Disposition/i.test(l));
+    if (idx < 0) return [];
+    const rows = [];
+    for (let i = idx + 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (/^Showing\b/i.test(line) || /^Previous\b/i.test(line) || /^Next\b/i.test(line) || /^Filter:?$/i.test(line)) break;
+      if (/FcSku/i.test(line) && /Disposition/i.test(line)) continue;
+      const row = parseInventoryLine(line);
+      if (row) rows.push(row);
+    }
+    return rows;
+  }
+
+  function parseDetailsText(text) {
+    const t = String(text || "");
+    const container = splitIdType(fieldLine(t, "Container ID") || fieldLine(t, "Container details") || "");
+    const parent = splitIdType(fieldLine(t, "Parent Container"));
+    const grandRaw = fieldLine(t, "Grandparent Container");
+    const grand = /^none$/i.test(grandRaw) ? { id: "", type: "" } : splitIdType(grandRaw);
+    const inventory = parseInventory(t);
+    const headerId = splitIdType(
+      (t.split(/\n/).map((l) => l.trim()).find((l) => /\[[A-Z0-9_]+\]/.test(l)) || "")
+    );
+    const oldestAge = fieldLine(t, "Oldest Units Age") || inventory[0]?.age || "";
+    const totalUnits = fieldLine(t, "Total units") || inventory.reduce((n, r) => n + Number(r.quantity || 0), 0) || "";
+    const found = Boolean(oldestAge || inventory.length);
+    return {
+      ok: found,
+      containerId: container.id || headerId.id,
+      containerType: container.type || headerId.type,
+      totalUnits: String(totalUnits),
+      oldestAge,
+      parentContainer: parent.id,
+      parentType: parent.type,
+      grandparent: grand.id,
+      inventory,
+      raw: t,
+    };
+  }
+
+  function popoverRoots() {
+    const seen = new Set();
+    const out = [];
+    const add = (n) => {
+      if (!n || seen.has(n) || !isShown(n)) return;
+      seen.add(n);
+      out.push(n);
+    };
+    document.querySelectorAll(".a-popover-inner, .a-popover-content, [id^='a-popover-content']").forEach(add);
+    document.querySelectorAll(".a-popover:not(.a-hidden), [id^='a-popover']:not(.a-hidden)").forEach(add);
+    return out;
+  }
+
+  function isShown(el) {
+    if (!(el instanceof Element)) return false;
+    if (el.closest(".a-hidden")) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 8 && r.height > 8;
+  }
+
+  function scrapePopoverFor(containerId) {
+    const want = cellText(containerId);
+    let best = { ok: false, error: "NO_POPOVER" };
+    for (const root of popoverRoots()) {
+      const t = root.innerText || "";
+      if (t.length < 12) continue;
+      const hasDetails = /Oldest Units Age|Total units|Container details/i.test(t);
+      const hasError = /could not|not found|no inventory|does not exist|internal failure/i.test(t);
+      if (hasDetails && (!want || textHasId(t, want))) {
+        const parsed = parseDetailsText(t);
+        if (parsed.oldestAge || (parsed.inventory && parsed.inventory.length)) {
+          parsed.ok = true;
+          parsed.containerId = want || parsed.containerId;
+          parsed.error = "";
+          return parsed;
+        }
+        best = { ok: false, error: "PENDING", raw: t };
+        continue;
+      }
+      if (hasDetails && want && !textHasId(t, want)) {
+        best = { ok: false, error: "STALE", raw: t };
+        continue;
+      }
+      if (hasError && !hasDetails) {
+        if (!want || textHasId(t, want)) best = { ok: false, error: "NOT_FOUND", raw: t };
+        else best = { ok: false, error: "STALE", raw: t };
+      }
+    }
+    return best;
+  }
+
+  function setInputValue(el, value) {
+    const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
+    desc.set.call(el, value);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function submitPeculiarSearch(containerId) {
+    const pecInput = document.querySelector("#searchContainerInput");
+    if (!pecInput) throw new Error("Peculiar search box not found. Open MEM3 overview or Reverse Logistics.");
+    setInputValue(pecInput, containerId);
+    const submit =
+      document.querySelector("#searchContainerButton input.a-button-input") ||
+      document.querySelector("#searchContainerButton .a-button-input") ||
+      document.querySelector("#searchContainerButton");
+    if (submit) submit.click();
+    else pecInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 13, bubbles: true }));
+  }
+
+  function waitForPopover(containerId, ms) {
+    return new Promise((resolve) => {
+      let finished = false;
+      let notFoundSince = 0;
+      const finish = (result) => {
+        if (finished) return;
+        finished = true;
+        obs.disconnect();
+        clearInterval(poll);
+        clearTimeout(timer);
+        resolve(result);
+      };
+      const check = () => {
+        const result = scrapePopoverFor(containerId);
+        if (result.ok) {
+          finish(result);
+          return;
+        }
+        if (result.error === "NOT_FOUND") {
+          if (!notFoundSince) notFoundSince = Date.now();
+          if (Date.now() - notFoundSince >= 200) finish(result);
+          return;
+        }
+        notFoundSince = 0;
+      };
+      const obs = new MutationObserver(check);
+      obs.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+      const poll = setInterval(check, 40);
+      const timer = setTimeout(() => {
+        const last = scrapePopoverFor(containerId);
+        finish(last.ok ? last : { ok: false, error: "TIMEOUT", raw: last.raw || "" });
+      }, ms);
+      check();
+    });
+  }
+
+  let pecLock = Promise.resolve();
+  async function searchPeculiarNow(containerId) {
+    const t0 = Date.now();
+    submitPeculiarSearch(containerId);
+    const result = await waitForPopover(containerId, 4000);
+    result.lookupMs = Date.now() - t0;
+    return result;
+  }
+
+  function searchPeculiar(containerId) {
+    const job = pecLock.then(
+      () => searchPeculiarNow(containerId),
+      () => searchPeculiarNow(containerId)
+    );
+    pecLock = job.then(
+      () => undefined,
+      () => undefined
+    );
+    return job;
+  }
+
+  function peculiarFresh() {
+    if (isPeculiar && document.querySelector("#searchContainerInput")) return true;
+    const t = Number(GM_getValue(KEYS.heartbeat, 0)) || 0;
+    return Date.now() - t < HEARTBEAT_STALE_MS;
+  }
+
+  function requestLookup(containerId) {
+    return new Promise((resolve, reject) => {
+      const id = nonce();
+      let done = false;
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        reject(new Error("Peculiar tab is not listening. Open Peculiar, finish Midway, leave it open."));
+      }, LOOKUP_TIMEOUT_MS);
+      const listenId = GM_addValueChangeListener(KEYS.response, (_n, _o, res) => {
+        if (!res || res.nonce !== id || done) return;
+        done = true;
+        clearTimeout(timer);
+        try {
+          GM_removeValueChangeListener(listenId);
+        } catch {
+          /* ignore */
+        }
+        resolve(res.result || { ok: false, error: "EMPTY" });
+      });
+      GM_setValue(KEYS.request, { nonce: id, containerId, t: Date.now() });
+    });
+  }
+
+  async function lookup(containerId) {
+    if (isPeculiar) return searchPeculiar(containerId);
+    return requestLookup(containerId);
+  }
+
+  function gmReq(url, opts = {}) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: opts.method || "GET",
+        url,
+        headers: opts.headers || {},
+        data: opts.body,
+        anonymous: false,
+        onload: (res) => resolve(res),
+        onerror: () => reject(new Error("Network error talking to SharePoint.")),
+        ontimeout: () => reject(new Error("SharePoint timed out.")),
+      });
+    });
+  }
+
+  async function spJson(url, opts = {}) {
+    const headers = Object.assign(
+      { Accept: "application/json;odata=nometadata" },
+      opts.headers || {}
+    );
+    const res = await gmReq(url, { ...opts, headers });
+    let json = null;
+    try {
+      json = res.responseText ? JSON.parse(res.responseText) : null;
+    } catch {
+      json = { raw: clip(res.responseText, 240) };
+    }
+    if (res.status < 200 || res.status >= 300) {
+      const msg =
+        (typeof json?.error?.message === "string" && json.error.message) ||
+        json?.error?.message?.value ||
+        json?.["odata.error"]?.message?.value ||
+        json?.raw ||
+        res.statusText ||
+        String(res.status);
+      lastError = `${res.status} ${typeof msg === "string" ? msg : JSON.stringify(msg)}`;
+      throw new Error(lastError);
+    }
+    return json;
+  }
+
+  async function digest() {
+    if (digestVal && Date.now() < digestExp) return digestVal;
+    const json = await spJson(`${SP_SITE}/_api/contextinfo`, { method: "POST" });
+    digestVal = json.FormDigestValue || json.GetContextWebInformation?.FormDigestValue;
+    digestExp = Date.now() + 18 * 60 * 1000;
+    return digestVal;
+  }
+
+  function aliasFromLogin(login) {
+    const s = String(login || "");
+    const mail = s.match(/([a-z0-9._-]+)@/i);
+    if (mail) return mail[1].toLowerCase();
+    const tail = s.split("|").pop() || s;
+    return tail.replace(/[^a-z0-9._-]/gi, "").slice(0, 32) || "operator";
+  }
+
+  async function currentAlias() {
+    const cached = GM_getValue(KEYS.session, null);
+    if (cached?.alias && cached.day === dayStamp()) return cached.alias;
+    const user = await spJson(`${SP_SITE}/_api/web/currentuser?$select=Title,LoginName,Email,UserPrincipalName`);
+    const alias = aliasFromLogin(user.UserPrincipalName || user.Email || user.LoginName);
+    return alias;
+  }
+
+  function fileNameFor(alias) {
+    return `LineFlush_${dayStamp()}_${alias}.csv`;
+  }
+
+  function filePathFor(name) {
+    return `${SOS_FOLDER}/${name}`;
+  }
+
+  function quotePath(path) {
+    return String(path || "").replace(/'/g, "''");
+  }
+
+  function spFolderUrl(query) {
+    const q = query ? `${query}&` : "";
+    return `${SP_SITE}/_api/web/GetFolderByServerRelativeUrl(@p)?${q}@p='${quotePath(SOS_FOLDER)}'`;
+  }
+
+  function spFileUrl(path, extra) {
+    return `${SP_SITE}/_api/web/GetFileByServerRelativeUrl(@p)${extra || ""}?@p='${quotePath(path)}'`;
+  }
+
+  async function folderExists(path) {
+    const res = await gmReq(`${SP_SITE}/_api/web/GetFolderByServerRelativeUrl(@p)?@p='${quotePath(path)}'`, {
+      headers: { Accept: "application/json;odata=nometadata" },
+    });
+    return res.status >= 200 && res.status < 300;
+  }
+
+  async function createFolder(path) {
+    const d = await digest();
+    const res = await gmReq(`${SP_SITE}/_api/web/folders`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json;odata=nometadata",
+        "Content-Type": "application/json;odata=nometadata",
+        "X-RequestDigest": d,
+      },
+      body: JSON.stringify({ ServerRelativeUrl: path }),
+    });
+    if (res.status === 409) return;
+    if (res.status >= 200 && res.status < 300) return;
+    lastError = `${res.status} ${clip(res.responseText, 180)}`;
+    throw new Error(lastError);
+  }
+
+  function childFoldersOfDocuments(fullPath) {
+    const lower = fullPath.toLowerCase();
+    const needle = "/documents/";
+    const idx = lower.indexOf(needle);
+    if (idx < 0) return [fullPath];
+    const root = fullPath.slice(0, idx + "/Documents".length);
+    const rest = fullPath.slice(idx + needle.length).split("/").filter(Boolean);
+    const out = [];
+    let acc = root;
+    for (const seg of rest) {
+      acc += "/" + seg;
+      out.push(acc);
+    }
+    return out;
+  }
+
+  async function ensureFolderPath(path) {
+    if (await folderExists(path)) return;
+    for (const p of childFoldersOfDocuments(path)) {
+      if (await folderExists(p)) continue;
+      await createFolder(p);
+    }
+    if (!(await folderExists(path))) {
+      throw new Error("Could not recreate the SOS folder. Create it in SharePoint, then refresh Peculiar.");
+    }
+  }
+
+  async function assertSosFolder() {
+    try {
+      await spJson(spFolderUrl());
+      return;
+    } catch (err) {
+      if (!/404|File Not Found|DirectoryNotFound/i.test(String(err.message || err))) throw err;
+    }
+    await ensureFolderPath(SOS_FOLDER);
+    lastError = "";
+  }
+
+  async function readSosFile(path) {
+    const res = await gmReq(spFileUrl(path, "/$value"), {
+      method: "GET",
+      headers: { Accept: "text/plain" },
+    });
+    if (res.status === 404) return null;
+    if (res.status < 200 || res.status >= 300) {
+      lastError = `${res.status} ${clip(res.responseText, 180)}`;
+      throw new Error(lastError);
+    }
+    return res.responseText || "";
+  }
+
+  async function writeSosFile(name, csv) {
+    const d = await digest();
+    const url = `${SP_SITE}/_api/web/GetFolderByServerRelativeUrl(@p)/Files/add(url='${name.replace(
+      /'/g,
+      ""
+    )}',overwrite=true)?@p='${quotePath(SOS_FOLDER)}'`;
+    const res = await gmReq(url, {
+      method: "POST",
+      headers: {
+        Accept: "application/json;odata=nometadata",
+        "Content-Type": "text/csv; charset=utf-8",
+        "X-RequestDigest": d,
+      },
+      body: csv,
+    });
+    if (res.status === 423) {
+      throw new Error("SharePoint locked the file. Close it in Excel, then scan again.");
+    }
+    if (res.status < 200 || res.status >= 300) {
+      if (/404|DirectoryNotFound|File Not Found/i.test(`${res.status} ${res.responseText || ""}`)) {
+        await assertSosFolder();
+        const retry = await gmReq(url, {
+          method: "POST",
+          headers: {
+            Accept: "application/json;odata=nometadata",
+            "Content-Type": "text/csv; charset=utf-8",
+            "X-RequestDigest": d,
+          },
+          body: csv,
+        });
+        if (retry.status >= 200 && retry.status < 300) {
+          lastError = "";
+          fileOk = true;
+          return;
+        }
+        lastError = `${retry.status} ${clip(retry.responseText, 180)}`;
+        throw new Error(lastError);
+      }
+      lastError = `${res.status} ${clip(res.responseText, 180)}`;
+      throw new Error(lastError);
+    }
+    lastError = "";
+    fileOk = true;
+  }
+
+  function rowsFromResult(containerId, result, alias) {
+    const inventory = result.inventory && result.inventory.length ? result.inventory : [{}];
+    const extra = Math.max(0, inventory.length - 1);
+    return inventory.map((inv, i) => {
+      const status = result.ok ? "OK" : result.error === "NOT_FOUND" ? "NOT FOUND" : "ERROR";
+      const notes = result.ok
+        ? i === 0 && extra
+          ? `${extra} more SKU(s) in extra rows`
+          : ""
+        : result.notes || result.error || "Lookup failed";
+      return [
+        result.containerId || containerId,
+        nowIso(),
+        alias,
+        i === 0 ? result.containerType || "" : "",
+        i === 0 ? result.totalUnits || "" : "",
+        i === 0 ? result.oldestAge || "" : "",
+        i === 0 ? result.parentContainer || "" : "",
+        i === 0 ? result.parentType || "" : "",
+        i === 0 ? result.grandparent || "" : "",
+        inv.age || (i === 0 ? result.oldestAge || "" : ""),
+        inv.fcSku || "",
+        inv.quantity || "",
+        inv.owner || "",
+        inv.disposition || "",
+        i === 0 ? status : "",
+        i === 0 ? notes : "",
+      ];
+    });
+  }
+
+  let saveChain = Promise.resolve();
+  function enqueueSave(fn) {
+    const run = saveChain.then(fn, fn);
+    saveChain = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  async function ensureSosCache(alias) {
+    if (sosCache.rows && sosCache.alias === alias && sosCache.day === dayStamp()) return;
+    await assertSosFolder();
+    const name = fileNameFor(alias);
+    const path = filePathFor(name);
+    let rows = [];
+    const existing = await readSosFile(path);
+    if (existing) rows = parseCsv(existing);
+    if (!rows.length) rows.push(HEADERS.slice());
+    else if (rows[0][0] !== "Container ID") rows.unshift(HEADERS.slice());
+    sosCache.alias = alias;
+    sosCache.day = dayStamp();
+    sosCache.name = name;
+    sosCache.rows = rows;
+  }
+
+  async function appendSosRows(newRows, alias) {
+    await ensureSosCache(alias);
+    const before = sosCache.rows.length;
+    sosCache.rows.push(...newRows);
+    try {
+      await writeSosFile(sosCache.name, toCsv(sosCache.rows));
+    } catch (err) {
+      sosCache.rows.splice(before);
+      fileOk = false;
+      throw err;
+    }
+    const session = {
+      alias,
+      day: dayStamp(),
+      name: sosCache.name,
+      count: Math.max(0, sosCache.rows.length - 1),
+      t: Date.now(),
+    };
+    GM_setValue(KEYS.session, session);
+    return session;
+  }
+
+  function startPeculiarWorker() {
+    GM_setValue(KEYS.heartbeat, Date.now());
+    setInterval(() => GM_setValue(KEYS.heartbeat, Date.now()), HEARTBEAT_MS);
+    GM_addValueChangeListener(KEYS.request, async (_n, _o, req) => {
+      if (!req?.nonce || !req.containerId) return;
+      try {
+        const result = await searchPeculiar(req.containerId);
+        GM_setValue(KEYS.response, { nonce: req.nonce, t: Date.now(), result });
+      } catch (err) {
+        GM_setValue(KEYS.response, {
+          nonce: req.nonce,
+          t: Date.now(),
+          result: { ok: false, error: "EXCEPTION", notes: String(err.message || err) },
+        });
+      }
+    });
+  }
+
+  function dash(v) {
+    const s = cellText(v);
+    return s ? escapeHtml(s) : "<span class='empty'>—</span>";
+  }
+
+  function loadHistory(alias) {
+    const pack = GM_getValue(KEYS.history, null);
+    if (!pack || pack.day !== dayStamp() || pack.alias !== alias || !Array.isArray(pack.rows)) return [];
+    return pack.rows;
+  }
+
+  function saveHistory(alias, rows) {
+    GM_setValue(KEYS.history, { day: dayStamp(), alias, rows: rows.slice(0, 400), t: Date.now() });
+  }
+
+  async function copyDebugText() {
+    const payload = {
+      version: VERSION,
+      at: nowIso(),
+      href: location.href,
+      userAgent: navigator.userAgent,
+      host,
+      lastError,
+      lastDebug,
+      peculiarConnected: peculiarFresh(),
+      fileOk,
+      session: GM_getValue(KEYS.session, null),
+      sosCache: { alias: sosCache.alias, day: sosCache.day, name: sosCache.name, rows: sosCache.rows?.length || 0 },
+      queued: scanQueueLen,
+      recent: recent.slice(0, 8).map((r) => ({ t: r.t, id: r.id, age: r.age, sku: r.sku, status: r.status })),
+    };
+    const text = JSON.stringify(payload, null, 2);
+    try {
+      GM_setClipboard(text, "text");
+    } catch {
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        document.body.append(ta);
+        ta.select();
+        document.execCommand("copy");
+        ta.remove();
+      }
+    }
+    return text.length;
+  }
+
+  function startScanner() {
+    if (document.getElementById("plf-scan-host")) return;
+    const hostEl = document.createElement("div");
+    hostEl.id = "plf-scan-host";
+    Object.assign(hostEl.style, {
+      position: "fixed",
+      inset: "0",
+      zIndex: "2147483646",
+      fontFamily: "Segoe UI, system-ui, sans-serif",
+    });
+    const shadow = hostEl.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
+      <style>
+        :host {
+          all: initial;
+          position: fixed !important;
+          inset: 0 !important;
+          z-index: 2147483646 !important;
+          display: block !important;
+          pointer-events: auto !important;
+        }
+        * { box-sizing: border-box; font-family: "Segoe UI", system-ui, sans-serif; }
+        .wrap {
+          position: absolute; inset: 0;
+          display: flex; align-items: center; justify-content: center;
+          pointer-events: auto;
+        }
+        .backdrop { position: absolute; inset: 0; background: rgba(4, 8, 12, .78); }
+        .modal {
+          position: relative; z-index: 1;
+          width: min(1280px, 96vw);
+          height: min(960px, 94vh);
+          display: flex; flex-direction: column;
+          background: #0e141c; color: #e8eef5;
+          border: 1px solid #2c3c4e; border-radius: 14px;
+          box-shadow: 0 24px 80px rgba(0,0,0,.55);
+          overflow: hidden;
+        }
+        .top {
+          display: grid; grid-template-columns: 1fr auto;
+          gap: 8px; align-items: start;
+          padding: 14px 14px 10px; background: #15202c; border-bottom: 1px solid #2c3c4e;
+        }
+        .brand { font-size: 11px; letter-spacing: .14em; font-weight: 800; color: #8fb4d4; }
+        .title { font-size: 20px; font-weight: 750; margin-top: 2px; }
+        .top-right { display: flex; align-items: flex-start; gap: 8px; }
+        .clock { font-variant-numeric: tabular-nums; font-size: 20px; font-weight: 700; text-align: right; }
+        .meta { font-size: 12px; color: #9db0c3; text-align: right; }
+        #debug {
+          white-space: nowrap; align-self: center;
+          background: #243044; color: #d5e2ef; border: 1px solid #3d536b;
+        }
+        .x {
+          width: 40px; height: 40px; border: 0; border-radius: 8px; cursor: pointer;
+          background: #3a1c1c; color: #ffd7d7; font-size: 22px; font-weight: 800; line-height: 1;
+          flex: 0 0 40px;
+        }
+        .x:hover { background: #5a2424; }
+        .lamps { display: flex; gap: 8px; flex-wrap: wrap; grid-column: 1 / -1; }
+        .lamp { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #c5d4e3; background: #0f1720; border: 1px solid #2c3c4e; border-radius: 999px; padding: 4px 10px; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; background: #6b7785; }
+        .ok .dot { background: #3dd68c; box-shadow: 0 0 8px #3dd68c; }
+        .bad .dot { background: #ff5d5d; box-shadow: 0 0 8px #ff5d5d; }
+        .scanbox { padding: 12px 16px 8px; background: #121b26; border-bottom: 1px solid #2c3c4e; }
+        .scan-label { font-size: 11px; letter-spacing: .12em; font-weight: 700; color: #8fb4d4; margin-bottom: 6px; }
+        #q {
+          width: 100%; border: 2px solid #3d7cc9; background: #071018; color: #f6fbff;
+          border-radius: 8px; padding: 12px 14px; font-size: 28px; font-weight: 700;
+          letter-spacing: .06em; outline: none;
+        }
+        #q:focus { border-color: #6ea8ea; box-shadow: 0 0 0 3px rgba(61,124,201,.28); }
+        .actions { display: flex; gap: 8px; margin-top: 8px; }
+        button { border: 0; border-radius: 8px; padding: 9px 12px; cursor: pointer; font-size: 13px; font-weight: 700; color: #d5e2ef; background: #314257; }
+        button.go { flex: 1; background: #2f7ae5; color: white; font-size: 15px; }
+        button.go:disabled { opacity: .55; cursor: wait; }
+        .banner { margin-top: 8px; border-radius: 8px; padding: 10px 12px; font-size: 15px; font-weight: 650; line-height: 1.35; }
+        .ready, .info { background: #1c2a3a; border: 1px solid #3d536b; color: #d5e2ef; }
+        .found { background: #14351f; border: 1px solid #2f9e57; color: #d8ffe6; }
+        .missing { background: #3a1c1c; border: 1px solid #c45b5d; color: #ffd7d7; }
+        .error { background: #3a2a12; border: 1px solid #c4892c; color: #ffe3b8; }
+        .ageboard {
+          margin-top: 8px; border-radius: 10px; padding: 10px 14px 12px;
+          border: 1px solid #3d536b; background: #1c2a3a; color: #d5e2ef;
+          transition: background .2s linear, color .2s linear, border-color .2s linear;
+        }
+        .age-kicker { font-size: 11px; letter-spacing: .12em; font-weight: 700; opacity: .88; }
+        .age-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 2px; }
+        .age-val { font-size: 28px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+        .age-tag { font-size: 12px; font-weight: 800; letter-spacing: .14em; }
+        .age-meter {
+          position: relative; height: 8px; margin-top: 8px; border-radius: 99px; overflow: hidden;
+          background: linear-gradient(to right, #2f9e57 0%, #2f9e57 30%, #e6c200 50%, #e24b4b 70%, #b71c1c 100%);
+        }
+        .age-mark {
+          position: absolute; top: -3px; width: 4px; height: 14px; margin-left: -2px;
+          background: #fff; border-radius: 2px; box-shadow: 0 0 0 1px rgba(0,0,0,.45);
+          transition: left .2s linear;
+        }
+        .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 8px 16px; border-bottom: 1px solid #2c3c4e; }
+        .stat { background: #15202c; border: 1px solid #2c3c4e; border-radius: 8px; padding: 7px; }
+        .stat b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+        .stat span { font-size: 11px; color: #9db0c3; letter-spacing: .04em; }
+        .ticket { flex: 1 1 auto; min-height: 0; padding: 8px 16px; border-bottom: 1px solid #2c3c4e; overflow: auto; }
+        .ticket h2, .history h2 { margin: 0 0 6px; font-size: 11px; letter-spacing: .12em; color: #8fb4d4; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; }
+        .field .label { font-size: 11px; color: #8ea0b3; }
+        .field .val { font-size: 15px; font-weight: 700; word-break: break-word; }
+        .field.wide { grid-column: 1 / -1; }
+        .empty { color: #5d6d7e; font-weight: 500; }
+        table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+        th { text-align: left; color: #8ea0b3; font-weight: 650; padding: 3px 6px; border-bottom: 1px solid #2c3c4e; }
+        td { padding: 4px 6px; border-bottom: 1px solid #223040; font-variant-numeric: tabular-nums; }
+        .history {
+          flex: 0 0 210px; height: 210px; min-height: 210px;
+          display: flex; flex-direction: column; padding: 8px 16px 0;
+          background: #0e141c;
+        }
+        .history h2 { display: flex; justify-content: space-between; align-items: center; }
+        #filter { width: 150px; border: 1px solid #3b4a5c; background: #0f1720; color: #e8eef5; border-radius: 6px; padding: 5px 8px; font-size: 12px; }
+        .histwrap { flex: 1; overflow: auto; border: 1px solid #2c3c4e; border-radius: 8px; background: #0b1219; }
+        .histwrap tr { cursor: pointer; }
+        .histwrap tr:hover { background: #1a2734; }
+        .histwrap tr.active { background: #243140; }
+        .st-ok { color: #3dd68c; font-weight: 700; }
+        .st-miss { color: #ff8b8b; font-weight: 700; }
+        .st-err { color: #ffcc66; font-weight: 700; }
+        .foot {
+          display: flex; align-items: center; justify-content: space-between; gap: 12px;
+          padding: 8px 16px 10px; border-top: 1px solid #2c3c4e; background: #15202c;
+          font-size: 12px; color: #9db0c3;
+        }
+        .foot b { color: #e8eef5; }
+        #footMsg { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .note {
+          flex: 0 0 auto; max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+          font-size: 11px; font-weight: 700; border-radius: 6px; padding: 4px 8px; line-height: 1.3;
+        }
+        .fab {
+          display: none; position: absolute; right: 18px; bottom: 18px; z-index: 2;
+          border: 0; border-radius: 999px; padding: 14px 18px; cursor: pointer;
+          background: #2f7ae5; color: white; font-weight: 800; font-size: 14px;
+          box-shadow: 0 10px 28px rgba(0,0,0,.4);
+        }
+        :host(.closed) .wrap { display: none; }
+        :host(.closed) .fab { display: block; pointer-events: auto !important; }
+        :host(.closed) { pointer-events: none !important; }
+      </style>
+      <div class="wrap" id="wrap">
+        <div class="backdrop" id="backdrop"></div>
+        <div class="modal" id="modal">
+          <div class="top">
+            <div>
+              <div class="brand">LINE FLUSH WORKSTATION · v${VERSION}</div>
+              <div class="title" id="opTitle">Operator</div>
+            </div>
+            <div class="top-right">
+              <div>
+                <div class="clock" id="clock">00:00:00</div>
+                <div class="meta" id="dayline"></div>
+              </div>
+              <button id="debug" title="Copy debug JSON">Copy Debug</button>
+              <button class="x" id="close" title="Close">×</button>
+            </div>
+            <div class="lamps">
+              <div class="lamp" id="lampPec"><span class="dot"></span>Peculiar</div>
+              <div class="lamp" id="lampSp"><span class="dot"></span>SharePoint</div>
+              <div class="lamp" id="lampFile"><span class="dot"></span>SOS file</div>
+            </div>
+          </div>
+          <div class="scanbox">
+            <div class="scan-label">SCANNER — keep this box focused; gun sends Enter</div>
+            <input id="q" type="text" placeholder="Waiting for scan…" autocomplete="off" spellcheck="false" />
+            <div class="actions">
+              <button class="go" id="go">Lookup and save</button>
+              <button id="folder">SOS folder</button>
+            </div>
+            <div class="ageboard" id="ageBoard">
+              <div class="age-kicker" id="ageKicker">OLDEST AGE</div>
+              <div class="age-row">
+                <div class="age-val" id="ageVal">Scan to see age</div>
+                <div class="age-tag" id="ageTag">—</div>
+              </div>
+              <div class="age-meter"><div class="age-mark" id="ageMark" style="left:0"></div></div>
+            </div>
+          </div>
+          <div class="stats">
+            <div class="stat"><b id="nTotal">0</b><span>SCANS</span></div>
+            <div class="stat"><b id="nOk">0</b><span>OK</span></div>
+            <div class="stat"><b id="nMiss">0</b><span>NOT FOUND</span></div>
+            <div class="stat"><b id="nErr">0</b><span>ERRORS</span></div>
+          </div>
+          <div class="ticket">
+            <h2>LAST CONTAINER</h2>
+            <div class="grid">
+              <div class="field wide"><div class="label">Container</div><div class="val" id="fId">—</div></div>
+              <div class="field"><div class="label">Type</div><div class="val" id="fType">—</div></div>
+              <div class="field"><div class="label">Oldest age</div><div class="val" id="fAge">—</div></div>
+              <div class="field"><div class="label">Total units</div><div class="val" id="fUnits">—</div></div>
+              <div class="field"><div class="label">Parent</div><div class="val" id="fParent">—</div></div>
+              <div class="field"><div class="label">Grandparent</div><div class="val" id="fGrand">—</div></div>
+              <div class="field"><div class="label">FcSku</div><div class="val" id="fSku">—</div></div>
+              <div class="field"><div class="label">Disposition</div><div class="val" id="fDisp">—</div></div>
+            </div>
+            <table>
+              <thead><tr><th>Age</th><th>FcSku</th><th>Qty</th><th>Owner</th><th>Disposition</th></tr></thead>
+              <tbody id="lines"><tr><td colspan="5" class="empty">No inventory lines yet</td></tr></tbody>
+            </table>
+          </div>
+          <div class="history">
+            <h2>SHIFT HISTORY <input id="filter" placeholder="Filter ID / SKU" /></h2>
+            <div class="histwrap">
+              <table>
+                <thead><tr><th>Time</th><th>Container</th><th>Age</th><th>FcSku</th><th>St</th></tr></thead>
+                <tbody id="hist"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="foot">
+            <span id="footMsg">SOS file will be created on the first save. Do not open it in Excel while scanning.</span>
+            <span class="note ready" id="note">READY · scan</span>
+          </div>
+        </div>
+      </div>
+      <button class="fab" id="fab">Open Line Flush</button>`;
+    document.documentElement.append(hostEl);
+
+    const input = shadow.getElementById("q");
+    const go = shadow.getElementById("go");
+    const note = shadow.getElementById("note");
+    const scanQueue = [];
+    let working = false;
+    let open = true;
+    let alias = "";
+    let spOk = false;
+    let selectedId = "";
+
+    function setBanner(kind, html) {
+      note.className = "note " + kind;
+      note.innerHTML = html;
+    }
+
+    function paintAge(result) {
+      const board = shadow.getElementById("ageBoard");
+      const kicker = shadow.getElementById("ageKicker");
+      const val = shadow.getElementById("ageVal");
+      const tag = shadow.getElementById("ageTag");
+      const mark = shadow.getElementById("ageMark");
+      const idle = { bg: "#1c2a3a", fg: "#d5e2ef", border: "#3d536b" };
+      const apply = (tone, kickerText, valueText, tagText, pct) => {
+        board.style.background = tone.bg;
+        board.style.color = tone.fg;
+        board.style.borderColor = tone.border;
+        kicker.textContent = kickerText;
+        val.textContent = valueText;
+        tag.textContent = tagText;
+        mark.style.left = `${pct || 0}%`;
+        mark.style.display = pct ? "block" : "none";
+      };
+      if (!result || (!result.oldestAge && result.ok !== true && !result.error)) {
+        apply(idle, "OLDEST AGE", result?.containerId ? `Looking up ${result.containerId}` : "Scan to see age", "—", 0);
+        return;
+      }
+      if (result.error === "NOT_FOUND" || result.error === "NOT FOUND") {
+        apply({ bg: "#3a1c1c", fg: "#ffd7d7", border: "#c45b5d" }, "OLDEST AGE", "Not found", "ALERT", 0);
+        return;
+      }
+      if (result.ok === false && result.error) {
+        apply({ bg: "#3a2a12", fg: "#ffe3b8", border: "#c4892c" }, "OLDEST AGE", result.error, "ALERT", 0);
+        return;
+      }
+      const raw = cellText(result.oldestAge);
+      const days = parseAgeDays(raw);
+      const tone = ageTone(days);
+      apply(tone, "OLDEST AGE", raw || "n/a", tone.label, days == null ? 0 : tone.pct);
+    }
+
+    function clockNow() {
+      const d = new Date();
+      const p = (n) => String(n).padStart(2, "0");
+      return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    }
+
+    function counts() {
+      const ok = recent.filter((r) => r.status === "OK").length;
+      const miss = recent.filter((r) => r.status === "NOT FOUND" || r.status === "NOT_FOUND").length;
+      const err = recent.filter((r) => r.status !== "OK" && r.status !== "NOT FOUND" && r.status !== "NOT_FOUND").length;
+      return { total: recent.length, ok, miss, err };
+    }
+
+    function renderStats() {
+      const c = counts();
+      shadow.getElementById("nTotal").textContent = String(c.total);
+      shadow.getElementById("nOk").textContent = String(c.ok);
+      shadow.getElementById("nMiss").textContent = String(c.miss);
+      shadow.getElementById("nErr").textContent = String(c.err);
+    }
+
+    function showTicket(id, result) {
+      const inv = result?.inventory?.[0] || {};
+      shadow.getElementById("fId").innerHTML = dash((result && result.containerId) || id);
+      shadow.getElementById("fType").innerHTML = dash(result?.containerType);
+      shadow.getElementById("fAge").innerHTML = dash(result?.oldestAge);
+      shadow.getElementById("fUnits").innerHTML = dash(result?.totalUnits);
+      shadow.getElementById("fParent").innerHTML = dash(
+        result?.parentContainer ? `${result.parentContainer}${result.parentType ? " [" + result.parentType + "]" : ""}` : ""
+      );
+      shadow.getElementById("fGrand").innerHTML = dash(result?.grandparent);
+      shadow.getElementById("fSku").innerHTML = dash(inv.fcSku);
+      shadow.getElementById("fDisp").innerHTML = dash(inv.disposition);
+      paintAge(result);
+      const lines = result?.inventory || [];
+      shadow.getElementById("lines").innerHTML = lines.length
+        ? lines
+            .map(
+              (r) =>
+                `<tr><td>${dash(r.age)}</td><td>${dash(r.fcSku)}</td><td>${dash(r.quantity)}</td><td>${dash(r.owner)}</td><td>${dash(r.disposition)}</td></tr>`
+            )
+            .join("")
+        : `<tr><td colspan="5" class="empty">No inventory lines</td></tr>`;
+    }
+
+    function renderHistory() {
+      const q = cellText(shadow.getElementById("filter").value).toLowerCase();
+      const rows = recent.filter((r) => !q || `${r.id} ${r.sku} ${r.age}`.toLowerCase().includes(q));
+      shadow.getElementById("hist").innerHTML = rows.length
+        ? rows
+            .map((r) => {
+              const st =
+                r.status === "OK" ? "st-ok" : r.status === "NOT FOUND" || r.status === "NOT_FOUND" ? "st-miss" : "st-err";
+              const active = r.id === selectedId ? "active" : "";
+              return `<tr class="${active}" data-id="${escapeHtml(r.id)}"><td>${escapeHtml((r.t || "").slice(11))}</td><td>${escapeHtml(r.id)}</td><td>${escapeHtml(r.age || "")}</td><td>${escapeHtml(r.sku || "")}</td><td class="${st}">${escapeHtml(r.status || "")}</td></tr>`;
+            })
+            .join("")
+        : `<tr><td colspan="5" class="empty">No scans this shift</td></tr>`;
+    }
+
+    function persist() {
+      if (alias) saveHistory(alias, recent);
+    }
+
+    function tick() {
+      shadow.getElementById("clock").textContent = clockNow();
+      shadow.getElementById("dayline").textContent = dayStamp();
+      const pec = peculiarFresh();
+      shadow.getElementById("lampPec").className = "lamp" + (pec ? " ok" : " bad");
+      shadow.getElementById("lampSp").className = "lamp" + (spOk ? " ok" : " bad");
+      shadow.getElementById("lampFile").className = "lamp" + (fileOk && !lastError ? " ok" : " bad");
+      const ses = GM_getValue(KEYS.session, null);
+      const today = ses?.day === dayStamp() && ses?.name;
+      if (lastError) {
+        shadow.getElementById("footMsg").innerHTML = `<span style="color:#ffd7d7">Save error: ${escapeHtml(clip(lastError, 160))}</span>`;
+      } else if (today && fileOk) {
+        shadow.getElementById("footMsg").innerHTML =
+          `Saving to <b>${escapeHtml(ses.name)}</b> · ${ses.count} row(s) · close this file in Excel while scanning`;
+      } else {
+        shadow.getElementById("footMsg").innerHTML =
+          "SOS file will be created on the first save. Do not open it in Excel while scanning.";
+      }
+      const filter = shadow.getElementById("filter");
+      if (open && shadow.activeElement !== filter && shadow.activeElement !== input) input.focus();
+    }
+
+    function setOpen(on) {
+      open = on;
+      hostEl.classList.toggle("closed", !on);
+      document.documentElement.style.overflow = on ? "hidden" : "";
+      if (on) setTimeout(() => input.focus(), 50);
+    }
+
+    shadow.getElementById("close").addEventListener("click", () => setOpen(false));
+    shadow.getElementById("fab").addEventListener("click", () => setOpen(true));
+    shadow.getElementById("folder").addEventListener("click", () => GM_openInTab(SOS_FOLDER_URL, true));
+    shadow.getElementById("debug").addEventListener("click", () => {
+      copyDebugText()
+        .then((n) => setBanner("info", `<strong>Debug copied</strong> (${n} bytes). Paste it in chat.`))
+        .catch((e) => setBanner("error", escapeHtml(e.message || e)));
+    });
+    shadow.getElementById("filter").addEventListener("input", renderHistory);
+    shadow.getElementById("hist").addEventListener("click", (e) => {
+      const tr = e.target.closest("tr[data-id]");
+      if (!tr) return;
+      selectedId = tr.getAttribute("data-id") || "";
+      const hit = recent.find((r) => r.id === selectedId);
+      if (hit?.result) showTicket(hit.id, hit.result);
+      renderHistory();
+    });
+
+    function syncQueueLen() {
+      scanQueueLen = scanQueue.length + (working ? 1 : 0);
+    }
+
+    function queueBanner(lookingId) {
+      const n = scanQueue.length;
+      const extra = n ? ` · ${n} queued` : "";
+      if (lookingId) setBanner("info", `Looking up <strong>${escapeHtml(lookingId)}</strong>${extra}`);
+    }
+
+    function enqueueScan(raw) {
+      const id = cellText(raw);
+      if (!id) return;
+      if (id.length < 4) {
+        setBanner("error", "Container ID looks too short.");
+        return;
+      }
+      if (working && idsMatch(selectedId, id)) return;
+      if (scanQueue.some((q) => idsMatch(q, id))) return;
+      scanQueue.push(id);
+      syncQueueLen();
+      if (working) queueBanner(selectedId);
+      drainQueue();
+    }
+
+    async function drainQueue() {
+      if (working) return;
+      const id = scanQueue.shift();
+      if (!id) {
+        syncQueueLen();
+        return;
+      }
+      working = true;
+      go.disabled = true;
+      syncQueueLen();
+      try {
+        await lookupOne(id);
+      } finally {
+        working = false;
+        go.disabled = false;
+        input.focus();
+        syncQueueLen();
+        if (scanQueue.length) drainQueue();
+      }
+    }
+
+    async function lookupOne(id) {
+      selectedId = id;
+      showTicket(id, { containerId: id, inventory: [] });
+      queueBanner(id);
+      await new Promise((r) => requestAnimationFrame(() => r()));
+      try {
+        if (!isPeculiar && !peculiarFresh()) {
+          GM_openInTab(PECULIAR_URL, false);
+          const waitStart = Date.now();
+          while (!peculiarFresh() && Date.now() - waitStart < 5000) await sleep(200);
+        }
+        if (!peculiarFresh()) throw new Error("Open Peculiar, finish Midway, leave that tab open.");
+        const result = await lookup(id);
+        if (result.ok) result.containerId = result.containerId || id;
+        lastDebug = {
+          t: nowIso(),
+          containerId: id,
+          ok: Boolean(result.ok),
+          error: result.error || "",
+          oldestAge: result.oldestAge || "",
+          inventoryCount: (result.inventory || []).length,
+          matched: idsMatch(result.containerId, id),
+          lookupMs: result.lookupMs || 0,
+          raw: clip(result.raw || "", 600),
+        };
+        const who = alias || (await currentAlias());
+        alias = who;
+        const sku = result.inventory?.[0]?.fcSku || "";
+        const status = result.ok ? "OK" : result.error === "NOT_FOUND" ? "NOT FOUND" : result.error || "ERROR";
+        selectedId = id;
+        recent.unshift({
+          t: nowIso(),
+          id,
+          age: result.oldestAge || "",
+          sku,
+          status,
+          result,
+        });
+        persist();
+        showTicket(id, result);
+        renderStats();
+        renderHistory();
+        const extra = scanQueue.length ? ` · ${scanQueue.length} queued` : "";
+        setBanner(
+          result.ok ? "found" : result.error === "NOT_FOUND" ? "missing" : "error",
+          result.ok
+            ? `<strong>SAVING</strong> ${escapeHtml(id)}${extra}`
+            : `<strong>${escapeHtml(status)}</strong> ${escapeHtml(id)}${extra}`
+        );
+        const rows = rowsFromResult(id, result, who);
+        enqueueSave(() => appendSosRows(rows, who))
+          .then((session) => {
+            spOk = true;
+            fileOk = true;
+            lastError = "";
+            tick();
+            if (working || !idsMatch(selectedId, id)) return;
+            setBanner(
+              result.ok ? "found" : result.error === "NOT_FOUND" ? "missing" : "error",
+              result.ok
+                ? `<strong>SAVED</strong> ${escapeHtml(id)}`
+                : `<strong>${escapeHtml(status)}</strong> · ${escapeHtml(session.name)}`
+            );
+          })
+          .catch((err) => {
+            fileOk = false;
+            tick();
+            if (working || !idsMatch(selectedId, id)) return;
+            setBanner("error", `<strong>Lookup shown, save failed.</strong> ${escapeHtml(err.message || err)}`);
+          });
+      } catch (err) {
+        lastDebug = { t: nowIso(), error: String(err.message || err) };
+        setBanner(
+          "error",
+          `<strong>NOT SAVED.</strong> ${escapeHtml(err.message || err)} Open SOS folder once if this is a SharePoint login issue.`
+        );
+      }
+    }
+
+    function run() {
+      enqueueScan(input.value);
+      input.value = "";
+      input.focus();
+    }
+
+    go.addEventListener("click", run);
+    shadow.getElementById("backdrop").addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      input.focus();
+    });
+    window.addEventListener(
+      "keydown",
+      (e) => {
+        if (!open) return;
+        const path = typeof e.composedPath === "function" ? e.composedPath() : [];
+        const filter = shadow.getElementById("filter");
+        if (path.includes(filter)) return;
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        if (e.key === "Enter" || e.key === "Tab") {
+          e.preventDefault();
+          run();
+          return;
+        }
+        if (e.key === "Backspace") {
+          e.preventDefault();
+          input.value = input.value.slice(0, -1);
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setOpen(false);
+          return;
+        }
+        if (e.key.length === 1) {
+          e.preventDefault();
+          if (shadow.activeElement !== input) input.focus();
+          input.value += e.key;
+        }
+      },
+      true
+    );
+
+    tick();
+    setOpen(true);
+    setInterval(tick, 1000);
+    setTimeout(() => input.focus(), 200);
+
+    currentAlias()
+      .then(async (who) => {
+        alias = who;
+        shadow.getElementById("opTitle").textContent = who;
+        const stored = loadHistory(who);
+        if (stored.length) {
+          recent.splice(0, recent.length, ...stored);
+          renderStats();
+          renderHistory();
+          if (recent[0]?.result) showTicket(recent[0].id, recent[0].result);
+        }
+        await digest();
+        await assertSosFolder();
+        spOk = true;
+        await ensureSosCache(who);
+        fileOk = true;
+        lastError = "";
+        tick();
+        setBanner("ready", `READY · <strong>${escapeHtml(who)}</strong>`);
+      })
+      .catch((err) => {
+        spOk = false;
+        fileOk = false;
+        tick();
+        setBanner(
+          "error",
+          `SharePoint save path failed. Open the SOS folder once, allow amazon-my.sharepoint.com, then refresh. ${escapeHtml(err.message || err)}`
+        );
+      });
+
+    try {
+      GM_registerMenuCommand("Open SOS folder", () => GM_openInTab(SOS_FOLDER_URL, true));
+      GM_registerMenuCommand("Open Peculiar", () => GM_openInTab(PECULIAR_URL, true));
+      GM_registerMenuCommand("Copy Debug", () => copyDebugText().catch(() => {}));
+    } catch {
+      /* optional */
+    }
+  }
+
+  if (isPeculiar && isTop) {
+    startPeculiarWorker();
+    startScanner();
+  }
+})();

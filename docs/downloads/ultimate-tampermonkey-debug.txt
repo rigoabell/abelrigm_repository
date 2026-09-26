@@ -1,0 +1,727 @@
+// ==UserScript==
+// @name         Ultimate Tampermonkey Debug
+// @namespace    ultimate-tampermonkey
+// @version      0.1.0
+// @description  Debug build for investigating Ultimate Tampermonkey behavior
+// @author       Cursor
+// @match        https://us-east-1.quicksight.aws.amazon.com/sn/account/quetzal/dashboards/ed0061b1-143a-4b06-adf5-8bbe28d30023/*
+// @grant        GM_setClipboard
+// @run-at       document-idle
+// ==/UserScript==
+(function() {
+	//#region src/debug-main.ts
+	var installationKey = "__ultimateTmQuicksightDebugInstalled";
+	var dashboardPath = "/sn/account/quetzal/dashboards/ed0061b1-143a-4b06-adf5-8bbe28d30023/";
+	var loginVisualTitle = "Pending APEX Engagements (Click Me To Filter)";
+	var summaryVisualTitle = "Disposition Level Accuracy Summary";
+	var debugTask = {
+		active: true,
+		title: "QuickSight auto-capture debug",
+		inactiveMessage: "No debugging required right now. You can turn off this debug userscript.",
+		instructions: [
+			"Debug steps:",
+			"1. Open the APEX dashboard and stay on this sheet.",
+			"2. Make sure both target visuals are visible:",
+			"   - Pending APEX Engagements",
+			"   - Disposition Level Accuracy Summary",
+			"3. Scroll the login table to the top before running.",
+			"4. Click \"Run test\" to run the same automated row-selection path used by the main script.",
+			"5. If it stops or fails, click \"Copy debug\" and send the full report."
+		]
+	};
+	function onDocumentReady(callback) {
+		if (document.readyState === "loading") {
+			document.addEventListener("DOMContentLoaded", () => {
+				callback();
+			}, { once: true });
+			return;
+		}
+		callback();
+	}
+	function normalizeText(value) {
+		return (value ?? "").replace(/\s+/g, " ").trim();
+	}
+	function delay(ms) {
+		return new Promise((resolve) => {
+			window.setTimeout(resolve, ms);
+		});
+	}
+	function clamp(value, min, max) {
+		return Math.min(Math.max(value, min), max);
+	}
+	async function copyText(text) {
+		if (typeof GM_setClipboard === "function") {
+			GM_setClipboard(text, "text");
+			return;
+		}
+		if (navigator.clipboard?.writeText) {
+			await navigator.clipboard.writeText(text);
+			return;
+		}
+		const textarea = document.createElement("textarea");
+		textarea.value = text;
+		textarea.style.position = "fixed";
+		textarea.style.opacity = "0";
+		document.body.appendChild(textarea);
+		textarea.select();
+		document.execCommand("copy");
+		textarea.remove();
+	}
+	function createStyles() {
+		const style = document.createElement("style");
+		style.textContent = `
+    .ut-qs-debug-icon {
+      position: fixed;
+      width: 40px;
+      height: 40px;
+      border: none;
+      border-radius: 9999px;
+      background: rgba(15, 23, 42, 0.94);
+      color: #f8fafc;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
+      cursor: grab;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font: 700 11px/1 Inter, "Segoe UI", Arial, sans-serif;
+      z-index: 2147483646;
+      user-select: none;
+    }
+    .ut-qs-debug-icon:active {
+      cursor: grabbing;
+    }
+    .ut-qs-debug-panel {
+      position: fixed;
+      width: 360px;
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.98);
+      color: #0f172a;
+      box-shadow: 0 14px 36px rgba(15, 23, 42, 0.12);
+      z-index: 2147483646;
+      font: 500 12px/1.35 Inter, "Segoe UI", Arial, sans-serif;
+    }
+    .ut-qs-debug-panel[data-open="true"] {
+      display: flex;
+    }
+    .ut-qs-debug-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .ut-qs-debug-title {
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .ut-qs-debug-button-row {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .ut-qs-debug-button {
+      border: none;
+      min-height: 32px;
+      border-radius: 10px;
+      padding: 0 10px;
+      cursor: pointer;
+      background: #eef2f7;
+      color: #0f172a;
+      font: inherit;
+      font-weight: 600;
+    }
+    .ut-qs-debug-button[data-variant="primary"] {
+      background: #0f172a;
+      color: #f8fafc;
+    }
+    .ut-qs-debug-button[data-variant="ghost"] {
+      min-width: 32px;
+      padding: 0;
+      background: #f1f5f9;
+      color: #475569;
+    }
+    .ut-qs-debug-button[disabled] {
+      opacity: 0.6;
+      cursor: wait;
+    }
+    .ut-qs-debug-instructions {
+      padding: 8px 10px;
+      border-radius: 10px;
+      background: #f8fafc;
+      color: #334155;
+      white-space: pre-wrap;
+    }
+    .ut-qs-debug-status {
+      color: #64748b;
+      font-size: 11px;
+    }
+    .ut-qs-debug-log {
+      max-height: 240px;
+      overflow: auto;
+      margin: 0;
+      padding: 10px;
+      border-radius: 10px;
+      background: #0f172a;
+      color: #e2e8f0;
+      font: 500 11px/1.35 Consolas, "SFMono-Regular", monospace;
+      white-space: pre-wrap;
+    }
+  `;
+		return style;
+	}
+	function getVisualTitleLabel(titleText) {
+		return Array.from(document.querySelectorAll("[data-automation-id=\"analysis_visual_title_label\"]")).find((element) => {
+			const contextText = normalizeText(element.dataset.automationContext);
+			const renderedText = normalizeText(element.textContent);
+			const normalizedTitle = normalizeText(titleText);
+			return contextText === normalizedTitle || renderedText === normalizedTitle;
+		}) ?? null;
+	}
+	function getVisualBlock(titleText) {
+		return getVisualTitleLabel(titleText)?.closest("[id^=\"block-\"]") ?? null;
+	}
+	function getPrintableCellText(element) {
+		return element?.querySelector(".printable-cell")?.textContent?.trim() ?? element?.getAttribute("title")?.trim() ?? "";
+	}
+	function getLoginTargets() {
+		const loginBlock = getVisualBlock(loginVisualTitle);
+		if (!loginBlock) return [];
+		const cells = Array.from(loginBlock.querySelectorAll("[data-automation-id^=\"sn-table-cell-\"][data-col-path=\"1\"][data-row-path]"));
+		const deduped = /* @__PURE__ */ new Map();
+		for (const cell of cells) {
+			const login = getPrintableCellText(cell);
+			if (!/^[a-z][a-z0-9_-]{2,}$/i.test(login)) continue;
+			const rowPath = cell.dataset.rowPath ?? `${deduped.size}`;
+			if (!deduped.has(rowPath)) deduped.set(rowPath, {
+				rowPath,
+				login
+			});
+		}
+		return Array.from(deduped.entries()).sort((left, right) => Number(left[0]) - Number(right[0])).map(([, target]) => target);
+	}
+	function getLoginCell(target) {
+		const loginBlock = getVisualBlock(loginVisualTitle);
+		if (!loginBlock) return null;
+		return loginBlock.querySelector(`[data-automation-id^="sn-table-cell-"][data-col-path="1"][data-row-path="${target.rowPath}"]`) ?? Array.from(loginBlock.querySelectorAll("[data-automation-id^=\"sn-table-cell-\"][data-col-path=\"1\"][data-row-path]")).find((cell) => getPrintableCellText(cell) === target.login) ?? null;
+	}
+	function readAccuracySnapshot() {
+		const summaryBlock = getVisualBlock(summaryVisualTitle);
+		if (!summaryBlock) return null;
+		const sellableAccuracy = getPrintableCellText(summaryBlock.querySelector("[data-col-path=\"0\"][data-row-path=\"0\"]"));
+		const unsellableAccuracy = getPrintableCellText(summaryBlock.querySelector("[data-col-path=\"0\"][data-row-path=\"1\"]"));
+		if (!sellableAccuracy || !unsellableAccuracy) return null;
+		return {
+			sellableAccuracy,
+			unsellableAccuracy
+		};
+	}
+	function getCellState(cell) {
+		if (!cell) return "missing-cell";
+		return JSON.stringify({
+			rowPath: cell.dataset.rowPath ?? "",
+			className: cell.className,
+			title: cell.getAttribute("title") ?? "",
+			ariaLabel: cell.getAttribute("aria-label") ?? ""
+		});
+	}
+	async function waitForAccuracySnapshot(previousSnapshot) {
+		const startedAt = Date.now();
+		const summaryRoot = getVisualBlock(summaryVisualTitle)?.parentElement ?? document.body;
+		let mutationCount = 0;
+		let lastKey = "";
+		let stableCount = 0;
+		const observer = new MutationObserver(() => {
+			mutationCount += 1;
+		});
+		observer.observe(summaryRoot, {
+			childList: true,
+			subtree: true,
+			characterData: true,
+			attributes: true
+		});
+		try {
+			await delay(400);
+			while (Date.now() - startedAt < 12e3) {
+				const snapshot = readAccuracySnapshot();
+				if (snapshot) {
+					const key = `${snapshot.sellableAccuracy}|${snapshot.unsellableAccuracy}`;
+					if (key === lastKey) stableCount += 1;
+					else {
+						lastKey = key;
+						stableCount = 1;
+					}
+					const previousKey = previousSnapshot ? `${previousSnapshot.sellableAccuracy}|${previousSnapshot.unsellableAccuracy}` : "";
+					const changedFromPrevious = !previousSnapshot || key !== previousKey;
+					if (stableCount >= 2 && (changedFromPrevious || mutationCount > 0)) return {
+						snapshot,
+						mutationCount,
+						changedFromPrevious,
+						timedOut: false
+					};
+				}
+				await delay(150);
+			}
+			return {
+				snapshot: readAccuracySnapshot(),
+				mutationCount,
+				changedFromPrevious: false,
+				timedOut: true
+			};
+		} finally {
+			observer.disconnect();
+		}
+	}
+	function formatInstructions() {
+		return debugTask.instructions.join("\n");
+	}
+	function snapshotToText(snapshot) {
+		if (!snapshot) return "none";
+		return `${snapshot.sellableAccuracy}/${snapshot.unsellableAccuracy}`;
+	}
+	function getSnapshotKey(snapshot) {
+		return snapshot ? `${snapshot.sellableAccuracy}|${snapshot.unsellableAccuracy}` : "";
+	}
+	function parseSnapshotText(snapshotText) {
+		const [sellableAccuracy, unsellableAccuracy] = snapshotText.split("/");
+		if (!sellableAccuracy || !unsellableAccuracy) return null;
+		return {
+			sellableAccuracy: sellableAccuracy.trim(),
+			unsellableAccuracy: unsellableAccuracy.trim()
+		};
+	}
+	function parsePercentValue(value) {
+		const normalized = value.replace("%", "").trim();
+		const parsed = Number.parseFloat(normalized);
+		return Number.isFinite(parsed) ? parsed : null;
+	}
+	function createEmptyRunContext() {
+		return {
+			loginVisualFound: false,
+			summaryVisualFound: false,
+			visibleLoginCount: 0,
+			initialSnapshot: "none",
+			finalSnapshot: "none",
+			results: [],
+			fatalError: ""
+		};
+	}
+	function buildDebugReport(lines, context) {
+		return [
+			"QuickSight Debug Report",
+			`URL: ${window.location.href}`,
+			`Time: ${(/* @__PURE__ */ new Date()).toISOString()}`,
+			"",
+			"Mode:",
+			`- ${debugTask.active ? "Auto capture debug" : "Idle"}`,
+			"",
+			"Environment:",
+			`- Login visual found: ${context.loginVisualFound}`,
+			`- Summary visual found: ${context.summaryVisualFound}`,
+			`- Visible login rows: ${context.visibleLoginCount}`,
+			`- Initial summary snapshot: ${context.initialSnapshot}`,
+			`- Final summary snapshot: ${context.finalSnapshot}`,
+			`- Fatal error: ${context.fatalError || "none"}`,
+			"",
+			formatInstructions(),
+			"",
+			"Per-row results:",
+			...context.results.length > 0 ? context.results.map((result) => [
+				`- [${result.index}] ${result.login}`,
+				`  rowPath=${result.rowPath}`,
+				`  strategy=${result.strategy}`,
+				`  outcome=${result.outcome}`,
+				`  snapshot=${result.snapshot}`,
+				`  mutations=${result.mutationCount}`,
+				`  changedFromPrevious=${result.changedFromPrevious}`,
+				`  timedOut=${result.timedOut}`,
+				`  before=${result.beforeCellState}`,
+				`  after=${result.afterCellState}`
+			].join("\n")) : ["- none"],
+			"",
+			"Logs:",
+			...lines
+		].join("\n");
+	}
+	function getErrorMessage(error) {
+		return error instanceof Error ? error.message : String(error);
+	}
+	async function attemptKeyboardSelection(element, key) {
+		element.scrollIntoView({
+			block: "center",
+			inline: "center"
+		});
+		await delay(120);
+		try {
+			element.focus({ preventScroll: true });
+		} catch {
+			element.focus();
+		}
+		element.dispatchEvent(new KeyboardEvent("keydown", {
+			bubbles: true,
+			cancelable: true,
+			composed: true,
+			key,
+			code: key === "Enter" ? "Enter" : "Space",
+			charCode: key === "Enter" ? 13 : 32,
+			keyCode: key === "Enter" ? 13 : 32,
+			which: key === "Enter" ? 13 : 32
+		}));
+		await delay(20);
+		element.dispatchEvent(new KeyboardEvent("keyup", {
+			bubbles: true,
+			cancelable: true,
+			composed: true,
+			key,
+			code: key === "Enter" ? "Enter" : "Space",
+			charCode: key === "Enter" ? 13 : 32,
+			keyCode: key === "Enter" ? 13 : 32,
+			which: key === "Enter" ? 13 : 32
+		}));
+	}
+	function getApplicationTargets(cell) {
+		if (!cell) return [];
+		const targets = [];
+		let cursor = cell;
+		while (cursor) {
+			if (cursor.getAttribute("role") === "application" && !targets.includes(cursor)) targets.push(cursor);
+			cursor = cursor.parentElement;
+		}
+		return targets;
+	}
+	async function runKeyboardStrategies(target, previousSnapshot) {
+		const cell = getLoginCell(target);
+		if (!cell) return {
+			strategy: "missing-cell",
+			snapshot: null,
+			changedFromPrevious: false,
+			selectionEvidence: false,
+			timedOut: false
+		};
+		const beforeCellState = getCellState(cell);
+		const strategies = [{
+			label: "cell-key-enter",
+			run: async () => {
+				await attemptKeyboardSelection(cell, "Enter");
+			}
+		}, {
+			label: "cell-key-space",
+			run: async () => {
+				await attemptKeyboardSelection(cell, " ");
+			}
+		}];
+		for (const appTarget of getApplicationTargets(cell)) {
+			strategies.push({
+				label: "app-key-enter",
+				run: async () => {
+					await attemptKeyboardSelection(appTarget, "Enter");
+				}
+			});
+			strategies.push({
+				label: "app-key-space",
+				run: async () => {
+					await attemptKeyboardSelection(appTarget, " ");
+				}
+			});
+		}
+		let bestSameValueResult = null;
+		for (const strategy of strategies) {
+			await strategy.run();
+			const waitResult = await waitForAccuracySnapshot(previousSnapshot);
+			const selectionEvidence = beforeCellState !== getCellState(getLoginCell(target));
+			if (waitResult.snapshot && waitResult.changedFromPrevious) return {
+				strategy: strategy.label,
+				snapshot: waitResult.snapshot,
+				changedFromPrevious: true,
+				selectionEvidence,
+				timedOut: waitResult.timedOut
+			};
+			if (!bestSameValueResult && waitResult.snapshot && selectionEvidence && !waitResult.timedOut) bestSameValueResult = {
+				strategy: strategy.label,
+				snapshot: waitResult.snapshot,
+				changedFromPrevious: false,
+				selectionEvidence: true,
+				timedOut: false
+			};
+		}
+		return bestSameValueResult ?? {
+			strategy: "no-keyboard-strategy",
+			snapshot: readAccuracySnapshot(),
+			changedFromPrevious: false,
+			selectionEvidence: false,
+			timedOut: false
+		};
+	}
+	async function verifySameValueCapture(loginTargets, results, target, candidateSnapshot) {
+		const candidateKey = getSnapshotKey(candidateSnapshot);
+		const anchorResult = results.find((result) => {
+			const snapshot = parseSnapshotText(result.snapshot);
+			return snapshot && parsePercentValue(snapshot.sellableAccuracy) !== null && parsePercentValue(snapshot.unsellableAccuracy) !== null && getSnapshotKey(snapshot) !== candidateKey;
+		});
+		if (!anchorResult) return false;
+		const anchorTarget = loginTargets.find((item) => item.login === anchorResult.login);
+		if (!anchorTarget) return false;
+		const movedAway = await runKeyboardStrategies(anchorTarget, candidateSnapshot);
+		if (!movedAway.snapshot || !movedAway.changedFromPrevious) return false;
+		const returned = await runKeyboardStrategies(target, movedAway.snapshot);
+		return getSnapshotKey(returned.snapshot) === candidateKey && returned.changedFromPrevious;
+	}
+	function installDebugger() {
+		if (!window.location.href.includes(dashboardPath)) return;
+		const appWindow = window;
+		if (appWindow[installationKey]) return;
+		appWindow[installationKey] = true;
+		document.documentElement.appendChild(createStyles());
+		const icon = document.createElement("button");
+		const panel = document.createElement("div");
+		const header = document.createElement("div");
+		const title = document.createElement("div");
+		const closeButton = document.createElement("button");
+		const instructions = document.createElement("div");
+		const buttonRow = document.createElement("div");
+		const runButton = document.createElement("button");
+		const copyButton = document.createElement("button");
+		const status = document.createElement("div");
+		const logBox = document.createElement("pre");
+		let logs = ["Ready."];
+		let lastRunContext = createEmptyRunContext();
+		let panelOpen = false;
+		let isDragging = false;
+		let movedDuringPointer = false;
+		let processingClick = false;
+		let previousSnapshot = null;
+		let pointerOffsetX = 0;
+		let pointerOffsetY = 0;
+		let position = {
+			x: window.innerWidth - 72,
+			y: window.innerHeight - 72
+		};
+		function applyIconPosition() {
+			icon.style.left = `${position.x}px`;
+			icon.style.top = `${position.y}px`;
+		}
+		function positionPanel() {
+			const iconRect = icon.getBoundingClientRect();
+			const panelWidth = panel.offsetWidth || 360;
+			const panelHeight = panel.offsetHeight || 420;
+			const left = clamp(iconRect.left + iconRect.width - panelWidth, 12, window.innerWidth - panelWidth - 12);
+			const preferredTop = iconRect.top - panelHeight - 4;
+			const top = preferredTop >= 12 ? preferredTop : clamp(iconRect.bottom, 12, window.innerHeight - panelHeight - 12);
+			panel.style.left = `${left}px`;
+			panel.style.top = `${top}px`;
+		}
+		function render() {
+			panel.dataset.open = panelOpen ? "true" : "false";
+			status.textContent = debugTask.active ? logs[0] ?? "Ready." : debugTask.inactiveMessage;
+			logBox.textContent = logs.join("\n");
+			copyButton.disabled = logs.length === 0;
+			runButton.disabled = !debugTask.active || processingClick;
+			runButton.textContent = debugTask.active ? "Run test" : "No debug task";
+			instructions.textContent = debugTask.active ? formatInstructions() : `${debugTask.inactiveMessage}\n\nWhen a new debugging task is active, this panel will show the exact steps automatically.`;
+			if (panelOpen) positionPanel();
+		}
+		function pushLog(line) {
+			logs.unshift(line);
+			logs = logs.slice(0, 80);
+			render();
+		}
+		icon.type = "button";
+		icon.className = "ut-qs-debug-icon";
+		icon.textContent = "DBG";
+		icon.setAttribute("aria-label", "Open QuickSight debug panel");
+		applyIconPosition();
+		panel.className = "ut-qs-debug-panel";
+		panel.dataset.open = "false";
+		header.className = "ut-qs-debug-header";
+		title.className = "ut-qs-debug-title";
+		title.textContent = debugTask.title;
+		closeButton.className = "ut-qs-debug-button";
+		closeButton.dataset.variant = "ghost";
+		closeButton.type = "button";
+		closeButton.textContent = "×";
+		instructions.className = "ut-qs-debug-instructions";
+		instructions.textContent = formatInstructions();
+		buttonRow.className = "ut-qs-debug-button-row";
+		runButton.className = "ut-qs-debug-button";
+		runButton.dataset.variant = "primary";
+		runButton.type = "button";
+		runButton.textContent = "Run test";
+		copyButton.className = "ut-qs-debug-button";
+		copyButton.type = "button";
+		copyButton.textContent = "Copy debug";
+		status.className = "ut-qs-debug-status";
+		logBox.className = "ut-qs-debug-log";
+		header.append(title, closeButton);
+		buttonRow.append(runButton, copyButton);
+		panel.append(header, instructions, buttonRow, status, logBox);
+		runButton.addEventListener("click", () => {
+			if (!debugTask.active) {
+				render();
+				return;
+			}
+			(async () => {
+				processingClick = true;
+				logs = [];
+				lastRunContext = createEmptyRunContext();
+				previousSnapshot = readAccuracySnapshot();
+				const loginTargets = getLoginTargets();
+				lastRunContext.loginVisualFound = getVisualBlock(loginVisualTitle) !== null;
+				lastRunContext.summaryVisualFound = getVisualBlock(summaryVisualTitle) !== null;
+				lastRunContext.visibleLoginCount = loginTargets.length;
+				lastRunContext.initialSnapshot = snapshotToText(previousSnapshot);
+				lastRunContext.finalSnapshot = lastRunContext.initialSnapshot;
+				pushLog(`Starting automated debug run for ${loginTargets.length} visible rows.`);
+				render();
+				for (let index = 0; index < loginTargets.length; index += 1) {
+					const target = loginTargets[index];
+					const beforeCellState = getCellState(getLoginCell(target));
+					const rowIndex = index + 1;
+					pushLog(`[${rowIndex}] ${target.login} before ${beforeCellState}`);
+					try {
+						const result = await runKeyboardStrategies(target, previousSnapshot);
+						const afterCellState = getCellState(getLoginCell(target));
+						const isLastRow = index === loginTargets.length - 1;
+						const acceptedFirstRow = index === 0 && result.snapshot;
+						const acceptedChangedSnapshot = result.snapshot && result.changedFromPrevious;
+						const acceptedLastRow = result.snapshot && isLastRow && result.changedFromPrevious;
+						const acceptedVerifiedSameValue = result.snapshot && !result.changedFromPrevious && result.selectionEvidence && await verifySameValueCapture(loginTargets, lastRunContext.results, target, result.snapshot);
+						const accepted = acceptedFirstRow || acceptedChangedSnapshot || acceptedLastRow || acceptedVerifiedSameValue;
+						const snapshotText = snapshotToText(result.snapshot);
+						const outcome = accepted ? "updated-values" : result.selectionEvidence ? "reacted-same-values" : result.timedOut ? "no-update-timeout" : "no-update";
+						pushLog(`[${rowIndex}] ${target.login} strategy=${result.strategy} outcome=${outcome} changed=${result.changedFromPrevious} timedOut=${result.timedOut} snapshot=${snapshotText} after=${afterCellState}`);
+						if (accepted && result.snapshot) {
+							lastRunContext.results.push({
+								index: rowIndex,
+								login: target.login,
+								rowPath: target.rowPath,
+								strategy: result.strategy,
+								beforeCellState,
+								afterCellState,
+								mutationCount: result.selectionEvidence ? 1 : 0,
+								changedFromPrevious: result.changedFromPrevious,
+								timedOut: result.timedOut,
+								snapshot: snapshotText,
+								outcome
+							});
+							previousSnapshot = result.snapshot;
+						} else lastRunContext.results.push({
+							index: rowIndex,
+							login: target.login,
+							rowPath: target.rowPath,
+							strategy: result.strategy,
+							beforeCellState,
+							afterCellState,
+							mutationCount: result.selectionEvidence ? 1 : 0,
+							changedFromPrevious: result.changedFromPrevious,
+							timedOut: result.timedOut,
+							snapshot: snapshotText,
+							outcome: "no-strategy-changed-summary"
+						});
+					} catch (error) {
+						const message = getErrorMessage(error);
+						lastRunContext.fatalError = message;
+						pushLog(`[${rowIndex}] ${target.login} error=${message}`);
+						lastRunContext.results.push({
+							index: rowIndex,
+							login: target.login,
+							rowPath: target.rowPath,
+							strategy: "threw-before-result",
+							beforeCellState,
+							afterCellState: getCellState(getLoginCell(target)),
+							mutationCount: 0,
+							changedFromPrevious: false,
+							timedOut: false,
+							snapshot: snapshotToText(readAccuracySnapshot()),
+							outcome: `error:${message}`
+						});
+						break;
+					}
+				}
+				lastRunContext.finalSnapshot = snapshotToText(readAccuracySnapshot());
+				pushLog("Automated debug run complete.");
+				processingClick = false;
+				render();
+			})().catch((error) => {
+				lastRunContext.fatalError = getErrorMessage(error);
+				lastRunContext.finalSnapshot = snapshotToText(readAccuracySnapshot());
+				pushLog(`Run failed: ${getErrorMessage(error)}`);
+				processingClick = false;
+				render();
+			});
+		});
+		copyButton.addEventListener("click", () => {
+			copyText(buildDebugReport(logs, lastRunContext)).catch((error) => {
+				pushLog(`Copy failed: ${error instanceof Error ? error.message : String(error)}`);
+			});
+		});
+		icon.addEventListener("click", () => {
+			if (movedDuringPointer) {
+				movedDuringPointer = false;
+				return;
+			}
+			panelOpen = !panelOpen;
+			render();
+		});
+		closeButton.addEventListener("click", () => {
+			panelOpen = false;
+			render();
+		});
+		icon.addEventListener("pointerdown", (event) => {
+			isDragging = true;
+			movedDuringPointer = false;
+			pointerOffsetX = event.clientX - position.x;
+			pointerOffsetY = event.clientY - position.y;
+			icon.setPointerCapture(event.pointerId);
+		});
+		icon.addEventListener("pointermove", (event) => {
+			if (!isDragging) return;
+			const nextX = clamp(event.clientX - pointerOffsetX, 12, window.innerWidth - 56);
+			const nextY = clamp(event.clientY - pointerOffsetY, 12, window.innerHeight - 56);
+			if (Math.abs(nextX - position.x) > 2 || Math.abs(nextY - position.y) > 2) movedDuringPointer = true;
+			position = {
+				x: nextX,
+				y: nextY
+			};
+			applyIconPosition();
+			if (panelOpen) positionPanel();
+		});
+		icon.addEventListener("pointerup", (event) => {
+			if (!isDragging) return;
+			isDragging = false;
+			icon.releasePointerCapture(event.pointerId);
+		});
+		icon.addEventListener("pointercancel", () => {
+			isDragging = false;
+		});
+		document.addEventListener("click", (event) => {
+			if (!panelOpen) return;
+			const targetNode = event.target;
+			if (targetNode && (panel.contains(targetNode) || icon.contains(targetNode))) return;
+			panelOpen = false;
+			render();
+		});
+		document.addEventListener("keydown", (event) => {
+			if (event.key === "Escape") {
+				panelOpen = false;
+				render();
+			}
+		});
+		window.addEventListener("resize", () => {
+			position = {
+				x: clamp(position.x, 12, window.innerWidth - 56),
+				y: clamp(position.y, 12, window.innerHeight - 56)
+			};
+			applyIconPosition();
+			if (panelOpen) positionPanel();
+		});
+		render();
+		document.body.append(icon, panel);
+	}
+	onDocumentReady(() => {
+		installDebugger();
+	});
+	//#endregion
+})();

@@ -1,0 +1,2213 @@
+// ==UserScript==
+// @name         QuickSight Pending Engagements
+// @namespace    https://github.com/ap3x/quicksight-pending-engagements
+// @version      2.5.2
+// @description  Collect AP3X and IDNM Pending Engagements; panel for clocked-in / copy logins / copy table
+// @author       AP3X
+// @match        https://*.quicksight.aws.amazon.com/*
+// @match        https://quicksight.aws.amazon.com/*
+// @grant        GM_setClipboard
+// @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
+// @connect      fclm-portal.amazon.com
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const SCRIPT = { name: 'QuickSight Pending Engagements', version: '2.5.2' };
+  const PREFERRED_VISUAL_TITLE = 'Pending Engagements';
+  const KNOWN_BLOCK_ID =
+    'block-ed0061b1-143a-4b06-adf5-8bbe28d30023_b9469711-c34c-4bc1-8ae8-827b8fe8ceca';
+  const KNOWN_IDNM_BLOCK_ID =
+    'block-ed0061b1-143a-4b06-adf5-8bbe28d30023_a04bfe8e-d37c-4510-8c2d-70ddc89c03bc';
+  const KNOWN_DETAIL_BLOCK_ID =
+    'block-ed0061b1-143a-4b06-adf5-8bbe28d30023_e56f85f4-1283-47d4-816c-4f0bb68c2d11';
+  const DETAIL_VISUAL_SUFFIX = 'e56f85f4-1283-47d4-816c-4f0bb68c2d11';
+  const STORAGE_PREFIX = 'qstd-target-block:';
+  const FCLM_TIME_DETAILS_URL = 'https://fclm-portal.amazon.com/employee/timeDetails';
+  const FCLM_ATTENDANCE_URL = 'https://fclm-portal.amazon.com/reports/employeeAttendance';
+  const DEFAULT_WAREHOUSE_ID = 'MEM3';
+  const DETAIL_VALUE_COL = 1;
+  const DETAIL_RATE_COL = 2;
+  const MODES = {
+    ap3x: {
+      id: 'ap3x',
+      label: 'AP3X',
+      warehouseCol: 1,
+      loginCol: 2,
+      cohortCol: 3,
+      nameCol: 4,
+      rateCol: null,
+      walkAttributes: true,
+      panelHeaders: ['Login', 'Attribute', 'Accuracy'],
+      headers: [
+        'Week',
+        'Warehouse',
+        'Login',
+        'Cohort',
+        'Manager',
+        'Hours',
+        'Weeks Engaged',
+        'Disposition Accuracy',
+        'Opportunity Count',
+      ],
+    },
+    idnm: {
+      id: 'idnm',
+      label: 'IDNM',
+      warehouseCol: 2,
+      loginCol: 3,
+      cohortCol: 5,
+      nameCol: 4,
+      rateCol: 7,
+      walkAttributes: false,
+      panelHeaders: ['Login', 'Name', 'Escalation %'],
+      headers: [
+        'Week',
+        'Region',
+        'Warehouse',
+        'Login',
+        'Name',
+        'Cohort',
+        'Manager',
+        'Escalation %',
+        'Escalations',
+        'Total Units',
+        'Weeks Engaged',
+      ],
+    },
+  };
+
+  const CELL_SELECTOR =
+    '[data-automation-id^="sn-table-cell"], div.cell[data-row-path][data-col-path]';
+
+  const STATE = {
+    lastScan: null,
+    observer: null,
+    targetBlockId: null,
+    lockedBlockId: null,
+    lateLoadTimer: null,
+    cellCache: new Map(),
+    cellCacheBlockId: null,
+    columnHeaders: null,
+    collecting: false,
+    autoCollectDone: false,
+    autoCollectScheduled: false,
+    collectPhases: [],
+    attrByLogin: new Map(),
+    attrCollecting: false,
+    clockFiltering: false,
+    lastClockFilter: null,
+    loginClickTimer: null,
+    loginClickBound: false,
+    diagLog: [],
+    lastError: null,
+    activeSheetId: null,
+    mode: null,
+    panelFrozen: false,
+  };
+
+  function qs(sel, root = document) {
+    return root.querySelector(sel);
+  }
+
+  function qsa(sel, root = document) {
+    return Array.from(root.querySelectorAll(sel));
+  }
+
+  function text(el) {
+    if (!el) return '';
+    const printable = el.querySelector('.printable-cell');
+    return (printable?.textContent || el.textContent || '').trim();
+  }
+
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  async function copyText(str) {
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(str, 'text');
+      return true;
+    }
+    try {
+      await navigator.clipboard.writeText(str);
+      return true;
+    } catch (_) {
+      const ta = document.createElement('textarea');
+      ta.value = str;
+      ta.style.cssText = 'position:fixed;opacity:0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    }
+  }
+
+  function diag(msg, extra) {
+    const entry = { t: new Date().toISOString(), msg };
+    if (extra !== undefined) entry.extra = extra;
+    STATE.diagLog.push(entry);
+    if (STATE.diagLog.length > 80) STATE.diagLog.shift();
+    if (extra !== undefined) console.info(`[${SCRIPT.name}] ${msg}`, extra);
+    else console.info(`[${SCRIPT.name}] ${msg}`);
+  }
+
+  function storageKey() {
+    const parts = location.pathname.split('/').filter(Boolean);
+    const dash = parts.find((p) => /^[0-9a-f-]{36}$/i.test(p)) || 'default';
+    const sheetIdx = parts.indexOf('sheets');
+    const sheet = sheetIdx >= 0 ? parts[sheetIdx + 1] || 'sheet' : 'sheet';
+    return `${STORAGE_PREFIX}${dash}:${sheet}`;
+  }
+
+  function currentSheetId() {
+    const parts = location.pathname.split('/').filter(Boolean);
+    const sheetIdx = parts.indexOf('sheets');
+    return sheetIdx >= 0 ? parts[sheetIdx + 1] || '' : '';
+  }
+
+  function loadPersistedBlockId() {
+    try {
+      return localStorage.getItem(storageKey()) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function persistBlockId(blockId) {
+    try {
+      if (blockId) localStorage.setItem(storageKey(), blockId);
+    } catch (_) {
+      /* ignore */
+    }
+    STATE.lockedBlockId = blockId;
+  }
+
+  function clearPersistedBlockId() {
+    try {
+      localStorage.removeItem(storageKey());
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function titleMatchesPreferred(title) {
+    return (title || '').trim().toLowerCase() === PREFERRED_VISUAL_TITLE.toLowerCase();
+  }
+
+  function isIdnmTitle(title) {
+    return /click me to load content/i.test(title || '');
+  }
+
+  function currentMode() {
+    return MODES[STATE.mode] || MODES.ap3x;
+  }
+
+  function loginCol() {
+    return currentMode().loginCol;
+  }
+
+  function warehouseCol() {
+    return currentMode().warehouseCol;
+  }
+
+  function cohortCol() {
+    return currentMode().cohortCol;
+  }
+
+  function looksLikeAssociateLogin(value) {
+    const v = String(value || '').trim();
+    if (!v || /\s/.test(v)) return false;
+    if (/^(MEM\d+|East|West|North|South)$/i.test(v)) return false;
+    return /^[a-z][a-z0-9._-]{2,24}$/i.test(v);
+  }
+
+  function blockHasLoginAt(blockEl, blockId, col) {
+    if (!blockEl || !blockId || col == null) return false;
+    const samples = getCellsInBlock(blockEl, blockId)
+      .filter((el) => Number(el.getAttribute('data-col-path')) === col)
+      .map(text)
+      .filter(Boolean);
+    if (!samples.length) return false;
+    const hits = samples.filter(looksLikeAssociateLogin).length;
+    return hits >= Math.max(1, Math.ceil(samples.length / 2));
+  }
+
+  function detectModeFromBlock(blockEl, blockId, title) {
+    if (blockId === KNOWN_BLOCK_ID || titleMatchesPreferred(title)) {
+      if (!blockEl) return 'ap3x';
+      if (blockHasLoginAt(blockEl, blockId, MODES.ap3x.loginCol)) return 'ap3x';
+      if (blockHasLoginAt(blockEl, blockId, MODES.idnm.loginCol)) return 'idnm';
+      return 'ap3x';
+    }
+    if (blockId === KNOWN_IDNM_BLOCK_ID || isIdnmTitle(title)) {
+      if (!blockEl) return 'idnm';
+      if (blockHasLoginAt(blockEl, blockId, MODES.idnm.loginCol)) return 'idnm';
+      return 'idnm';
+    }
+    if (blockEl) {
+      if (blockHasLoginAt(blockEl, blockId, MODES.ap3x.loginCol)) return 'ap3x';
+      if (blockHasLoginAt(blockEl, blockId, MODES.idnm.loginCol)) return 'idnm';
+    }
+    return null;
+  }
+
+  function setActiveModeFromTarget(target) {
+    if (!target) {
+      STATE.mode = null;
+      return;
+    }
+    const blockEl = getBlockElement(target.blockId);
+    STATE.mode = detectModeFromBlock(blockEl, target.blockId, target.visualTitle);
+  }
+
+  function getLockedBlockId() {
+    const persisted = STATE.lockedBlockId || loadPersistedBlockId();
+    if (persisted) {
+      const meta = getBlockMeta(persisted);
+      if (meta && isAllowedTargetBlock(meta)) return persisted;
+      if (persisted === KNOWN_BLOCK_ID || persisted === KNOWN_IDNM_BLOCK_ID) {
+        if (getBlockElement(persisted) || !meta) return persisted;
+      }
+    }
+    const ap3x = getBlockMeta(KNOWN_BLOCK_ID);
+    if (ap3x && isAllowedTargetBlock(ap3x)) return KNOWN_BLOCK_ID;
+    const idnm = getBlockMeta(KNOWN_IDNM_BLOCK_ID);
+    if (idnm && isAllowedTargetBlock(idnm)) return KNOWN_IDNM_BLOCK_ID;
+    return STATE.mode === 'idnm' ? KNOWN_IDNM_BLOCK_ID : KNOWN_BLOCK_ID;
+  }
+
+  function getBlockElement(blockId) {
+    return blockId ? document.getElementById(blockId) : null;
+  }
+
+  function getVisualTitle(blockEl) {
+    if (!blockEl) return '';
+    const label = blockEl.querySelector('[data-automation-id="analysis_visual_title_label"]');
+    return (
+      label?.dataset?.automationContext ||
+      label?.textContent ||
+      blockEl.querySelector('.visual-title')?.textContent ||
+      ''
+    ).trim();
+  }
+
+  function isAllowedTargetBlock(blockMeta) {
+    if (!blockMeta) return false;
+    const blockEl = getBlockElement(blockMeta.blockId);
+    return Boolean(detectModeFromBlock(blockEl, blockMeta.blockId, blockMeta.visualTitle));
+  }
+
+  function getCellsInBlock(blockEl, blockId) {
+    if (!blockEl || !blockId) return [];
+    return qsa(CELL_SELECTOR, blockEl).filter((el) => el.closest('[id^="block-"]')?.id === blockId);
+  }
+
+  function getBlockMeta(blockId) {
+    const blockEl = getBlockElement(blockId);
+    if (!blockEl) return null;
+    const cells = getCellsInBlock(blockEl, blockId);
+    return {
+      blockId,
+      visualTitle: getVisualTitle(blockEl),
+      cellCount: cells.length,
+      hasTableCells: cells.length > 0,
+    };
+  }
+
+  function resolveTargetBlock(allVisualBlocks) {
+    const ap3x =
+      allVisualBlocks.find((b) => b.blockId === KNOWN_BLOCK_ID) || getBlockMeta(KNOWN_BLOCK_ID);
+    if (ap3x && ap3x.hasTableCells && isAllowedTargetBlock(ap3x)) return ap3x;
+
+    const idnm =
+      allVisualBlocks.find((b) => b.blockId === KNOWN_IDNM_BLOCK_ID) ||
+      getBlockMeta(KNOWN_IDNM_BLOCK_ID);
+    if (idnm && idnm.hasTableCells && isAllowedTargetBlock(idnm)) return idnm;
+
+    const lockedId = STATE.lockedBlockId || loadPersistedBlockId();
+    if (lockedId) {
+      const locked =
+        allVisualBlocks.find((b) => b.blockId === lockedId) || getBlockMeta(lockedId);
+      if (locked && isAllowedTargetBlock(locked)) return locked;
+    }
+
+    return (
+      allVisualBlocks.find((b) => isAllowedTargetBlock(b)) || null
+    );
+  }
+
+  function clearCellCache() {
+    STATE.cellCache.clear();
+    STATE.cellCacheBlockId = null;
+  }
+
+  function mergeCellsIntoCache(blockId, cells) {
+    if (!blockId) return;
+    if (STATE.cellCacheBlockId && STATE.cellCacheBlockId !== blockId) clearCellCache();
+    STATE.cellCacheBlockId = blockId;
+    for (const c of cells) {
+      if (c.rowPath == null || c.colPath == null || !c.value) continue;
+      STATE.cellCache.set(`${blockId}:${c.rowPath}:${c.colPath}`, c.value);
+    }
+  }
+
+  function mergeViewportIntoCache(blockId, blockEl) {
+    if (!blockId || !blockEl) return;
+    const cells = getCellsInBlock(blockEl, blockId).map((el, i) => parseCell(el, i));
+    mergeCellsIntoCache(blockId, cells);
+  }
+
+  function countCachedRows(blockId) {
+    const rows = new Set();
+    for (const key of STATE.cellCache.keys()) {
+      if (!key.startsWith(`${blockId}:`)) continue;
+      rows.add(key.split(':')[1]);
+    }
+    return rows.size;
+  }
+
+  function getCachedLoginsInRowOrder(blockId) {
+    const byRow = new Map();
+    for (const [key, value] of STATE.cellCache) {
+      if (!key.startsWith(`${blockId}:`)) continue;
+      const [, rowStr, colStr] = key.split(':');
+      if (Number(colStr) !== loginCol()) continue;
+      byRow.set(Number(rowStr), value);
+    }
+    return [...byRow.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, login]) => login);
+  }
+
+  function countCachedLogins(blockId) {
+    return getCachedLoginsInRowOrder(blockId).length;
+  }
+
+  function getDfLogins(blockId) {
+    const byRow = new Map();
+    for (const [key, value] of STATE.cellCache) {
+      if (!key.startsWith(`${blockId}:`)) continue;
+      const [, rowStr, colStr] = key.split(':');
+      const row = Number(rowStr);
+      const col = Number(colStr);
+      if (!byRow.has(row)) byRow.set(row, {});
+      byRow.get(row)[col] = value;
+    }
+    const out = [];
+    for (const row of [...byRow.keys()].sort((a, b) => a - b)) {
+      const cols = byRow.get(row);
+      const login = cols[loginCol()];
+      const cohort = (cols[cohortCol()] || '').trim();
+      if (!login) continue;
+      if (/^[df]/i.test(cohort)) out.push(login);
+    }
+    return out;
+  }
+
+  function buildMatrixFromCache(blockId) {
+    const rowMap = new Map();
+    let minCol = Infinity;
+    let maxCol = -Infinity;
+    for (const [key, value] of STATE.cellCache) {
+      if (!key.startsWith(`${blockId}:`)) continue;
+      const [, rowStr, colStr] = key.split(':');
+      const row = Number(rowStr);
+      const col = Number(colStr);
+      if (!rowMap.has(row)) rowMap.set(row, new Map());
+      rowMap.get(row).set(col, value);
+      minCol = Math.min(minCol, col);
+      maxCol = Math.max(maxCol, col);
+    }
+    if (!rowMap.size) return { rows: [], tsv: '' };
+    const lines = [];
+    for (const row of [...rowMap.keys()].sort((a, b) => a - b)) {
+      const cols = rowMap.get(row);
+      const line = [];
+      for (let c = minCol; c <= maxCol; c++) line.push(cols.get(c) ?? '');
+      lines.push(line.join('\t'));
+    }
+    return { rows: lines, tsv: lines.join('\n') };
+  }
+
+  function bumpCacheScanSummary(blockId) {
+    if (!STATE.lastScan || STATE.lastScan.target?.blockId !== blockId) return;
+    STATE.lastScan.accumulatedMatrix = buildMatrixFromCache(blockId);
+    STATE.lastScan.summary.collected.rows = countCachedRows(blockId);
+    STATE.lastScan.summary.collected.cells = STATE.cellCache.size;
+  }
+
+  function parseCell(cellEl, index) {
+    const rowPath = Number(cellEl.getAttribute('data-row-path'));
+    const colPath = Number(cellEl.getAttribute('data-col-path'));
+    return {
+      index,
+      rowPath: Number.isNaN(rowPath) ? null : rowPath,
+      colPath: Number.isNaN(colPath) ? null : colPath,
+      automationId: cellEl.getAttribute('data-automation-id'),
+      value: text(cellEl),
+      titleAttr: cellEl.getAttribute('title'),
+    };
+  }
+
+  function isInsideBlock(el, blockEl) {
+    return el === blockEl || blockEl.contains(el);
+  }
+
+  function findScrollParent(el) {
+    let node = el?.parentElement;
+    while (node && node !== document.body) {
+      const style = getComputedStyle(node);
+      if (/auto|scroll|overlay/.test(style.overflowY + style.overflow)) {
+        if (node.scrollHeight > node.clientHeight + 2) return node;
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function findTableScroller(blockEl) {
+    if (!blockEl) return null;
+    const sample = qs(CELL_SELECTOR, blockEl);
+    if (!sample) return null;
+
+    const candidates = new Set();
+    let node = sample.parentElement;
+    while (node && node !== blockEl && node !== document.body) {
+      if (node.scrollHeight > node.clientHeight + 2) candidates.add(node);
+      node = node.parentElement;
+    }
+
+    for (const el of qsa('*', blockEl)) {
+      const style = getComputedStyle(el);
+      if (/auto|scroll|overlay/.test(style.overflowY + style.overflow)) {
+        if (el.scrollHeight > el.clientHeight + 2 && el.querySelector(CELL_SELECTOR)) {
+          candidates.add(el);
+        }
+      }
+    }
+
+    const maxH = window.innerHeight * 0.75;
+    const scored = [...candidates]
+      .filter((el) => {
+        if (el === document.body || el === document.documentElement) return false;
+        if (!isInsideBlock(el, blockEl)) return false;
+        if (el.clientHeight > maxH) return false;
+        return el.querySelector(CELL_SELECTOR);
+      })
+      .map((el) => ({ el, scrollRange: el.scrollHeight - el.clientHeight }))
+      .sort((a, b) => b.scrollRange - a.scrollRange);
+
+    return scored[0]?.el || null;
+  }
+
+  function getScrollerMetrics(scroller) {
+    if (!scroller) return { scrollTop: 0, maxScroll: 0 };
+    return {
+      scrollTop: scroller.scrollTop,
+      maxScroll: Math.max(0, scroller.scrollHeight - scroller.clientHeight),
+    };
+  }
+
+  function savePageScroll() {
+    return { x: window.scrollX, y: window.scrollY };
+  }
+
+  function restorePageScroll(pos) {
+    if (pos) window.scrollTo(pos.x, pos.y);
+  }
+
+  function hoverScroller(scroller) {
+    if (!scroller) return;
+    scroller.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+    scroller.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+  }
+
+  function dispatchWheelAt(target, deltaY, count = 1) {
+    if (!target) return;
+    for (let i = 0; i < count; i++) {
+      target.dispatchEvent(
+        new WheelEvent('wheel', {
+          bubbles: true,
+          cancelable: true,
+          deltaY,
+          deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+        }),
+      );
+    }
+  }
+
+  function prepareCellForFocus(cellEl, { scrollIntoView = false } = {}) {
+    if (!cellEl) return null;
+    if (!cellEl.hasAttribute('tabindex')) cellEl.tabIndex = -1;
+    try {
+      cellEl.focus({ preventScroll: !scrollIntoView });
+    } catch (_) {
+      cellEl.focus();
+    }
+    return cellEl;
+  }
+
+  function getBottomRowCell(blockEl, blockId, col = loginCol()) {
+    const cells = getCellsInBlock(blockEl, blockId);
+    let best = null;
+    let bestRow = -1;
+    for (const el of cells) {
+      if (Number(el.getAttribute('data-col-path')) !== col) continue;
+      const row = Number(el.getAttribute('data-row-path'));
+      if (row > bestRow) {
+        bestRow = row;
+        best = el;
+      }
+    }
+    return best;
+  }
+
+  function getMaxRowPathInViewport(blockEl, blockId) {
+    let max = -1;
+    for (const el of getCellsInBlock(blockEl, blockId)) {
+      const row = Number(el.getAttribute('data-row-path'));
+      if (!Number.isNaN(row) && row > max) max = row;
+    }
+    return max;
+  }
+
+  function applyAllScrollStrategies(blockEl, blockId, scroller, pixels, { fast = true } = {}) {
+    const pagePos = savePageScroll();
+    hoverScroller(scroller);
+    const bottom = prepareCellForFocus(getBottomRowCell(blockEl, blockId), { scrollIntoView: false });
+
+    if (fast) {
+      dispatchWheelAt(bottom || scroller, pixels, 5);
+      if (scroller && bottom !== scroller) dispatchWheelAt(scroller, pixels, 4);
+    } else {
+      dispatchWheelAt(bottom || scroller, pixels, 15);
+      if (scroller) dispatchWheelAt(scroller, pixels, 12);
+    }
+
+    if (scroller && scroller.scrollHeight > scroller.clientHeight + 2) {
+      const nextTop =
+        pixels >= 0
+          ? Math.min(scroller.scrollTop + pixels, scroller.scrollHeight - scroller.clientHeight)
+          : Math.max(scroller.scrollTop + pixels, 0);
+      scroller.scrollTop = nextTop;
+      scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+    }
+
+    restorePageScroll(pagePos);
+    return getMaxRowPathInViewport(blockEl, blockId);
+  }
+
+  function dispatchKey(target, key) {
+    if (!target) return;
+    const opts = { key, bubbles: true, cancelable: true };
+    target.dispatchEvent(new KeyboardEvent('keydown', opts));
+    target.dispatchEvent(new KeyboardEvent('keyup', opts));
+  }
+
+  async function scrollTableToTop(blockEl, blockId, scroller) {
+    if (scroller) scroller.scrollTop = 0;
+    for (let i = 0; i < 8; i++) {
+      applyAllScrollStrategies(blockEl, blockId, scroller, -120, { fast: true });
+      await sleep(25);
+    }
+    if (scroller) scroller.scrollTop = 0;
+    mergeViewportIntoCache(blockId, blockEl);
+    bumpCacheScanSummary(blockId);
+    await sleep(80);
+  }
+
+  function estimateTableRows(scroller, collectedRows = 0, scrollPercent = null) {
+    if (!scroller?.scrollHeight) return null;
+    if (scrollPercent != null && scrollPercent >= 95 && collectedRows > 0) return collectedRows;
+    return Math.max(collectedRows, Math.round(scroller.scrollHeight / 25));
+  }
+
+  function isScrollerAtBottom(scroller, slackPx = 5) {
+    if (!scroller) return false;
+    return scroller.scrollTop >= scroller.scrollHeight - scroller.clientHeight - slackPx;
+  }
+
+  function resolveTargetRows(scroller, blockId, blockEl = null) {
+    const fromScroll = estimateTableRows(scroller, 0);
+    if (fromScroll != null && fromScroll > 0) return fromScroll;
+    const el = blockEl || getBlockElement(blockId);
+    const maxRow = el && blockId ? getMaxRowPathInViewport(el, blockId) : -1;
+    if (maxRow >= 0) return maxRow + 1;
+    return null;
+  }
+
+  function saveVisualLayoutState(blockEl) {
+    if (!blockEl) return null;
+    const scroller = findTableScroller(blockEl);
+    return {
+      blockWidth: blockEl.style.width,
+      blockHeight: blockEl.style.height,
+      scrollTop: scroller?.scrollTop ?? 0,
+    };
+  }
+
+  function restoreVisualLayoutAfterCollect(blockEl, snapshot) {
+    if (!blockEl || !snapshot) return;
+    const scroller = findTableScroller(blockEl);
+    if (scroller) scroller.scrollTop = snapshot.scrollTop;
+    blockEl.style.width = snapshot.blockWidth || '';
+    blockEl.style.height = snapshot.blockHeight || '';
+    const active = document.activeElement;
+    if (active && blockEl.contains(active)) active.blur();
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', bubbles: true }));
+  }
+
+  function installPageScrollLock(blockEl) {
+    const onScroll = () => window.scrollTo(window.scrollX, window.scrollY);
+    window.addEventListener('scroll', onScroll, { passive: false });
+    return () => window.removeEventListener('scroll', onScroll);
+  }
+
+  async function waitForViewportAdvance(blockEl, blockId, beforeRow, beforeLogins, timeoutMs = 180) {
+    return new Promise((resolve) => {
+      let settled = false;
+      let debounce = null;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        observer.disconnect();
+        clearTimeout(timer);
+        clearTimeout(debounce);
+        resolve();
+      };
+
+      const check = () => {
+        mergeViewportIntoCache(blockId, blockEl);
+        const row = getMaxRowPathInViewport(blockEl, blockId);
+        const logins = countCachedLogins(blockId);
+        if (row > beforeRow || logins > beforeLogins) finish();
+      };
+
+      const observer = new MutationObserver(() => {
+        clearTimeout(debounce);
+        debounce = setTimeout(check, 25);
+      });
+
+      observer.observe(blockEl, { childList: true, subtree: true, characterData: true });
+      debounce = setTimeout(check, 30);
+      const timer = setTimeout(finish, timeoutMs);
+    });
+  }
+
+  async function runScrollPass(blockEl, blockId, scroller, { nudgePx, maxSteps, passLabel, targetRows }) {
+    let stale = 0;
+    let steps = 0;
+    let scrollStale = 0;
+    let lastLogins = countCachedLogins(blockId);
+    let lastScrollTop = getScrollerMetrics(scroller).scrollTop;
+    const phase = { pass: passLabel, steps: 0, loginsEnd: lastLogins, stale: 0, scrollMoved: false };
+
+    while (stale < 8 && steps < maxSteps) {
+      steps += 1;
+      const maxRowBefore = getMaxRowPathInViewport(blockEl, blockId);
+      const loginsBefore = countCachedLogins(blockId);
+
+      applyAllScrollStrategies(blockEl, blockId, scroller, nudgePx, { fast: true });
+      await waitForViewportAdvance(blockEl, blockId, maxRowBefore, loginsBefore, 180);
+      mergeViewportIntoCache(blockId, blockEl);
+      bumpCacheScanSummary(blockId);
+
+      const logins = countCachedLogins(blockId);
+      const maxRowAfter = getMaxRowPathInViewport(blockEl, blockId);
+      const scrollTop = getScrollerMetrics(scroller).scrollTop;
+      if (scrollTop !== lastScrollTop) {
+        phase.scrollMoved = true;
+        lastScrollTop = scrollTop;
+        scrollStale = 0;
+      } else {
+        scrollStale += 1;
+      }
+
+      if (logins > lastLogins || maxRowAfter > maxRowBefore) {
+        lastLogins = logins;
+        stale = 0;
+      } else {
+        stale += 1;
+      }
+
+      if (targetRows && logins >= targetRows) break;
+      if (isScrollerAtBottom(scroller) && stale >= 2) break;
+      if (scrollStale >= 6 && stale >= 4) break;
+    }
+
+    phase.steps = steps;
+    phase.loginsEnd = countCachedLogins(blockId);
+    phase.stale = stale;
+    STATE.collectPhases.push(phase);
+    return phase;
+  }
+
+  async function runKeyboardWalkPass(blockEl, blockId, scroller, { maxSteps = 100, passLabel = 'keyboard' }) {
+    let stale = 0;
+    let steps = 0;
+    let lastLogins = countCachedLogins(blockId);
+    const phase = { pass: passLabel, steps: 0, loginsEnd: lastLogins, stale: 0 };
+
+    while (stale < 10 && steps < maxSteps) {
+      steps += 1;
+      const loginsBefore = countCachedLogins(blockId);
+      const maxRowBefore = getMaxRowPathInViewport(blockEl, blockId);
+      const bottom = prepareCellForFocus(getBottomRowCell(blockEl, blockId), { scrollIntoView: false });
+
+      if (bottom) {
+        for (const key of ['ArrowDown', 'ArrowDown', 'ArrowDown', 'PageDown']) {
+          dispatchKey(bottom, key);
+        }
+      }
+
+      hoverScroller(scroller);
+      dispatchWheelAt(scroller || blockEl, 60, 8);
+      await waitForViewportAdvance(blockEl, blockId, maxRowBefore, loginsBefore, 500);
+      mergeViewportIntoCache(blockId, blockEl);
+      bumpCacheScanSummary(blockId);
+
+      const logins = countCachedLogins(blockId);
+      if (logins > lastLogins) {
+        lastLogins = logins;
+        stale = 0;
+      } else {
+        stale += 1;
+      }
+    }
+
+    phase.steps = steps;
+    phase.loginsEnd = countCachedLogins(blockId);
+    phase.stale = stale;
+    STATE.collectPhases.push(phase);
+    return phase;
+  }
+
+  async function collectAllNoUserInput({ clearFirst = true } = {}) {
+    if (STATE.collecting) return;
+    STATE.collecting = true;
+    STATE.collectPhases = [];
+
+    let releaseScrollLock = null;
+    let layoutSnapshot = null;
+    let blockId = getLockedBlockId();
+    let loginsStart = 0;
+    let loginsEnd = 0;
+    let collectError = null;
+
+    try {
+      if (clearFirst) clearCellCache();
+
+      const scan = await waitForTableReady();
+      if (!scan?.target || !isAllowedTargetBlock(scan.target)) {
+        toast('Pending Engagements table not found on this sheet', true);
+        return;
+      }
+      blockId = scan.target.blockId;
+      persistBlockId(blockId);
+
+      const blockEl = getBlockElement(scan.target.blockId);
+      if (!blockEl) {
+        toast('Block not found', true);
+        return;
+      }
+
+      layoutSnapshot = saveVisualLayoutState(blockEl);
+      releaseScrollLock = installPageScrollLock(blockEl);
+      refreshScan();
+
+      const scroller = findTableScroller(blockEl);
+      loginsStart = countCachedLogins(blockId);
+      const targetRows = resolveTargetRows(scroller, blockId, blockEl);
+
+      if (scroller && scroller.scrollTop > 10) {
+        await scrollTableToTop(blockEl, blockId, scroller);
+      }
+
+      const nudgePx = Math.max(55, Math.floor((scroller?.clientHeight || 428) * 0.22));
+      const pass1 = await runScrollPass(blockEl, blockId, scroller, {
+        nudgePx,
+        maxSteps: 40,
+        passLabel: 'pass1-wheel',
+        targetRows,
+      });
+
+      loginsEnd = countCachedLogins(blockId);
+      if (targetRows && loginsEnd < targetRows - 3 && pass1.steps < 4 && !pass1.scrollMoved) {
+        await runKeyboardWalkPass(blockEl, blockId, scroller, {
+          maxSteps: 100,
+          passLabel: 'keyboard-walk',
+        });
+        loginsEnd = countCachedLogins(blockId);
+      }
+
+      if (targetRows && loginsEnd < targetRows - 3) {
+        await scrollTableToTop(blockEl, blockId, scroller);
+        await runScrollPass(blockEl, blockId, scroller, {
+          nudgePx: Math.max(30, Math.floor(nudgePx * 0.65)),
+          maxSteps: 50,
+          passLabel: 'pass2-fine',
+          targetRows,
+        });
+        loginsEnd = countCachedLogins(blockId);
+      }
+
+      const finalTarget = resolveTargetRows(scroller, blockId, blockEl) || targetRows;
+      if (!finalTarget || loginsEnd >= finalTarget - 3) {
+        toast(`Done — ${loginsEnd} rows collected`);
+      } else {
+        toast(`${loginsEnd}/${finalTarget} rows — scroll table manually to finish`, true);
+      }
+    } catch (err) {
+      collectError = String(err?.message || err);
+      toast(`Collect error: ${collectError}`, true);
+    } finally {
+      STATE.collecting = false;
+      releaseScrollLock?.();
+      restoreVisualLayoutAfterCollect(getBlockElement(blockId), layoutSnapshot);
+      refreshScan();
+      loginsEnd = countCachedLogins(blockId);
+      if (collectError) {
+        STATE.lastError = collectError;
+        diag('row-collect failed', collectError);
+      } else {
+        diag('row-collect done', {
+          from: loginsStart,
+          to: loginsEnd,
+          phases: STATE.collectPhases.length,
+          mode: STATE.mode,
+        });
+        populatePanelFromCache(blockId, { force: true });
+      }
+      STATE.autoCollectDone = true;
+    }
+  }
+
+  function scanTables() {
+    const blocks = qsa('[id^="block-"]')
+      .map((el) => getBlockMeta(el.id))
+      .filter((b) => b && b.hasTableCells);
+
+    const target = resolveTargetBlock(blocks);
+    maybeResetForNavigation(target?.blockId);
+    setActiveModeFromTarget(target);
+    const blockId = target?.blockId || null;
+    const blockEl = target ? getBlockElement(target.blockId) : null;
+
+    if (blockEl && target && isAllowedTargetBlock(target)) {
+      mergeViewportIntoCache(target.blockId, blockEl);
+      persistBlockId(target.blockId);
+      if (!STATE.panelFrozen && !currentMode().walkAttributes) {
+        populatePanelFromCache(target.blockId);
+      }
+    }
+
+    const cells = blockEl && target ? getCellsInBlock(blockEl, target.blockId).map(parseCell) : [];
+    const rowPaths = [...new Set(cells.map((c) => c.rowPath).filter((r) => r != null))];
+    const matrix = blockId ? buildMatrixFromCache(blockId) : { rows: [], tsv: '' };
+
+    return {
+      target: target
+        ? { ...target, locked: target.blockId === getLockedBlockId() }
+        : null,
+      waitingFor: target ? null : PREFERRED_VISUAL_TITLE,
+      blocks,
+      cells,
+      headers: { inferredColumnHeaders: currentMode().headers },
+      matrix: { tsv: matrix.tsv, dataRows: matrix.rows.length },
+      accumulatedMatrix: matrix,
+      summary: {
+        totalCellsInDom: cells.length,
+        collected: { rows: countCachedRows(blockId), cells: STATE.cellCache.size },
+        matrixSpan: {
+          dataRows: rowPaths.length,
+          minRow: rowPaths.length ? Math.min(...rowPaths) : null,
+          maxRow: rowPaths.length ? Math.max(...rowPaths) : null,
+        },
+      },
+      meta: { scannedAt: new Date().toISOString() },
+    };
+  }
+
+  function maybeResetForNavigation(targetBlockId) {
+    const sheetId = currentSheetId();
+    const sheetChanged = STATE.activeSheetId && STATE.activeSheetId !== sheetId;
+    const blockChanged =
+      targetBlockId && STATE.cellCacheBlockId && STATE.cellCacheBlockId !== targetBlockId;
+      if (sheetChanged || blockChanged) {
+      STATE.autoCollectDone = false;
+      STATE.autoCollectScheduled = false;
+      STATE.attrByLogin.clear();
+      STATE.panelFrozen = false;
+      if (sheetChanged || (blockChanged && STATE.cellCacheBlockId !== targetBlockId)) {
+        clearCellCache();
+      }
+      diag('context change', {
+        fromSheet: STATE.activeSheetId,
+        toSheet: sheetId,
+        fromBlock: STATE.cellCacheBlockId,
+        toBlock: targetBlockId || null,
+      });
+    }
+    STATE.activeSheetId = sheetId;
+  }
+
+  function stripForeignTitleButtons(targetBlockId) {
+    qsa('[id^="block-"]').forEach((el) => {
+      if (targetBlockId && el.id === targetBlockId) return;
+      const wrap = el.querySelector('.qstd-title-btns');
+      if (!wrap) return;
+      wrap.remove();
+      const titleContainer =
+        el.querySelector('.visual-title-container') ||
+        el.querySelector('[data-automation-id="analysis_visual_title_label"]')?.parentElement;
+      if (titleContainer) delete titleContainer.dataset.qstdTitleBtns;
+    });
+  }
+
+  function refreshScan() {
+    STATE.lastScan = scanTables();
+    stripForeignTitleButtons(STATE.lastScan.target?.blockId || null);
+    const blockEl = STATE.lastScan.target ? getBlockElement(STATE.lastScan.target.blockId) : null;
+    watchTableScroll(blockEl);
+    if (STATE.lastScan.target?.blockId) updateTitleCopyButtons(STATE.lastScan.target.blockId);
+    maybeScheduleAutoCollect(STATE.lastScan);
+    return STATE.lastScan;
+  }
+
+  async function waitForTableReady(maxMs = 90000) {
+    const started = Date.now();
+    while (Date.now() - started < maxMs) {
+      const scan = refreshScan();
+      if (scan.target && isAllowedTargetBlock(scan.target) && scan.summary.totalCellsInDom > 0) {
+        return scan;
+      }
+      await sleep(1000);
+    }
+    return null;
+  }
+
+  function maybeScheduleAutoCollect(scan) {
+    if (STATE.autoCollectScheduled || STATE.collecting || STATE.autoCollectDone) return;
+    if (!scan.target || !isAllowedTargetBlock(scan.target) || scan.summary.totalCellsInDom === 0) {
+      return;
+    }
+    STATE.autoCollectScheduled = true;
+    setTimeout(() => collectAllNoUserInput({ clearFirst: false }), 1500);
+  }
+
+  function watchTableScroll(blockEl) {
+    if (!blockEl) return;
+    const sample = qs(CELL_SELECTOR, blockEl);
+    const sp = sample ? findScrollParent(sample) : null;
+    if (!sp || sp.dataset.qstdScrollWatch) return;
+    sp.dataset.qstdScrollWatch = '1';
+    let debounce = null;
+    sp.addEventListener(
+      'scroll',
+      () => {
+        clearTimeout(debounce);
+        debounce = setTimeout(refreshScan, STATE.collecting ? 120 : 350);
+      },
+      { passive: true },
+    );
+  }
+
+  function getUniqueCachedLogins(blockId = getLockedBlockId()) {
+    return [...new Set(getCachedLoginsInRowOrder(blockId))];
+  }
+
+  function sampleCellInfo(blockEl, col = null) {
+    if (!blockEl) return null;
+    const el = getCellsInBlock(blockEl, blockEl.id).find(
+      (c) => col == null || Number(c.getAttribute('data-col-path')) === col,
+    );
+    if (!el) return null;
+    return {
+      row: el.getAttribute('data-row-path'),
+      col: el.getAttribute('data-col-path'),
+      title: el.getAttribute('title'),
+      text: text(el),
+      className: el.className,
+      outer: (el.outerHTML || '').slice(0, 600),
+    };
+  }
+
+  function buildScriptDebugDump() {
+    const peId = getLockedBlockId();
+    const peEl = getBlockElement(peId);
+    const attrEl = getDetailBlockEl();
+    const logins = getUniqueCachedLogins(peId);
+    const attrs = [...STATE.attrByLogin.entries()].map(([login, rec]) => ({
+      login,
+      values: rec.values || [],
+      error: rec.error || null,
+      capturedAt: rec.capturedAt || null,
+    }));
+    const withValues = attrs.filter((a) => a.values.length).length;
+    const empty = attrs.filter((a) => !a.values.length).length;
+    const scan = STATE.lastScan;
+    const matrixRows = scan?.accumulatedMatrix?.rows || [];
+    const payload = {
+      script: SCRIPT,
+      copiedAt: new Date().toISOString(),
+      href: location.href,
+      readyState: document.readyState,
+      flags: {
+        collecting: STATE.collecting,
+        attrCollecting: STATE.attrCollecting,
+        clockFiltering: STATE.clockFiltering,
+        autoCollectDone: STATE.autoCollectDone,
+        autoCollectScheduled: STATE.autoCollectScheduled,
+        lastError: STATE.lastError,
+        mode: STATE.mode,
+        panelFrozen: STATE.panelFrozen,
+      },
+      blocks: {
+        knownPe: KNOWN_BLOCK_ID,
+        knownIdnm: KNOWN_IDNM_BLOCK_ID,
+        lockedPe: peId,
+        persistedPe: loadPersistedBlockId(),
+        peInDom: Boolean(peEl),
+        peTitle: peEl ? getVisualTitle(peEl) : null,
+        peViewportCells: peEl ? getCellsInBlock(peEl, peId).length : 0,
+        knownAttr: KNOWN_DETAIL_BLOCK_ID,
+        attrInDom: Boolean(attrEl),
+        attrId: attrEl?.id || null,
+        attrTitle: attrEl ? getVisualTitle(attrEl) : null,
+        attrViewportCells: attrEl ? getCellsInBlock(attrEl, attrEl.id).length : 0,
+        tableBlockCount: qsa('[id^="block-"]').filter((el) => getCellsInBlock(el, el.id).length).length,
+      },
+      cache: {
+        cells: STATE.cellCache.size,
+        uniqueLogins: logins.length,
+        sampleLogins: logins.slice(0, 12),
+      },
+      lastScan: scan
+        ? {
+            waitingFor: scan.waitingFor,
+            target: scan.target,
+            summary: scan.summary,
+            matrixRows: scan.matrix?.dataRows,
+            matrixHead: matrixRows.slice(0, 3),
+            matrixTail: matrixRows.slice(-1),
+            scannedAt: scan.meta?.scannedAt,
+          }
+        : null,
+      collectPhases: STATE.collectPhases,
+      attributes: {
+        recorded: attrs.length,
+        withValues,
+        empty,
+        sample: attrs.slice(0, 8),
+      },
+      clockFilter: STATE.lastClockFilter,
+      samples: {
+        loginCell: sampleCellInfo(peEl, loginCol()),
+        attrCell: sampleCellInfo(attrEl, DETAIL_VALUE_COL),
+        accuracyCell: sampleCellInfo(attrEl, DETAIL_RATE_COL),
+      },
+      recent: STATE.diagLog.slice(-40),
+    };
+    return [
+      `=== ${SCRIPT.name} debug v${SCRIPT.version} ===`,
+      `Paste this dump to diagnose collect / Attribute recording.`,
+      JSON.stringify(payload, null, 2),
+    ].join('\n');
+  }
+
+  function getRowPathForLogin(blockId, login) {
+    let best = null;
+    for (const [key, value] of STATE.cellCache) {
+      if (!key.startsWith(`${blockId}:`)) continue;
+      const [, rowStr, colStr] = key.split(':');
+      if (Number(colStr) !== loginCol() || value !== login) continue;
+      const row = Number(rowStr);
+      if (best == null || row < best) best = row;
+    }
+    return best;
+  }
+
+  function getDetailBlockEl() {
+    const known = document.getElementById(KNOWN_DETAIL_BLOCK_ID);
+    if (known) return known;
+    const peId = getLockedBlockId();
+    const blocks = qsa('[id^="block-"]').filter(
+      (el) => el.id !== peId && getCellsInBlock(el, el.id).length > 0,
+    );
+    return blocks.find((el) => el.id.includes(DETAIL_VISUAL_SUFFIX)) || null;
+  }
+
+  function detailRowKey(row) {
+    return `${(row?.attribute || '').trim()}\t${(row?.accuracy || '').trim()}`;
+  }
+
+  function normalizeDetailRows(rows) {
+    const out = [];
+    const seen = new Set();
+    for (const row of rows || []) {
+      const rec = {
+        attribute: (row.attribute || '').trim(),
+        accuracy: (row.accuracy || '').trim(),
+      };
+      if (!rec.attribute && !rec.accuracy) continue;
+      const key = detailRowKey(rec);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(rec);
+    }
+    return out;
+  }
+
+  function readDetailValuesFrom(blockEl) {
+    if (!blockEl) return [];
+    const cells = getCellsInBlock(blockEl, blockEl.id);
+    const byRow = new Map();
+    for (const el of cells) {
+      const row = Number(el.getAttribute('data-row-path'));
+      const col = Number(el.getAttribute('data-col-path'));
+      const val = text(el);
+      if (row == null || Number.isNaN(row) || !val) continue;
+      if (!byRow.has(row)) byRow.set(row, {});
+      byRow.get(row)[col] = val;
+    }
+    const rows = [];
+    for (const row of [...byRow.keys()].sort((a, b) => a - b)) {
+      const cols = byRow.get(row);
+      rows.push({
+        attribute: (cols[DETAIL_VALUE_COL] || '').trim(),
+        accuracy: (cols[DETAIL_RATE_COL] || '').trim(),
+      });
+    }
+    return normalizeDetailRows(rows);
+  }
+
+  function snapshotDetailSig() {
+    return readDetailValuesFrom(getDetailBlockEl()).map(detailRowKey).join('\0');
+  }
+
+  async function harvestDetailValues() {
+    const blockEl = getDetailBlockEl();
+    if (!blockEl) return [];
+    const collected = new Map();
+    const merge = () => {
+      for (const row of readDetailValuesFrom(blockEl)) collected.set(detailRowKey(row), row);
+    };
+    merge();
+    const scroller = findTableScroller(blockEl);
+    if (!scroller || scroller.scrollHeight <= scroller.clientHeight + 5) return [...collected.values()];
+
+    const startTop = scroller.scrollTop;
+    scroller.scrollTop = 0;
+    scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+    await sleep(60);
+    merge();
+
+    let stale = 0;
+    let lastSize = collected.size;
+    for (let i = 0; i < 16 && stale < 3; i++) {
+      const step = Math.max(40, Math.floor(scroller.clientHeight * 0.7));
+      scroller.scrollTop = Math.min(scroller.scrollTop + step, scroller.scrollHeight);
+      scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await sleep(70);
+      merge();
+      if (collected.size === lastSize) stale += 1;
+      else stale = 0;
+      lastSize = collected.size;
+      if (isScrollerAtBottom(scroller)) break;
+    }
+
+    scroller.scrollTop = startTop;
+    return [...collected.values()];
+  }
+
+  async function waitForDetailSettle(beforeSig = null) {
+    const started = Date.now();
+    await sleep(900);
+    let lastSig = snapshotDetailSig();
+    let stable = 0;
+    while (Date.now() - started < 8000) {
+      await sleep(200);
+      const sig = snapshotDetailSig();
+      const hasData = sig.length > 0;
+      if (sig === lastSig) {
+        stable += 1;
+        const changed = beforeSig != null && sig !== beforeSig;
+        if (hasData && stable >= 3) break;
+        if (changed && hasData && stable >= 2 && Date.now() - started > 1400) break;
+        if (!hasData && stable >= 10 && Date.now() - started > 2800) break;
+      } else {
+        stable = 0;
+        lastSig = sig;
+      }
+    }
+    return harvestDetailValues();
+  }
+
+  function findLoginCellInBlock(blockEl, blockId, login) {
+    if (!blockEl || !blockId || !login) return null;
+    for (const el of getCellsInBlock(blockEl, blockId)) {
+      if (Number(el.getAttribute('data-col-path')) !== loginCol()) continue;
+      if (text(el) === login) return el;
+    }
+    return null;
+  }
+
+  function pageCtor(name) {
+    try {
+      if (typeof unsafeWindow !== 'undefined' && typeof unsafeWindow[name] === 'function') {
+        return unsafeWindow[name];
+      }
+    } catch (_) {
+      /* sandbox */
+    }
+    return typeof window[name] === 'function' ? window[name] : null;
+  }
+
+  function clickCell(el) {
+    if (!el) return;
+    prepareCellForFocus(el, { scrollIntoView: false });
+    const rect = el.getBoundingClientRect();
+    const clientX = Math.round(rect.left + Math.max(rect.width / 2, 1));
+    const clientY = Math.round(rect.top + Math.max(rect.height / 2, 1));
+    const base = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      button: 0,
+      buttons: 1,
+      clientX,
+      clientY,
+      screenX: clientX,
+      screenY: clientY,
+      detail: 1,
+    };
+    const MouseEv = pageCtor('MouseEvent');
+    const PointerEv = pageCtor('PointerEvent');
+    const fire = (Ctor, type, extra = {}) => {
+      if (typeof Ctor !== 'function') return false;
+      try {
+        el.dispatchEvent(new Ctor(type, { ...base, ...extra }));
+        return true;
+      } catch (_) {
+        try {
+          el.dispatchEvent(new Ctor(type, { bubbles: true, cancelable: true }));
+          return true;
+        } catch (__) {
+          return false;
+        }
+      }
+    };
+    fire(PointerEv, 'pointerdown', { pointerId: 1, pointerType: 'mouse', isPrimary: true });
+    fire(MouseEv, 'mousedown');
+    fire(PointerEv, 'pointerup', { pointerId: 1, pointerType: 'mouse', isPrimary: true, buttons: 0 });
+    fire(MouseEv, 'mouseup', { buttons: 0 });
+    fire(MouseEv, 'click', { buttons: 0 });
+    try {
+      el.click();
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  async function revealLoginCell(blockEl, blockId, scroller, login) {
+    let cell = findLoginCellInBlock(blockEl, blockId, login);
+    if (cell) return cell;
+
+    const rowPath = getRowPathForLogin(blockId, login);
+    if (scroller && rowPath != null) {
+      scroller.scrollTop = Math.max(0, rowPath * 25 - Math.floor((scroller.clientHeight || 200) / 3));
+      hoverScroller(scroller);
+      scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await sleep(220);
+      cell = findLoginCellInBlock(blockEl, blockId, login);
+      if (cell) return cell;
+      applyAllScrollStrategies(blockEl, blockId, scroller, 40, { fast: true });
+      await sleep(120);
+      cell = findLoginCellInBlock(blockEl, blockId, login);
+      if (cell) return cell;
+    }
+
+    await scrollTableToTop(blockEl, blockId, scroller);
+    const nudgePx = Math.max(55, Math.floor((scroller?.clientHeight || 428) * 0.22));
+    for (let i = 0; i < 80; i++) {
+      cell = findLoginCellInBlock(blockEl, blockId, login);
+      if (cell) return cell;
+      const before = getMaxRowPathInViewport(blockEl, blockId);
+      applyAllScrollStrategies(blockEl, blockId, scroller, nudgePx, { fast: true });
+      await sleep(70);
+      if (isScrollerAtBottom(scroller) && getMaxRowPathInViewport(blockEl, blockId) <= before) break;
+    }
+    return findLoginCellInBlock(blockEl, blockId, login);
+  }
+
+  function rowsFromCache(blockId) {
+    const byRow = new Map();
+    if (!blockId) return byRow;
+    const prefix = `${blockId}:`;
+    for (const [key, value] of STATE.cellCache) {
+      if (!key.startsWith(prefix)) continue;
+      const rest = key.slice(prefix.length);
+      const [rowStr, colStr] = rest.split(':');
+      const row = Number(rowStr);
+      const col = Number(colStr);
+      if (!byRow.has(row)) byRow.set(row, {});
+      byRow.get(row)[col] = value;
+    }
+    return byRow;
+  }
+
+  function inferModeFromCache(blockId) {
+    const byRow = rowsFromCache(blockId);
+    let ap3xHits = 0;
+    let idnmHits = 0;
+    for (const cols of byRow.values()) {
+      if (looksLikeAssociateLogin(cols[MODES.ap3x.loginCol])) ap3xHits += 1;
+      if (looksLikeAssociateLogin(cols[MODES.idnm.loginCol])) idnmHits += 1;
+    }
+    if (idnmHits > ap3xHits) return 'idnm';
+    if (ap3xHits > 0) return 'ap3x';
+    return STATE.mode;
+  }
+
+  function populatePanelFromCache(blockId = STATE.cellCacheBlockId || getLockedBlockId(), extra = {}) {
+    const force = Boolean(extra.force);
+    if (!force && (STATE.panelFrozen || STATE.clockFiltering || STATE.attrCollecting)) return 0;
+    const inferred = inferModeFromCache(blockId);
+    if (inferred) STATE.mode = inferred;
+    const mode = currentMode();
+    const byRow = rowsFromCache(blockId);
+    const next = new Map();
+    for (const row of [...byRow.keys()].sort((a, b) => a - b)) {
+      const cols = byRow.get(row);
+      const login = String(cols[mode.loginCol] || '').trim();
+      if (!looksLikeAssociateLogin(login)) continue;
+      next.set(login, {
+        values: [
+          {
+            attribute: mode.walkAttributes ? '' : String(cols[mode.nameCol] || '').trim(),
+            accuracy: mode.rateCol == null ? '' : String(cols[mode.rateCol] || '').trim(),
+          },
+        ],
+        capturedAt: new Date().toISOString(),
+      });
+    }
+    STATE.attrByLogin = next;
+    diag('panel populated', { mode: STATE.mode, count: next.size, blockId, force });
+    showAttrPanel();
+    return next.size;
+  }
+
+  function rememberAttr(login, values, extra = {}) {
+    if (!login) return;
+    STATE.attrByLogin.set(login, {
+      values: Array.isArray(values) ? values : [],
+      capturedAt: new Date().toISOString(),
+      ...extra,
+    });
+    diag('attr recorded', { login, values, error: extra.error || null });
+    showAttrPanel();
+  }
+
+  function syncIdnmPanelFromCache(blockId = STATE.cellCacheBlockId || getLockedBlockId()) {
+    return populatePanelFromCache(blockId);
+  }
+
+  function getVisiblePanelLogins() {
+    const cached = getUniqueCachedLogins();
+    const order = [];
+    const seen = new Set();
+    for (const login of cached) {
+      if (!STATE.attrByLogin.has(login)) continue;
+      order.push(login);
+      seen.add(login);
+    }
+    for (const login of STATE.attrByLogin.keys()) {
+      if (seen.has(login)) continue;
+      order.push(login);
+    }
+    return order.length ? order : cached;
+  }
+
+  function formatAttrTsv() {
+    const labels = currentMode().panelHeaders;
+    const cached = getUniqueCachedLogins();
+    const lines = [labels.join('\t')];
+    const seen = new Set();
+    const order = [];
+    for (const login of cached) {
+      if (!STATE.attrByLogin.has(login)) continue;
+      order.push(login);
+      seen.add(login);
+    }
+    for (const login of STATE.attrByLogin.keys()) {
+      if (seen.has(login)) continue;
+      order.push(login);
+    }
+    for (const login of order) {
+      const rec = STATE.attrByLogin.get(login);
+      const rows = rec?.values || [];
+      if (!rows.length) {
+        lines.push(`${login}\t${rec?.error || ''}\t`);
+        continue;
+      }
+      for (const row of rows) {
+        lines.push(`${login}\t${row.attribute || ''}\t${row.accuracy || ''}`);
+      }
+    }
+    return lines.join('\n');
+  }
+
+  function gmRequest(url) {
+    const gm =
+      typeof GM_xmlhttpRequest === 'function'
+        ? GM_xmlhttpRequest
+        : typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function'
+          ? GM.xmlHttpRequest.bind(GM)
+          : null;
+    if (!gm) return Promise.reject(new Error('GM_xmlhttpRequest is not available'));
+    return new Promise((resolve, reject) => {
+      gm({
+        method: 'GET',
+        url,
+        timeout: 30000,
+        onload: resolve,
+        onerror() {
+          reject(new Error('Could not connect to FCLM'));
+        },
+        ontimeout() {
+          reject(new Error('FCLM request timed out'));
+        },
+      });
+    });
+  }
+
+  function responseLooksLikeAuth(body) {
+    const sample = String(body || '').slice(0, 4000);
+    return /<html|<!doctype|midway|sign in with midway/i.test(sample);
+  }
+
+  function formatDateOnly(date) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  function parseCsv(csv, delimiter = ',') {
+    const pattern = new RegExp(
+      `(\\${delimiter}|\\r?\\n|\\r|^)(?:"([^"]*(?:""[^"]*)*)"|([^"\\${delimiter}\\r\\n]*))`,
+      'gi',
+    );
+    const rows = [[]];
+    let match;
+    while ((match = pattern.exec(csv))) {
+      if (match[1].length && match[1] !== delimiter) rows.push([]);
+      rows[rows.length - 1].push(match[2] ? match[2].replace(/""/g, '"') : match[3]);
+    }
+    return rows;
+  }
+
+  function getWarehouseIdFromCache(blockId = getLockedBlockId()) {
+    const counts = new Map();
+    for (const [key, value] of STATE.cellCache) {
+      if (!key.startsWith(`${blockId}:`)) continue;
+      const col = Number(key.split(':')[2]);
+      if (col !== warehouseCol()) continue;
+      const id = String(value || '').trim().toUpperCase();
+      if (!id) continue;
+      counts.set(id, (counts.get(id) || 0) + 1);
+    }
+    let best = DEFAULT_WAREHOUSE_ID;
+    let n = 0;
+    for (const [id, count] of counts) {
+      if (count > n) {
+        best = id;
+        n = count;
+      }
+    }
+    return best;
+  }
+
+  async function requestAttendanceCsv(warehouseId, queryDate) {
+    const url = new URL(FCLM_ATTENDANCE_URL);
+    url.searchParams.set('reportFormat', 'CSV');
+    url.searchParams.set('warehouseId', warehouseId);
+    url.searchParams.set('spanType', 'Day');
+    url.searchParams.set('startDateDay', queryDate);
+    const response = await gmRequest(url.href);
+    const body = response.responseText || '';
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`Attendance report HTTP ${response.status}`);
+    }
+    if (responseLooksLikeAuth(body)) {
+      throw new Error('FCLM authentication required — open FCLM and sign in first');
+    }
+    return parseCsv(body);
+  }
+
+  async function fetchAttendanceRows(warehouseId) {
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const reports = await Promise.all(
+      [yesterday, today].map((date) => requestAttendanceCsv(warehouseId, formatDateOnly(date))),
+    );
+    return reports.flat();
+  }
+
+  function normalizeName(value) {
+    return String(value ?? '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim()
+      .replace(/\s+/g, ' ');
+  }
+
+  function swapNameOrder(value) {
+    const parts = String(value ?? '')
+      .split(',')
+      .map((part) => part.trim())
+      .filter(Boolean);
+    return parts.length >= 2 ? `${parts.slice(1).join(' ')} ${parts[0]}` : value;
+  }
+
+  function punchClassFromType(value) {
+    const punchType = String(value ?? '').toLowerCase();
+    if (punchType.includes('out') || punchType.includes('meal start')) return 'out';
+    if (punchType.includes('in') || punchType.includes('meal end') || punchType.includes('return')) {
+      return 'in';
+    }
+    return 'unknown';
+  }
+
+  function latestPunchForKeys(attendanceRows, keys, names = []) {
+    const keySet = new Set(
+      [...keys].map((value) => String(value ?? '').trim().toLowerCase()).filter(Boolean),
+    );
+    const nameSet = new Set([...names].map(normalizeName).filter(Boolean));
+    let latest = null;
+    for (const row of attendanceRows) {
+      if (!Array.isArray(row) || row.length < 6) continue;
+      const cells = row.map((cell) => String(cell ?? '').trim().toLowerCase());
+      const rowName = normalizeName(row[1]);
+      const matches = cells.some((cell) => keySet.has(cell)) || (nameSet.size > 0 && nameSet.has(rowName));
+      if (!matches) continue;
+      const timestamp = new Date(String(row[5] ?? '').trim()).getTime();
+      if (Number.isNaN(timestamp)) continue;
+      if (!latest || timestamp > latest.timestamp) {
+        latest = { timestamp, type: String(row[4] ?? '').trim() };
+      }
+    }
+    return latest;
+  }
+
+  function findDefinitionValue(documentNode, selector, labelPattern) {
+    const supplied = text(documentNode.querySelector(selector));
+    if (supplied) return supplied;
+    for (const term of documentNode.querySelectorAll('dt')) {
+      if (labelPattern.test(text(term))) return text(term.nextElementSibling);
+    }
+    return '';
+  }
+
+  async function lookupEmployee(login, warehouseId) {
+    const url = new URL(FCLM_TIME_DETAILS_URL);
+    url.searchParams.set('warehouseId', warehouseId);
+    url.searchParams.set('employeeId', login);
+    const response = await gmRequest(url.href);
+    const html = response.responseText || '';
+    if (response.status < 200 || response.status >= 400) {
+      throw new Error(`FCLM returned HTTP ${response.status}`);
+    }
+    const documentNode = new DOMParser().parseFromString(html, 'text/html');
+    const photo = documentNode.querySelector('img.photo');
+    const title = documentNode.querySelector('td.title > span.fold-control');
+    if (!photo || !title) {
+      const isMidway =
+        /midway/i.test(documentNode.title) ||
+        /sign in with midway/i.test(documentNode.body?.textContent || '');
+      throw new Error(
+        isMidway
+          ? 'FCLM authentication required — open FCLM and sign in first'
+          : 'Employee was not found in FCLM',
+      );
+    }
+    const titleText = text(title);
+    const loginMatch = titleText.match(/\(([^()]+)\)\s*$/);
+    const photoUrl = new URL(photo.getAttribute('src'), FCLM_TIME_DETAILS_URL).href;
+    const employeeId =
+      new URL(photoUrl).searchParams.get('employeeid') ||
+      new URL(photoUrl).searchParams.get('employeeId') ||
+      '';
+    return {
+      login: loginMatch?.[1] || login,
+      name: loginMatch ? titleText.slice(0, loginMatch.index).trim() : titleText,
+      badgeNumber: findDefinitionValue(
+        documentNode,
+        'dl.list-side-by-side:nth-of-type(1) > dd:nth-of-type(3)',
+        /^badge(\s*(id|number|#))?$/i,
+      ),
+      employeeId,
+    };
+  }
+
+  function clockClassFromPunch(punch) {
+    return punch ? punchClassFromType(punch.type) : 'out';
+  }
+
+  async function keepClockedInOnly() {
+    if (STATE.clockFiltering || STATE.attrCollecting || STATE.collecting) {
+      toast('Busy — wait for collect to finish', true);
+      return;
+    }
+    const logins = [...STATE.attrByLogin.keys()];
+    if (!logins.length) {
+      toast('Nothing recorded yet', true);
+      return;
+    }
+
+    STATE.clockFiltering = true;
+    renderAttrPanel();
+    updateTitleCopyButtons(getLockedBlockId());
+    toast('Checking FCLM clock status…', false, 5000);
+
+    try {
+      const warehouseId = getWarehouseIdFromCache();
+      const attendanceRows = await fetchAttendanceRows(warehouseId);
+      const statusByLogin = new Map();
+      const unmatched = [];
+
+      for (const login of logins) {
+        const punch = latestPunchForKeys(attendanceRows, [login]);
+        if (punch) statusByLogin.set(login, clockClassFromPunch(punch));
+        else unmatched.push(login);
+      }
+
+      const lookupResults = await Promise.all(
+        unmatched.map(async (login) => {
+          try {
+            const emp = await lookupEmployee(login, warehouseId);
+            const punch = latestPunchForKeys(
+              attendanceRows,
+              [emp.login, emp.employeeId, emp.badgeNumber],
+              [emp.name, swapNameOrder(emp.name)],
+            );
+            return { login, status: clockClassFromPunch(punch), error: null };
+          } catch (err) {
+            const error = String(err?.message || err);
+            if (/authentication|midway|sign in/i.test(error)) throw err;
+            return { login, status: 'out', error };
+          }
+        }),
+      );
+      for (const row of lookupResults) statusByLogin.set(row.login, row.status);
+
+      const removedLogins = [];
+      for (const login of logins) {
+        if (statusByLogin.get(login) === 'in') continue;
+        STATE.attrByLogin.delete(login);
+        removedLogins.push(login);
+      }
+
+      const kept = STATE.attrByLogin.size;
+      STATE.lastClockFilter = {
+        at: new Date().toISOString(),
+        warehouseId,
+        attendanceRows: attendanceRows.length,
+        kept,
+        removed: removedLogins.length,
+        unmatchedLookups: unmatched.length,
+        removedSample: removedLogins.slice(0, 12),
+      };
+      diag('clock filter', STATE.lastClockFilter);
+      STATE.panelFrozen = true;
+      toast(
+        removedLogins.length
+          ? `Removed ${removedLogins.length} not clocked in — ${kept} left`
+          : `All ${kept} are clocked in`,
+      );
+    } catch (err) {
+      STATE.lastError = String(err?.message || err);
+      STATE.lastClockFilter = {
+        at: new Date().toISOString(),
+        error: STATE.lastError,
+      };
+      diag('clock filter failed', STATE.lastError);
+      toast(`Clock filter failed: ${STATE.lastError}`, true, 5000);
+    } finally {
+      STATE.clockFiltering = false;
+      renderAttrPanel();
+      updateTitleCopyButtons(getLockedBlockId());
+    }
+  }
+
+  function ensureAttrPanel() {
+    let panel = qs('#qs-pe-attr-panel');
+    if (panel) return panel;
+    panel = document.createElement('div');
+    panel.id = 'qs-pe-attr-panel';
+    panel.innerHTML = `
+      <div class="qs-pe-attr-head">
+        <strong>Recorded Attributes</strong>
+        <div class="qs-pe-attr-actions">
+          <button type="button" class="qstd-title-btn" data-qstd-panel="clocked-in">Keep clocked in</button>
+          <button type="button" class="qstd-title-btn" data-qstd-panel="copy-logins">Copy visible logins</button>
+          <button type="button" class="qstd-title-btn" data-qstd-panel="copy">Copy table</button>
+        </div>
+      </div>
+      <div class="qs-pe-attr-body">
+        <table>
+          <thead><tr><th>Login</th><th>Attribute</th><th>Accuracy</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="qs-pe-attr-foot">No records yet</div>
+    `;
+    panel.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-qstd-panel]');
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const action = btn.dataset.qstdPanel;
+      if (action === 'clocked-in') {
+        await keepClockedInOnly();
+        return;
+      }
+      if (action === 'copy-logins') {
+        const logins = getVisiblePanelLogins();
+        if (!logins.length) {
+          toast('No visible logins to copy', true);
+          return;
+        }
+        const ok = await copyText(logins.join('\n'));
+        toast(ok ? `Copied ${logins.length} visible logins` : 'Copy failed', !ok);
+        return;
+      }
+      if (action !== 'copy') return;
+      if (!STATE.attrByLogin.size) {
+        toast('Nothing recorded yet', true);
+        return;
+      }
+      const tsv = formatAttrTsv();
+      const ok = await copyText(tsv);
+      const n = Math.max(0, tsv.split('\n').length - 1);
+      toast(ok ? `Copied ${n} rows` : 'Copy failed', !ok);
+    });
+    document.body.appendChild(panel);
+    return panel;
+  }
+
+  function flashPanelCopied() {
+    const panel = ensureAttrPanel();
+    panel.classList.add('is-open');
+    panel.classList.remove('qs-pe-flash');
+    void panel.offsetWidth;
+    panel.classList.add('qs-pe-flash');
+    clearTimeout(panel._flashT);
+    panel._flashT = setTimeout(() => panel.classList.remove('qs-pe-flash'), 800);
+  }
+
+  function showAttrPanel() {
+    const panel = ensureAttrPanel();
+    panel.classList.add('is-open');
+    renderAttrPanel();
+  }
+
+  function renderAttrPanel() {
+    const panel = ensureAttrPanel();
+    const tbody = panel.querySelector('tbody');
+    const foot = panel.querySelector('.qs-pe-attr-foot');
+    if (!tbody || !foot) return;
+    const title = panel.querySelector('.qs-pe-attr-head strong');
+    if (title) title.textContent = STATE.mode === 'idnm' ? 'IDNM Engagements' : 'Recorded Attributes';
+    const headCells = panel.querySelectorAll('thead th');
+    currentMode().panelHeaders.forEach((label, i) => {
+      if (headCells[i]) headCells[i].textContent = label;
+    });
+    tbody.replaceChildren();
+    const cached = getUniqueCachedLogins();
+    const order = [];
+    const seen = new Set();
+    for (const login of cached) {
+      if (!STATE.attrByLogin.has(login)) continue;
+      order.push(login);
+      seen.add(login);
+    }
+    for (const login of STATE.attrByLogin.keys()) {
+      if (seen.has(login)) continue;
+      order.push(login);
+    }
+    for (const login of order) {
+      const rec = STATE.attrByLogin.get(login);
+      const rows = rec?.values?.length ? rec.values : [{ attribute: rec?.error || '', accuracy: '' }];
+      rows.forEach((row, i) => {
+        const tr = document.createElement('tr');
+        if (rec?.error) tr.dataset.state = 'error';
+        const tdLogin = document.createElement('td');
+        const tdAttr = document.createElement('td');
+        const tdAcc = document.createElement('td');
+        tdLogin.textContent = i === 0 ? login : '';
+        tdAttr.textContent = row.attribute || '';
+        tdAcc.textContent = row.accuracy || '';
+        tr.append(tdLogin, tdAttr, tdAcc);
+        tbody.appendChild(tr);
+      });
+    }
+    const total = cached.length || STATE.attrByLogin.size;
+    const n = STATE.attrByLogin.size;
+    const clockBtn = panel.querySelector('[data-qstd-panel="clocked-in"]');
+    const copyLoginsBtn = panel.querySelector('[data-qstd-panel="copy-logins"]');
+    const copyBtn = panel.querySelector('[data-qstd-panel="copy"]');
+    if (clockBtn) {
+      clockBtn.disabled = STATE.attrCollecting || STATE.clockFiltering || !n;
+    }
+    if (copyLoginsBtn) copyLoginsBtn.disabled = getVisiblePanelLogins().length === 0;
+    if (copyBtn) copyBtn.disabled = !n;
+    if (STATE.clockFiltering) foot.textContent = `Checking FCLM clock status for ${n}…`;
+    else if (STATE.attrCollecting) foot.textContent = `Recording ${n}/${total}…`;
+    else if (!n) foot.textContent = 'No records yet';
+    else foot.textContent = STATE.mode === 'idnm' ? `${n} IDNM rows` : `${n} recorded`;
+  }
+
+  function loginFromPeCell(cell, blockEl, blockId) {
+    if (!cell) return '';
+    if (Number(cell.getAttribute('data-col-path')) === loginCol()) return text(cell);
+    const row = cell.getAttribute('data-row-path');
+    if (row == null) return '';
+    const loginCell = getCellsInBlock(blockEl, blockId).find(
+      (el) =>
+        el.getAttribute('data-row-path') === row && Number(el.getAttribute('data-col-path')) === loginCol(),
+    );
+    return loginCell ? text(loginCell) : '';
+  }
+
+  function scheduleManualAttrCapture(login) {
+    if (!login || STATE.attrCollecting || STATE.collecting) return;
+    clearTimeout(STATE.loginClickTimer);
+    STATE.loginClickTimer = setTimeout(async () => {
+      const values = await waitForDetailSettle(null);
+      rememberAttr(login, values);
+      updateTitleCopyButtons(getLockedBlockId());
+    }, 50);
+  }
+
+  function onPeTableClick(e) {
+    if (STATE.attrCollecting || STATE.collecting) return;
+    if (!currentMode().walkAttributes) return;
+    const cell = e.target?.closest?.(CELL_SELECTOR);
+    if (!cell) return;
+    const blockEl = cell.closest('[id^="block-"]');
+    const blockId = getLockedBlockId();
+    if (!blockEl || blockEl.id !== blockId) return;
+    const login = loginFromPeCell(cell, blockEl, blockId);
+    if (login) scheduleManualAttrCapture(login);
+  }
+
+  function bindLoginClickCapture() {
+    if (STATE.loginClickBound) return;
+    STATE.loginClickBound = true;
+    document.addEventListener('click', onPeTableClick, true);
+  }
+
+  async function collectAttrsForLogins(logins) {
+    if (STATE.attrCollecting) return;
+    STATE.attrCollecting = true;
+    const blockId = getLockedBlockId();
+    const blockEl = getBlockElement(blockId);
+    let releaseScrollLock = null;
+    let layoutSnapshot = null;
+    showAttrPanel();
+    updateTitleCopyButtons(blockId);
+
+    try {
+      if (!blockEl) {
+        STATE.lastError = 'Pending Engagements table not found';
+        diag('attr-collect aborted', STATE.lastError);
+        toast(STATE.lastError, true);
+        return;
+      }
+      layoutSnapshot = saveVisualLayoutState(blockEl);
+      releaseScrollLock = installPageScrollLock(blockEl);
+      const scroller = findTableScroller(blockEl);
+      diag('attr-collect start', { count: logins.length, attrBlock: Boolean(getDetailBlockEl()) });
+
+      for (let i = 0; i < logins.length; i++) {
+        const login = logins[i];
+        toast(`Attribute ${i + 1}/${logins.length} — ${login}`, false, 4000);
+        try {
+          const cell = await revealLoginCell(blockEl, blockId, scroller, login);
+          if (!cell) {
+            rememberAttr(login, [], { error: 'cell not found' });
+            renderAttrPanel();
+            continue;
+          }
+          const before = snapshotDetailSig();
+          clickCell(cell);
+          const values = await waitForDetailSettle(before);
+          rememberAttr(login, values, values.length ? {} : { error: 'no attribute cells' });
+          renderAttrPanel();
+        } catch (err) {
+          const error = String(err?.message || err);
+          STATE.lastError = error;
+          diag('attr-collect login failed', { login, error });
+          rememberAttr(login, [], { error });
+          renderAttrPanel();
+        }
+      }
+      diag('attr-collect done', { recorded: STATE.attrByLogin.size });
+    } catch (err) {
+      STATE.lastError = String(err?.message || err);
+      diag('attr-collect failed', STATE.lastError);
+      toast(`Attribute error: ${STATE.lastError}`, true);
+    } finally {
+      releaseScrollLock?.();
+      restoreVisualLayoutAfterCollect(getBlockElement(blockId), layoutSnapshot);
+      STATE.attrCollecting = false;
+      renderAttrPanel();
+      updateTitleCopyButtons(blockId);
+    }
+  }
+
+  async function copyScriptDebug() {
+    const dump = buildScriptDebugDump();
+    const ok = await copyText(dump);
+    diag('copy debug', { ok, bytes: dump.length });
+    toast(ok ? 'Copied script debug dump' : 'Copy failed', !ok);
+  }
+
+  async function copyAllLogins() {
+    if (STATE.attrCollecting || STATE.collecting || STATE.clockFiltering) {
+      toast('Busy — wait for collect to finish', true);
+      return;
+    }
+    const blockId = STATE.cellCacheBlockId || getLockedBlockId();
+    const inferred = inferModeFromCache(blockId);
+    if (inferred) STATE.mode = inferred;
+    const filled = populatePanelFromCache(blockId, { force: true });
+    const logins = getVisiblePanelLogins();
+    if (!logins.length) {
+      toast('No logins cached yet', true);
+      return;
+    }
+    const copied = await copyText(logins.join('\n'));
+    flashPanelCopied();
+    if (!currentMode().walkAttributes) {
+      toast(
+        copied
+          ? `Copied ${logins.length} logins — ${filled} on panel`
+          : `${filled} logins on panel`,
+        !copied,
+      );
+      return;
+    }
+    toast(
+      copied
+        ? `Copied ${logins.length} logins — collecting attributes…`
+        : 'Collecting attributes…',
+      !copied,
+      4000,
+    );
+    await collectAttrsForLogins(logins);
+    toast(`Recorded attributes for ${STATE.attrByLogin.size} logins`);
+  }
+
+  async function copyDfLogins() {
+    const blockId = getLockedBlockId();
+    const logins = getDfLogins(blockId);
+    if (!logins.length) {
+      toast('No D/F cohort logins cached', true);
+      return;
+    }
+    const ok = await copyText(logins.join('\n'));
+    toast(ok ? `Copied ${logins.length} D/F logins` : 'Copy failed', !ok);
+  }
+
+  function injectTitleCopyButtons(blockEl, blockId) {
+    const titleLabel = blockEl.querySelector('[data-automation-id="analysis_visual_title_label"]');
+    const titleContainer =
+      titleLabel?.closest('.visual-title-container') ||
+      titleLabel?.parentElement ||
+      blockEl.querySelector('.visual-title-container');
+    if (!titleContainer || titleContainer.dataset.qstdTitleBtns) return;
+
+    titleContainer.dataset.qstdTitleBtns = '1';
+    titleContainer.style.display = 'flex';
+    titleContainer.style.flexWrap = 'wrap';
+    titleContainer.style.alignItems = 'center';
+    titleContainer.style.gap = '8px';
+
+    const wrap = document.createElement('span');
+    wrap.className = 'qstd-title-btns';
+    wrap.innerHTML = `
+      <button type="button" class="qstd-title-btn" data-qstd-copy="all">Copy All Logins</button>
+      <button type="button" class="qstd-title-btn" data-qstd-copy="df">Copy D/F Logins</button>
+      <button type="button" class="qstd-title-btn" data-qstd-copy="debug">Copy Debug</button>
+    `;
+    titleContainer.appendChild(wrap);
+
+    wrap.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-qstd-copy]');
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (btn.dataset.qstdCopy === 'df') copyDfLogins();
+      else if (btn.dataset.qstdCopy === 'debug') copyScriptDebug();
+      else copyAllLogins();
+    });
+  }
+
+  function updateTitleCopyButtons(blockId) {
+    const blockEl = getBlockElement(blockId);
+    const meta = getBlockMeta(blockId);
+    if (!blockEl || !isAllowedTargetBlock(meta)) return;
+    injectTitleCopyButtons(blockEl, blockId);
+    const wrap = blockEl.querySelector('.qstd-title-btns');
+    if (!wrap) return;
+    const allBtn = wrap.querySelector('[data-qstd-copy="all"]');
+    const dfBtn = wrap.querySelector('[data-qstd-copy="df"]');
+    const debugBtn = wrap.querySelector('[data-qstd-copy="debug"]');
+    const busy = STATE.collecting || STATE.attrCollecting || STATE.clockFiltering;
+    const hasLogins = countCachedLogins(blockId) > 0;
+    if (allBtn) allBtn.disabled = busy || !hasLogins;
+    if (dfBtn) dfBtn.disabled = busy || getDfLogins(blockId).length === 0;
+    if (debugBtn) debugBtn.disabled = false;
+  }
+
+  function toast(msg, isError = false, ms = 2800) {
+    let el = qs('#qs-pe-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'qs-pe-toast';
+      document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.dataset.state = isError ? 'error' : 'ok';
+    el.classList.add('show');
+    clearTimeout(el._t);
+    el._t = setTimeout(() => el.classList.remove('show'), ms);
+  }
+
+  function injectStyles() {
+    const css = `
+      #qs-pe-toast {
+        position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
+        z-index: 2147483647; background: #323232; color: #fff;
+        padding: 10px 18px; border-radius: 8px; opacity: 0;
+        transition: opacity .2s, transform .2s; pointer-events: none;
+        font: 13px/1.4 system-ui, sans-serif;
+      }
+      #qs-pe-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+      #qs-pe-toast[data-state="error"] { background: #b3261e; }
+      .qstd-title-btns { display: inline-flex; gap: 6px; flex-shrink: 0; }
+      .qstd-title-btn {
+        font-size: 11px; line-height: 1.3; padding: 3px 10px;
+        border: 1px solid #dadce0; border-radius: 4px; background: #fff; color: #1a73e8;
+        cursor: pointer; white-space: nowrap;
+        font-family: "Amazon Ember", "Helvetica Neue", Arial, sans-serif;
+      }
+      .qstd-title-btn:hover:not(:disabled) { background: #e8f0fe; border-color: #1a73e8; }
+      .qstd-title-btn:disabled { opacity: .45; cursor: not-allowed; color: #80868b; }
+      #qs-pe-attr-panel {
+        display: none; position: fixed; left: 12px; bottom: 12px; z-index: 2147483646;
+        width: 420px; max-height: 300px; flex-direction: column; overflow: hidden;
+        background: #fff; color: #202124; border: 1px solid #dadce0; border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(0,0,0,.18);
+        font: 12px/1.4 "Amazon Ember", "Helvetica Neue", Arial, sans-serif;
+      }
+      #qs-pe-attr-panel.is-open { display: flex; }
+      #qs-pe-attr-panel.qs-pe-flash {
+        animation: qs-pe-glow-green .7s ease;
+      }
+      @keyframes qs-pe-glow-green {
+        0% { box-shadow: 0 8px 24px rgba(0,0,0,.18); border-color: #dadce0; }
+        20% {
+          box-shadow: 0 0 0 3px rgba(34,197,94,.9), 0 8px 28px rgba(22,163,74,.4);
+          border-color: #16a34a; background: #f0fdf4;
+        }
+        100% { box-shadow: 0 8px 24px rgba(0,0,0,.18); border-color: #dadce0; background: #fff; }
+      }
+      #qs-pe-attr-panel .qs-pe-attr-head {
+        display: flex; align-items: center; gap: 8px; padding: 8px;
+        border-bottom: 1px solid #eee; flex-shrink: 0; flex-wrap: wrap;
+      }
+      #qs-pe-attr-panel .qs-pe-attr-head strong { flex: 1; font-size: 12px; }
+      #qs-pe-attr-panel .qs-pe-attr-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+      #qs-pe-attr-panel .qs-pe-attr-body { overflow: auto; flex: 1; }
+      #qs-pe-attr-panel table { width: 100%; border-collapse: collapse; }
+      #qs-pe-attr-panel th, #qs-pe-attr-panel td {
+        text-align: left; padding: 4px 8px; border-bottom: 1px solid #f1f3f4;
+        font-size: 11px; vertical-align: top; word-break: break-word;
+      }
+      #qs-pe-attr-panel th { color: #5f6368; font-weight: 600; position: sticky; top: 0; background: #fff; }
+      #qs-pe-attr-panel tr[data-state="error"] td { color: #b3261e; }
+      #qs-pe-attr-panel .qs-pe-attr-foot {
+        padding: 6px 8px; font-size: 11px; color: #5f6368;
+        border-top: 1px solid #eee; flex-shrink: 0;
+      }
+    `;
+    if (typeof GM_addStyle === 'function') GM_addStyle(css);
+    else {
+      const s = document.createElement('style');
+      s.textContent = css;
+      document.head.appendChild(s);
+    }
+  }
+
+  function startObserver() {
+    if (STATE.observer) return;
+    let debounce = null;
+    STATE.observer = new MutationObserver(() => {
+      if (STATE.collecting || STATE.attrCollecting) return;
+      clearTimeout(debounce);
+      debounce = setTimeout(refreshScan, 600);
+    });
+    STATE.observer.observe(document.body, { childList: true, subtree: true });
+  }
+
+  function startLateLoadWatcher() {
+    if (STATE.lateLoadTimer) return;
+    let ticks = 0;
+    STATE.lateLoadTimer = setInterval(() => {
+      ticks += 1;
+      const scan = refreshScan();
+      const ready =
+        scan.target &&
+        isAllowedTargetBlock(scan.target) &&
+        scan.summary.totalCellsInDom > 0;
+      if (ready) {
+        clearInterval(STATE.lateLoadTimer);
+        STATE.lateLoadTimer = null;
+        maybeScheduleAutoCollect(scan);
+      } else if (ticks >= 90) {
+        clearInterval(STATE.lateLoadTimer);
+        STATE.lateLoadTimer = null;
+      }
+    }, 2000);
+  }
+
+  function init() {
+    injectStyles();
+    STATE.lockedBlockId = loadPersistedBlockId();
+    STATE.targetBlockId = getLockedBlockId();
+    refreshScan();
+    startObserver();
+    startLateLoadWatcher();
+    bindLoginClickCapture();
+    showAttrPanel();
+    diag('loaded', { href: location.href });
+    console.info(`[${SCRIPT.name} v${SCRIPT.version}] loaded — auto-collect on table load.`);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();

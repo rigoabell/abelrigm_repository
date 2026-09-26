@@ -1,0 +1,1880 @@
+// ==UserScript==
+// @name         Dropzone Barcode Label Generator
+// @namespace    https://github.com/barcode-generator
+// @version      1.6.1
+// @description  Generate warehouse dropzone labels (Code 128, Aztec) with adjustable ratio, colored borders, and saved settings.
+// @author       Barcode Generator
+// @match        *://*/*
+// @grant        GM_addStyle
+// @grant        GM_registerMenuCommand
+// @grant        GM_setClipboard
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @require      https://cdn.jsdelivr.net/npm/bwip-js@4.5.1/dist/bwip-js.min.js
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // Each layout defines symbology + visual composition.
+  const LAYOUTS = [
+    {
+      id: 'tag',
+      label: 'Tag (Code 128) — full border, barcode top, text bottom',
+      symbology: 'code128',
+      type: '1d',
+      defaultBorder: '#e91e8c',
+    },
+    {
+      id: 'dropzone',
+      label: 'Dropzone (Aztec) — full border, barcode top, title + ID below',
+      symbology: 'azteccode',
+      type: '2d',
+      defaultBorder: '#6b21a8',
+    },
+  ];
+
+  const DEFAULTS = {
+    layout: 'tag',
+    scale: 3,
+    barHeight: 12,
+    printRatio: 1.5,
+    borderColor: '#e91e8c',
+    borderWidth: 14,
+    labelWidth: 420,
+    labelHeight: 280,
+    titleSize: 16,
+    idSize: 22,
+    subtextSize: 14,
+    bgColor: '#ffffff',
+    textColor: '#000000',
+    subtextColor: '#555555',
+    subtextText: '',
+    pageSize: 'letter',
+    labelsPerPage: 6,
+  };
+
+  const PAGE_DPI = 150;
+  const PAGE_SIZES = {
+    letter: { w: Math.round(8.5 * PAGE_DPI), h: Math.round(11 * PAGE_DPI), label: 'US Letter (8.5 × 11 in)' },
+    a4: { w: Math.round(210 * (PAGE_DPI / 25.4)), h: Math.round(297 * (PAGE_DPI / 25.4)), label: 'A4 (210 × 297 mm)' },
+  };
+  const PAGE_MIN_GAP = 8;
+
+  const STORAGE_KEY = 'dz-bg-settings-v1';
+
+  let panelOpen = false;
+  let saveTimer = null;
+
+  GM_addStyle(`
+    #dz-bg-root {
+      display: block; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      font-size: 14px; line-height: 1.4; color: #e8e8ec; box-sizing: border-box;
+    }
+    #dz-bg-root *, #dz-bg-root *::before, #dz-bg-root *::after { box-sizing: border-box; }
+    #dz-bg-fab {
+      position: fixed; bottom: 24px; right: 24px; z-index: 2147483646;
+      width: 52px; height: 52px; border-radius: 50%; border: none; cursor: pointer;
+      background: linear-gradient(135deg, #6b21a8, #e91e8c); color: #fff; font-size: 22px;
+      box-shadow: 0 4px 20px rgba(0,0,0,.35); transition: transform .15s;
+    }
+    #dz-bg-fab:hover { transform: scale(1.06); }
+    #dz-bg-overlay {
+      position: fixed; inset: 0; z-index: 2147483647; background: rgba(15,15,20,.55);
+      display: none; align-items: center; justify-content: center; padding: 16px;
+    }
+    #dz-bg-overlay.open { display: flex; }
+    #dz-bg-panel {
+      background: #1a1a22; color: #e8e8ec; border-radius: 12px; width: min(1100px, 100%);
+      max-height: 92vh; overflow: hidden; display: grid; grid-template-rows: auto 1fr auto;
+      box-shadow: 0 20px 60px rgba(0,0,0,.5); border: 1px solid #333;
+    }
+    #dz-bg-panel header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 18px; border-bottom: 1px solid #333; background: #12121a;
+    }
+    #dz-bg-panel header h1 { margin: 0; font-size: 17px; font-weight: 600; }
+    #dz-bg-panel header button {
+      background: transparent; border: none; color: #aaa; font-size: 22px; cursor: pointer; line-height: 1;
+    }
+    #dz-bg-body { display: grid; grid-template-columns: 340px 1fr; gap: 0; overflow: hidden; min-height: 0; }
+    #dz-bg-form {
+      padding: 16px; overflow-y: auto; border-right: 1px solid #333; display: flex; flex-direction: column; gap: 12px;
+    }
+    #dz-bg-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #b0b0b8; }
+    #dz-bg-form label.row { flex-direction: row; align-items: center; gap: 8px; }
+    #dz-bg-form input[type="text"], #dz-bg-form input[type="number"], #dz-bg-form select, #dz-bg-form textarea {
+      background: #0e0e14; border: 1px solid #3a3a48; color: #f0f0f4; border-radius: 6px; padding: 7px 9px; font-size: 13px;
+    }
+    #dz-bg-form textarea { min-height: 110px; resize: vertical; font-family: ui-monospace, Consolas, monospace; }
+    #dz-bg-form input[type="color"] {
+      width: 100%; height: 36px; min-height: 36px; padding: 4px; cursor: pointer;
+      border: 1px solid #3a3a48; border-radius: 6px; background-color: #0e0e14;
+      display: block; appearance: auto;
+    }
+    #dz-bg-form input[type="range"] { width: 100%; accent-color: #e91e8c; }
+    #dz-bg-form .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    #dz-bg-form .hint { font-size: 11px; color: #777; margin-top: 2px; }
+    #dz-mini-preview-wrap {
+      background: #0e0e14; border: 1px solid #3a3a48; border-radius: 6px;
+      padding: 8px; text-align: center;
+    }
+    #dz-mini-preview-wrap .mini-label { font-size: 11px; color: #888; margin-bottom: 6px; }
+    #dz-mini-preview {
+      display: block; width: 100%; max-height: 360px; margin: 0 auto;
+      border-radius: 2px; object-fit: contain;
+    }
+    #dz-bg-preview-wrap {
+      display: flex; flex-direction: column; overflow: hidden; min-height: 0;
+    }
+    #dz-preview-tabs {
+      display: flex; gap: 6px; padding: 10px 16px 0; background: #0e0e12; border-bottom: 1px solid #333;
+    }
+    #dz-preview-tabs button {
+      background: #1a1a22; border: 1px solid #3a3a48; color: #aaa; border-radius: 6px 6px 0 0;
+      padding: 7px 14px; font-size: 12px; font-weight: 600; cursor: pointer;
+    }
+    #dz-preview-tabs button.active { background: #0e0e12; color: #f0f0f4; border-bottom-color: #0e0e12; }
+    #dz-label-colors-wrap {
+      display: none; padding: 8px 16px; background: #12121a; border-bottom: 1px solid #333;
+      max-height: 140px; overflow-y: auto;
+    }
+    #dz-label-colors-wrap.open { display: block; }
+    #dz-label-colors-header { font-size: 11px; color: #888; margin-bottom: 6px; }
+    #dz-label-colors-list {
+      display: flex; flex-wrap: wrap; gap: 6px 10px;
+    }
+    .dz-label-color-row {
+      display: flex; align-items: center; gap: 6px; font-size: 11px; color: #b0b0b8;
+      background: #0e0e14; border: 1px solid #3a3a48; border-radius: 6px; padding: 4px 8px;
+    }
+    .dz-label-color-row input[type="color"] {
+      width: 32px; height: 24px; min-height: 24px; padding: 2px; border: 1px solid #3a3a48;
+      border-radius: 4px; cursor: pointer; background: #0e0e14;
+    }
+    .dz-label-color-name {
+      max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-family: ui-monospace, Consolas, monospace; font-size: 10px;
+    }
+    #dz-bg-preview .card.label-card {
+      display: flex; flex-direction: column; align-items: center; gap: 6px;
+    }
+    .dz-label-card-color {
+      display: flex; align-items: center; gap: 6px; font-size: 11px; color: #aaa;
+    }
+    .dz-label-card-color input[type="color"] {
+      width: 36px; height: 28px; min-height: 28px; padding: 2px; border: 1px solid #3a3a48;
+      border-radius: 4px; cursor: pointer; background: #0e0e14;
+    }
+    #dz-bg-preview {
+      padding: 16px; overflow-y: auto; background: #0e0e12; flex: 1;
+      display: flex; flex-wrap: wrap; gap: 16px; align-content: flex-start; justify-content: center;
+    }
+    #dz-bg-preview.pages-mode { flex-direction: column; align-items: center; }
+    #dz-bg-preview .card {
+      background: transparent; padding: 0; border-radius: 0; box-shadow: none;
+    }
+    #dz-bg-preview .card img { display: block; max-width: 100%; height: auto; }
+    #dz-bg-preview .card.page-card {
+      background: #fff; box-shadow: 0 2px 12px rgba(0,0,0,.35); border-radius: 2px;
+      padding: 4px; max-width: min(100%, 420px);
+    }
+    #dz-bg-preview .card.page-card .cap { font-size: 11px; color: #888; text-align: center; margin-top: 6px; }
+    #dz-bg-preview .card .cap { font-size: 11px; color: #ccc; text-align: center; margin-top: 6px; word-break: break-all; }
+    #dz-bg-footer {
+      padding: 12px 18px; border-top: 1px solid #333; display: flex; gap: 10px; flex-wrap: wrap; background: #12121a;
+    }
+    #dz-bg-footer button {
+      border: none; border-radius: 6px; padding: 9px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    #dz-bg-btn-generate { background: #6b21a8; color: #fff; }
+    #dz-bg-btn-download { background: #e91e8c; color: #fff; }
+    #dz-bg-btn-download-pages { background: #c0267a; color: #fff; }
+    #dz-bg-btn-print { background: #2a2a36; color: #ddd; }
+    #dz-bg-btn-debug { background: #1e3a5f; color: #aad; }
+    #dz-bg-status { margin-left: auto; font-size: 12px; color: #888; align-self: center; }
+    #dz-dup-dialog {
+      position: fixed; inset: 0; z-index: 2147483648; background: rgba(0,0,0,.65);
+      display: none; align-items: center; justify-content: center; padding: 16px;
+    }
+    #dz-dup-dialog.open { display: flex; }
+    #dz-dup-dialog .dz-dup-box {
+      background: #1a1a22; border: 1px solid #444; border-radius: 10px; padding: 20px;
+      max-width: 420px; width: 100%; color: #e8e8ec;
+    }
+    #dz-dup-dialog h3 { margin: 0 0 10px; font-size: 16px; }
+    #dz-dup-dialog p { margin: 0 0 16px; font-size: 13px; color: #bbb; line-height: 1.45; white-space: pre-wrap; }
+    #dz-dup-dialog .dz-dup-actions { display: flex; flex-direction: column; gap: 8px; }
+    #dz-dup-dialog button {
+      border: none; border-radius: 6px; padding: 10px 14px; font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    #dz-dup-btn-remove { background: #6b21a8; color: #fff; }
+    #dz-dup-btn-proceed { background: #e91e8c; color: #fff; }
+    #dz-dup-btn-cancel { background: #2a2a36; color: #ccc; }
+    #dz-subtext-controls { display: none; flex-direction: column; gap: 10px; }
+    #dz-subtext-controls.open { display: flex; }
+    #dz-page-section { border-top: 1px solid #333; padding-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+    #dz-page-section h2 { margin: 0; font-size: 13px; font-weight: 600; color: #d0d0d8; }
+    @media (max-width: 800px) {
+      #dz-bg-body { grid-template-columns: 1fr; }
+      #dz-bg-form { border-right: none; border-bottom: 1px solid #333; max-height: 45vh; }
+    }
+  `);
+
+  const root = document.createElement('div');
+  root.id = 'dz-bg-root';
+  root.innerHTML = `
+    <button id="dz-bg-fab" title="Barcode Label Generator (Ctrl+Shift+B)">▦</button>
+    <div id="dz-bg-overlay">
+      <div id="dz-bg-panel">
+        <header>
+          <h1>Dropzone Barcode Label Generator</h1>
+          <button type="button" id="dz-bg-close" aria-label="Close">×</button>
+        </header>
+        <div id="dz-bg-body">
+          <form id="dz-bg-form">
+            <label>
+              Barcode data (one label per line)
+              <textarea id="dz-data" placeholder="dz-P-CR-EOL&#10;dz-P-NonSort-ILS|Dropzone for NonSort ILS"></textarea>
+              <span class="hint" id="dz-data-hint">Format: <code>data</code> or <code>data|title</code> or <code>data|title|subtitle</code></span>
+            </label>
+            <label>
+              Label layout
+              <select id="dz-layout"></select>
+              <span class="hint">Layout picks symbology and label design.</span>
+            </label>
+            <div class="grid2" id="dz-1d-controls">
+              <label>
+                Module scale (X)
+                <input type="number" id="dz-scale" min="1" max="20" step="0.5" value="3">
+                <span class="hint">TEC-IT: X ≥ 0.19 mm at print DPI</span>
+              </label>
+              <label>
+                Bar height (1D, mm)
+                <input type="number" id="dz-bar-height" min="4" max="40" step="1" value="12">
+                <span class="hint">TEC-IT: H ≥ 15% of width</span>
+              </label>
+            </div>
+            <div class="grid2">
+              <label>
+                Label width (px)
+                <input type="number" id="dz-label-w" min="200" max="1200" step="10" value="420">
+              </label>
+              <label>
+                Label height (px)
+                <input type="number" id="dz-label-h" min="100" max="2400" step="10" value="280">
+              </label>
+            </div>
+            <div id="dz-mini-preview-wrap">
+              <div class="mini-label">Live preview</div>
+              <img id="dz-mini-preview" alt="Label preview">
+            </div>
+            <label id="dz-ratio-wrap">
+              Label ratio (width ÷ height)
+              <input type="range" id="dz-ratio" min="0.5" max="3" step="0.05" value="1.5">
+              <span class="hint">Ratio <strong id="dz-ratio-val">1.5</strong> — 0.5 = 2× tall, 1.0 = square, 3.0 = wide</span>
+            </label>
+            <div class="grid2">
+              <label>
+                Border color
+                <input type="color" id="dz-color-border" value="#e91e8c">
+              </label>
+              <label>
+                Border width (px)
+                <input type="number" id="dz-border-width" min="0" max="40" step="1" value="14">
+              </label>
+            </div>
+            <label class="row" id="dz-rainbow-wrap">
+              <input type="checkbox" id="dz-rainbow">
+              Rainbow coloring
+              <span class="hint" style="margin:0">Generate: red → violet, evenly spaced per line</span>
+            </label>
+            <div class="grid2">
+              <label>
+                Background
+                <input type="color" id="dz-color-background" value="#ffffff">
+              </label>
+              <label>
+                Text color
+                <input type="color" id="dz-color-text" value="#000000">
+              </label>
+            </div>
+            <div class="grid2">
+              <label id="dz-title-size-wrap">
+                Title size (px)
+                <input type="number" id="dz-title-size" min="8" max="96" step="1" value="16">
+                <span class="hint" id="dz-title-size-hint">Top line — needs data|title|id in barcode lines</span>
+              </label>
+              <label id="dz-text-size-wrap">
+                Text size (px)
+                <input type="number" id="dz-text-size" min="8" max="96" step="1" value="22">
+                <span class="hint" id="dz-text-size-hint">Main bottom label text</span>
+              </label>
+            </div>
+            <label class="row">
+              <input type="checkbox" id="dz-subtext">
+              Enable subtext on labels
+            </label>
+            <label id="dz-subtext-content-wrap">
+              Subtext (same on all labels)
+              <input type="text" id="dz-subtext-content" placeholder="e.g. Building 3, Dock A">
+              <span class="hint">Shown below the main text on every label when enabled</span>
+            </label>
+            <div id="dz-subtext-controls">
+              <div class="grid2">
+                <label>
+                  Subtext size (px)
+                  <input type="number" id="dz-subtext-size" min="8" max="72" step="1" value="14">
+                </label>
+                <label>
+                  Subtext color
+                  <input type="color" id="dz-color-subtext" value="#555555">
+                </label>
+              </div>
+            </div>
+            <div id="dz-page-section">
+              <h2>Page layout</h2>
+              <div class="grid2">
+                <label>
+                  Page size
+                  <select id="dz-page-size">
+                    <option value="letter">US Letter (8.5 × 11 in)</option>
+                    <option value="a4">A4 (210 × 297 mm)</option>
+                  </select>
+                </label>
+                <label>
+                  Labels per page
+                  <input type="number" id="dz-labels-per-page" min="1" max="24" step="1" value="6">
+                </label>
+              </div>
+              <span class="hint" id="dz-page-layout-hint">Fewer labels than this are repeated to fill the page. Labels are placed with equal gaps to each other and the page edge.</span>
+            </div>
+          </form>
+          <div id="dz-bg-preview-wrap">
+            <div id="dz-preview-tabs">
+              <button type="button" id="dz-tab-labels" class="active">Labels</button>
+              <button type="button" id="dz-tab-pages">Pages</button>
+            </div>
+            <div id="dz-label-colors-wrap">
+              <div id="dz-label-colors-header">Per-label border colors (updates labels and pages)</div>
+              <div id="dz-label-colors-list"></div>
+            </div>
+            <div id="dz-bg-preview"><p style="color:#666;margin:auto">Click Generate to preview labels.</p></div>
+          </div>
+        </div>
+        <footer id="dz-bg-footer">
+          <button type="button" id="dz-bg-btn-generate">Generate</button>
+          <button type="button" id="dz-bg-btn-download" disabled>Download labels</button>
+          <button type="button" id="dz-bg-btn-download-pages" disabled>Download pages</button>
+          <button type="button" id="dz-bg-btn-print" disabled>Print pages</button>
+          <button type="button" id="dz-bg-btn-debug">Copy debug</button>
+          <span id="dz-bg-status"></span>
+        </footer>
+      </div>
+    </div>
+    <div id="dz-dup-dialog">
+      <div class="dz-dup-box">
+        <h3>Duplicate barcode values</h3>
+        <p id="dz-dup-msg"></p>
+        <div class="dz-dup-actions">
+          <button type="button" id="dz-dup-btn-remove">Remove duplicates &amp; generate</button>
+          <button type="button" id="dz-dup-btn-proceed">Proceed with duplicates</button>
+          <button type="button" id="dz-dup-btn-cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.documentElement.appendChild(root);
+
+  const $ = (sel) => root.querySelector(sel);
+  const layoutSel = $('#dz-layout');
+
+  LAYOUTS.forEach((l) => {
+    const o = document.createElement('option');
+    o.value = l.id;
+    o.textContent = l.label;
+    layoutSel.appendChild(o);
+  });
+
+  function getLayoutConfig(layoutId) {
+    return LAYOUTS.find((l) => l.id === layoutId) || LAYOUTS[0];
+  }
+
+  let lastResults = [];
+  let lastPages = [];
+  let lastPageGrid = null;
+  let lastGenerateErrors = [];
+  let previewMode = 'labels';
+  let pageRebuildTimer = null;
+  let labelBorderColorOverrides = {};
+  let lastDebug = null;
+  let miniPreviewTimer = null;
+  let miniPreviewRaf = 0;
+
+  // Tracked live from picker events (Firefox/Tampermonkey may not re-read .value reliably).
+  const colorState = {
+    borderColor: DEFAULTS.borderColor,
+    bgColor: DEFAULTS.bgColor,
+    textColor: DEFAULTS.textColor,
+    subtextColor: DEFAULTS.subtextColor,
+  };
+
+  const fontSizeState = {
+    titleSize: DEFAULTS.titleSize,
+    idSize: DEFAULTS.idSize,
+    subtextSize: DEFAULTS.subtextSize,
+  };
+
+  let colorEls = {};
+
+  const RATIO_MIN = 0.5;
+  const RATIO_MAX = 3;
+  const RAINBOW_HUE_START = 0;    // red
+  const RAINBOW_HUE_END = 270;    // violet
+
+  let rainbowCtx = null;
+
+  function rainbowBorderColor(index, total) {
+    if (total <= 1) return rainbowHueToHex(RAINBOW_HUE_START);
+    const t = index / (total - 1);
+    const hue = RAINBOW_HUE_START + t * (RAINBOW_HUE_END - RAINBOW_HUE_START);
+    return rainbowHueToHex(hue);
+  }
+
+  function rainbowHueToHex(hue) {
+    if (!rainbowCtx) {
+      rainbowCtx = document.createElement('canvas').getContext('2d');
+    }
+    rainbowCtx.fillStyle = `hsl(${hue}, 92%, 48%)`;
+    const computed = rainbowCtx.fillStyle;
+    if (typeof computed === 'string') {
+      if (computed.startsWith('#')) {
+        return computed.length >= 7 ? computed.slice(0, 7) : computed;
+      }
+      const m = computed.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+      if (m) {
+        const hex = (n) => Number(m[n]).toString(16).padStart(2, '0');
+        return `#${hex(1)}${hex(2)}${hex(3)}`;
+      }
+    }
+    return DEFAULTS.borderColor;
+  }
+
+  function isRainbowEnabled() {
+    return $('#dz-rainbow')?.checked === true;
+  }
+
+  function isSubtextEnabled() {
+    return $('#dz-subtext')?.checked === true;
+  }
+
+  function updateSubtextUi() {
+    const on = isSubtextEnabled();
+    const el = $('#dz-subtext-controls');
+    if (el) el.classList.toggle('open', on);
+    const hint = $('#dz-data-hint');
+    if (hint) {
+      hint.innerHTML = 'Format: <code>data</code> or <code>data|title</code> or <code>data|title|subtitle</code>';
+    }
+  }
+
+  function findDuplicateData(entries) {
+    const seen = new Map();
+    const dups = [];
+    entries.forEach(({ line, entry }) => {
+      const key = entry.data.toLowerCase();
+      if (!seen.has(key)) {
+        seen.set(key, [line]);
+      } else {
+        seen.get(key).push(line);
+      }
+    });
+    seen.forEach((lines, key) => {
+      if (lines.length > 1) dups.push({ data: entries.find((e) => e.entry.data.toLowerCase() === key).entry.data, count: lines.length, lines });
+    });
+    return dups;
+  }
+
+  function dedupeEntries(entries) {
+    const seen = new Set();
+    return entries.filter(({ entry }) => {
+      const key = entry.data.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  function showDuplicateDialog(dups, entries, onDone) {
+    const dlg = $('#dz-dup-dialog');
+    const list = dups.map((d) => `• ${d.data} (${d.count}×)`).join('\n');
+    $('#dz-dup-msg').textContent = `These encoded values appear more than once:\n\n${list}`;
+    dlg.classList.add('open');
+
+    const close = () => dlg.classList.remove('open');
+
+    $('#dz-dup-btn-cancel').onclick = () => {
+      close();
+      onDone(null);
+    };
+    $('#dz-dup-btn-remove').onclick = () => {
+      close();
+      const deduped = dedupeEntries(entries);
+      const lines = deduped.map((e) => e.line);
+      $('#dz-data').value = lines.join('\n');
+      scheduleSave();
+      onDone(deduped);
+    };
+    $('#dz-dup-btn-proceed').onclick = () => {
+      close();
+      const ok = confirm(
+        `Generate ${entries.length} labels including duplicates?\n\nDuplicates will produce identical barcodes with separate files.`
+      );
+      onDone(ok ? entries : null);
+    };
+  }
+
+  function layoutBarcodeAndText(innerX, innerY, innerW, innerH, bcCanvas, textContentH, hasSubtextGap) {
+    const padX = 10;
+    const minGap = 8;
+    const gapCount = hasSubtextGap ? 4 : 3;
+    const scaleByW = (innerW - padX * 2) / bcCanvas.width;
+    let gap = minGap;
+    let bcScale = scaleByW;
+    let bcH = bcCanvas.height * bcScale;
+    let remaining = innerH - bcH - textContentH;
+
+    if (remaining >= minGap * gapCount) {
+      gap = remaining / gapCount;
+    } else {
+      bcScale = Math.min(scaleByW, (innerH - minGap * gapCount - textContentH) / bcCanvas.height);
+      bcH = bcCanvas.height * bcScale;
+      remaining = innerH - bcH - textContentH;
+      gap = Math.max(minGap, remaining / gapCount);
+    }
+
+    const bcW = bcCanvas.width * bcScale;
+    return {
+      bcX: innerX + (innerW - bcW) / 2,
+      bcY: innerY + gap,
+      bcW,
+      bcH,
+      textTop: innerY + gap + bcH + gap,
+      gap,
+    };
+  }
+
+  function updateRainbowUi() {
+    const borderInput = $('#dz-color-border');
+    if (borderInput) borderInput.disabled = isRainbowEnabled();
+  }
+
+  function syncHeightFromRatio() {
+    const ratio = Math.min(RATIO_MAX, Math.max(RATIO_MIN, parseFloat($('#dz-ratio').value) || DEFAULTS.printRatio));
+    const w = parseInt($('#dz-label-w').value, 10) || DEFAULTS.labelWidth;
+    $('#dz-label-h').value = Math.round(w / ratio);
+    $('#dz-ratio-val').textContent = ratio.toFixed(2);
+  }
+
+  function syncRatioFromDimensions() {
+    const w = parseInt($('#dz-label-w').value, 10) || DEFAULTS.labelWidth;
+    const h = parseInt($('#dz-label-h').value, 10) || DEFAULTS.labelHeight;
+    if (h > 0) {
+      const ratio = Math.min(RATIO_MAX, Math.max(RATIO_MIN, w / h));
+      $('#dz-ratio').value = ratio;
+      $('#dz-ratio-val').textContent = ratio.toFixed(2);
+    }
+  }
+
+  function renderMiniPreviewNow() {
+    const img = $('#dz-mini-preview');
+    try {
+      const settings = getSettings();
+      const { canvas } = composeLabel(getPreviewEntry(), settings);
+      img.src = canvas.toDataURL('image/png');
+      img.style.display = 'block';
+    } catch (err) {
+      img.style.display = 'none';
+    }
+  }
+
+  function updateMiniPreview(immediate) {
+    clearTimeout(miniPreviewTimer);
+    if (immediate) {
+      if (miniPreviewRaf) cancelAnimationFrame(miniPreviewRaf);
+      miniPreviewRaf = 0;
+      renderMiniPreviewNow();
+      return;
+    }
+    miniPreviewTimer = setTimeout(renderMiniPreviewNow, 40);
+  }
+
+  function scheduleMiniPreviewRaf() {
+    if (miniPreviewRaf) return;
+    miniPreviewRaf = requestAnimationFrame(() => {
+      miniPreviewRaf = 0;
+      renderMiniPreviewNow();
+    });
+  }
+
+  function getPreviewEntry() {
+    const line = $('#dz-data').value.split(/\r?\n/).map((l) => l.trim()).find(Boolean);
+    if (line) return parseLine(line);
+    const layout = $('#dz-layout').value;
+    return layout === 'dropzone'
+      ? parseLine('dz-P-NonSort-ILS|Dropzone for NonSort ILS')
+      : parseLine('dz-P-CR-EOL');
+  }
+
+  function normalizeHexColor(raw, fallback) {
+    if (!raw) return fallback;
+    let v = String(raw).trim().toLowerCase();
+    if (/^#[0-9a-f]{8}$/.test(v)) v = v.slice(0, 7);
+    if (/^#[0-9a-f]{3}$/.test(v)) {
+      v = `#${v[1]}${v[1]}${v[2]}${v[2]}${v[3]}${v[3]}`;
+    }
+    return /^#[0-9a-f]{6}$/.test(v) ? v : fallback;
+  }
+
+  function syncColorState(key, el) {
+    if (!el) return;
+    colorState[key] = normalizeHexColor(el.value, colorState[key]);
+  }
+
+  function bindColorPickers() {
+    colorEls = {
+      'dz-color-border': $('#dz-color-border'),
+      'dz-color-background': $('#dz-color-background'),
+      'dz-color-text': $('#dz-color-text'),
+      'dz-color-subtext': $('#dz-color-subtext'),
+    };
+    const bindings = [
+      ['dz-color-border', 'borderColor'],
+      ['dz-color-background', 'bgColor'],
+      ['dz-color-text', 'textColor'],
+      ['dz-color-subtext', 'subtextColor'],
+    ];
+    bindings.forEach(([id, key]) => {
+      const el = colorEls[id];
+      if (!el) return;
+      const apply = () => {
+        syncColorState(key, el);
+        updateMiniPreview(true);
+        scheduleSave();
+      };
+      el.addEventListener('input', apply);
+      el.addEventListener('change', apply);
+      syncColorState(key, el);
+    });
+  }
+
+  function getColorDebugInfo() {
+    return {
+      colorState: { ...colorState },
+      pickerValues: {
+        border: colorEls['dz-color-border']?.value ?? null,
+        background: colorEls['dz-color-background']?.value ?? null,
+        text: colorEls['dz-color-text']?.value ?? null,
+        subtext: colorEls['dz-color-subtext']?.value ?? null,
+      },
+    };
+  }
+
+  function readFontSizeFromEl(el, fallback, max) {
+    if (!el) return fallback;
+    const n = Number(el.value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(8, Math.min(max, Math.round(n)));
+  }
+
+  function readFontSize(id, fallback, max) {
+    const key = id === '#dz-title-size' ? 'titleSize' : id === '#dz-text-size' ? 'idSize' : id === '#dz-subtext-size' ? 'subtextSize' : null;
+    if (key && fontSizeState[key] != null) return fontSizeState[key];
+    return readFontSizeFromEl($(id), fallback, max);
+  }
+
+  function syncFontSizeState(key, el, fallback, max) {
+    if (!el) return;
+    fontSizeState[key] = readFontSizeFromEl(el, fallback, max);
+  }
+
+  function bindFontSizeInputs() {
+    const bindings = [
+      ['#dz-title-size', 'titleSize', DEFAULTS.titleSize, 96],
+      ['#dz-text-size', 'idSize', DEFAULTS.idSize, 96],
+      ['#dz-subtext-size', 'subtextSize', DEFAULTS.subtextSize, 72],
+    ];
+    bindings.forEach(([sel, key, fallback, max]) => {
+      const el = $(sel);
+      if (!el) return;
+      const apply = () => {
+        syncFontSizeState(key, el, fallback, max);
+        updateFontSizeUi();
+        updateMiniPreview(true);
+        scheduleSave();
+      };
+      el.addEventListener('input', apply);
+      el.addEventListener('change', apply);
+      syncFontSizeState(key, el, fallback, max);
+    });
+  }
+
+  function flushFormInputs() {
+    const ae = document.activeElement;
+    if (ae && root.contains(ae) && typeof ae.blur === 'function') {
+      ae.blur();
+    }
+    syncFontSizeState('titleSize', $('#dz-title-size'), DEFAULTS.titleSize, 96);
+    syncFontSizeState('idSize', $('#dz-text-size'), DEFAULTS.idSize, 96);
+    syncFontSizeState('subtextSize', $('#dz-subtext-size'), DEFAULTS.subtextSize, 72);
+  }
+
+  function dataLinesHaveTitles() {
+    return $('#dz-data').value
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .some((line) => (line.split('|')[1] || '').trim());
+  }
+
+  function updateFontSizeUi() {
+    const layout = $('#dz-layout').value;
+    const isDropzone = layout === 'dropzone';
+    const titleWrap = $('#dz-title-size-wrap');
+    const textSizeWrap = $('#dz-text-size-wrap');
+    const titleHint = $('#dz-title-size-hint');
+    const textHint = $('#dz-text-size-hint');
+    const textInput = $('#dz-text-size');
+    const titleInput = $('#dz-title-size');
+    const hasTitles = isDropzone && dataLinesHaveTitles();
+
+    if (titleWrap) {
+      titleWrap.style.display = hasTitles ? '' : 'none';
+      titleWrap.style.opacity = '1';
+    }
+    if (titleInput) titleInput.disabled = false;
+    if (textSizeWrap) {
+      textSizeWrap.style.opacity = '1';
+      textSizeWrap.style.gridColumn = hasTitles ? '' : '1 / -1';
+    }
+    if (textInput) textInput.disabled = false;
+
+    if (!isDropzone) {
+      if (textHint) textHint.textContent = 'Main bottom label text';
+      return;
+    }
+
+    if (titleHint && hasTitles) {
+      titleHint.textContent = 'Top line (data|title|id format)';
+    }
+    if (textHint) {
+      textHint.textContent = hasTitles
+        ? 'Bottom ID line (data|title|id format)'
+        : 'Controls the dropzone ID text on your labels';
+    }
+  }
+
+  function measureFittedFontSize(ctx, text, maxSize, minSize, maxWidth, weight, family) {
+    if (!text) return maxSize;
+    let size = maxSize;
+    while (size > minSize) {
+      ctx.font = `${weight} ${size}px ${family}`;
+      if (ctx.measureText(text).width <= maxWidth) return size;
+      size -= 1;
+    }
+    ctx.font = `${weight} ${minSize}px ${family}`;
+    return minSize;
+  }
+  function readBorderWidth() {
+    const n = Number($('#dz-border-width').value);
+    if (!Number.isFinite(n)) return DEFAULTS.borderWidth;
+    return Math.max(0, Math.min(40, Math.round(n)));
+  }
+
+  function collectState() {
+    return {
+      data: $('#dz-data').value,
+      layout: $('#dz-layout').value,
+      scale: $('#dz-scale').value,
+      barHeight: $('#dz-bar-height').value,
+      ratio: $('#dz-ratio').value,
+      labelW: $('#dz-label-w').value,
+      labelH: $('#dz-label-h').value,
+      borderWidth: $('#dz-border-width').value,
+      borderColor: colorState.borderColor,
+      bgColor: colorState.bgColor,
+      textColor: colorState.textColor,
+      subtextColor: colorState.subtextColor,
+      titleSize: $('#dz-title-size').value,
+      textSize: $('#dz-text-size').value,
+      subtextSize: $('#dz-subtext-size').value,
+      subtextContent: $('#dz-subtext-content').value,
+      subtext: isSubtextEnabled(),
+      rainbow: isRainbowEnabled(),
+      pageSize: $('#dz-page-size')?.value,
+      labelsPerPage: $('#dz-labels-per-page')?.value,
+      labelBorderColors: { ...labelBorderColorOverrides },
+    };
+  }
+
+  function saveState() {
+    try {
+      GM_setValue(STORAGE_KEY, collectState());
+    } catch (err) {
+      /* storage unavailable */
+    }
+  }
+
+  function scheduleSave() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveState, 250);
+  }
+
+  function setInputValue(id, value) {
+    if (value == null || value === '') return;
+    const el = $(id);
+    if (el) el.value = value;
+  }
+
+  function loadState() {
+    try {
+      const s = GM_getValue(STORAGE_KEY, null);
+      if (!s || typeof s !== 'object') return false;
+
+      if (s.data != null) $('#dz-data').value = s.data;
+      setInputValue('#dz-layout', s.layout);
+      setInputValue('#dz-scale', s.scale);
+      setInputValue('#dz-bar-height', s.barHeight);
+      setInputValue('#dz-ratio', s.ratio);
+      setInputValue('#dz-label-w', s.labelW);
+      setInputValue('#dz-label-h', s.labelH);
+      setInputValue('#dz-border-width', s.borderWidth);
+      setInputValue('#dz-title-size', s.titleSize);
+      setInputValue('#dz-text-size', s.textSize);
+      if (s.rainbow != null) $('#dz-rainbow').checked = !!s.rainbow;
+
+      if (s.borderColor) {
+        colorState.borderColor = normalizeHexColor(s.borderColor, DEFAULTS.borderColor);
+        setInputValue('#dz-color-border', colorState.borderColor);
+      }
+      if (s.bgColor) {
+        colorState.bgColor = normalizeHexColor(s.bgColor, DEFAULTS.bgColor);
+        setInputValue('#dz-color-background', colorState.bgColor);
+      }
+      if (s.textColor) {
+        colorState.textColor = normalizeHexColor(s.textColor, DEFAULTS.textColor);
+        setInputValue('#dz-color-text', colorState.textColor);
+      }
+      if (s.subtextColor) {
+        colorState.subtextColor = normalizeHexColor(s.subtextColor, DEFAULTS.subtextColor);
+        setInputValue('#dz-color-subtext', colorState.subtextColor);
+      }
+      setInputValue('#dz-subtext-size', s.subtextSize);
+      setInputValue('#dz-subtext-content', s.subtextContent);
+      if (s.subtext != null) $('#dz-subtext').checked = !!s.subtext;
+      setInputValue('#dz-page-size', s.pageSize);
+      setInputValue('#dz-labels-per-page', s.labelsPerPage);
+      if (s.labelBorderColors && typeof s.labelBorderColors === 'object') {
+        labelBorderColorOverrides = { ...s.labelBorderColors };
+      }
+
+      syncFontSizeState('titleSize', $('#dz-title-size'), DEFAULTS.titleSize, 96);
+      syncFontSizeState('idSize', $('#dz-text-size'), DEFAULTS.idSize, 96);
+      syncFontSizeState('subtextSize', $('#dz-subtext-size'), DEFAULTS.subtextSize, 72);
+
+      const ratio = parseFloat($('#dz-ratio').value);
+      if (Number.isFinite(ratio)) $('#dz-ratio-val').textContent = ratio.toFixed(2);
+
+      return true;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function parseLine(line) {
+    const parts = line.split('|').map((p) => p.trim());
+    const data = parts[0] || '';
+    const title = parts[1] || '';
+    const subtitle = parts[2] || data;
+    return { data, title, subtitle };
+  }
+
+  function getSettings() {
+    const layout = $('#dz-layout').value;
+    const layoutConfig = getLayoutConfig(layout);
+    return {
+      layout,
+      symbology: layoutConfig.symbology,
+      symbologyType: layoutConfig.type,
+      scale: parseFloat($('#dz-scale').value) || DEFAULTS.scale,
+      barHeight: parseFloat($('#dz-bar-height').value) || DEFAULTS.barHeight,
+      printRatio: parseFloat($('#dz-ratio').value) || DEFAULTS.printRatio,
+      borderColor: colorState.borderColor,
+      borderWidth: readBorderWidth(),
+      labelWidth: parseInt($('#dz-label-w').value, 10) || DEFAULTS.labelWidth,
+      labelHeight: parseInt($('#dz-label-h').value, 10) || DEFAULTS.labelHeight,
+      bgColor: colorState.bgColor,
+      textColor: colorState.textColor,
+      subtextColor: colorState.subtextColor,
+      titleSize: fontSizeState.titleSize,
+      idSize: fontSizeState.idSize,
+      subtextSize: fontSizeState.subtextSize,
+      subtextEnabled: isSubtextEnabled(),
+      subText: isSubtextEnabled() ? ($('#dz-subtext-content').value || '').trim() : '',
+      rainbowColoring: isRainbowEnabled(),
+    };
+  }
+
+  function settingsForLabel(baseSettings, index, total) {
+    if (!baseSettings.rainbowColoring) return baseSettings;
+    return { ...baseSettings, borderColor: rainbowBorderColor(index, total) };
+  }
+
+  function renderBarcodeCanvas(text, settings) {
+    const canvas = document.createElement('canvas');
+    const opts = {
+      bcid: settings.symbology,
+      text,
+      scale: settings.scale,
+      includetext: false,
+      textxalign: 'center',
+      paddingwidth: 2,
+      paddingheight: 2,
+    };
+
+    if (settings.symbologyType === '1d') {
+      opts.height = settings.barHeight;
+    }
+
+    bwipjs.toCanvas(canvas, opts);
+    return canvas;
+  }
+
+  function drawDropzoneLabel(ctx, w, h, bcCanvas, entry, settings) {
+    const bw = settings.borderWidth;
+    const borderColor = settings.borderColor;
+    const bgColor = settings.bgColor;
+    const textColor = settings.textColor;
+    const subtextColor = settings.subtextColor;
+    const innerX = bw;
+    const innerY = bw;
+    const innerW = w - bw * 2;
+    const innerH = h - bw * 2;
+
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(0, 0, w, h);
+    if (bw > 0) {
+      ctx.fillStyle = borderColor;
+      ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = bgColor;
+      ctx.fillRect(innerX, innerY, innerW, innerH);
+    }
+
+    const titleSize = settings.titleSize || DEFAULTS.titleSize;
+    const idSize = settings.idSize || DEFAULTS.idSize;
+    const subSize = settings.subtextSize || DEFAULTS.subtextSize;
+    const lineGap = entry.title ? 8 : 0;
+    const hasSub = settings.subtextEnabled && settings.subText;
+    const minGap = 8;
+    const maxTextW = innerW - 20;
+    const idText = entry.subtitle || entry.data;
+    const fittedTitleSize = entry.title
+      ? measureFittedFontSize(ctx, entry.title, titleSize, 8, maxTextW, '600', 'system-ui, sans-serif')
+      : 0;
+    const fittedIdSize = measureFittedFontSize(ctx, idText, idSize, 8, maxTextW, '700', 'system-ui, sans-serif');
+    let textContentH = entry.title ? fittedTitleSize + lineGap + fittedIdSize : fittedIdSize;
+    if (hasSub) textContentH += minGap + subSize;
+
+    const layout = layoutBarcodeAndText(innerX, innerY, innerW, innerH, bcCanvas, textContentH, hasSub);
+    ctx.drawImage(bcCanvas, layout.bcX, layout.bcY, layout.bcW, layout.bcH);
+
+    const cx = innerX + innerW / 2;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    let y = layout.textTop;
+
+    if (entry.title) {
+      ctx.fillStyle = textColor;
+      ctx.font = `600 ${fittedTitleSize}px system-ui, sans-serif`;
+      ctx.fillText(entry.title, cx, y);
+      y += fittedTitleSize + lineGap;
+    }
+    ctx.fillStyle = textColor;
+    ctx.font = `700 ${fittedIdSize}px system-ui, sans-serif`;
+    ctx.fillText(idText, cx, y);
+    y += fittedIdSize;
+
+    if (hasSub) {
+      y += layout.gap;
+      ctx.fillStyle = subtextColor;
+      ctx.font = `500 ${subSize}px system-ui, sans-serif`;
+      ctx.fillText(settings.subText, cx, y);
+    }
+  }
+
+  function drawTagLabel(ctx, w, h, bcCanvas, entry, settings) {
+    const bw = settings.borderWidth;
+    const borderColor = settings.borderColor;
+    const bgColor = settings.bgColor;
+    const textColor = settings.textColor;
+    const subtextColor = settings.subtextColor;
+    const innerX = bw;
+    const innerY = bw;
+    const innerW = w - bw * 2;
+    const innerH = h - bw * 2;
+
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(0, 0, w, h);
+    if (bw > 0) {
+      ctx.fillStyle = borderColor;
+      ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = bgColor;
+      ctx.fillRect(innerX, innerY, innerW, innerH);
+    }
+
+    const mainSize = settings.idSize || DEFAULTS.idSize;
+    const subSize = settings.subtextSize || DEFAULTS.subtextSize;
+    const hasSub = settings.subtextEnabled && settings.subText;
+    const minGap = 8;
+    const mainText = entry.title || entry.subtitle || entry.data;
+    const maxTextW = innerW - 20;
+    const fittedMainSize = measureFittedFontSize(ctx, mainText, mainSize, 8, maxTextW, '700', 'Georgia, "Times New Roman", serif');
+    let textContentH = fittedMainSize;
+    if (hasSub) textContentH += minGap + subSize;
+
+    const layout = layoutBarcodeAndText(innerX, innerY, innerW, innerH, bcCanvas, textContentH, hasSub);
+    ctx.drawImage(bcCanvas, layout.bcX, layout.bcY, layout.bcW, layout.bcH);
+
+    const cx = innerX + innerW / 2;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = textColor;
+    ctx.font = `700 ${fittedMainSize}px Georgia, "Times New Roman", serif`;
+    ctx.fillText(mainText, cx, layout.textTop);
+
+    if (hasSub) {
+      ctx.fillStyle = subtextColor;
+      ctx.font = `500 ${subSize}px Georgia, "Times New Roman", serif`;
+      ctx.fillText(settings.subText, cx, layout.textTop + fittedMainSize + layout.gap);
+    }
+
+    return { bcX: layout.bcX, bcY: layout.bcY, bcW: layout.bcW, bcH: layout.bcH, labelText: mainText, fontSize: fittedMainSize };
+  }
+
+  function composeLabel(entry, settings) {
+    const w = settings.labelWidth;
+    const h = settings.labelHeight;
+    const out = document.createElement('canvas');
+    out.width = w;
+    out.height = h;
+    const ctx = out.getContext('2d');
+
+    const bcCanvas = renderBarcodeCanvas(entry.data, settings);
+    const layout = settings.layout;
+    let layoutMeta = {};
+
+    if (layout === 'dropzone') {
+      drawDropzoneLabel(ctx, w, h, bcCanvas, entry, settings);
+    } else {
+      layoutMeta = drawTagLabel(ctx, w, h, bcCanvas, entry, settings) || {};
+    }
+
+    return {
+      canvas: out,
+      meta: {
+        labelWidth: w,
+        labelHeight: h,
+        symbology: settings.symbology,
+        barcodeNativeWidth: bcCanvas.width,
+        barcodeNativeHeight: bcCanvas.height,
+        layout,
+        ...layoutMeta,
+      },
+    };
+  }
+
+  function onLayoutChange() {
+    const cfg = getLayoutConfig(layoutSel.value);
+    const is1d = cfg.type === '1d';
+    $('#dz-1d-controls').style.display = is1d ? '' : 'none';
+    updateFontSizeUi();
+    updateSubtextUi();
+    updateMiniPreview(true);
+  }
+
+  function getPageSettings() {
+    const labelsPerPage = parseInt($('#dz-labels-per-page').value, 10);
+    return {
+      pageSize: $('#dz-page-size')?.value === 'a4' ? 'a4' : 'letter',
+      labelsPerPage: Number.isFinite(labelsPerPage) ? Math.max(1, Math.min(24, labelsPerPage)) : DEFAULTS.labelsPerPage,
+    };
+  }
+
+  function getPageDimensions(pageSize) {
+    return PAGE_SIZES[pageSize] || PAGE_SIZES.letter;
+  }
+
+  function maxScaleForGrid(cols, rows, labelW, labelH, pageW, pageH) {
+    let lo = 0.05;
+    let hi = 1;
+    let best = null;
+    for (let i = 0; i < 40; i += 1) {
+      const scale = (lo + hi) / 2;
+      const w = labelW * scale;
+      const h = labelH * scale;
+      const gapX = (pageW - cols * w) / (cols + 1);
+      const gapY = (pageH - rows * h) / (rows + 1);
+      if (gapX >= PAGE_MIN_GAP && gapY >= PAGE_MIN_GAP) {
+        best = { cols, rows, gapX, gapY, scale, labelW: w, labelH: h };
+        lo = scale;
+      } else {
+        hi = scale;
+      }
+    }
+    return best;
+  }
+
+  function pickPageGrid(perPage, labelW, labelH, pageW, pageH) {
+    let best = null;
+    for (let cols = 1; cols <= perPage; cols += 1) {
+      const rows = Math.ceil(perPage / cols);
+      const candidate = maxScaleForGrid(cols, rows, labelW, labelH, pageW, pageH);
+      if (!candidate) continue;
+      const balance = Math.min(candidate.gapX, candidate.gapY) / Math.max(candidate.gapX, candidate.gapY);
+      const score = candidate.scale * 1000 + balance;
+      if (!best || score > best.score) {
+        best = { ...candidate, score };
+      }
+    }
+    if (best) return best;
+    const cols = 1;
+    const rows = perPage;
+    const w = labelW * 0.1;
+    const h = labelH * 0.1;
+    return {
+      cols,
+      rows,
+      gapX: Math.max(PAGE_MIN_GAP, (pageW - cols * w) / (cols + 1)),
+      gapY: Math.max(PAGE_MIN_GAP, (pageH - rows * h) / (rows + 1)),
+      scale: 0.1,
+      labelW: w,
+      labelH: h,
+    };
+  }
+
+  function labelPositionOnPage(index, count, grid, pageW, pageH) {
+    const { cols, gapX, gapY, labelW, labelH } = grid;
+    const row = Math.floor(index / cols);
+    const col = index % cols;
+    const usedRows = Math.ceil(count / cols);
+    const itemsInRow = row === usedRows - 1 ? count - (usedRows - 1) * cols : cols;
+
+    if (itemsInRow < cols) {
+      const rowW = itemsInRow * labelW + (itemsInRow + 1) * gapX;
+      const rowOffX = (pageW - rowW) / 2;
+      const colInRow = index - (usedRows - 1) * cols;
+      return {
+        x: rowOffX + gapX + colInRow * (labelW + gapX),
+        y: gapY + row * (labelH + gapY),
+      };
+    }
+
+    return {
+      x: gapX + col * (labelW + gapX),
+      y: gapY + row * (labelH + gapY),
+    };
+  }
+
+  function loadImage(dataUrl) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('Failed to load label image'));
+      img.src = dataUrl;
+    });
+  }
+
+  function fillPageCopies(images, perPage) {
+    if (!images.length || images.length >= perPage) return images;
+    const filled = [];
+    while (filled.length < perPage) {
+      filled.push(images[filled.length % images.length]);
+    }
+    return filled;
+  }
+
+  async function buildPagesFromResults(results) {
+    if (!results.length) return { pages: [], grid: null, pageDim: null };
+    const pageSettings = getPageSettings();
+    const pageDim = getPageDimensions(pageSettings.pageSize);
+    const nativeW = results[0].meta.labelWidth;
+    const nativeH = results[0].meta.labelHeight;
+    const grid = pickPageGrid(pageSettings.labelsPerPage, nativeW, nativeH, pageDim.w, pageDim.h);
+    const images = fillPageCopies(
+      await Promise.all(results.map((r) => loadImage(r.dataUrl))),
+      pageSettings.labelsPerPage,
+    );
+    const pages = [];
+
+    for (let i = 0; i < images.length; i += pageSettings.labelsPerPage) {
+      const chunk = images.slice(i, i + pageSettings.labelsPerPage);
+      const canvas = document.createElement('canvas');
+      canvas.width = pageDim.w;
+      canvas.height = pageDim.h;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, pageDim.w, pageDim.h);
+
+      chunk.forEach((img, idx) => {
+        const { x, y } = labelPositionOnPage(idx, chunk.length, grid, pageDim.w, pageDim.h);
+        ctx.drawImage(img, x, y, grid.labelW, grid.labelH);
+      });
+
+      pages.push({
+        name: `page_${pages.length + 1}.png`,
+        dataUrl: canvas.toDataURL('image/png'),
+        pageSize: pageSettings.pageSize,
+      });
+    }
+
+    return { pages, grid, pageDim, pageSettings };
+  }
+
+  function updatePageLayoutHint(grid, pageCount) {
+    const el = $('#dz-page-layout-hint');
+    if (!el) return;
+    if (!grid || !pageCount) {
+      el.textContent = 'Fewer labels than the page count are repeated to fill the sheet. Labels are placed with equal gaps to each other and the page edge.';
+      return;
+    }
+    const scaleNote = `labels at ${Math.round(grid.scale * 100)}%`;
+    const gapNote = Math.abs(grid.gapX - grid.gapY) < 2
+      ? `${Math.round(grid.gapX)}px gaps`
+      : `${Math.round(grid.gapX)}×${Math.round(grid.gapY)}px gaps`;
+    el.textContent = `${grid.cols} × ${grid.rows} grid, ${gapNote}, ${scaleNote} → ${pageCount} page(s)`;
+  }
+
+  function bindLabelColorPicker(el, index) {
+    if (!el) return;
+    const apply = () => { applyLabelBorderColor(index, el.value); };
+    el.addEventListener('input', apply);
+    el.addEventListener('change', apply);
+  }
+
+  function syncLabelColorPickers(index, borderColor) {
+    root.querySelectorAll(`[data-label-color-idx="${index}"]`).forEach((el) => {
+      if (el.value !== borderColor) el.value = borderColor;
+    });
+  }
+
+  function applyLabelBorderColor(index, rawColor) {
+    const result = lastResults[index];
+    if (!result?.labelSettings) return;
+
+    const borderColor = normalizeHexColor(rawColor, result.borderColor || DEFAULTS.borderColor);
+    if (result.borderColor === borderColor) return;
+
+    result.borderColor = borderColor;
+    labelBorderColorOverrides[result.entry.data] = borderColor;
+    const settings = { ...result.labelSettings, borderColor };
+    result.labelSettings = settings;
+
+    const { canvas, meta } = composeLabel(result.entry, settings);
+    result.dataUrl = canvas.toDataURL('image/png');
+    result.meta = { ...meta, borderColor };
+
+    syncLabelColorPickers(index, borderColor);
+    const img = $(`#dz-label-card-${index} img`);
+    if (img) img.src = result.dataUrl;
+
+    clearTimeout(pageRebuildTimer);
+    pageRebuildTimer = setTimeout(() => {
+      rebuildPages().then(() => scheduleSave());
+    }, 120);
+  }
+
+  function renderLabelColorPanel() {
+    const wrap = $('#dz-label-colors-wrap');
+    const list = $('#dz-label-colors-list');
+    if (!wrap || !list) return;
+    if (!lastResults.length) {
+      wrap.classList.remove('open');
+      list.innerHTML = '';
+      return;
+    }
+    wrap.classList.add('open');
+    list.innerHTML = '';
+    lastResults.forEach((r, index) => {
+      const color = r.borderColor || r.meta?.borderColor || DEFAULTS.borderColor;
+      const row = document.createElement('label');
+      row.className = 'dz-label-color-row';
+      row.innerHTML = `<span class="dz-label-color-name" title="${r.entry.data}">${r.entry.data}</span>`;
+      const input = document.createElement('input');
+      input.type = 'color';
+      input.value = color;
+      input.dataset.labelColorIdx = String(index);
+      bindLabelColorPicker(input, index);
+      row.appendChild(input);
+      list.appendChild(row);
+    });
+  }
+
+  function renderPreviewLabels() {
+    const preview = $('#dz-bg-preview');
+    preview.classList.remove('pages-mode');
+    preview.innerHTML = '';
+    if (!lastResults.length) {
+      preview.innerHTML = '<p style="color:#666;margin:auto">Click Generate to preview labels.</p>';
+      return;
+    }
+    lastResults.forEach((r, index) => {
+      const { dataUrl, entry } = r;
+      const borderColor = r.borderColor || r.meta?.borderColor || DEFAULTS.borderColor;
+      const card = document.createElement('div');
+      card.className = 'card label-card';
+      card.id = `dz-label-card-${index}`;
+      card.innerHTML = `<img src="${dataUrl}" alt="${entry.data}">`;
+      const colorLabel = document.createElement('label');
+      colorLabel.className = 'dz-label-card-color';
+      colorLabel.appendChild(document.createTextNode('Border '));
+      const input = document.createElement('input');
+      input.type = 'color';
+      input.value = borderColor;
+      input.dataset.labelColorIdx = String(index);
+      colorLabel.appendChild(input);
+      card.appendChild(colorLabel);
+      bindLabelColorPicker(input, index);
+      preview.appendChild(card);
+    });
+    lastGenerateErrors.forEach(({ data, error }) => {
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.innerHTML = `<div class="cap" style="color:#f66;padding:20px">Error: ${data}<br>${error}</div>`;
+      preview.appendChild(card);
+    });
+  }
+
+  function renderPreviewPages() {
+    const preview = $('#dz-bg-preview');
+    preview.classList.add('pages-mode');
+    preview.innerHTML = '';
+    if (!lastPages.length) {
+      preview.innerHTML = '<p style="color:#666;margin:auto">Generate labels to see page layout.</p>';
+      return;
+    }
+    lastPages.forEach((page, idx) => {
+      const card = document.createElement('div');
+      card.className = 'card page-card';
+      card.innerHTML = `<img src="${page.dataUrl}" alt="Page ${idx + 1}"><div class="cap">Page ${idx + 1}</div>`;
+      preview.appendChild(card);
+    });
+  }
+
+  function setPreviewMode(mode) {
+    previewMode = mode === 'pages' ? 'pages' : 'labels';
+    $('#dz-tab-labels')?.classList.toggle('active', previewMode === 'labels');
+    $('#dz-tab-pages')?.classList.toggle('active', previewMode === 'pages');
+    renderLabelColorPanel();
+    if (previewMode === 'pages') renderPreviewPages();
+    else renderPreviewLabels();
+  }
+
+  function updateOutputButtons() {
+    const hasLabels = lastResults.length > 0;
+    const hasPages = lastPages.length > 0;
+    $('#dz-bg-btn-download').disabled = !hasLabels;
+    $('#dz-bg-btn-download-pages').disabled = !hasPages;
+    $('#dz-bg-btn-print').disabled = !hasPages;
+  }
+
+  async function rebuildPages() {
+    if (!lastResults.length) {
+      lastPages = [];
+      lastPageGrid = null;
+      updatePageLayoutHint(null);
+      updateOutputButtons();
+      if (previewMode === 'pages') renderPreviewPages();
+      return;
+    }
+    try {
+      const { pages, grid } = await buildPagesFromResults(lastResults);
+      lastPages = pages;
+      lastPageGrid = grid;
+      updatePageLayoutHint(grid, pages.length);
+      updateOutputButtons();
+      if (previewMode === 'pages') renderPreviewPages();
+    } catch (err) {
+      $('#dz-bg-status').textContent = `Page layout failed: ${err?.message || String(err)}`;
+    }
+  }
+
+  function runGenerate(entries) {
+    const settings = getSettings();
+    $('#dz-bg-preview').innerHTML = '';
+    lastResults = [];
+    lastPages = [];
+    lastGenerateErrors = [];
+
+    let errors = 0;
+    const errorList = [];
+    entries.forEach(({ line, entry }, labelIndex) => {
+      const labelSettings = settingsForLabel(settings, labelIndex, entries.length);
+      if (labelBorderColorOverrides[entry.data]) {
+        labelSettings.borderColor = labelBorderColorOverrides[entry.data];
+      }
+
+      try {
+        const { canvas, meta } = composeLabel(entry, labelSettings);
+        const dataUrl = canvas.toDataURL('image/png');
+        const safeName = entry.data.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80);
+        lastResults.push({
+          name: `${safeName || 'label'}_${labelIndex + 1}.png`,
+          dataUrl,
+          entry,
+          borderColor: labelSettings.borderColor,
+          labelSettings: { ...labelSettings },
+          meta: { ...meta, borderColor: labelSettings.borderColor },
+        });
+      } catch (err) {
+        errors += 1;
+        const errMsg = String(err);
+        errorList.push({ line, data: entry.data, error: errMsg });
+        lastGenerateErrors.push({ data: entry.data, error: errMsg });
+      }
+    });
+
+    const finishGenerate = async () => {
+      await rebuildPages();
+      const perPage = getPageSettings().labelsPerPage;
+      const labelsOnPages = lastResults.length && lastResults.length < perPage
+        ? perPage
+        : lastResults.length;
+      lastDebug = {
+        scriptVersion: '1.6.1',
+        timestamp: new Date().toISOString(),
+        pageUrl: location.href,
+        userAgent: navigator.userAgent,
+        settings: { ...settings, ...getPageSettings() },
+        pageLayout: lastPageGrid,
+        pages: lastPages.length,
+        labelsOnPages,
+        inputLines: entries.map((e) => e.line),
+        results: lastResults.map((r) => ({
+          data: r.entry.data,
+          title: r.entry.title,
+          subtitle: r.entry.subtitle,
+          subText: settings.subText,
+          fileName: r.name,
+          meta: r.meta,
+        })),
+        errors: errorList,
+        ...getColorDebugInfo(),
+      };
+      setPreviewMode(previewMode);
+      $('#dz-bg-status').textContent = errors
+        ? `Generated ${lastResults.length} unique label(s), ${errors} failed. ${labelsOnPages} on ${lastPages.length} page(s).`
+        : `Generated ${lastResults.length} unique label(s), ${labelsOnPages} on ${lastPages.length} page(s).`;
+      saveState();
+    };
+
+    finishGenerate();
+  }
+
+  function generate() {
+    flushFormInputs();
+    const lines = $('#dz-data').value
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    if (!lines.length) {
+      $('#dz-bg-status').textContent = 'Enter at least one barcode value.';
+      return;
+    }
+
+    const entries = lines
+      .map((line) => ({ line, entry: parseLine(line) }))
+      .filter(({ entry }) => entry.data);
+
+    const dups = findDuplicateData(entries);
+    if (dups.length) {
+      showDuplicateDialog(dups, entries, (finalEntries) => {
+        if (finalEntries) runGenerate(finalEntries);
+      });
+      return;
+    }
+
+    runGenerate(entries);
+  }
+
+  function copyDebug() {
+    const payload = lastDebug || {
+      scriptVersion: '1.6.1',
+      timestamp: new Date().toISOString(),
+      pageUrl: location.href,
+      userAgent: navigator.userAgent,
+      settings: getSettings(),
+      inputLines: $('#dz-data').value.split(/\r?\n/).filter((l) => l.trim()),
+      results: [],
+      errors: [],
+      note: 'No generation run yet — settings snapshot only.',
+      ...getColorDebugInfo(),
+    };
+
+    const text = JSON.stringify(payload, null, 2);
+    GM_setClipboard(text, { type: 'text', mimetype: 'text/plain' });
+    $('#dz-bg-status').textContent = 'Debug JSON copied — paste into chat.';
+  }
+
+  function downloadFolderName() {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    return `barcode-labels-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  }
+
+  const CRC32_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let i = 0; i < 256; i += 1) {
+      let c = i;
+      for (let j = 0; j < 8; j += 1) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+      table[i] = c >>> 0;
+    }
+    return table;
+  })();
+
+  function crc32(bytes) {
+    let crc = 0xffffffff;
+    for (let i = 0; i < bytes.length; i += 1) {
+      crc = CRC32_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+    }
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+
+  function dataUrlToBytes(dataUrl) {
+    const base64 = dataUrl.split(',')[1];
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  /** Fast ZIP (store only — PNGs are already compressed). */
+  function buildStoreZip(fileEntries) {
+    const encoder = new TextEncoder();
+    const localParts = [];
+    const central = [];
+    let offset = 0;
+
+    fileEntries.forEach(({ path, bytes }) => {
+      const name = encoder.encode(path.replace(/\\/g, '/'));
+      const checksum = crc32(bytes);
+      const size = bytes.length;
+
+      const local = new Uint8Array(30 + name.length);
+      const lv = new DataView(local.buffer, local.byteOffset, local.byteLength);
+      lv.setUint32(0, 0x04034b50, true);
+      lv.setUint16(4, 20, true);
+      lv.setUint16(6, 0, true);
+      lv.setUint16(8, 0, true);
+      lv.setUint32(14, checksum, true);
+      lv.setUint32(18, size, true);
+      lv.setUint32(22, size, true);
+      lv.setUint16(26, name.length, true);
+      lv.setUint16(28, 0, true);
+      local.set(name, 30);
+
+      const centralRec = new Uint8Array(46 + name.length);
+      const cv = new DataView(centralRec.buffer, centralRec.byteOffset, centralRec.byteLength);
+      cv.setUint32(0, 0x02014b50, true);
+      cv.setUint16(4, 20, true);
+      cv.setUint16(6, 20, true);
+      cv.setUint16(8, 0, true);
+      cv.setUint16(10, 0, true);
+      cv.setUint32(16, checksum, true);
+      cv.setUint32(20, size, true);
+      cv.setUint32(24, size, true);
+      cv.setUint16(28, name.length, true);
+      cv.setUint16(30, 0, true);
+      cv.setUint16(32, 0, true);
+      cv.setUint16(34, 0, true);
+      cv.setUint16(36, 0, true);
+      cv.setUint32(38, 0, true);
+      cv.setUint32(42, offset, true);
+      centralRec.set(name, 46);
+
+      localParts.push(local, bytes);
+      central.push(centralRec);
+      offset += local.length + bytes.length;
+    });
+
+    const centralSize = central.reduce((sum, rec) => sum + rec.length, 0);
+    const end = new Uint8Array(22);
+    const ev = new DataView(end.buffer, end.byteOffset, end.byteLength);
+    ev.setUint32(0, 0x06054b50, true);
+    ev.setUint16(4, 0, true);
+    ev.setUint16(6, 0, true);
+    ev.setUint16(8, fileEntries.length, true);
+    ev.setUint16(10, fileEntries.length, true);
+    ev.setUint32(12, centralSize, true);
+    ev.setUint32(16, offset, true);
+    ev.setUint16(20, 0, true);
+
+    const localSize = localParts.reduce((sum, part) => sum + part.length, 0);
+    const total = localSize + centralSize + end.length;
+    const out = new Uint8Array(total);
+    let pos = 0;
+    localParts.forEach((part) => {
+      out.set(part, pos);
+      pos += part.length;
+    });
+    central.forEach((rec) => {
+      out.set(rec, pos);
+      pos += rec.length;
+    });
+    out.set(end, pos);
+    return new Blob([out], { type: 'application/zip' });
+  }
+
+  function triggerBlobDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
+
+  function triggerDataUrlDownload(dataUrl, filename) {
+    const a = document.createElement('a');
+    a.href = dataUrl;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  async function downloadAll() {
+    if (!lastResults.length) return;
+
+    const status = $('#dz-bg-status');
+    const dlBtn = $('#dz-bg-btn-download');
+
+    if (lastResults.length === 1) {
+      const { name, dataUrl } = lastResults[0];
+      triggerDataUrlDownload(dataUrl, name);
+      status.textContent = `Downloaded ${name}`;
+      return;
+    }
+
+    const folderName = downloadFolderName();
+    const zipName = `${folderName}.zip`;
+    const total = lastResults.length;
+
+    dlBtn.disabled = true;
+    status.textContent = `Preparing ${total} labels…`;
+
+    try {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+
+      const files = [];
+      for (let i = 0; i < lastResults.length; i += 1) {
+        const { name, dataUrl } = lastResults[i];
+        if (i % 4 === 0) {
+          status.textContent = `Preparing ${i + 1}/${total}…`;
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+        }
+        files.push({
+          path: `${folderName}/${name}`,
+          bytes: dataUrlToBytes(dataUrl),
+        });
+      }
+
+      status.textContent = `Building ${zipName}…`;
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+
+      const blob = buildStoreZip(files);
+      triggerBlobDownload(blob, zipName);
+      status.textContent = `Downloaded ${zipName} (${total} PNGs in ${folderName}/).`;
+    } catch (err) {
+      status.textContent = `ZIP failed: ${err?.message || String(err)}`;
+    } finally {
+      dlBtn.disabled = lastResults.length === 0;
+    }
+  }
+
+  async function downloadPages() {
+    if (!lastPages.length) return;
+
+    const status = $('#dz-bg-status');
+    const dlBtn = $('#dz-bg-btn-download-pages');
+    const folderName = downloadFolderName();
+    const zipName = `${folderName}-pages.zip`;
+    const total = lastPages.length;
+
+    if (total === 1) {
+      triggerDataUrlDownload(lastPages[0].dataUrl, lastPages[0].name);
+      status.textContent = `Downloaded ${lastPages[0].name}`;
+      return;
+    }
+
+    dlBtn.disabled = true;
+    status.textContent = `Packing ${total} pages into ${zipName}…`;
+
+    try {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      const files = lastPages.map((page) => ({
+        path: `${folderName}/${page.name}`,
+        bytes: dataUrlToBytes(page.dataUrl),
+      }));
+      const blob = buildStoreZip(files);
+      triggerBlobDownload(blob, zipName);
+      status.textContent = `Downloaded ${zipName} (${total} pages).`;
+    } catch (err) {
+      status.textContent = `Page ZIP failed: ${err?.message || String(err)}`;
+    } finally {
+      dlBtn.disabled = lastPages.length === 0;
+    }
+  }
+
+  function printAll() {
+    if (!lastPages.length) {
+      $('#dz-bg-status').textContent = 'Generate labels first to print pages.';
+      return;
+    }
+    const win = window.open('', '_blank');
+    if (!win) {
+      $('#dz-bg-status').textContent = 'Popup blocked — allow popups to print.';
+      return;
+    }
+    const pageSize = lastPages[0].pageSize === 'a4' ? 'A4' : 'letter';
+    const imgs = lastPages.map((r) => `<img src="${r.dataUrl}" alt="">`).join('');
+    win.document.write(`<!DOCTYPE html><html><head><title>Barcode Label Pages</title>
+      <style>
+        @page { size: ${pageSize} portrait; margin: 0; }
+        html, body { margin: 0; padding: 0; }
+        img { display: block; width: 100%; height: 100vh; object-fit: contain; page-break-after: always; }
+        img:last-child { page-break-after: auto; }
+      </style>
+      </head><body>${imgs}<script>window.onload=()=>{window.print();}</script></body></html>`);
+    win.document.close();
+  }
+
+  function togglePanel(open) {
+    panelOpen = open ?? !panelOpen;
+    $('#dz-bg-overlay').classList.toggle('open', panelOpen);
+    if (panelOpen && !$('#dz-data').value.trim()) {
+      $('#dz-data').value = 'dz-P-CR-EOL\ndz-P-NonSort-ILS|Dropzone for NonSort ILS';
+    }
+    if (panelOpen) updateMiniPreview(true);
+  }
+
+  const previewInputs = [
+    '#dz-data', '#dz-layout', '#dz-scale', '#dz-bar-height',
+    '#dz-label-w', '#dz-label-h', '#dz-title-size', '#dz-text-size', '#dz-subtext-size', '#dz-subtext-content',
+  ];
+
+  previewInputs.forEach((sel) => {
+    const el = $(sel);
+    el.addEventListener('input', () => {
+      if (sel === '#dz-label-w' || sel === '#dz-label-h') syncRatioFromDimensions();
+      if (sel === '#dz-data') updateFontSizeUi();
+      updateMiniPreview(false);
+      scheduleSave();
+    });
+    el.addEventListener('change', () => {
+      if (sel === '#dz-label-w' || sel === '#dz-label-h') syncRatioFromDimensions();
+      if (sel === '#dz-data') updateFontSizeUi();
+      updateMiniPreview(true);
+      scheduleSave();
+    });
+  });
+
+  $('#dz-border-width').addEventListener('input', () => {
+    updateMiniPreview(true);
+    scheduleSave();
+  });
+  $('#dz-border-width').addEventListener('change', () => {
+    updateMiniPreview(true);
+    scheduleSave();
+  });
+
+  $('#dz-rainbow').addEventListener('change', () => {
+    updateRainbowUi();
+    scheduleSave();
+  });
+
+  $('#dz-subtext').addEventListener('change', () => {
+    updateSubtextUi();
+    updateMiniPreview(true);
+    scheduleSave();
+  });
+
+  $('#dz-ratio').addEventListener('input', () => {
+    syncHeightFromRatio();
+    scheduleMiniPreviewRaf();
+    scheduleSave();
+  });
+  $('#dz-ratio').addEventListener('change', () => {
+    syncHeightFromRatio();
+    updateMiniPreview(true);
+    scheduleSave();
+  });
+
+  $('#dz-bg-fab').addEventListener('click', () => togglePanel(true));
+  $('#dz-bg-close').addEventListener('click', () => togglePanel(false));
+  $('#dz-bg-overlay').addEventListener('click', (e) => {
+    if (e.target.id === 'dz-bg-overlay') togglePanel(false);
+  });
+  $('#dz-bg-btn-generate').addEventListener('click', (e) => {
+    e.preventDefault();
+    generate();
+  });
+  $('#dz-bg-btn-download').addEventListener('click', downloadAll);
+  $('#dz-bg-btn-download-pages').addEventListener('click', downloadPages);
+  $('#dz-bg-btn-print').addEventListener('click', printAll);
+  $('#dz-tab-labels').addEventListener('click', () => setPreviewMode('labels'));
+  $('#dz-tab-pages').addEventListener('click', () => setPreviewMode('pages'));
+  $('#dz-page-size').addEventListener('change', () => {
+    rebuildPages();
+    scheduleSave();
+  });
+  $('#dz-labels-per-page').addEventListener('input', () => {
+    rebuildPages();
+    scheduleSave();
+  });
+  $('#dz-labels-per-page').addEventListener('change', () => {
+    rebuildPages();
+    scheduleSave();
+  });
+  $('#dz-bg-btn-debug').addEventListener('click', copyDebug);
+  layoutSel.addEventListener('change', () => {
+    onLayoutChange();
+    scheduleSave();
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'b') {
+      e.preventDefault();
+      togglePanel();
+    }
+    if (e.key === 'Escape' && panelOpen) togglePanel(false);
+  });
+
+  GM_registerMenuCommand('Open Barcode Label Generator', () => togglePanel(true));
+
+  const hadSaved = loadState();
+  bindColorPickers();
+  bindFontSizeInputs();
+  updateRainbowUi();
+  updateSubtextUi();
+  updateFontSizeUi();
+  onLayoutChange();
+  if (!hadSaved) syncRatioFromDimensions();
+  updateOutputButtons();
+  updateMiniPreview(true);
+})();

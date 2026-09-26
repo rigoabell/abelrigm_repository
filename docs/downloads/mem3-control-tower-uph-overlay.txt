@@ -1,0 +1,1475 @@
+// ==UserScript==
+// @name         MEM3 Control Tower - UPH Overlay
+// @namespace    https://mem3.amazon.local/
+// @version      2.0.11
+// @description  Shows each associate's FCLM UPH next to their login on Control Tower /MEM3/assignments, inside the associate popup, as a per-line average badge, and as a floor summary in the Section/CSV/search bar.
+// @author       mameenk
+// @match        https://beta.control-tower.meta.amazon.dev/MEM3/assignments*
+// @match        https://control-tower.meta.amazon.dev/MEM3/assignments*
+// @connect      fclm-portal.amazon.com
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setClipboard
+// @grant        unsafeWindow
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const WAREHOUSE = 'MEM3';
+
+    // Grading and bypass live under C-Returns Processed; decant is its own
+    // process, so both rollups are pulled and merged. DECANT 1/2 still display
+    // Primary Grading from C-Returns - graders parked on a decanter do not
+    // get a Decant-process rate. If Primary Grading is missing, the next
+    // C-Returns function (often labeled Jobs) is used so the line avg is not empty.
+    const ROLLUP_PROCESSES = [
+        { id: '01003026', label: 'C-Returns', primary: true },
+        { id: '1731079507691', label: 'Decant', primary: false }
+    ];
+    const SHIFT_START_HOUR = 7;
+    const AUTO_REFRESH_MIN = 5;
+    const UPH_TARGET = 30;
+
+    const TARGET_SECTIONS = {
+        'LINE 1':   ['CRET Line 1 (O)', 'CRET Line 1 (E)'],
+        'LINE 2':   ['CRET Line 2 (O)', 'CRET Line 2 (E)'],
+        'LINE 3':   ['CRET LINE 3 (O)', 'CRET Line 3 (E)'],
+        'LINE 4':   ['CRET Line 4 (O)', 'CRET Line 4 (E)'],
+        'DECANT 1': ['DECANTER Line 1 (O)', 'DECANTER Line 1 (E)'],
+        'DECANT 2': ['DECANTER LINE 2 (O)', 'DECANTER Line 2 (E)']
+    };
+
+    const DECOR_CLASS = 'mem3-uph-badge';
+    const SECTION_BADGE_CLASS = 'mem3-line-avg-badge';
+    const POPUP_CLASS = 'mem3-popup-uph';
+    const FLOOR_SUMMARY_ID = 'mem3-floor-summary';
+    const DATE_DEBUG_ID = 'mem3-uph-date-debug';
+
+    const DEBUG = {
+        startedAt: new Date().toISOString(),
+        lastRunError: null,
+        lastStatus: null,
+        rollupSize: null,
+        rollupFunctions: null,
+        perLine: {},
+        sampleMatched: [],
+        logs: []
+    };
+    const MAX_DEBUG_LOGS = 60;
+
+    function pushDebug(level, args) {
+        const msg = [].slice.call(args).map(function (a) {
+            if (a instanceof Error) return a.message;
+            if (typeof a === 'object') {
+                try { return JSON.stringify(a); } catch (e) { return String(a); }
+            }
+            return String(a);
+        }).join(' ');
+        DEBUG.logs.push({ t: new Date().toISOString(), level: level, msg: msg });
+        if (DEBUG.logs.length > MAX_DEBUG_LOGS) DEBUG.logs.shift();
+    }
+
+    const log = function () { pushDebug('log', arguments); console.log.apply(console, ['[MEM3-UPH]'].concat([].slice.call(arguments))); };
+    const warn = function () { pushDebug('warn', arguments); console.warn.apply(console, ['[MEM3-UPH]'].concat([].slice.call(arguments))); };
+
+    function normalizeName(s) {
+        return (s || '').trim().toLowerCase().replace(/\s+/g, ' ').replace(/\s*,\s*/g, ',');
+    }
+
+    function isLogin(text) {
+        return /^[a-z][a-z0-9._-]{2,31}$/i.test(text) && text.indexOf(',') === -1;
+    }
+
+    /* ---------------------------------------------------------------
+       Identity: Control Tower's own employee roster API.
+       Records look like:
+         { login, name: "Last,First", id: <FCLM employee id>, badge, jobTitle }
+       Manager fields exist on the same record, so only exact key names
+       are accepted - "name" yes, "managerName" never.
+       --------------------------------------------------------------- */
+    // Null-prototype maps so a login like "constructor" cannot match Object.prototype.
+    const IDENTITY = {
+        byLogin: Object.create(null),
+        byName: Object.create(null),
+        byId: Object.create(null),
+        byBadge: Object.create(null),
+        count: 0
+    };
+
+    const KEY_LOGIN = /^(login|alias|username|user)$/i;
+    const KEY_NAME = /^(name|fullname|full_name|employeename|employee_name|associatename)$/i;
+    const KEY_ID = /^(id|employeeid|employee_id|empid|associateid|personid)$/i;
+    const KEY_BADGE = /^(badge|badgeid|badge_id|badgenumber)$/i;
+    const KEY_TITLE = /^(jobtitle|job_title|title|jobrole)$/i;
+    const PERSON_NAME_RE = /^[A-Za-z][A-Za-z'`. -]*,\s*[A-Za-z][A-Za-z'`. -]*$/;
+
+    function storeIdentity(rec) {
+        if (!rec.login) return;
+        const existing = IDENTITY.byLogin[rec.login];
+        if (!existing) IDENTITY.count++;
+        const merged = existing || { login: rec.login, name: null, id: null, badge: null, jobTitle: null, idCandidates: [] };
+        if (rec.name) merged.name = rec.name;
+        if (rec.badge) merged.badge = rec.badge;
+        if (rec.jobTitle) merged.jobTitle = rec.jobTitle;
+        if (rec.id) {
+            if (merged.idCandidates.indexOf(rec.id) === -1) merged.idCandidates.push(rec.id);
+            if (!merged.id) merged.id = rec.id;
+            IDENTITY.byId[rec.id] = merged;
+        }
+        IDENTITY.byLogin[rec.login] = merged;
+        if (merged.name) IDENTITY.byName[normalizeName(merged.name)] = merged;
+        if (merged.badge) IDENTITY.byBadge[merged.badge] = merged;
+    }
+
+    // Different payloads can carry different numeric ids for the same person;
+    // the one FCLM actually reports rates for wins.
+    function resolveEmpId(person) {
+        if (!person) return null;
+        const list = person.idCandidates || [];
+        for (let i = 0; i < list.length; i++) {
+            if (LAST_ROLLUP[list[i]]) return list[i];
+        }
+        return person.id || null;
+    }
+
+    function harvestJson(data) {
+        // The roster payload is ~750 KB and holds every badge at the site, so the
+        // walk has to cover all of it or logins go missing and rows stay unmatched.
+        let budget = 1000000;
+        const stack = [data];
+        while (stack.length && budget > 0) {
+            const node = stack.pop();
+            budget--;
+            if (!node || typeof node !== 'object') continue;
+            if (Array.isArray(node)) {
+                for (let i = 0; i < node.length; i++) stack.push(node[i]);
+                continue;
+            }
+            let keys;
+            try { keys = Object.keys(node); } catch (e) { continue; }
+
+            const rec = { login: null, name: null, id: null, badge: null, jobTitle: null };
+            for (let i = 0; i < keys.length; i++) {
+                const k = keys[i];
+                const v = node[k];
+                if (v && typeof v === 'object') { stack.push(v); continue; }
+                if (v === null || v === undefined) continue;
+                const s = String(v).trim();
+                if (!s || s.length > 60) continue;
+                if (KEY_LOGIN.test(k) && isLogin(s)) rec.login = s.toLowerCase();
+                else if (KEY_NAME.test(k) && PERSON_NAME_RE.test(s)) rec.name = s;
+                else if (KEY_ID.test(k) && /^\d{5,12}$/.test(s)) rec.id = s;
+                else if (KEY_BADGE.test(k) && /^\d{5,12}$/.test(s)) rec.badge = s;
+                else if (KEY_TITLE.test(k)) rec.jobTitle = s;
+            }
+            if (rec.login && (rec.name || rec.id)) storeIdentity(rec);
+        }
+    }
+
+    const CAPTURED_REQUESTS = {};
+    const IDENTITY_ENDPOINTS = /get_employee_roster|read_assignments/i;
+
+    function captureRequest(url, method, body) {
+        if (!url || !IDENTITY_ENDPOINTS.test(String(url))) return;
+        const key = String(url).split('?')[0];
+        if (CAPTURED_REQUESTS[key]) return;
+        CAPTURED_REQUESTS[key] = {
+            url: String(url),
+            method: (method || 'GET').toUpperCase(),
+            body: (typeof body === 'string') ? body.slice(0, 4000) : null
+        };
+    }
+
+    function installNetworkSniffer() {
+        try {
+            const origFetch = window.fetch;
+            if (typeof origFetch === 'function' && !origFetch.mem3Patched) {
+                const patched = function (input, init) {
+                    const promise = origFetch.apply(this, arguments);
+                    try {
+                        const url = (typeof input === 'string') ? input : (input && input.url) || '';
+                        const method = (init && init.method) || (input && input.method) || 'GET';
+                        const body = (init && typeof init.body === 'string') ? init.body : null;
+                        captureRequest(url, method, body);
+                        promise.then(function (res) {
+                            const ct = (res.headers && res.headers.get) ? res.headers.get('content-type') : '';
+                            if (ct && ct.indexOf('json') !== -1) {
+                                res.clone().json().then(harvestJson).catch(function () {});
+                            }
+                        }).catch(function () {});
+                    } catch (e) { /* ignore */ }
+                    return promise;
+                };
+                patched.mem3Patched = true;
+                window.fetch = patched;
+            }
+        } catch (e) { /* ignore */ }
+
+        try {
+            const proto = window.XMLHttpRequest && window.XMLHttpRequest.prototype;
+            if (proto && !proto.mem3Patched) {
+                const origOpen = proto.open;
+                const origSend = proto.send;
+                proto.open = function (method, url) {
+                    this.mem3Url = url;
+                    this.mem3Method = method;
+                    return origOpen.apply(this, arguments);
+                };
+                proto.send = function (body) {
+                    const xhr = this;
+                    try { captureRequest(xhr.mem3Url, xhr.mem3Method, (typeof body === 'string') ? body : null); } catch (e) { /* ignore */ }
+                    xhr.addEventListener('load', function () {
+                        try {
+                            const type = xhr.responseType;
+                            if (type !== '' && type !== 'text' && type !== 'json') return;
+                            const payload = (type === 'json') ? xhr.response : xhr.responseText;
+                            if (!payload) return;
+                            harvestJson(typeof payload === 'string' ? JSON.parse(payload) : payload);
+                        } catch (e) { /* not json */ }
+                    });
+                    return origSend.apply(this, arguments);
+                };
+                proto.mem3Patched = true;
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    let identityLoaded = false;
+
+    async function loadIdentities() {
+        identityLoaded = true;
+        const requests = [];
+        const keys = Object.keys(CAPTURED_REQUESTS);
+        for (let i = 0; i < keys.length; i++) {
+            if (keys[i].indexOf('get_employee_roster') !== -1) requests.push(CAPTURED_REQUESTS[keys[i]]);
+        }
+        if (!requests.length) {
+            requests.push({ url: '/api/v1/get_employee_roster', method: 'POST', body: JSON.stringify({ whid: WAREHOUSE }) });
+        }
+
+        for (let i = 0; i < requests.length; i++) {
+            const req = requests[i];
+            try {
+                const init = { method: req.method, credentials: 'include' };
+                if (req.method !== 'GET' && req.body) {
+                    init.body = req.body;
+                    init.headers = { 'Content-Type': 'application/json' };
+                }
+                const res = await fetch(req.url, init);
+                const text = await res.text();
+                let parsed = null;
+                try { parsed = JSON.parse(text); } catch (e) { /* not json */ }
+                if (parsed) harvestJson(parsed);
+            } catch (e) {
+                warn('identity request failed:', e);
+            }
+        }
+        log('identities loaded: ' + IDENTITY.count);
+    }
+
+    /* ---------------------------------------------------------------
+       FCLM rollup - the UPH source.
+       --------------------------------------------------------------- */
+    function getShiftWindow() {
+        const now = new Date();
+        const start = new Date(now);
+        start.setHours(SHIFT_START_HOUR, 0, 0, 0);
+        if (now < start) start.setDate(start.getDate() - 1);
+        const end = new Date(now.getTime() + 5 * 60 * 1000);
+        const pad = function (n) { return String(n).padStart(2, '0'); };
+        const fmt = function (d) {
+            return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+                'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) + '.000';
+        };
+        return { start: fmt(start), end: fmt(end) };
+    }
+
+    function getShiftWindowForLink() {
+        const w = getShiftWindow();
+        const tzMin = -new Date().getTimezoneOffset();
+        const sign = tzMin >= 0 ? '+' : '-';
+        const absMin = Math.abs(tzMin);
+        const pad = function (n) { return String(n).padStart(2, '0'); };
+        const tz = sign + pad(Math.floor(absMin / 60)) + pad(absMin % 60);
+        return {
+            startLink: w.start.replace('.000', '') + tz,
+            endLink: w.end.replace('.000', '') + tz
+        };
+    }
+
+    function gmFetch(url) {
+        return new Promise(function (resolve, reject) {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: url,
+                timeout: 60000,
+                onload: function (r) {
+                    if (r.status >= 200 && r.status < 400) resolve(r.responseText);
+                    else reject(new Error('HTTP ' + r.status));
+                },
+                onerror: function () { reject(new Error('Network error')); },
+                ontimeout: function () { reject(new Error('Timeout')); }
+            });
+        });
+    }
+
+    function parseTableRows(html) {
+        const rows = [];
+        const trRe = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+        const cellRe = /<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi;
+        const decoder = document.createElement('div');
+        let m;
+        while ((m = trRe.exec(html)) !== null) {
+            const cells = [];
+            let cm;
+            cellRe.lastIndex = 0;
+            while ((cm = cellRe.exec(m[1])) !== null) {
+                decoder.innerHTML = cm[1].replace(/<[^>]+>/g, '');
+                cells.push((decoder.textContent || '').replace(/\s+/g, ' ').trim());
+            }
+            if (cells.length > 0) rows.push(cells);
+        }
+        return rows;
+    }
+
+    // Keep every function section, not just grading and bypass - people who only
+    // show up under another function (decant, problem solve) still have a rate.
+    const EMP_TYPES = { AMZN: true, TEMP: true, '3PTY': true };
+    const NON_FUNCTION_ROW = /^(employee|total|type|name|login|shift|department|process)\b/i;
+    // Functions are split into size classes; those sub-headers must not be
+    // mistaken for the function itself or grading and bypass get merged.
+    const SIZE_ROW = /^(small|medium|large|x-?large|xl|oversize[d]?|sortable|non-?sortable|heavy|bulky|misc|other)$/i;
+
+    function addFunctionSample(entry, key, units, uph) {
+        let slot = entry.functions[key];
+        if (!slot) { slot = { units: 0, hours: 0, uph: 0 }; entry.functions[key] = slot; }
+        slot.units += units;
+        if (units > 0 && uph > 0) slot.hours += units / uph;
+        if (slot.hours > 0) slot.uph = slot.units / slot.hours;
+        return slot;
+    }
+
+    function parseFunctionRollup(html, proc, fnCounts) {
+        const rows = parseTableRows(html);
+        let currentFn = null;
+        const byEmpId = {};
+        for (let i = 0; i < rows.length; i++) {
+            const r = rows[i];
+            if (r.length === 0) continue;
+            const first = (r[0] || '').trim();
+            if (!first) continue;
+
+            if (EMP_TYPES[first]) {
+                if (r.length < 11) continue;
+                const empId = r[1];
+                if (!/^\d+$/.test(empId)) continue;
+                const units = parseFloat((r[9] || '').replace(/,/g, ''));
+                const uph = parseFloat((r[10] || '').replace(/,/g, ''));
+                const fnName = currentFn || 'Unspecified';
+                const key = proc.primary ? fnName
+                    : proc.label + (fnName === 'Unspecified' ? '' : ' \u00b7 ' + fnName);
+                if (!byEmpId[empId]) byEmpId[empId] = { name: r[2], functions: {} };
+                addFunctionSample(byEmpId[empId], key,
+                    isFinite(units) ? units : 0, isFinite(uph) ? uph : 0);
+                if (fnCounts) fnCounts[key] = (fnCounts[key] || 0) + 1;
+            } else if (first.length <= 60 && /[A-Za-z]/.test(first) &&
+                       !NON_FUNCTION_ROW.test(first) && !SIZE_ROW.test(first)) {
+                currentFn = first;
+            }
+        }
+        return byEmpId;
+    }
+
+    function mergeRollup(target, src) {
+        const ids = Object.keys(src);
+        for (let i = 0; i < ids.length; i++) {
+            const id = ids[i];
+            if (!target[id]) { target[id] = src[id]; continue; }
+            const fns = src[id].functions;
+            const keys = Object.keys(fns);
+            for (let k = 0; k < keys.length; k++) {
+                const slot = fns[keys[k]];
+                addFunctionSample(target[id], keys[k], slot.units, slot.uph);
+            }
+        }
+    }
+
+    function rollupUrl(processId, w) {
+        return 'https://fclm-portal.amazon.com/reports/functionRollup?warehouseId=' + WAREHOUSE +
+            '&spanType=Day&startDate=' + encodeURIComponent(w.start) +
+            '&endDate=' + encodeURIComponent(w.end) +
+            '&reportFormat=HTML&processId=' + processId;
+    }
+
+    async function getRollup() {
+        const w = getShiftWindow();
+        const merged = {};
+        const fnCounts = {};
+
+        let anyFetchOk = false;
+        const results = await Promise.all(ROLLUP_PROCESSES.map(async function (proc) {
+            try {
+                const html = await gmFetch(rollupUrl(proc.id, w));
+                anyFetchOk = true;
+                return parseFunctionRollup(html, proc, fnCounts);
+            } catch (e) {
+                warn('rollup failed for ' + proc.label + ':', e);
+                return {};
+            }
+        }));
+        if (!anyFetchOk) throw new Error('FCLM rollup unreachable');
+        for (let i = 0; i < results.length; i++) mergeRollup(merged, results[i]);
+
+        DEBUG.rollupSize = Object.keys(merged).length;
+        DEBUG.rollupFunctions = fnCounts;
+        log('rollup parsed: ' + DEBUG.rollupSize + ' associates across ' +
+            ROLLUP_PROCESSES.length + ' processes');
+        return merged;
+    }
+
+    let LAST_ROLLUP = {};
+    let LAST_ROLLUP_AT = null;
+
+    // mode 'grading' = C-Returns path for DECANT panels (Primary Grading first,
+    // then any non-Decant function such as Jobs). Decant-process rates stay out.
+    // mode 'any'     = grading, then bypass, then most units (CRET lines).
+    function isNonPrimaryFn(name) {
+        const lower = (name || '').toLowerCase();
+        if (lower.indexOf(' \u00b7 ') !== -1) return true;
+        const labels = ['decant', 'each-receive', 'each receive'];
+        for (let i = 0; i < ROLLUP_PROCESSES.length; i++) {
+            if (!ROLLUP_PROCESSES[i].primary) labels.push(ROLLUP_PROCESSES[i].label.toLowerCase());
+        }
+        for (let i = 0; i < labels.length; i++) {
+            if (lower === labels[i] || lower.indexOf(labels[i] + ' ') === 0) return true;
+        }
+        return false;
+    }
+
+    function statsFor(empId, mode) {
+        const entry = empId ? LAST_ROLLUP[empId] : null;
+        if (!entry) return { uph: 0, units: 0, hasData: false, fn: null };
+        const fns = entry.functions || {};
+        const names = Object.keys(fns);
+        const gradingOnly = mode === 'grading';
+
+        const pick = function (needle, requireUph) {
+            for (let i = 0; i < names.length; i++) {
+                const n = names[i];
+                if (gradingOnly && isNonPrimaryFn(n)) continue;
+                if (n.toLowerCase().indexOf(needle) === -1) continue;
+                if (requireUph && !(fns[n].uph > 0)) continue;
+                return n;
+            }
+            return null;
+        };
+
+        let chosen;
+        if (gradingOnly) {
+            chosen = pick('primary grading', true) || pick('primary grading', false);
+            if (!chosen) {
+                for (let i = 0; i < names.length; i++) {
+                    if (isNonPrimaryFn(names[i])) continue;
+                    if (fns[names[i]].units > 0 && (!chosen || fns[names[i]].units > fns[chosen].units)) chosen = names[i];
+                }
+            }
+            if (!chosen) return { uph: 0, units: 0, hasData: false, fn: null };
+        } else {
+            chosen = pick('primary grading', true) || pick('bypass', true);
+            if (!chosen) {
+                for (let i = 0; i < names.length; i++) {
+                    if (fns[names[i]].units > 0 && (!chosen || fns[names[i]].units > fns[chosen].units)) chosen = names[i];
+                }
+            }
+            if (!chosen) return { uph: 0, units: 0, hasData: true, fn: null };
+        }
+        return { uph: fns[chosen].uph || 0, units: fns[chosen].units || 0, hasData: true, fn: chosen };
+    }
+
+    function fclmEmpUrl(empId) {
+        const w = getShiftWindowForLink();
+        return 'https://fclm-portal.amazon.com/employee/timeDetails?employeeId=' + empId +
+            '&warehouseId=' + WAREHOUSE +
+            '&startTime=' + encodeURIComponent(w.startLink) +
+            '&endTime=' + encodeURIComponent(w.endLink);
+    }
+
+    /* ---------------------------------------------------------------
+       Page decoration.
+       --------------------------------------------------------------- */
+    function findH5(label) {
+        const needle = label.toLowerCase();
+        const all = document.querySelectorAll('h5');
+        for (let i = 0; i < all.length; i++) {
+            const text = (all[i].textContent || '').trim().toLowerCase();
+            if (text.indexOf(needle) !== -1) return all[i];
+        }
+        return null;
+    }
+
+    function findTable(h) {
+        let c = h;
+        for (let i = 0; i < 10; i++) {
+            c = c.parentElement;
+            if (!c) return null;
+            const t = c.querySelector('table');
+            if (t) return t;
+        }
+        return null;
+    }
+
+    // Every login on the floor is known from the roster API, so match rows against
+    // that exact list instead of guessing which cell holds a person.
+    function findLoginInRow(tr) {
+        const els = tr.querySelectorAll('a, button, span, div, td');
+        for (let i = els.length - 1; i >= 0; i--) {
+            const el = els[i];
+            const text = (el.textContent || '').trim().toLowerCase();
+            if (text.length < 3 || text.length > 32) continue;
+            if (IDENTITY.byLogin[text]) return { el: el, login: text };
+        }
+        const rowText = tr.textContent || '';
+        const tokens = rowText.toLowerCase().match(/[a-z][a-z0-9._-]{2,31}/g) || [];
+        for (let i = 0; i < tokens.length; i++) {
+            if (IDENTITY.byLogin[tokens[i]]) return { el: null, login: tokens[i] };
+        }
+        // Last resort: the login can be glued to neighbouring text ("whijimarOverride").
+        const compact = rowText.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const logins = Object.keys(IDENTITY.byLogin);
+        for (let i = 0; i < logins.length; i++) {
+            if (logins[i].length >= 6 && compact.indexOf(logins[i]) !== -1) {
+                return { el: null, login: logins[i] };
+            }
+        }
+        return null;
+    }
+
+    function badgeHost(el, tr) {
+        if (!el) {
+            const tds = tr.querySelectorAll('td');
+            return tds.length > 1 ? tds[1] : tds[0] || tr;
+        }
+        if (el.tagName === 'TD') return el;
+        return el.parentElement || el;
+    }
+
+    function uphColor(uph) {
+        if (!uph || uph <= 0) return '#8b949e';
+        if (uph >= UPH_TARGET) return '#2ea043';
+        if (uph >= UPH_TARGET * 0.75) return '#d29922';
+        return '#f85149';
+    }
+
+    function clearDecorations() {
+        const nodes = document.querySelectorAll('.' + DECOR_CLASS + ', .' + SECTION_BADGE_CLASS);
+        for (let i = 0; i < nodes.length; i++) nodes[i].remove();
+    }
+
+    function makeBadge(stats, known) {
+        const span = document.createElement('span');
+        span.className = DECOR_CLASS;
+        const color = (known && stats.hasData) ? uphColor(stats.uph) : '#8b949e';
+        span.textContent = !known ? '?' : (stats.hasData ? (stats.uph > 0 ? stats.uph.toFixed(1) : '0') : '\u2013');
+        span.title = !known
+            ? 'No FCLM identity for this associate'
+            : !stats.hasData
+                ? 'Not in the FCLM returns rollup this shift'
+                : (stats.uph > 0 ? stats.uph.toFixed(1) + ' UPH \u00b7 ' + stats.units.toLocaleString() +
+                    ' units this shift' + (stats.fn ? ' \u00b7 ' + stats.fn : '')
+                    : 'No returns units recorded this shift');
+        // White numerals on a colour-coded pill: the rate stays readable, the
+        // green/amber/red still says how they are doing at a glance.
+        span.style.cssText = 'display:inline-block; margin-left:8px; padding:2px 9px; border-radius:12px; ' +
+            'background:' + color + '33; color:#ffffff; border:1px solid ' + color + '; ' +
+            'font-weight:700; font-size:16.5px; font-family:Segoe UI,system-ui,sans-serif; vertical-align:middle;';
+        return span;
+    }
+
+    function shortPanelName(name) {
+        const line = /^LINE\s+(\d+)/i.exec(name);
+        if (line) return 'L' + line[1];
+        const decant = /^DECANT\s+(\d+)/i.exec(name);
+        if (decant) return 'D' + decant[1];
+        return name;
+    }
+
+    function buttonLabel(el) {
+        return (el.textContent || '').replace(/\s+/g, ' ').trim();
+    }
+
+    // The hashed css-* classes on this bar change; find it by the Section
+    // button, CSV export, and login search that always sit together.
+    function findToolbar() {
+        const buttons = document.querySelectorAll('button');
+        for (let i = 0; i < buttons.length; i++) {
+            if (buttonLabel(buttons[i]) !== 'Section') continue;
+            let host = buttons[i].parentElement;
+            for (let hops = 0; host && hops < 5; hops++) {
+                if (host.querySelector('a[download*="assignments"]') &&
+                    host.querySelector('input[placeholder*="Search for login"]')) {
+                    return host;
+                }
+                host = host.parentElement;
+            }
+        }
+        return null;
+    }
+
+    function formatPageDate(d) {
+        const pad = function (n) { return String(n).padStart(2, '0'); };
+        return pad(d.getMonth() + 1) + '/' + pad(d.getDate()) + '/' + d.getFullYear();
+    }
+
+    function findDatePicker() {
+        return document.querySelector('input[aria-placeholder="Select date"]') ||
+            document.querySelector('input[id^="datepicker"]');
+    }
+
+    function pageWindow() {
+        return (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+    }
+
+    function nativeValueSetter() {
+        const win = pageWindow();
+        const proto = win.HTMLInputElement && win.HTMLInputElement.prototype;
+        const desc = proto && (win.Object || Object).getOwnPropertyDescriptor(proto, 'value');
+        return desc && desc.set ? desc.set : null;
+    }
+
+    function fireInputEvents(el, data, inputType) {
+        const win = pageWindow();
+        try {
+            el.dispatchEvent(new win.InputEvent('input', {
+                bubbles: true, cancelable: true, data: data, inputType: inputType || 'insertText'
+            }));
+        } catch (e) {
+            el.dispatchEvent(new win.Event('input', { bubbles: true }));
+        }
+        el.dispatchEvent(new win.Event('change', { bubbles: true }));
+    }
+
+    function writeInputValue(el, value) {
+        const setter = nativeValueSetter();
+        if (el._valueTracker) {
+            try { el._valueTracker.setValue(''); } catch (e) { /* ignore */ }
+        }
+        if (setter) setter.call(el, value);
+        else el.value = value;
+    }
+
+    function typeDateValue(el, value) {
+        const win = pageWindow();
+        try { el.focus(); } catch (e) { /* ignore */ }
+        writeInputValue(el, '');
+        fireInputEvents(el, null, 'deleteContentBackward');
+        let acc = '';
+        for (let i = 0; i < value.length; i++) {
+            acc += value[i];
+            writeInputValue(el, acc);
+            try {
+                el.dispatchEvent(new win.KeyboardEvent('keydown', { key: value[i], bubbles: true }));
+            } catch (e2) { /* ignore */ }
+            fireInputEvents(el, value[i], 'insertText');
+            try {
+                el.dispatchEvent(new win.KeyboardEvent('keyup', { key: value[i], bubbles: true }));
+            } catch (e3) { /* ignore */ }
+        }
+        try {
+            el.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+            el.dispatchEvent(new win.KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+        } catch (e4) { /* ignore */ }
+        try { el.blur(); } catch (e5) { /* ignore */ }
+    }
+
+    function insertTextValue(el, value) {
+        try { el.focus(); } catch (e) { /* ignore */ }
+        try {
+            if (el.select) el.select();
+            if (el.setSelectionRange) el.setSelectionRange(0, (el.value || '').length);
+        } catch (e2) { /* ignore */ }
+        let ok = false;
+        try { ok = document.execCommand('insertText', false, value); } catch (e3) { ok = false; }
+        fireInputEvents(el, value, 'insertFromPaste');
+        try { el.blur(); } catch (e4) { /* ignore */ }
+        return ok;
+    }
+
+    function pageClick(el) {
+        if (!el) return;
+        const win = pageWindow();
+        const opts = { bubbles: true, cancelable: true, view: win, buttons: 1 };
+        try {
+            el.dispatchEvent(new win.PointerEvent('pointerdown', opts));
+            el.dispatchEvent(new win.MouseEvent('mousedown', opts));
+            el.dispatchEvent(new win.PointerEvent('pointerup', opts));
+            el.dispatchEvent(new win.MouseEvent('mouseup', opts));
+            el.dispatchEvent(new win.MouseEvent('click', opts));
+        } catch (e) {
+            try { el.click(); } catch (e2) { /* ignore */ }
+        }
+    }
+
+    function findDatePickerSuffix() {
+        const input = findDatePicker();
+        if (!input) return null;
+        let n = input.parentElement;
+        for (let hops = 0; n && hops < 10; hops++) {
+            const suffixes = n.querySelectorAll('[mdn-input-box-suffix]');
+            if (suffixes.length) return suffixes[suffixes.length - 1];
+            n = n.parentElement;
+        }
+        return null;
+    }
+
+    function todayIsoDate(d) {
+        const pad = function (n) { return String(n).padStart(2, '0'); };
+        return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+    }
+
+    function findMiniCalToday() {
+        const iso = todayIsoDate(new Date());
+        const pop = document.querySelector('[id^="datepicker-popover"]');
+        const root = pop || document;
+        return root.querySelector('[id^="mini-cal-"][id$="-' + iso + '"]');
+    }
+
+    function clickTodayInCalendar() {
+        const cell = findMiniCalToday();
+        if (!cell) return null;
+        const span = cell.querySelector('span') || cell;
+        pageClick(cell);
+        if (span !== cell) pageClick(span);
+        return cell.id;
+    }
+
+    let dateApplied = false;
+    let dateAttempts = 0;
+    let dateMethodIndex = 0;
+    let dateCalTries = 0;
+    const DATE_TRACE = {
+        expected: null,
+        valueWhenFound: null,
+        valueAfterSet: null,
+        applied: false,
+        skippedAlreadyToday: false,
+        changeDispatched: false,
+        appliedAt: null,
+        attempts: 0,
+        pickerId: null,
+        methodsTried: [],
+        methodThatWorked: null,
+        gaveUp: false,
+        suffixFound: false,
+        popoverId: null,
+        cellId: null
+    };
+
+    function pickerMatchesToday(input, today) {
+        return !!input && (input.value || '') === today;
+    }
+
+    function trySetDateMethod(input, today, method) {
+        DATE_TRACE.methodsTried.push(method);
+        DATE_TRACE.changeDispatched = true;
+        if (method === 'insertText') insertTextValue(input, today);
+        else if (method === 'nativeSetter') {
+            try { input.focus(); } catch (e) { /* ignore */ }
+            writeInputValue(input, today);
+            fireInputEvents(input, today, 'insertFromPaste');
+            try { input.blur(); } catch (e2) { /* ignore */ }
+        } else if (method === 'typeSlashes') typeDateValue(input, today);
+        else if (method === 'typeDigits') typeDateValue(input, today.replace(/\D/g, ''));
+        DATE_TRACE.valueAfterSet = input.value || '';
+        return pickerMatchesToday(input, today);
+    }
+
+    function applyTodayDateOnce() {
+        if (dateApplied) {
+            placeDateDebugButton();
+            return;
+        }
+        const input = findDatePicker();
+        if (!input) {
+            dateAttempts++;
+            DATE_TRACE.attempts = dateAttempts;
+            if (dateAttempts < 40) setTimeout(applyTodayDateOnce, 250);
+            return;
+        }
+        const today = formatPageDate(new Date());
+        DATE_TRACE.expected = today;
+        DATE_TRACE.pickerId = input.id || null;
+        DATE_TRACE.attempts = dateAttempts;
+        if (DATE_TRACE.valueWhenFound === null) DATE_TRACE.valueWhenFound = input.value || '';
+
+        if (pickerMatchesToday(input, today)) {
+            DATE_TRACE.skippedAlreadyToday = DATE_TRACE.methodsTried.length === 0;
+            DATE_TRACE.valueAfterSet = input.value || '';
+            DATE_TRACE.applied = DATE_TRACE.methodsTried.length > 0;
+            if (!DATE_TRACE.methodThatWorked && DATE_TRACE.methodsTried.length) {
+                DATE_TRACE.methodThatWorked = DATE_TRACE.methodsTried[DATE_TRACE.methodsTried.length - 1];
+            }
+            DATE_TRACE.appliedAt = DATE_TRACE.appliedAt || new Date().toISOString();
+            dateApplied = true;
+            log('date picker is today', today);
+            placeDateDebugButton();
+            return;
+        }
+
+        const methods = ['calendarToday'];
+        if (dateMethodIndex >= methods.length) {
+            DATE_TRACE.gaveUp = true;
+            DATE_TRACE.valueAfterSet = input.value || '';
+            dateApplied = true;
+            warn('date picker did not accept', today, 'value=', input.value);
+            placeDateDebugButton();
+            return;
+        }
+
+        const method = methods[dateMethodIndex];
+        dateMethodIndex++;
+        if (method === 'calendarToday') {
+            DATE_TRACE.methodsTried.push(method);
+            DATE_TRACE.changeDispatched = true;
+            const suffix = findDatePickerSuffix();
+            DATE_TRACE.suffixFound = !!suffix;
+            if (suffix) pageClick(suffix);
+            else DATE_TRACE.methodsTried.push('suffix-missing');
+            setTimeout(function () {
+                const pop = document.querySelector('[id^="datepicker-popover"]');
+                DATE_TRACE.popoverId = pop ? pop.id : null;
+                const cellId = clickTodayInCalendar();
+                DATE_TRACE.cellId = cellId;
+                DATE_TRACE.methodsTried.push(cellId ? ('mini-cal:' + cellId) : 'mini-cal:no-hit');
+                const live = findDatePicker() || input;
+                DATE_TRACE.valueAfterSet = live.value || '';
+                setTimeout(function () {
+                    const again = findDatePicker();
+                    const todayNow = formatPageDate(new Date());
+                    if (!pickerMatchesToday(again, todayNow) && dateCalTries < 8) {
+                        dateCalTries++;
+                        dateMethodIndex = 0;
+                    }
+                    applyTodayDateOnce();
+                }, 300);
+            }, 350);
+            placeDateDebugButton();
+            return;
+        }
+        const ok = trySetDateMethod(input, today, method);
+        if (ok) {
+            DATE_TRACE.methodThatWorked = method;
+            DATE_TRACE.applied = true;
+            DATE_TRACE.appliedAt = new Date().toISOString();
+            dateApplied = true;
+            log('date picker set to', today, 'via', method);
+            placeDateDebugButton();
+            return;
+        }
+        // React often commits on the next tick; re-check before the next method.
+        setTimeout(applyTodayDateOnce, 200);
+        placeDateDebugButton();
+    }
+
+    function collectDateDebug() {
+        const input = findDatePicker();
+        const expected = formatPageDate(new Date());
+        const current = input ? (input.value || '') : null;
+        return {
+            script: 'MEM3 Control Tower - UPH Overlay v2.0.11',
+            what: 'date picker',
+            now: new Date().toISOString(),
+            expectedToday: expected,
+            matchesToday: current === expected,
+            picker: input ? {
+                found: true,
+                id: input.id || null,
+                value: current,
+                placeholder: input.getAttribute('aria-placeholder') || input.placeholder || null,
+                disabled: !!input.disabled
+            } : { found: false },
+            apply: DATE_TRACE
+        };
+    }
+
+    function placeDateDebugButton() {
+        const input = findDatePicker();
+        if (!input) return;
+        const fieldset = input.closest ? input.closest('fieldset') : null;
+        const anchor = fieldset || input.parentElement;
+        const host = anchor && anchor.parentElement;
+        if (!host) return;
+
+        let btn = document.getElementById(DATE_DEBUG_ID);
+        if (btn && btn.previousElementSibling === anchor) return;
+        if (btn) btn.remove();
+
+        btn = document.createElement('button');
+        btn.id = DATE_DEBUG_ID;
+        btn.type = 'button';
+        btn.textContent = 'Copy Debug';
+        btn.title = 'Copy date-picker debug info';
+        btn.style.cssText = 'display:block; margin:8px 0 0; padding:4px 10px; border-radius:6px; ' +
+            'border:1px solid #58a6ff; background:transparent; color:#58a6ff; cursor:pointer; ' +
+            'font:600 11px/1 Segoe UI,system-ui,sans-serif;';
+        btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            copyText(JSON.stringify(collectDateDebug(), null, 2)).then(function () {
+                btn.textContent = 'Copied';
+                setTimeout(function () { btn.textContent = 'Copy Debug'; }, 1500);
+            }).catch(function (err) {
+                btn.textContent = 'Copy failed';
+                warn('date debug copy failed:', err);
+                setTimeout(function () { btn.textContent = 'Copy Debug'; }, 2000);
+            });
+        });
+
+        if (anchor.nextSibling) host.insertBefore(btn, anchor.nextSibling);
+        else host.appendChild(btn);
+    }
+
+    function panelTitle(name) {
+        const line = /^LINE\s+(\d+)/i.exec(name);
+        if (line) return 'Line ' + line[1];
+        const decant = /^DECANT\s+(\d+)/i.exec(name);
+        if (decant) return 'Decant ' + decant[1];
+        return name;
+    }
+
+    function makeSummaryCell(opts) {
+        const c = uphColor(opts.uph);
+        const cell = document.createElement('div');
+        cell.title = opts.title || '';
+        cell.style.cssText = 'display:flex; flex-direction:column; justify-content:center; gap:1px; ' +
+            'flex:1 1 0; min-width:0; padding:2px 10px; border-left:3px solid ' + c + ';';
+
+        const kicker = document.createElement('div');
+        kicker.textContent = opts.kicker;
+        kicker.style.cssText = 'font-size:10px; letter-spacing:0.06em; text-transform:uppercase; ' +
+            'color:#8b949e; font-weight:600; white-space:nowrap;';
+
+        const valueRow = document.createElement('div');
+        valueRow.style.cssText = 'display:flex; align-items:baseline; gap:5px; line-height:1.05;';
+        const num = document.createElement('span');
+        num.textContent = opts.value;
+        num.style.cssText = 'font-size:' + (opts.emphasize ? '26px' : '22px') +
+            '; font-weight:700; color:' + (opts.uph > 0 ? c : '#c9d1d9') +
+            '; font-variant-numeric:tabular-nums;';
+        const unit = document.createElement('span');
+        unit.textContent = 'UPH';
+        unit.style.cssText = 'font-size:10px; font-weight:600; color:#8b949e;';
+        valueRow.appendChild(num);
+        valueRow.appendChild(unit);
+
+        const sub = document.createElement('div');
+        sub.textContent = opts.sub;
+        sub.style.cssText = 'font-size:11px; color:#8b949e; margin-top:2px; white-space:nowrap; ' +
+            'overflow:hidden; text-overflow:ellipsis;';
+
+        cell.appendChild(kicker);
+        cell.appendChild(valueRow);
+        cell.appendChild(sub);
+        return cell;
+    }
+
+    function makeSummaryDivider() {
+        const d = document.createElement('div');
+        d.style.cssText = 'width:1px; align-self:stretch; background:#30363d; margin:4px 4px; flex:0 0 1px;';
+        return d;
+    }
+
+    let LAST_SUMMARY = null;
+
+    function placeFloorSummary(summary) {
+        if (summary) LAST_SUMMARY = summary;
+        const data = LAST_SUMMARY;
+        if (!data) return;
+        const bar = findToolbar();
+        if (!bar || !bar.parentElement) return;
+
+        let node = document.getElementById(FLOOR_SUMMARY_ID);
+        if (node && node.previousElementSibling !== bar) {
+            node.remove();
+            node = null;
+        }
+        if (!node) {
+            node = document.createElement('div');
+            node.id = FLOOR_SUMMARY_ID;
+            if (bar.nextSibling) bar.parentElement.insertBefore(node, bar.nextSibling);
+            else bar.parentElement.appendChild(node);
+        }
+
+        const sig = 'row|' + data.floorAvg.toFixed(1) + '|' + data.floorUnits + '|' + data.floorRated + '|' +
+            data.floorStaffed + '|' + data.asOf + '|' + data.lines.map(function (l) {
+                return l.name + ':' + l.avgUph.toFixed(1) + ':' + l.totalUnits + ':' + l.withData + ':' + l.staffed;
+            }).join(',');
+        if (node.getAttribute('data-sig') === sig) return;
+        node.setAttribute('data-sig', sig);
+
+        node.style.cssText = 'display:flex; align-items:stretch; flex-wrap:nowrap; gap:0; ' +
+            'flex:1 0 100%; width:100%; box-sizing:border-box; margin:8px 0 6px; padding:6px 8px; ' +
+            'background:#161b22; border:1px solid #30363d; border-radius:10px; ' +
+            'font-family:Segoe UI,system-ui,sans-serif; color:#ffffff; overflow:hidden;';
+
+        while (node.firstChild) node.removeChild(node.firstChild);
+
+        node.appendChild(makeSummaryCell({
+            kicker: 'Floor',
+            value: data.floorAvg > 0 ? data.floorAvg.toFixed(1) : '\u2014',
+            sub: data.floorUnits.toLocaleString() + ' units  \u00b7  ' +
+                data.floorRated + '/' + data.floorStaffed + ' rated',
+            uph: data.floorAvg,
+            emphasize: true,
+            title: 'Average of CRET and Decant line UPHs'
+        }));
+        node.appendChild(makeSummaryDivider());
+
+        const cret = data.lines.filter(function (l) { return /^LINE/i.test(l.name); });
+        const decant = data.lines.filter(function (l) { return /^DECANT/i.test(l.name); });
+        const groups = [cret, decant];
+        for (let g = 0; g < groups.length; g++) {
+            if (g === 1 && groups[0].length && groups[1].length) node.appendChild(makeSummaryDivider());
+            for (let i = 0; i < groups[g].length; i++) {
+                const line = groups[g][i];
+                node.appendChild(makeSummaryCell({
+                    kicker: panelTitle(line.name),
+                    value: line.avgUph > 0 ? line.avgUph.toFixed(1) : '\u2014',
+                    sub: line.staffed
+                        ? line.totalUnits.toLocaleString() + ' units  \u00b7  ' + line.withData + '/' + line.staffed + ' rated'
+                        : 'no one assigned',
+                    uph: line.avgUph,
+                    title: panelTitle(line.name) + (line.avgUph > 0 ? '' : ' \u00b7 no Primary Grading rate this shift')
+                }));
+            }
+        }
+
+        const asOf = document.createElement('div');
+        asOf.style.cssText = 'flex:0 0 auto; display:flex; flex-direction:column; justify-content:center; ' +
+            'align-items:flex-end; gap:6px; padding:4px 8px 4px 12px; color:#8b949e; ' +
+            'font-size:11px; line-height:1.3; white-space:nowrap;';
+        asOf.appendChild(document.createTextNode('Target ' + UPH_TARGET + ' UPH'));
+        asOf.appendChild(document.createTextNode(data.asOf ? 'as of ' + data.asOf : 'waiting on FCLM'));
+        node.appendChild(asOf);
+    }
+
+    function makeLineBadge(avgUph, totalUnits, withData, staffed) {
+        const wrap = document.createElement('span');
+        wrap.className = SECTION_BADGE_CLASS;
+        wrap.style.cssText = 'display:inline-flex; gap:10px; margin-left:14px; align-items:center; ' +
+            'font-family:Segoe UI,system-ui,sans-serif; font-weight:normal; font-size:12px; vertical-align:middle;';
+        const c = uphColor(avgUph);
+        wrap.innerHTML =
+            '<span style="padding:3px 12px; border-radius:14px; font-size:18px; background:' + c + '33; color:#ffffff' +
+            '; border:1px solid ' + c + '; font-weight:700;">' +
+            (avgUph > 0 ? avgUph.toFixed(1) : '-') + ' UPH avg</span>' +
+            '<span style="color:#8b949e;">' + totalUnits.toLocaleString() + ' units &middot; ' +
+            withData + '/' + staffed + ' rated</span>';
+        return wrap;
+    }
+
+    function decorateSection(panelName, sectionLabels) {
+        const uphList = [];
+        let totalUnits = 0, staffed = 0, total = 0, withData = 0;
+
+        for (let s = 0; s < sectionLabels.length; s++) {
+            const h = findH5(sectionLabels[s]);
+            if (!h) { warn('section header not found:', sectionLabels[s]); continue; }
+            const table = findTable(h);
+            if (!table) { warn('no table for', sectionLabels[s]); continue; }
+
+            const trs = table.querySelectorAll('tbody tr');
+            for (let i = 0; i < trs.length; i++) {
+                const tr = trs[i];
+                if (tr.querySelector('.' + DECOR_CLASS)) continue;
+                total++;
+
+                const found = findLoginInRow(tr);
+                if (!found) continue;
+                staffed++;
+
+                const person = IDENTITY.byLogin[found.login];
+                const empId = resolveEmpId(person);
+                const stats = statsFor(empId, /^DECANT/i.test(panelName) ? 'grading' : 'any');
+                if (stats.hasData) withData++;
+                if (stats.uph > 0) { uphList.push(stats.uph); totalUnits += stats.units; }
+
+                if (DEBUG.sampleMatched.length < 16) {
+                    const entry = empId ? LAST_ROLLUP[empId] : null;
+                    DEBUG.sampleMatched.push({
+                        panel: panelName,
+                        login: found.login,
+                        empId: empId,
+                        fns: entry ? Object.keys(entry.functions || {}) : [],
+                        shown: stats,
+                        popupWouldShow: statsFor(empId, 'any')
+                    });
+                }
+
+                badgeHost(found.el, tr).appendChild(makeBadge(stats, !!empId));
+            }
+        }
+
+        let sum = 0;
+        for (let i = 0; i < uphList.length; i++) sum += uphList[i];
+        const avgUph = uphList.length ? (sum / uphList.length) : 0;
+
+        const firstH = findH5(sectionLabels[0]);
+        if (firstH && !firstH.querySelector('.' + SECTION_BADGE_CLASS)) {
+            firstH.appendChild(makeLineBadge(avgUph, totalUnits, withData, staffed));
+        }
+        return { avgUph: avgUph, totalUnits: totalUnits, staffed: staffed, total: total, withData: withData };
+    }
+
+    /* ---------------------------------------------------------------
+       Associate popup: inject the rate where the name and id already are.
+       --------------------------------------------------------------- */
+    function personFromText(text) {
+        const numbers = text.match(/\d{5,12}/g) || [];
+        for (let i = 0; i < numbers.length; i++) {
+            const hit = IDENTITY.byId[numbers[i]] || IDENTITY.byBadge[numbers[i]];
+            if (hit) return hit;
+        }
+        // "Last,First" may be followed by job title and button labels, and first
+        // names can be multi-word, so drop trailing words until something matches.
+        const nameMatch = text.match(/[A-Za-z][A-Za-z'`-]+,\s*[A-Za-z][A-Za-z'`. -]*/);
+        if (nameMatch) {
+            const words = nameMatch[0].trim().split(/\s+/);
+            while (words.length) {
+                const hit = IDENTITY.byName[normalizeName(words.join(' '))];
+                if (hit) return hit;
+                words.pop();
+            }
+        }
+        const tokens = text.toLowerCase().match(/[a-z][a-z0-9._-]{2,31}/g) || [];
+        for (let i = 0; i < tokens.length; i++) {
+            if (IDENTITY.byLogin[tokens[i]]) return IDENTITY.byLogin[tokens[i]];
+        }
+        return null;
+    }
+
+    function makePopupLine(person, empId, stats) {
+        const box = document.createElement('div');
+        box.className = POPUP_CLASS;
+        const color = uphColor(stats.uph);
+        box.style.cssText = 'margin:10px 0; padding:8px 10px; border-radius:8px; ' +
+            'background:' + color + '22; border:1px solid ' + color + '; ' +
+            'border-left:4px solid ' + color + '; ' +
+            'font-family:Segoe UI,system-ui,sans-serif; font-size:13px; color:#ffffff;';
+
+        const headline = document.createElement('div');
+        headline.style.cssText = 'font-weight:700; color:#ffffff; font-size:22.5px; line-height:1.2;';
+        headline.textContent = stats.hasData
+            ? (stats.uph > 0 ? stats.uph.toFixed(1) + ' UPH' : '0 UPH')
+            : 'No FCLM data this shift';
+        box.appendChild(headline);
+
+        const detail = document.createElement('div');
+        detail.style.cssText = 'color:#8b949e; font-size:12px; margin-top:2px;';
+        const asOf = LAST_ROLLUP_AT ? ' \u00b7 as of ' + LAST_ROLLUP_AT.toLocaleTimeString() : '';
+        detail.textContent = (stats.hasData
+            ? stats.units.toLocaleString() + ' units since ' + SHIFT_START_HOUR + ':00' +
+              (stats.fn ? ' \u00b7 ' + stats.fn : '')
+            : 'Not in the returns rollup yet') + asOf;
+        box.appendChild(detail);
+
+        if (empId) {
+            const link = document.createElement('a');
+            link.href = fclmEmpUrl(empId);
+            link.target = '_blank';
+            link.rel = 'noopener';
+            link.textContent = 'Open FCLM Time Details';
+            link.style.cssText = 'display:inline-block; margin-top:6px; font-size:12px; color:#58a6ff; text-decoration:underline;';
+            link.addEventListener('click', function (e) { e.stopPropagation(); });
+            box.appendChild(link);
+        }
+
+        const dbg = document.createElement('button');
+        dbg.type = 'button';
+        dbg.textContent = 'Copy debug';
+        dbg.style.cssText = 'display:inline-block; margin-top:6px; margin-left:12px; padding:0; border:0; ' +
+            'background:transparent; font-size:12px; color:#58a6ff; text-decoration:underline; cursor:pointer; ' +
+            'font-family:Segoe UI,system-ui,sans-serif;';
+        dbg.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const entry = empId ? LAST_ROLLUP[empId] : null;
+            const payload = {
+                login: person && person.login,
+                name: person && person.name,
+                empId: empId,
+                functions: entry ? entry.functions : null,
+                lineBadge: statsFor(empId, 'grading'),
+                popup: statsFor(empId, 'any')
+            };
+            copyText(JSON.stringify(payload, null, 2)).then(function () {
+                dbg.textContent = 'Copied';
+                setTimeout(function () { dbg.textContent = 'Copy debug'; }, 1500);
+            }).catch(function () {
+                dbg.textContent = 'Copy failed';
+                setTimeout(function () { dbg.textContent = 'Copy debug'; }, 2000);
+            });
+        });
+        box.appendChild(dbg);
+        return box;
+    }
+
+    const STOP_TAGS = { TR: true, TBODY: true, TABLE: true, BODY: true, HTML: true };
+
+    function decoratePopups() {
+        const buttons = document.querySelectorAll('button');
+        for (let i = 0; i < buttons.length; i++) {
+            const btn = buttons[i];
+            if (!/^unassign$/i.test((btn.textContent || '').trim())) continue;
+
+            // The popup may be a portal dialog or a popover nested in the cell, so
+            // walk up only until there is real content - never as far as the row.
+            let host = btn.closest('[role="dialog"]');
+            if (!host) {
+                host = btn.parentElement;
+                let hops = 0;
+                while (host && hops < 6 && !STOP_TAGS[host.tagName] &&
+                       (host.textContent || '').replace(/\s+/g, ' ').trim().length < 25) {
+                    host = host.parentElement;
+                    hops++;
+                }
+            }
+            if (!host || STOP_TAGS[host.tagName]) continue;
+            if (host.querySelector('.' + POPUP_CLASS)) continue;
+
+            const text = (host.textContent || '').replace(/\s+/g, ' ').trim();
+            if (!text || text.length > 400) continue;
+
+            const person = personFromText(text);
+            if (!person) continue;
+
+            const empId = resolveEmpId(person);
+            const line = makePopupLine(person, empId, statsFor(empId));
+            let anchor = btn;
+            while (anchor.parentElement && anchor.parentElement !== host) anchor = anchor.parentElement;
+            if (anchor.parentElement === host) host.insertBefore(line, anchor);
+            else host.appendChild(line);
+        }
+    }
+
+    function watchForPopups() {
+        let pending = null;
+        const schedule = function () {
+            if (pending) return;
+            pending = setTimeout(function () {
+                pending = null;
+                try { decoratePopups(); } catch (e) { warn('popup decorate failed:', e); }
+            }, 80);
+        };
+        const observer = new MutationObserver(schedule);
+        observer.observe(document.body, { childList: true, subtree: true });
+        document.addEventListener('click', schedule, true);
+    }
+
+    /* ---------------------------------------------------------------
+       Debug copy.
+       --------------------------------------------------------------- */
+    function collectDebugSnapshot() {
+        const sections = {};
+        const keys = Object.keys(TARGET_SECTIONS);
+        for (let i = 0; i < keys.length; i++) {
+            sections[keys[i]] = TARGET_SECTIONS[keys[i]].map(function (label) {
+                const h = findH5(label);
+                return { label: label, found: !!h, hasTable: !!(h && findTable(h)) };
+            });
+        }
+        return {
+            script: 'MEM3 Control Tower - UPH Overlay v2.0.8',
+            page: { url: location.href, readyState: document.readyState },
+            runtime: {
+                startedAt: DEBUG.startedAt,
+                lastRunError: DEBUG.lastRunError,
+                lastStatus: DEBUG.lastStatus,
+                rollupSize: DEBUG.rollupSize,
+                identityCount: IDENTITY.count,
+                shiftWindow: getShiftWindow()
+            },
+            rollup: { functions: DEBUG.rollupFunctions },
+            matching: { perLine: DEBUG.perLine, sampleMatched: DEBUG.sampleMatched },
+            sections: sections,
+            logs: DEBUG.logs
+        };
+    }
+
+    function copyText(text) {
+        return new Promise(function (resolve, reject) {
+            if (typeof GM_setClipboard === 'function') {
+                try { GM_setClipboard(text, { type: 'text' }); resolve(); return; } catch (e) { /* fall through */ }
+            }
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(resolve).catch(reject);
+                return;
+            }
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.cssText = 'position:fixed; left:-9999px;';
+            document.body.appendChild(ta);
+            ta.select();
+            try {
+                if (document.execCommand('copy')) resolve();
+                else reject(new Error('copy failed'));
+            } catch (e) { reject(e); } finally { ta.remove(); }
+        });
+    }
+
+    /* ---------------------------------------------------------------
+       Run loop.
+       --------------------------------------------------------------- */
+    // Control Tower fills the assignment rows in well after the tables exist, and
+    // keeps re-rendering them, so decoration is driven by DOM changes rather than
+    // by a one-shot scan. Data fetching stays on its own slower schedule.
+    const RENDER_MIN_GAP_MS = 1500;
+    let rowObserver = null;
+    let renderTimer = null;
+    let lastRenderAt = 0;
+
+    let lastSignature = null;
+    let lastIdentified = null;
+
+    function observeRows() {
+        if (!rowObserver) return;
+        rowObserver.observe(document.body, { childList: true, subtree: true });
+    }
+
+    // Cheap fingerprint of the assignment tables so constant React re-renders
+    // don't cause a badge rebuild when nothing actually changed.
+    function tablesSignature() {
+        let sig = '';
+        const keys = Object.keys(TARGET_SECTIONS);
+        for (let i = 0; i < keys.length; i++) {
+            const labels = TARGET_SECTIONS[keys[i]];
+            for (let j = 0; j < labels.length; j++) {
+                const h = findH5(labels[j]);
+                const table = h ? findTable(h) : null;
+                if (!table) { sig += '-|'; continue; }
+                const text = table.textContent || '';
+                let sum = 0;
+                for (let c = 0; c < text.length; c += 16) sum = (sum + text.charCodeAt(c)) % 1000000007;
+                sig += table.querySelectorAll('tbody tr').length + '.' + text.length + '.' + sum + '|';
+            }
+        }
+        return sig;
+    }
+
+    function render() {
+        if (!LAST_ROLLUP_AT) return;
+        lastRenderAt = Date.now();
+        if (rowObserver) rowObserver.disconnect();
+        try {
+            clearDecorations();
+            DEBUG.sampleMatched = [];
+            DEBUG.perLine = {};
+
+            const avgList = [];
+            const lineStats = [];
+            let floorUnits = 0, floorStaffed = 0, floorTotal = 0, floorRated = 0;
+            const keys = Object.keys(TARGET_SECTIONS);
+            for (let i = 0; i < keys.length; i++) {
+                const s = decorateSection(keys[i], TARGET_SECTIONS[keys[i]]);
+                lineStats.push({
+                    name: keys[i],
+                    avgUph: s.avgUph,
+                    totalUnits: s.totalUnits,
+                    staffed: s.staffed,
+                    withData: s.withData
+                });
+                DEBUG.perLine[keys[i]] = lineStats[lineStats.length - 1];
+                if (s.avgUph > 0) avgList.push(s.avgUph);
+                floorUnits += s.totalUnits;
+                floorStaffed += s.staffed;
+                floorTotal += s.total;
+                floorRated += s.withData;
+            }
+            let sum = 0;
+            for (let i = 0; i < avgList.length; i++) sum += avgList[i];
+            const floorAvg = avgList.length ? (sum / avgList.length) : 0;
+
+            const identified = floorStaffed + '/' + floorTotal;
+            DEBUG.lastStatus = 'floor ' + floorAvg.toFixed(1) + ' UPH · ' + identified +
+                ' identified · ' + floorRated + ' rated';
+            if (identified !== lastIdentified) {
+                lastIdentified = identified;
+                log('floor ' + floorAvg.toFixed(1) + ' UPH \u00b7 ' + identified + ' identified \u00b7 ' +
+                    floorRated + ' rated \u00b7 ' + floorUnits.toLocaleString() + ' units');
+            }
+            placeFloorSummary({
+                floorAvg: floorAvg,
+                floorUnits: floorUnits,
+                floorRated: floorRated,
+                floorStaffed: floorStaffed,
+                asOf: LAST_ROLLUP_AT ? LAST_ROLLUP_AT.toLocaleTimeString() : '',
+                lines: lineStats
+            });
+            decoratePopups();
+        } catch (e) {
+            DEBUG.lastRunError = (e && e.message) ? e.message : String(e);
+            warn('render failed:', e);
+        } finally {
+            lastSignature = tablesSignature();
+            observeRows();
+        }
+    }
+
+    function scheduleRender() {
+        if (renderTimer) return;
+        const wait = Math.max(250, RENDER_MIN_GAP_MS - (Date.now() - lastRenderAt));
+        renderTimer = setTimeout(function () {
+            renderTimer = null;
+            if (tablesSignature() === lastSignature) {
+                if (!document.getElementById(FLOOR_SUMMARY_ID) && LAST_SUMMARY) {
+                    if (rowObserver) rowObserver.disconnect();
+                    try { placeFloorSummary(); } finally { observeRows(); }
+                }
+                placeDateDebugButton();
+                return;
+            }
+            render();
+        }, wait);
+    }
+
+    async function refreshData() {
+        try {
+            if (!identityLoaded) await loadIdentities();
+            LAST_ROLLUP = await getRollup();
+            LAST_ROLLUP_AT = new Date();
+            lastIdentified = null;
+            render();
+        } catch (e) {
+            DEBUG.lastRunError = (e && e.message) ? e.message : String(e);
+            warn('refresh failed:', e);
+        }
+    }
+
+    function init() {
+        installNetworkSniffer();
+
+        const ready = function () {
+            const keys = Object.keys(TARGET_SECTIONS);
+            for (let i = 0; i < keys.length; i++) {
+                const h = findH5(TARGET_SECTIONS[keys[i]][0]);
+                const table = h ? findTable(h) : null;
+                if (table && table.querySelectorAll('tbody tr').length > 0) return true;
+            }
+            return false;
+        };
+
+        if (!ready()) {
+            setTimeout(init, 1000);
+            return;
+        }
+
+        watchForPopups();
+        rowObserver = new MutationObserver(scheduleRender);
+        observeRows();
+        refreshData();
+        setInterval(refreshData, AUTO_REFRESH_MIN * 60 * 1000);
+    }
+
+    applyTodayDateOnce();
+    init();
+})();

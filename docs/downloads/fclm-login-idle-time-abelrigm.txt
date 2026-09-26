@@ -1,0 +1,3328 @@
+// ==UserScript==
+// @name         FCLM Login Idle Time (abelrigm)
+// @namespace    http://tampermonkey.net/
+// @version      1.5.2
+// @description  Paste Amazon logins and get FCLM idle time for a start/end range of up to 31 days. Ranges over 24 hours are fetched in 24h windows and summed. Progress, Stop, and optional graphs are available. Copy Debug dumps parse details for fixes.
+// @author       Cursor
+// @match        https://fclm-portal.amazon.com/*
+// @match        https://*.amazon.com/*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setClipboard
+// @connect      fclm-portal.amazon.com
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const SCRIPT_ID = 'fclm-login-idle-time';
+  const VERSION = '1.5.2';
+  const INSTALL_KEY = '__fclmLoginIdleTimeInstalledV152';
+  const STORAGE_KEY = '__fclmLoginIdleTimeState';
+  const FCLM_ORIGIN = 'https://fclm-portal.amazon.com';
+  const DEFAULT_WAREHOUSE_ID = 'MEM3';
+  const REQUEST_TIMEOUT_MS = 30000;
+  const LOOKUP_CONCURRENCY = 4;
+  const CHUNK_MS = 24 * 60 * 60 * 1000;
+  const MAX_RANGE_DAYS = 31;
+  const MAX_RANGE_MS = MAX_RANGE_DAYS * CHUNK_MS;
+  const MAX_DEBUG_FUNCTION_ROWS = 40;
+  const MAX_DEBUG_HTML_CHARS = 1200;
+  const VIEW_PAD = 12;
+  const TOGGLE_GAP = 12;
+  const TOGGLE_EDGE = 20;
+  const PANEL_WIDTH = 1040;
+  const TABLE_COLUMNS = ['Login', 'Idle', 'On Clock', 'Idle %'];
+  const DAY_TABLE_COLUMNS = ['Login', 'Day', 'Idle', 'On Clock', 'Idle %'];
+
+  if (window[INSTALL_KEY]) {
+    return;
+  }
+  window[INSTALL_KEY] = true;
+
+  const DEFAULT_DEBUG = {
+    script: SCRIPT_ID,
+    version: VERSION,
+    generatedAt: null,
+    pageUrl: window.location.href,
+    warehouseId: null,
+    startTime: null,
+    endTime: null,
+    timeRange: null,
+    logins: [],
+    steps: [],
+    results: [],
+    errors: [],
+  };
+
+  let lastDebugPayload = { ...DEFAULT_DEBUG };
+  let lastTableResults = [];
+  let lastLookupResults = [];
+  let lastChartData = { logins: [], days: [], series: [] };
+  const runControl = {
+    running: false,
+    stopRequested: false,
+    done: 0,
+    total: 0,
+    currentLogin: '',
+    requests: new Set(),
+  };
+
+  function LookupStopped(message) {
+    const error = new Error(message || 'Stopped');
+    error.name = 'LookupStopped';
+    return error;
+  }
+
+  function isStoppedError(error) {
+    return Boolean(error && error.name === 'LookupStopped');
+  }
+
+  const styles = `
+    #${SCRIPT_ID}-toggle {
+      position: fixed;
+      left: 50%;
+      bottom: ${TOGGLE_EDGE}px;
+      transform: translateX(-50%);
+      width: 48px;
+      height: 48px;
+      border: 0;
+      border-radius: 999px;
+      background: #0f766e;
+      color: #ffffff;
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      line-height: 1;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      z-index: 2147483646;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
+      user-select: none;
+    }
+
+    #${SCRIPT_ID}-toggle:hover {
+      background: #0d9488;
+    }
+
+    #${SCRIPT_ID}-panel {
+      position: fixed;
+      display: flex;
+      flex-direction: column;
+      width: ${PANEL_WIDTH}px;
+      max-width: calc(100vw - ${VIEW_PAD * 2}px);
+      overflow: hidden;
+      z-index: 2147483645;
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 14px;
+      box-shadow: 0 16px 40px rgba(15, 23, 42, 0.16);
+      font-family: "Segoe UI", system-ui, sans-serif;
+      color: #111827;
+    }
+
+    #${SCRIPT_ID}-panel.is-hidden {
+      display: none;
+    }
+
+    #${SCRIPT_ID}-panel * {
+      box-sizing: border-box;
+      font-family: inherit;
+    }
+
+    #${SCRIPT_ID}-panel .idle-header {
+      padding: 12px 14px 11px;
+      border-bottom: 1px solid #e5e7eb;
+      background: #f8fafc;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      flex: 0 0 auto;
+    }
+
+    #${SCRIPT_ID}-panel .idle-header-text {
+      min-width: 0;
+    }
+
+    #${SCRIPT_ID}-panel .idle-title {
+      font-weight: 700;
+      font-size: 14px;
+      letter-spacing: -0.01em;
+      color: #111827;
+    }
+
+    #${SCRIPT_ID}-summary {
+      margin-top: 3px;
+      font-size: 11px;
+      font-weight: 500;
+      color: #6b7280;
+      line-height: 1.35;
+      word-break: break-word;
+    }
+
+    #${SCRIPT_ID}-panel .idle-body {
+      padding: 14px;
+      overflow: auto;
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+
+    #${SCRIPT_ID}-panel label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: #6b7280;
+      letter-spacing: 0.02em;
+      margin-bottom: 6px;
+    }
+
+    #${SCRIPT_ID}-panel .idle-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    #${SCRIPT_ID}-panel .idle-row > div {
+      flex: 1;
+      min-width: 0;
+    }
+
+    #${SCRIPT_ID}-panel input,
+    #${SCRIPT_ID}-panel textarea,
+    #${SCRIPT_ID}-panel button {
+      width: 100%;
+      font-size: 13px;
+    }
+
+    #${SCRIPT_ID}-panel input,
+    #${SCRIPT_ID}-panel textarea {
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: #fff;
+      color: #111827;
+    }
+
+    #${SCRIPT_ID}-panel input:focus,
+    #${SCRIPT_ID}-panel textarea:focus {
+      outline: none;
+      border-color: #9ca3af;
+      box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.06);
+    }
+
+    #${SCRIPT_ID}-panel textarea {
+      min-height: 84px;
+      resize: vertical;
+      margin-bottom: 12px;
+      line-height: 1.4;
+    }
+
+    #${SCRIPT_ID}-panel .idle-hint {
+      font-size: 11px;
+      color: #6b7280;
+      margin: -2px 0 12px;
+      line-height: 1.35;
+    }
+
+    #${SCRIPT_ID}-panel input[type="datetime-local"] {
+      font-size: 12px;
+      min-width: 0;
+    }
+
+    #${SCRIPT_ID}-panel .idle-actions {
+      display: flex;
+      gap: 8px;
+      margin: 0 0 8px;
+    }
+
+    #${SCRIPT_ID}-panel .idle-actions button,
+    #${SCRIPT_ID}-copy {
+      width: auto;
+      min-width: 0;
+      flex: 1 1 0;
+      border: 0;
+      border-radius: 8px;
+      padding: 9px 10px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 12px;
+      color: #111827;
+      transition: background 0.12s ease;
+    }
+
+    #${SCRIPT_ID}-panel .idle-actions #${SCRIPT_ID}-run {
+      background: #0f766e;
+      color: #ffffff;
+    }
+
+    #${SCRIPT_ID}-panel .idle-actions #${SCRIPT_ID}-run:hover {
+      background: #0d9488;
+      color: #ffffff;
+    }
+
+    #${SCRIPT_ID}-panel .idle-actions #${SCRIPT_ID}-run:disabled {
+      opacity: 0.65;
+      cursor: wait;
+      color: #ffffff;
+    }
+
+    #${SCRIPT_ID}-panel .idle-actions #${SCRIPT_ID}-stop {
+      background: #f3f4f6;
+      color: #111827;
+    }
+
+    #${SCRIPT_ID}-panel .idle-actions #${SCRIPT_ID}-stop:hover:not(:disabled) {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+
+    #${SCRIPT_ID}-panel .idle-actions #${SCRIPT_ID}-stop:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    #${SCRIPT_ID}-progress {
+      margin: 0 0 12px;
+    }
+
+    #${SCRIPT_ID}-progress.is-hidden {
+      display: none;
+    }
+
+    #${SCRIPT_ID}-progress .idle-progress-track {
+      height: 8px;
+      background: #e5e7eb;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    #${SCRIPT_ID}-progress-fill {
+      height: 100%;
+      width: 0%;
+      background: #0f766e;
+      border-radius: 999px;
+      transition: width 0.16s ease;
+    }
+
+    #${SCRIPT_ID}-progress-label {
+      margin-top: 6px;
+      font-size: 11px;
+      color: #6b7280;
+      line-height: 1.35;
+    }
+
+    #${SCRIPT_ID}-copy-table,
+    #${SCRIPT_ID}-export-table,
+    #${SCRIPT_ID}-copy {
+      background: #f3f4f6;
+      color: #111827;
+    }
+
+    #${SCRIPT_ID}-copy-table:hover,
+    #${SCRIPT_ID}-export-table:hover,
+    #${SCRIPT_ID}-copy:hover {
+      background: #e5e7eb;
+    }
+
+    #${SCRIPT_ID}-copy {
+      width: 100%;
+      margin: 0 0 12px;
+    }
+
+    #${SCRIPT_ID}-close {
+      width: 28px !important;
+      height: 28px;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: #6b7280;
+      cursor: pointer;
+      font-size: 20px !important;
+      line-height: 1;
+      padding: 0;
+      flex: 0 0 auto;
+    }
+
+    #${SCRIPT_ID}-close:hover {
+      background: #e5e7eb;
+      color: #111827;
+    }
+
+    #${SCRIPT_ID}-status {
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      line-height: 1.4;
+      margin-bottom: 12px;
+      background: #f8fafc;
+      color: #111827;
+      border: 1px solid #e5e7eb;
+    }
+
+    #${SCRIPT_ID}-findings {
+      margin: 0 0 12px;
+      padding: 0;
+      background: transparent;
+      border: 0;
+    }
+
+    #${SCRIPT_ID}-findings .findings-title {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #6b7280;
+      margin: 0 0 8px;
+    }
+
+    #${SCRIPT_ID}-findings .findings-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    #${SCRIPT_ID}-findings .finding {
+      background: #f8fafc;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 8px 9px;
+      min-width: 0;
+    }
+
+    #${SCRIPT_ID}-findings .finding-label {
+      display: block;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: #6b7280;
+      margin-bottom: 4px;
+    }
+
+    #${SCRIPT_ID}-findings .finding-value {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: #111827;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    #${SCRIPT_ID}-findings.is-empty {
+      display: none;
+    }
+
+    #${SCRIPT_ID}-viz-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 0 0 12px;
+    }
+
+    #${SCRIPT_ID}-panel .idle-switch {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0;
+      font-size: 12px;
+      font-weight: 600;
+      color: #111827;
+      letter-spacing: 0;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    #${SCRIPT_ID}-visualize {
+      position: absolute;
+      opacity: 0;
+      width: 1px;
+      height: 1px;
+      pointer-events: none;
+    }
+
+    #${SCRIPT_ID}-panel .idle-switch-ui {
+      width: 36px;
+      height: 20px;
+      border-radius: 999px;
+      background: #d1d5db;
+      position: relative;
+      flex: 0 0 auto;
+      transition: background 0.12s ease;
+    }
+
+    #${SCRIPT_ID}-panel .idle-switch-ui::after {
+      content: "";
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 16px;
+      height: 16px;
+      border-radius: 999px;
+      background: #ffffff;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.18);
+      transition: transform 0.12s ease;
+    }
+
+    #${SCRIPT_ID}-visualize:checked + .idle-switch-ui {
+      background: #0f766e;
+    }
+
+    #${SCRIPT_ID}-visualize:checked + .idle-switch-ui::after {
+      transform: translateX(16px);
+    }
+
+    #${SCRIPT_ID}-visualize:focus-visible + .idle-switch-ui {
+      box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.25);
+    }
+
+    #${SCRIPT_ID}-charts {
+      margin: 0 0 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      position: relative;
+    }
+
+    #${SCRIPT_ID}-charts.is-hidden {
+      display: none;
+    }
+
+    #${SCRIPT_ID}-charts .chart-card {
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      background: #f8fafc;
+      padding: 10px 10px 8px;
+      position: relative;
+    }
+
+    #${SCRIPT_ID}-charts .chart-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      width: 100%;
+      margin: 0 0 8px;
+    }
+
+    #${SCRIPT_ID}-charts .chart-title {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #6b7280;
+      margin: 0;
+      min-width: 0;
+    }
+
+    #${SCRIPT_ID}-panel .chart-download {
+      width: auto !important;
+      flex: 0 0 auto;
+      border: 0;
+      border-radius: 8px;
+      padding: 5px 9px;
+      background: #f3f4f6;
+      color: #111827;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    #${SCRIPT_ID}-panel .chart-download:hover {
+      background: #e5e7eb;
+    }
+
+    #${SCRIPT_ID}-charts .chart-visual {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 100%;
+    }
+
+    #${SCRIPT_ID}-charts .chart-empty {
+      font-size: 12px;
+      color: #6b7280;
+      text-align: center;
+      padding: 16px 8px;
+    }
+
+    #${SCRIPT_ID}-charts svg {
+      display: block;
+      width: 66.666%;
+      max-width: 66.666%;
+      height: auto;
+    }
+
+    #${SCRIPT_ID}-charts .chart-scroll {
+      overflow: auto;
+      max-height: 187px;
+      width: 66.666%;
+    }
+
+    #${SCRIPT_ID}-charts svg a {
+      cursor: pointer;
+    }
+
+    #${SCRIPT_ID}-charts .chart-legend {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 8px 12px;
+      margin-top: 8px;
+      width: 66.666%;
+      font-size: 11px;
+      color: #6b7280;
+    }
+
+    #${SCRIPT_ID}-charts .chart-legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    #${SCRIPT_ID}-charts .chart-swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 3px;
+      display: inline-block;
+      flex: 0 0 auto;
+    }
+
+    #${SCRIPT_ID}-charts .chart-note {
+      margin-top: 6px;
+      width: 66.666%;
+      font-size: 11px;
+      color: #6b7280;
+      line-height: 1.35;
+      text-align: center;
+    }
+
+    #${SCRIPT_ID}-chart-tip {
+      position: fixed;
+      z-index: 2147483647;
+      display: none;
+      max-width: 240px;
+      padding: 6px 8px;
+      border-radius: 8px;
+      background: #111827;
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1.35;
+      pointer-events: none;
+      box-shadow: 0 8px 20px rgba(15, 23, 42, 0.24);
+    }
+
+
+    #${SCRIPT_ID}-table-mode {
+      display: flex;
+      width: fit-content;
+      max-width: 100%;
+      margin: 0 0 8px;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #ffffff;
+    }
+
+    #${SCRIPT_ID}-panel #${SCRIPT_ID}-table-mode button {
+      width: auto !important;
+      flex: 0 0 auto;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      color: #6b7280;
+      padding: 7px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    #${SCRIPT_ID}-panel #${SCRIPT_ID}-table-mode button.is-active {
+      background: #0f766e;
+      color: #ffffff;
+    }
+
+    #${SCRIPT_ID}-panel #${SCRIPT_ID}-table-mode button:hover:not(.is-active) {
+      background: #f3f4f6;
+      color: #111827;
+    }
+
+    #${SCRIPT_ID}-results {
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      overflow: auto;
+    }
+
+    #${SCRIPT_ID}-results table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    #${SCRIPT_ID}-results th,
+    #${SCRIPT_ID}-results td {
+      padding: 8px 10px;
+      border-bottom: 1px solid #e5e7eb;
+      font-size: 12px;
+      text-align: left;
+      vertical-align: middle;
+      word-break: break-word;
+      color: #111827;
+    }
+
+    #${SCRIPT_ID}-results tr:last-child td {
+      border-bottom: 0;
+    }
+
+    #${SCRIPT_ID}-results th {
+      background: #f8fafc;
+      font-weight: 600;
+      font-size: 11px;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: #6b7280;
+      position: sticky;
+      top: 0;
+    }
+
+    #${SCRIPT_ID}-results tr.idle-group-alt td {
+      background: #f3f4f6;
+    }
+
+    #${SCRIPT_ID}-results td.idle-empty {
+      text-align: center;
+      color: #6b7280;
+      padding: 18px 10px;
+    }
+
+    #${SCRIPT_ID}-results .idle-pct-chip {
+      display: inline-block;
+      min-width: 3.6em;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      text-align: center;
+      line-height: 1.35;
+    }
+
+    #${SCRIPT_ID}-results tr.idle-day-link {
+      cursor: pointer;
+    }
+
+    #${SCRIPT_ID}-results tr.idle-day-link:hover td {
+      box-shadow: inset 0 0 0 999px rgba(15, 118, 110, 0.08);
+    }
+  `;
+
+  function injectStyles() {
+    if (document.getElementById(`${SCRIPT_ID}-style`)) {
+      return;
+    }
+    const style = document.createElement('style');
+    style.id = `${SCRIPT_ID}-style`;
+    style.textContent = styles;
+    document.head.appendChild(style);
+  }
+
+  function loadState() {
+    try {
+      return JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null') || {};
+    } catch {
+      return {};
+    }
+  }
+
+  function storeState(partial) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...loadState(), ...partial }));
+    } catch {
+      // Ignore unavailable storage.
+    }
+  }
+
+  function slimResult(entry) {
+    return {
+      login: entry.login || '',
+      resolvedLogin: entry.resolvedLogin || entry.login || '',
+      displayName: entry.displayName || '',
+      employeeId: entry.employeeId || '',
+      idleSeconds: Number(entry.idleSeconds) || 0,
+      totSeconds: Number(entry.totSeconds) || 0,
+      activeSeconds: Number(entry.activeSeconds) || 0,
+      onClockSeconds: Number(entry.onClockSeconds) || 0,
+      idleTime: entry.idleTime || '0m',
+      totTime: entry.totTime || '0m',
+      activeTime: entry.activeTime || '0m',
+      onClockTime: entry.onClockTime || '0m',
+      idlePct: entry.idlePct || '0.0%',
+      note: entry.note || '',
+      ok: Boolean(entry.ok),
+    };
+  }
+
+  function persistFormState() {
+    const warehouseInput = document.getElementById(`${SCRIPT_ID}-warehouse`);
+    const loginInput = document.getElementById(`${SCRIPT_ID}-logins`);
+    const startInput = document.getElementById(`${SCRIPT_ID}-start`);
+    const endInput = document.getElementById(`${SCRIPT_ID}-end`);
+    storeState({
+      warehouseId: cleanText(warehouseInput && warehouseInput.value).toUpperCase(),
+      startLocal: startInput ? startInput.value : '',
+      endLocal: endInput ? endInput.value : '',
+      logins: loginInput ? loginInput.value : '',
+      visualize: isVisualizeOn(),
+      tableMode: getTableMode(),
+    });
+  }
+
+  let persistFormTimer = null;
+  function persistFormStateSoon() {
+    window.clearTimeout(persistFormTimer);
+    persistFormTimer = window.setTimeout(persistFormState, 200);
+  }
+
+  function persistSession(results, statusMessage) {
+    lastChartData = buildChartData(results, lastDebugPayload.results);
+    storeState({
+      results: Array.isArray(results) ? results.map(slimResult) : [],
+      statusMessage: statusMessage || '',
+      chartData: lastChartData,
+      visualize: isVisualizeOn(),
+      tableMode: getTableMode(),
+    });
+  }
+
+  function detectWarehouseId() {
+    try {
+      return new URL(window.location.href).searchParams.get('warehouseId') || '';
+    } catch {
+      return '';
+    }
+  }
+
+  function parseLogins(rawValue) {
+    return Array.from(
+      new Set(
+        String(rawValue || '')
+          .split(/[\s,;]+/)
+          .map((value) => value.trim().toLowerCase())
+          .filter(Boolean)
+      )
+    );
+  }
+
+  function pad2(n) {
+    return String(n).padStart(2, '0');
+  }
+
+  function formatPortalDateTime(date) {
+    const offsetMinutes = -date.getTimezoneOffset();
+    const sign = offsetMinutes >= 0 ? '+' : '-';
+    const offsetHours = String(Math.floor(Math.abs(offsetMinutes) / 60)).padStart(2, '0');
+    const offsetRemainder = String(Math.abs(offsetMinutes) % 60).padStart(2, '0');
+    return (
+      `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}` +
+      `T${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}` +
+      `${sign}${offsetHours}${offsetRemainder}`
+    );
+  }
+
+  function formatDatetimeLocal(date) {
+    return (
+      `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}` +
+      `T${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+    );
+  }
+
+  function formatRangeLabel(start, end) {
+    return `${formatDatetimeLocal(start).replace('T', ' ')} → ${formatDatetimeLocal(end).replace('T', ' ')}`;
+  }
+
+  function parseDatetimeLocal(value) {
+    const text = cleanText(value);
+    if (!text) {
+      return null;
+    }
+    const date = new Date(text);
+    if (Number.isNaN(date.getTime())) {
+      return null;
+    }
+    return date;
+  }
+
+  function getDefaultRange() {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    return {
+      start,
+      end: new Date(start.getTime() + CHUNK_MS),
+    };
+  }
+
+  function clampRange(start, end) {
+    if (!(start instanceof Date) || Number.isNaN(start.getTime())) {
+      return getDefaultRange();
+    }
+    if (!(end instanceof Date) || Number.isNaN(end.getTime()) || end.getTime() <= start.getTime()) {
+      return {
+        start,
+        end: new Date(start.getTime() + CHUNK_MS),
+      };
+    }
+    if (end.getTime() - start.getTime() > MAX_RANGE_MS) {
+      return {
+        start,
+        end: new Date(start.getTime() + MAX_RANGE_MS),
+      };
+    }
+    return { start, end };
+  }
+
+  function splitRangeIntoChunks(start, end) {
+    const chunks = [];
+    let cursor = start.getTime();
+    const endMs = end.getTime();
+    while (cursor < endMs) {
+      const next = Math.min(cursor + CHUNK_MS, endMs);
+      chunks.push({
+        start: new Date(cursor),
+        end: new Date(next),
+      });
+      cursor = next;
+    }
+    return chunks;
+  }
+
+  function formatRangeDuration(start, end) {
+    const totalMinutes = Math.max(0, Math.round((end.getTime() - start.getTime()) / 60000));
+    const days = Math.floor(totalMinutes / (60 * 24));
+    const hours = Math.floor((totalMinutes % (60 * 24)) / 60);
+    const minutes = totalMinutes % 60;
+    const parts = [];
+    if (days > 0) {
+      parts.push(`${days}d`);
+    }
+    if (hours > 0) {
+      parts.push(`${hours}h`);
+    }
+    if (minutes > 0 || parts.length === 0) {
+      parts.push(`${minutes}m`);
+    }
+    return parts.join(' ');
+  }
+
+  function validateRange(start, end) {
+    if (!start || !end) {
+      return 'Set both a start and an end date/time.';
+    }
+    if (end.getTime() <= start.getTime()) {
+      return 'End must be after start.';
+    }
+    if (end.getTime() - start.getTime() > MAX_RANGE_MS) {
+      return `Range cannot be more than ${MAX_RANGE_DAYS} days.`;
+    }
+    return '';
+  }
+
+  function buildQueryDateRange(start, end) {
+    return {
+      startTime: formatPortalDateTime(start),
+      endTime: formatPortalDateTime(end),
+      durationMs: end.getTime() - start.getTime(),
+      durationLabel: formatRangeDuration(start, end),
+    };
+  }
+
+  function buildTimeDetailsUrl(login, warehouseId, start, end) {
+    const range = buildQueryDateRange(start, end);
+    const url = new URL('/employee/timeDetails', FCLM_ORIGIN);
+    url.searchParams.set('warehouseId', warehouseId);
+    url.searchParams.set('employeeId', login);
+    url.searchParams.set('startTime', range.startTime);
+    url.searchParams.set('endTime', range.endTime);
+    return url.toString();
+  }
+
+  function readRangeFromInputs(clampValues) {
+    const startInput = document.getElementById(`${SCRIPT_ID}-start`);
+    const endInput = document.getElementById(`${SCRIPT_ID}-end`);
+    const parsedStart = parseDatetimeLocal(startInput && startInput.value);
+    const parsedEnd = parseDatetimeLocal(endInput && endInput.value);
+    const range = clampValues ? clampRange(parsedStart, parsedEnd) : { start: parsedStart, end: parsedEnd };
+    if (clampValues && startInput && endInput) {
+      startInput.value = formatDatetimeLocal(range.start);
+      endInput.value = formatDatetimeLocal(range.end);
+    }
+    return range;
+  }
+
+  function cleanText(value) {
+    return String(value || '')
+      .replace(/\u00a0/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function parseDurationToSeconds(durationStr) {
+    const text = cleanText(durationStr);
+    if (!text) {
+      return 0;
+    }
+    const parts = text.split(':').map((n) => Number(n));
+    if (parts.some(Number.isNaN)) {
+      return 0;
+    }
+    if (parts.length === 2) {
+      return parts[0] * 60 + parts[1];
+    }
+    if (parts.length === 3) {
+      return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    }
+    return 0;
+  }
+
+  function formatSeconds(totalSeconds) {
+    const total = Math.max(0, Math.round(totalSeconds || 0));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    if (hours > 0 && minutes > 0) {
+      return `${hours}h ${minutes}m`;
+    }
+    if (hours > 0) {
+      return `${hours}h`;
+    }
+    return `${minutes}m`;
+  }
+
+  function formatPct(numerator, denominator) {
+    if (!denominator) {
+      return '0.0%';
+    }
+    return `${((numerator / denominator) * 100).toFixed(1)}%`;
+  }
+
+  function truncate(value, maxChars) {
+    const text = String(value || '');
+    if (text.length <= maxChars) {
+      return text;
+    }
+    return `${text.slice(0, maxChars)}…`;
+  }
+
+  function looksLikeAuth(html, title) {
+    const haystack = `${title || ''}\n${html || ''}`.toLowerCase();
+    return (
+      haystack.includes('sign in with midway') ||
+      haystack.includes('midway-auth') ||
+      /<title>[^<]*midway/i.test(html || '')
+    );
+  }
+
+  function looksLikeNotFound(html, title) {
+    const haystack = `${title || ''}\n${html || ''}`.toLowerCase();
+    return haystack.includes('http status 404') || haystack.includes('was not found') || haystack.includes('not found');
+  }
+
+  function extractDefinitionValue(doc, labelPattern) {
+    for (const term of doc.querySelectorAll('dt')) {
+      if (labelPattern.test(cleanText(term.textContent))) {
+        return cleanText(term.nextElementSibling && term.nextElementSibling.textContent);
+      }
+    }
+    return '';
+  }
+
+  function classifyFunctionRow(row) {
+    const className = row.className || '';
+    const text = cleanText(row.textContent);
+    const titleText = cleanText((row.querySelector('td:first-child') || row).textContent);
+    const durationText = cleanText(
+      (row.querySelector('td.rightAlign') || row.querySelector('td:last-child') || {}).textContent
+    );
+    const isIndirect =
+      row.classList.contains('indirect') ||
+      /\bindirect\b/i.test(className) ||
+      /\bindirect\b/i.test(text);
+    const isTimeOffTask =
+      row.classList.contains('timeOffTask') ||
+      /\btimeofftask\b/i.test(className) ||
+      /\btime off task\b/i.test(text);
+    const hasPathMarker = /[♦◆]|â™¦/.test(titleText);
+    let bucket = 'other';
+    if (isTimeOffTask) {
+      bucket = 'tot';
+    } else if (isIndirect) {
+      bucket = 'idle';
+    } else if (hasPathMarker || row.classList.contains('direct')) {
+      bucket = 'active';
+    }
+    return {
+      className,
+      titleText: truncate(titleText, 160),
+      durationText,
+      seconds: parseDurationToSeconds(durationText),
+      isIndirect,
+      isTimeOffTask,
+      hasPathMarker,
+      bucket,
+    };
+  }
+
+  function parseTimeDetailsHtml(html, login, url, httpStatus) {
+    const doc = new DOMParser().parseFromString(html || '', 'text/html');
+    const title = cleanText(doc.title);
+    const bodyText = cleanText(doc.body ? doc.body.textContent : '');
+    const auth = looksLikeAuth(html, title);
+    const notFound = looksLikeNotFound(html, title);
+    const gantt = doc.querySelector('table.ganttChart');
+    const functionRows = Array.from(doc.querySelectorAll('tr.function-seg'));
+    const clockRows = Array.from(doc.querySelectorAll('tr.clock-seg, tr[class*="clock"]'));
+
+    const classified = functionRows.map(classifyFunctionRow);
+    const idleSeconds = classified
+      .filter((row) => row.bucket === 'idle')
+      .reduce((sum, row) => sum + row.seconds, 0);
+    const totSeconds = classified
+      .filter((row) => row.bucket === 'tot')
+      .reduce((sum, row) => sum + row.seconds, 0);
+    const activeSeconds = classified
+      .filter((row) => row.bucket === 'active')
+      .reduce((sum, row) => sum + row.seconds, 0);
+
+    let onClockSeconds = 0;
+    let offClockSeconds = 0;
+    const clockSamples = clockRows.slice(0, 12).map((row) => {
+      const className = row.className || '';
+      const text = cleanText(row.textContent);
+      const durationText = cleanText(
+        (row.querySelector('td.rightAlign') || row.querySelector('td:last-child') || {}).textContent
+      );
+      const seconds = parseDurationToSeconds(durationText);
+      const isOnClock =
+        row.classList.contains('on-clock') ||
+        row.classList.contains('paid') ||
+        row.classList.contains('ClockPaid') ||
+        /\bon-clock\b/i.test(className) ||
+        /\bonclock\/paid\b/i.test(text);
+      const isOffClock =
+        row.classList.contains('off-clock') ||
+        row.classList.contains('un-paid') ||
+        /\boff-clock\b/i.test(className);
+      if (isOnClock) {
+        onClockSeconds += seconds;
+      } else if (isOffClock) {
+        offClockSeconds += seconds;
+      }
+      return { className, durationText, seconds, isOnClock, isOffClock };
+    });
+
+    const titleNode = doc.querySelector('td.title > span.fold-control, .employeeInfo h1, h1');
+    const titleText = cleanText(titleNode && titleNode.textContent);
+    const loginMatch = titleText.match(/\(([^()]+)\)\s*$/);
+    const displayName = loginMatch ? titleText.slice(0, loginMatch.index).trim() : titleText;
+    const resolvedLogin = (loginMatch && loginMatch[1]) || login;
+    const photo = doc.querySelector('img.photo');
+    let employeeId = extractDefinitionValue(doc, /^employee\s*id$/i);
+    if (!employeeId && photo && photo.getAttribute('src')) {
+      try {
+        const photoUrl = new URL(photo.getAttribute('src'), FCLM_ORIGIN);
+        employeeId = photoUrl.searchParams.get('employeeid') || photoUrl.searchParams.get('employeeId') || '';
+      } catch {
+        employeeId = '';
+      }
+    }
+
+    const classCounts = {};
+    classified.forEach((row) => {
+      const key = row.className || '(none)';
+      classCounts[key] = (classCounts[key] || 0) + 1;
+    });
+
+    let note = '';
+    if (auth) {
+      note = 'FCLM auth required. Open fclm-portal.amazon.com and sign in with Midway, then retry.';
+    } else if (notFound) {
+      note = `No FCLM time details found for ${login}.`;
+    } else if (!gantt && functionRows.length === 0) {
+      note = 'Time details loaded but no Gantt/function segments were present for this date.';
+    }
+
+    return {
+      login,
+      resolvedLogin,
+      displayName: displayName || '',
+      employeeId: employeeId || '',
+      idleSeconds,
+      totSeconds,
+      activeSeconds,
+      onClockSeconds,
+      offClockSeconds,
+      idleTime: formatSeconds(idleSeconds),
+      totTime: formatSeconds(totSeconds),
+      activeTime: formatSeconds(activeSeconds),
+      onClockTime: formatSeconds(onClockSeconds),
+      idlePct: formatPct(idleSeconds, onClockSeconds),
+      note,
+      ok: !auth && !notFound,
+      debug: {
+        url,
+        httpStatus,
+        htmlLength: (html || '').length,
+        title,
+        looksLikeAuth: auth,
+        looksLikeNotFound: notFound,
+        ganttPresent: Boolean(gantt),
+        ganttClass: gantt ? gantt.className : null,
+        functionSegCount: functionRows.length,
+        clockSegCount: clockRows.length,
+        classCounts,
+        idleSeconds,
+        totSeconds,
+        activeSeconds,
+        onClockSeconds,
+        offClockSeconds,
+        functionRows: classified.slice(0, MAX_DEBUG_FUNCTION_ROWS),
+        functionRowsOmitted: Math.max(0, classified.length - MAX_DEBUG_FUNCTION_ROWS),
+        clockSamples,
+        bodyPreview: truncate(bodyText, MAX_DEBUG_HTML_CHARS),
+      },
+    };
+  }
+
+  function gmRequest(url) {
+    return new Promise((resolve, reject) => {
+      if (runControl.stopRequested) {
+        reject(LookupStopped());
+        return;
+      }
+      let settled = false;
+      let handle = null;
+      function finish(callback) {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        runControl.requests.delete(handle);
+        callback();
+      }
+      handle = GM_xmlhttpRequest({
+        method: 'GET',
+        url,
+        timeout: REQUEST_TIMEOUT_MS,
+        onload(response) {
+          finish(function () {
+            if (runControl.stopRequested) {
+              reject(LookupStopped());
+              return;
+            }
+            resolve({
+              url,
+              status: response.status,
+              responseText: response.responseText || '',
+              finalUrl: response.finalUrl || url,
+            });
+          });
+        },
+        onerror() {
+          finish(function () {
+            reject(new Error(`Network error for ${url}`));
+          });
+        },
+        ontimeout() {
+          finish(function () {
+            reject(new Error(`Timeout for ${url}`));
+          });
+        },
+        onabort() {
+          finish(function () {
+            reject(LookupStopped());
+          });
+        },
+      });
+      if (handle) {
+        runControl.requests.add(handle);
+      }
+    });
+  }
+
+  function mergeParsedChunks(login, parsedChunks) {
+    const merged = {
+      login,
+      resolvedLogin: login,
+      displayName: '',
+      employeeId: '',
+      idleSeconds: 0,
+      totSeconds: 0,
+      activeSeconds: 0,
+      onClockSeconds: 0,
+      offClockSeconds: 0,
+      note: '',
+      ok: false,
+      debug: {
+        chunkCount: parsedChunks.length,
+        chunks: [],
+      },
+    };
+
+    const notes = [];
+    for (const parsed of parsedChunks) {
+      if (parsed.debug) {
+        merged.debug.chunks.push(parsed.debug);
+      }
+      if (parsed.debug && parsed.debug.looksLikeAuth) {
+        merged.note = parsed.note || 'FCLM auth required. Open fclm-portal.amazon.com and sign in with Midway, then retry.';
+        merged.ok = false;
+        merged.idleTime = '—';
+        merged.totTime = '—';
+        merged.activeTime = '—';
+        merged.onClockTime = '—';
+        merged.idlePct = '—';
+        return merged;
+      }
+      if (parsed.ok) {
+        merged.ok = true;
+        merged.idleSeconds += Number(parsed.idleSeconds) || 0;
+        merged.totSeconds += Number(parsed.totSeconds) || 0;
+        merged.activeSeconds += Number(parsed.activeSeconds) || 0;
+        merged.onClockSeconds += Number(parsed.onClockSeconds) || 0;
+        merged.offClockSeconds += Number(parsed.offClockSeconds) || 0;
+        if (parsed.displayName) {
+          merged.displayName = parsed.displayName;
+        }
+        if (parsed.employeeId) {
+          merged.employeeId = parsed.employeeId;
+        }
+        if (parsed.resolvedLogin) {
+          merged.resolvedLogin = parsed.resolvedLogin;
+        }
+      } else if (parsed.note) {
+        notes.push(parsed.note);
+      }
+    }
+
+    merged.idleTime = formatSeconds(merged.idleSeconds);
+    merged.totTime = formatSeconds(merged.totSeconds);
+    merged.activeTime = formatSeconds(merged.activeSeconds);
+    merged.onClockTime = formatSeconds(merged.onClockSeconds);
+    merged.idlePct = formatPct(merged.idleSeconds, merged.onClockSeconds);
+    if (!merged.ok) {
+      merged.note = notes[0] || `No FCLM time details found for ${login}.`;
+      merged.idleTime = '—';
+      merged.totTime = '—';
+      merged.activeTime = '—';
+      merged.onClockTime = '—';
+      merged.idlePct = '—';
+    }
+    return merged;
+  }
+
+  function stoppedPartialResult(login, parsedChunks, expectedWindows) {
+    const merged = mergeParsedChunks(login, parsedChunks);
+    merged.stopped = true;
+    if (merged.ok) {
+      merged.note = `Stopped after ${parsedChunks.length} of ${expectedWindows} windows.`;
+    } else {
+      merged.note = 'Stopped before time details were loaded.';
+      merged.idleTime = '—';
+      merged.onClockTime = '—';
+      merged.idlePct = '—';
+      merged.totTime = '—';
+    }
+    return merged;
+  }
+
+  async function lookupIdleForLogin(login, warehouseId, start, end) {
+    const windows = splitRangeIntoChunks(start, end);
+    runControl.currentLogin = login;
+    addDebugStep(`lookup:start:${login}`, {
+      windows: windows.length,
+      startTime: formatPortalDateTime(start),
+      endTime: formatPortalDateTime(end),
+    });
+    updateProgress();
+
+    const parsedChunks = [];
+    for (let index = 0; index < windows.length; index += 1) {
+      if (runControl.stopRequested) {
+        return stoppedPartialResult(login, parsedChunks, windows.length);
+      }
+      const windowRange = windows[index];
+      const url = buildTimeDetailsUrl(login, warehouseId, windowRange.start, windowRange.end);
+      addDebugStep(`lookup:window:${login}`, {
+        index,
+        url,
+      });
+      let response;
+      try {
+        response = await gmRequest(url);
+      } catch (error) {
+        if (isStoppedError(error)) {
+          return stoppedPartialResult(login, parsedChunks, windows.length);
+        }
+        throw error;
+      }
+      markRequestDone();
+      addDebugStep(`lookup:http:${login}`, {
+        index,
+        status: response.status,
+        htmlLength: (response.responseText || '').length,
+        finalUrl: response.finalUrl,
+      });
+      if (response.status < 200 || response.status >= 400) {
+        throw new Error(`FCLM returned HTTP ${response.status} for ${login}`);
+      }
+      const parsed = parseTimeDetailsHtml(response.responseText, login, url, response.status);
+      parsedChunks.push(parsed);
+      if (parsed.debug && parsed.debug.looksLikeAuth) {
+        runControl.done += Math.max(0, windows.length - parsedChunks.length);
+        updateProgress();
+        break;
+      }
+    }
+
+    return mergeParsedChunks(login, parsedChunks);
+  }
+
+  async function mapWithConcurrency(items, concurrency, mapper) {
+    const results = new Array(items.length);
+    let nextIndex = 0;
+    async function worker() {
+      while (nextIndex < items.length) {
+        if (runControl.stopRequested) {
+          return;
+        }
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+      }
+    }
+    const workerCount = Math.min(concurrency, items.length);
+    await Promise.all(Array.from({ length: workerCount }, worker));
+    return results.filter(function (entry) {
+      return entry != null;
+    });
+  }
+
+  function resetDebug(warehouseId, start, end, logins) {
+    lastDebugPayload = {
+      ...DEFAULT_DEBUG,
+      generatedAt: new Date().toISOString(),
+      pageUrl: window.location.href,
+      warehouseId,
+      startTime: formatPortalDateTime(start),
+      endTime: formatPortalDateTime(end),
+      timeRange: {
+        ...buildQueryDateRange(start, end),
+        windowCount: splitRangeIntoChunks(start, end).length,
+      },
+      logins: [...logins],
+      steps: [],
+      results: [],
+      errors: [],
+    };
+  }
+
+  function addDebugStep(step, data) {
+    lastDebugPayload.steps.push({
+      at: new Date().toISOString(),
+      step,
+      data: data == null ? null : data,
+    });
+  }
+
+  function addDebugError(step, error) {
+    lastDebugPayload.errors.push({
+      at: new Date().toISOString(),
+      step,
+      error: formatError(error),
+    });
+  }
+
+  function formatError(error) {
+    if (error instanceof Error) {
+      return error.message;
+    }
+    return String(error || 'Unknown error');
+  }
+
+  function escapeHtml(value) {
+    return String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function updateStatus(message, kind) {
+    const node = document.getElementById(`${SCRIPT_ID}-status`);
+    if (!node) {
+      return;
+    }
+    node.className = '';
+    node.id = `${SCRIPT_ID}-status`;
+    if (kind) {
+      node.classList.add(`status-${kind}`);
+    }
+    node.textContent = message;
+  }
+
+  function updateProgress() {
+    const wrap = document.getElementById(`${SCRIPT_ID}-progress`);
+    const fill = document.getElementById(`${SCRIPT_ID}-progress-fill`);
+    const label = document.getElementById(`${SCRIPT_ID}-progress-label`);
+    if (!wrap || !fill || !label) {
+      return;
+    }
+    const total = runControl.total;
+    const done = runControl.done;
+    const show = runControl.running || total > 0;
+    wrap.classList.toggle('is-hidden', !show);
+    const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
+    fill.style.width = `${pct}%`;
+    const loginNote = runControl.currentLogin ? ` · ${runControl.currentLogin}` : '';
+    label.textContent = total
+      ? `${done} / ${total} requests${loginNote}`
+      : 'Waiting…';
+  }
+
+  function markRequestDone() {
+    runControl.done += 1;
+    updateProgress();
+  }
+
+  function setLookupButtons(running) {
+    const runButton = document.getElementById(`${SCRIPT_ID}-run`);
+    const stopButton = document.getElementById(`${SCRIPT_ID}-stop`);
+    if (runButton) {
+      runButton.disabled = running;
+    }
+    if (stopButton) {
+      stopButton.disabled = !running;
+    }
+  }
+
+  function resetRunControl() {
+    runControl.running = false;
+    runControl.stopRequested = false;
+    runControl.done = 0;
+    runControl.total = 0;
+    runControl.currentLogin = '';
+    runControl.requests.clear();
+  }
+
+  function startRunControl(total) {
+    runControl.running = true;
+    runControl.stopRequested = false;
+    runControl.done = 0;
+    runControl.total = total;
+    runControl.currentLogin = '';
+    runControl.requests.clear();
+    setLookupButtons(true);
+    updateProgress();
+  }
+
+  function stopLookup() {
+    if (!runControl.running || runControl.stopRequested) {
+      return;
+    }
+    runControl.stopRequested = true;
+    addDebugStep('stop', {
+      done: runControl.done,
+      total: runControl.total,
+    });
+    runControl.requests.forEach(function (handle) {
+      try {
+        if (handle && typeof handle.abort === 'function') {
+          handle.abort();
+        }
+      } catch {
+        // Ignore abort failures.
+      }
+    });
+    runControl.requests.clear();
+    updateStatus('Stopping…');
+    updateProgress();
+  }
+
+  function updateSummary(warehouseId, start, end, count) {
+    const node = document.getElementById(`${SCRIPT_ID}-summary`);
+    if (!node) {
+      return;
+    }
+    const parts = [warehouseId || '—'];
+    if (start && end) {
+      parts.push(formatRangeLabel(start, end));
+      parts.push(formatRangeDuration(start, end));
+    }
+    if (count) {
+      parts.push(`${count} login${count === 1 ? '' : 's'}`);
+    }
+    node.textContent = parts.join(' · ');
+  }
+
+  function renderResults(results) {
+    const body = document.getElementById(`${SCRIPT_ID}-results-body`);
+    if (!body) {
+      return;
+    }
+    if (!results || results.length === 0) {
+      lastLookupResults = [];
+      lastTableResults = [];
+      lastChartData = { logins: [], days: [], series: [] };
+      paintResultsTable();
+      renderFindings([]);
+      renderCharts();
+      layoutOverlay();
+      return;
+    }
+    lastLookupResults = results;
+    if (lastDebugPayload.results && lastDebugPayload.results.length) {
+      lastChartData = buildChartData(results, lastDebugPayload.results);
+    } else if (!lastChartData.logins.length) {
+      lastChartData = buildChartData(results, []);
+    }
+    paintResultsTable();
+    renderFindings(results);
+    renderCharts();
+    layoutOverlay();
+  }
+
+  function getTableMode() {
+    const active = document.querySelector(`#${SCRIPT_ID}-table-mode button.is-active`);
+    return active && active.getAttribute('data-mode') === 'day' ? 'day' : 'cumulative';
+  }
+
+  function setTableMode(mode) {
+    document.querySelectorAll(`#${SCRIPT_ID}-table-mode button`).forEach((button) => {
+      button.classList.toggle('is-active', button.getAttribute('data-mode') === mode);
+    });
+  }
+
+  function handleTableModeClick(event) {
+    const button = event.currentTarget;
+    const mode = button.getAttribute('data-mode') === 'day' ? 'day' : 'cumulative';
+    setTableMode(mode);
+    storeState({ tableMode: mode });
+    paintResultsTable();
+    layoutOverlay();
+  }
+
+  function buildDayProgressionRows() {
+    const days = (lastChartData && lastChartData.days) || [];
+    const seriesMap = new Map(((lastChartData && lastChartData.series) || []).map((row) => [row.login, row]));
+    const rows = [];
+    (lastLookupResults || []).forEach((result) => {
+      const series = seriesMap.get(result.login);
+      const points = series && Array.isArray(series.points) ? series.points : [];
+      const byDay = new Map(points.map((point) => [point.start, point]));
+      if (!days.length) {
+        rows.push({
+          login: result.login,
+          day: 'All days',
+          idleTime: formatSeconds(result.idleSeconds),
+          onClockTime: formatSeconds(result.onClockSeconds),
+          idlePct: formatPct(result.idleSeconds, result.onClockSeconds),
+          idlePctValue: result.onClockSeconds
+            ? ((Number(result.idleSeconds) || 0) / result.onClockSeconds) * 100
+            : 0,
+          start: '',
+        });
+        return;
+      }
+      days.forEach((day) => {
+        const point = byDay.get(day.start);
+        const idleSeconds = point ? Number(point.idleSeconds) || 0 : 0;
+        const onClockSeconds = point ? Number(point.onClockSeconds) || 0 : 0;
+        rows.push({
+          login: result.login,
+          day: formatDayLabel(day.start),
+          idleTime: formatSeconds(idleSeconds),
+          onClockTime: formatSeconds(onClockSeconds),
+          idlePct: formatPct(idleSeconds, onClockSeconds),
+          idlePctValue: onClockSeconds ? (idleSeconds / onClockSeconds) * 100 : 0,
+          start: day.start,
+        });
+      });
+    });
+    return rows;
+  }
+
+  function idlePctChip(pct, text) {
+    const value = Number(pct) || 0;
+    const fill = idleHeatColor(value);
+    const color = value >= 30 ? '#ffffff' : '#111827';
+    return `<span class="idle-pct-chip" style="background:${fill};color:${color}">${escapeHtml(text || '0.0%')}</span>`;
+  }
+
+  function paintResultsTable() {
+    const body = document.getElementById(`${SCRIPT_ID}-results-body`);
+    const headRow = document.getElementById(`${SCRIPT_ID}-results-head`);
+    if (!body) {
+      return;
+    }
+    const mode = getTableMode();
+    if (!lastLookupResults.length) {
+      lastTableResults = [];
+      if (headRow) {
+        headRow.innerHTML = TABLE_COLUMNS.map((column) => `<th>${column}</th>`).join('');
+      }
+      body.innerHTML = `<tr><td class="idle-empty" colspan="${TABLE_COLUMNS.length}">No results yet.</td></tr>`;
+      return;
+    }
+    if (mode === 'day') {
+      const rows = buildDayProgressionRows();
+      lastTableResults = rows;
+      if (headRow) {
+        headRow.innerHTML = DAY_TABLE_COLUMNS.map((column) => `<th>${column}</th>`).join('');
+      }
+      let groupIndex = -1;
+      let previousLogin = null;
+      body.innerHTML = rows
+        .map((row, index) => {
+          if (row.login !== previousLogin) {
+            groupIndex += 1;
+            previousLogin = row.login;
+          }
+          const showLogin = index === 0 || rows[index - 1].login !== row.login;
+          const groupClass = groupIndex % 2 === 1 ? ' idle-group-alt' : '';
+          const href = row.start ? buildDayTimeCardUrl(row.login, row.start) : '';
+          const linkClass = href ? ' idle-day-link' : '';
+          const hrefAttr = href ? ` data-href="${escapeHtml(href)}"` : '';
+          return `<tr class="${`${groupClass}${linkClass}`.trim()}"${hrefAttr}>
+            <td>${showLogin ? escapeHtml(row.login) : ''}</td>
+            <td>${escapeHtml(row.day)}</td>
+            <td>${escapeHtml(row.idleTime || '—')}</td>
+            <td>${escapeHtml(row.onClockTime || '—')}</td>
+            <td>${idlePctChip(row.idlePctValue, row.idlePct)}</td>
+          </tr>`;
+        })
+        .join('');
+      body.querySelectorAll('tr[data-href]').forEach((row) => {
+        row.addEventListener('click', function () {
+          window.open(row.getAttribute('data-href'), '_blank', 'noopener,noreferrer');
+        });
+      });
+      return;
+    }
+    lastTableResults = lastLookupResults.map((result) => ({
+      ...result,
+      idleTime: formatSeconds(result.idleSeconds),
+      onClockTime: formatSeconds(result.onClockSeconds),
+      totTime: formatSeconds(result.totSeconds),
+    }));
+    if (headRow) {
+      headRow.innerHTML = TABLE_COLUMNS.map((column) => `<th>${column}</th>`).join('');
+    }
+    body.innerHTML = lastTableResults
+      .map((result) => {
+        const title = result.displayName ? ` title="${escapeHtml(result.displayName)}"` : '';
+        return `
+          <tr>
+            <td${title}>${escapeHtml(result.login)}</td>
+            <td>${escapeHtml(result.idleTime || '—')}</td>
+            <td>${escapeHtml(result.onClockTime || '—')}</td>
+            <td>${idlePctChip(
+              result.onClockSeconds ? ((Number(result.idleSeconds) || 0) / result.onClockSeconds) * 100 : 0,
+              result.idlePct
+            )}</td>
+          </tr>
+        `;
+      })
+      .join('');
+  }
+
+  function renderFindings(results) {
+    const node = document.getElementById(`${SCRIPT_ID}-findings`);
+    if (!node) {
+      return;
+    }
+    if (!results || results.length === 0) {
+      node.className = 'is-empty';
+      node.id = `${SCRIPT_ID}-findings`;
+      node.innerHTML = '';
+      return;
+    }
+    const okRows = results.filter((item) => item.ok);
+    const failures = results.length - okRows.length;
+    const totalIdle = okRows.reduce((sum, item) => sum + (item.idleSeconds || 0), 0);
+    const totalOnClock = okRows.reduce((sum, item) => sum + (item.onClockSeconds || 0), 0);
+    const highIdle = okRows.filter((item) => (item.idleSeconds || 0) >= 30 * 60).length;
+    const highest = okRows.reduce((best, item) => {
+      if (!best || (item.idleSeconds || 0) > best.idleSeconds) {
+        return item;
+      }
+      return best;
+    }, null);
+    const avgIdle = okRows.length ? totalIdle / okRows.length : 0;
+    node.className = '';
+    node.id = `${SCRIPT_ID}-findings`;
+    const highestLabel = highest ? `${highest.login} · ${highest.idleTime}` : '—';
+    node.innerHTML = `
+      <div class="findings-title">Findings</div>
+      <div class="findings-grid">
+        <div class="finding">
+          <span class="finding-label">Checked</span>
+          <span class="finding-value">${results.length}</span>
+        </div>
+        <div class="finding">
+          <span class="finding-label">Failed</span>
+          <span class="finding-value">${failures}</span>
+        </div>
+        <div class="finding">
+          <span class="finding-label">Total idle</span>
+          <span class="finding-value">${escapeHtml(formatSeconds(totalIdle))}</span>
+        </div>
+        <div class="finding">
+          <span class="finding-label">Avg idle</span>
+          <span class="finding-value">${escapeHtml(formatSeconds(avgIdle))}</span>
+        </div>
+        <div class="finding">
+          <span class="finding-label">On clock</span>
+          <span class="finding-value">${escapeHtml(formatSeconds(totalOnClock))}</span>
+        </div>
+        <div class="finding">
+          <span class="finding-label">Idle %</span>
+          <span class="finding-value">${escapeHtml(formatPct(totalIdle, totalOnClock))}</span>
+        </div>
+        <div class="finding">
+          <span class="finding-label">Idle ≥ 30m</span>
+          <span class="finding-value">${highIdle}</span>
+        </div>
+        <div class="finding">
+          <span class="finding-label">Highest idle</span>
+          <span class="finding-value" title="${escapeHtml(highestLabel)}">${escapeHtml(highestLabel)}</span>
+        </div>
+      </div>
+    `;
+  }
+
+  function isVisualizeOn() {
+    const input = document.getElementById(`${SCRIPT_ID}-visualize`);
+    return Boolean(input && input.checked);
+  }
+
+  function handleVisualizeChange() {
+    storeState({ visualize: isVisualizeOn() });
+    renderCharts();
+    layoutOverlay();
+  }
+
+  function chunkStartFromUrl(url) {
+    try {
+      return new URL(url, FCLM_ORIGIN).searchParams.get('startTime') || '';
+    } catch {
+      return '';
+    }
+  }
+
+  function formatDayLabel(startTime) {
+    const match = String(startTime || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (!match) {
+      return startTime || '';
+    }
+    return `${Number(match[2])}/${Number(match[3])}`;
+  }
+
+  function formatPortalDayParam(startTime) {
+    const match = String(startTime || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (!match) {
+      return '';
+    }
+    return `${match[1]}/${match[2]}/${match[3]}`;
+  }
+
+  function currentWarehouseId() {
+    const input = document.getElementById(`${SCRIPT_ID}-warehouse`);
+    return cleanText(input && input.value).toUpperCase() || DEFAULT_WAREHOUSE_ID;
+  }
+
+  function employeeIdForLogin(login) {
+    const saved = (lastLookupResults || []).find((row) => row.login === login);
+    if (saved && saved.employeeId) {
+      return saved.employeeId;
+    }
+    const debug = (lastDebugPayload.results || []).find((row) => row.login === login);
+    if (debug && debug.employeeId) {
+      return debug.employeeId;
+    }
+    return login;
+  }
+
+  function buildDayTimeCardUrl(login, startTime) {
+    const day = formatPortalDayParam(startTime);
+    const url = new URL('/employee/timeDetails', FCLM_ORIGIN);
+    url.searchParams.set('employeeId', employeeIdForLogin(login));
+    url.searchParams.set('warehouseId', currentWarehouseId());
+    url.searchParams.set('spanType', 'Day');
+    if (day) {
+      url.searchParams.set('startDateDay', day);
+    }
+    return url.toString();
+  }
+
+  function buildChartData(results, debugResults) {
+    const logins = (results || [])
+      .filter((row) => row && row.ok)
+      .map((row) => {
+        const idleSeconds = Number(row.idleSeconds) || 0;
+        const totSeconds = Number(row.totSeconds) || 0;
+        const activeSeconds = Number(row.activeSeconds) || 0;
+        const onClockSeconds = Number(row.onClockSeconds) || 0;
+        return {
+          login: row.login || '',
+          idleSeconds,
+          totSeconds,
+          activeSeconds,
+          onClockSeconds,
+          otherSeconds: Math.max(0, onClockSeconds - idleSeconds - totSeconds - activeSeconds),
+          idlePct: onClockSeconds ? (idleSeconds / onClockSeconds) * 100 : 0,
+        };
+      })
+      .sort((a, b) => b.idleSeconds - a.idleSeconds)
+      .slice(0, 40);
+
+    const dayMap = new Map();
+    const seriesMap = new Map();
+    (debugResults || []).forEach((entry) => {
+      const login = entry && entry.login ? entry.login : '';
+      if (!login) {
+        return;
+      }
+      const chunks = entry.parse && Array.isArray(entry.parse.chunks) ? entry.parse.chunks : [];
+      const points = [];
+      chunks.forEach((chunk) => {
+        if (!chunk || chunk.looksLikeAuth) {
+          return;
+        }
+        const start = chunkStartFromUrl(chunk.url);
+        if (!start) {
+          return;
+        }
+        const idleSeconds = Number(chunk.idleSeconds) || 0;
+        const totSeconds = Number(chunk.totSeconds) || 0;
+        const activeSeconds = Number(chunk.activeSeconds) || 0;
+        const onClockSeconds = Number(chunk.onClockSeconds) || 0;
+        const point = {
+          start,
+          idleSeconds,
+          totSeconds,
+          activeSeconds,
+          onClockSeconds,
+          idlePct: onClockSeconds ? (idleSeconds / onClockSeconds) * 100 : 0,
+        };
+        points.push(point);
+        const existing = dayMap.get(start) || {
+          start,
+          idleSeconds: 0,
+          totSeconds: 0,
+          activeSeconds: 0,
+          onClockSeconds: 0,
+        };
+        existing.idleSeconds += idleSeconds;
+        existing.totSeconds += totSeconds;
+        existing.activeSeconds += activeSeconds;
+        existing.onClockSeconds += onClockSeconds;
+        dayMap.set(start, existing);
+      });
+      if (points.length) {
+        seriesMap.set(login, points);
+      }
+    });
+
+    const days = Array.from(dayMap.values())
+      .sort((a, b) => a.start.localeCompare(b.start))
+      .map((day) => ({
+        ...day,
+        idlePct: day.onClockSeconds ? (day.idleSeconds / day.onClockSeconds) * 100 : 0,
+      }));
+
+    return {
+      logins,
+      days,
+      series: logins
+        .map((row) => ({
+          login: row.login,
+          points: seriesMap.get(row.login) || [],
+        }))
+        .filter((row) => row.points.length),
+    };
+  }
+
+  const CHART_COLORS = {
+    idle: '#0f766e',
+    tot: '#d97706',
+    active: '#67e8f9',
+    other: '#cbd5e1',
+    grid: '#e5e7eb',
+    text: '#6b7280',
+    axis: '#9ca3af',
+    avg: '#be123c',
+  };
+
+  const SERIES_COLORS = ['#0f766e', '#2563eb', '#d97706', '#7c3aed', '#db2777', '#0891b2', '#65a30d', '#ea580c'];
+
+  function chartLegend(items) {
+    return `<div class="chart-legend">${items
+      .map(
+        (item) =>
+          `<span><i class="chart-swatch" style="background:${item.color}"></i>${escapeHtml(item.label)}</span>`
+      )
+      .join('')}</div>`;
+  }
+
+  function niceCeiling(value) {
+    if (value <= 0) {
+      return 1;
+    }
+    const exp = Math.pow(10, Math.floor(Math.log10(value)));
+    const n = value / exp;
+    const nice = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
+    return nice * exp;
+  }
+
+  function yTicks(maxValue, count) {
+    const top = niceCeiling(maxValue || 1);
+    const step = niceCeiling(top / count);
+    const values = [];
+    for (let value = 0; value <= top + 1e-9; value += step) {
+      values.push(value);
+    }
+    return { max: Math.max(top, values[values.length - 1] || top), values };
+  }
+
+  function polarPoint(cx, cy, radius, angle) {
+    const rad = ((angle - 90) * Math.PI) / 180;
+    return [cx + radius * Math.cos(rad), cy + radius * Math.sin(rad)];
+  }
+
+  function pieSlice(cx, cy, radius, startAngle, endAngle) {
+    const [x1, y1] = polarPoint(cx, cy, radius, endAngle);
+    const [x2, y2] = polarPoint(cx, cy, radius, startAngle);
+    const large = endAngle - startAngle > 180 ? 1 : 0;
+    return `M ${cx} ${cy} L ${x2} ${y2} A ${radius} ${radius} 0 ${large} 1 ${x1} ${y1} Z`;
+  }
+
+  function idleHeatColor(pct) {
+    const n = Number(pct) || 0;
+    if (n < 5) {
+      return '#e5e7eb';
+    }
+    if (n < 10) {
+      return '#99f6e4';
+    }
+    if (n < 15) {
+      return '#2dd4bf';
+    }
+    if (n < 20) {
+      return '#fde68a';
+    }
+    if (n < 25) {
+      return '#fbbf24';
+    }
+    if (n < 30) {
+      return '#fb923c';
+    }
+    return '#ef4444';
+  }
+
+  function heatLegendItems() {
+    return [
+      { color: '#e5e7eb', label: '0–5%' },
+      { color: '#99f6e4', label: '5–10%' },
+      { color: '#2dd4bf', label: '10–15%' },
+      { color: '#fde68a', label: '15–20%' },
+      { color: '#fbbf24', label: '20–25%' },
+      { color: '#fb923c', label: '25–30%' },
+      { color: '#ef4444', label: '30%+' },
+    ];
+  }
+
+  function bindChartTooltips(root) {
+    if (!root) {
+      return;
+    }
+    let tip = document.getElementById(`${SCRIPT_ID}-chart-tip`);
+    if (!tip) {
+      tip = document.createElement('div');
+      tip.id = `${SCRIPT_ID}-chart-tip`;
+      document.body.appendChild(tip);
+    }
+    function hideTip() {
+      tip.style.display = 'none';
+    }
+    function showTip(event) {
+      const target = event.currentTarget;
+      const text = target.getAttribute('data-tip');
+      if (!text) {
+        return;
+      }
+      tip.textContent = text;
+      tip.style.display = 'block';
+      const pad = 12;
+      const offsetX = 14;
+      const offsetY = 10;
+      let left = event.clientX + offsetX;
+      let top = event.clientY - tip.offsetHeight - offsetY;
+      if (left + tip.offsetWidth > window.innerWidth - pad) {
+        left = window.innerWidth - tip.offsetWidth - pad;
+      }
+      if (top < pad) {
+        top = pad;
+      }
+      tip.style.left = `${Math.max(pad, left)}px`;
+      tip.style.top = `${top}px`;
+    }
+    root.querySelectorAll('[data-tip]').forEach((node) => {
+      node.addEventListener('pointerenter', showTip);
+      node.addEventListener('pointermove', showTip);
+      node.addEventListener('pointerleave', hideTip);
+    });
+    hideTip();
+  }
+
+  function svgCompositionBars(items) {
+    const width = 460;
+    const rowH = 26;
+    const left = 78;
+    const right = 52;
+    const top = 8;
+    const height = top + items.length * rowH + 8;
+    const barMax = Math.max(width - left - right, 8);
+    const maxValue = Math.max(1, ...items.map((item) => item.onClockSeconds || 0));
+    const bars = items
+      .map((item, index) => {
+        const y = top + index * rowH;
+        const scale = barMax / maxValue;
+        const idleW = Math.max(item.idleSeconds ? 2 : 0, item.idleSeconds * scale);
+        const totW = Math.max(item.totSeconds ? 2 : 0, item.totSeconds * scale);
+        const activeW = Math.max(item.activeSeconds ? 2 : 0, item.activeSeconds * scale);
+        const otherW = Math.max(item.otherSeconds ? 1 : 0, item.otherSeconds * scale);
+        let x = left;
+        const parts = [
+          { w: idleW, color: CHART_COLORS.idle, label: 'Idle', seconds: item.idleSeconds },
+          { w: totW, color: CHART_COLORS.tot, label: 'ToT', seconds: item.totSeconds },
+          { w: activeW, color: CHART_COLORS.active, label: 'Active', seconds: item.activeSeconds },
+          { w: otherW, color: CHART_COLORS.other, label: 'Other', seconds: item.otherSeconds },
+        ].filter((part) => part.seconds > 0);
+        const rects = parts
+          .map((part) => {
+            const rect = `<rect data-tip="${escapeHtml(
+              `${item.login} · ${part.label} ${formatSeconds(part.seconds)}`
+            )}" x="${x.toFixed(1)}" y="${y + 5}" width="${part.w.toFixed(1)}" height="14" fill="${part.color}" style="cursor:pointer"></rect>`;
+            x += part.w;
+            return rect;
+          })
+          .join('');
+        return `
+          <text x="${left - 8}" y="${y + 16}" text-anchor="end" fill="#4b5563" font-size="10">${escapeHtml(item.login)}</text>
+          ${rects}
+          <text x="${left + barMax + 6}" y="${y + 16}" fill="#111827" font-size="10">${escapeHtml(item.idlePct.toFixed(1))}%</text>
+        `;
+      })
+      .join('');
+    return `<svg viewBox="0 0 ${width} ${height}" role="img">${bars}</svg>${chartLegend([
+      { color: CHART_COLORS.idle, label: 'Idle' },
+      { color: CHART_COLORS.tot, label: 'Time off task' },
+      { color: CHART_COLORS.active, label: 'Active' },
+      { color: CHART_COLORS.other, label: 'Other on-clock' },
+    ])}`;
+  }
+
+  function svgPctBarsWithAverage(items) {
+    const width = 460;
+    const rowH = 22;
+    const left = 78;
+    const right = 48;
+    const top = 6;
+    const height = top + items.length * rowH + 18;
+    const barMax = Math.max(width - left - right, 8);
+    const avg = items.length ? items.reduce((sum, item) => sum + item.idlePct, 0) / items.length : 0;
+    const avgX = left + (Math.min(100, avg) / 100) * barMax;
+    const bars = items
+      .map((item, index) => {
+        const y = top + index * rowH;
+        const barWidth = Math.max(2, (Math.min(100, item.idlePct) / 100) * barMax);
+        const fill = idleHeatColor(item.idlePct);
+        return `
+          <text x="${left - 8}" y="${y + 13}" text-anchor="end" fill="#4b5563" font-size="10">${escapeHtml(item.login)}</text>
+          <rect x="${left}" y="${y + 4}" width="${barWidth.toFixed(1)}" height="12" rx="3" fill="${fill}">
+            <title>${escapeHtml(`${item.login} · ${item.idlePct.toFixed(1)}% idle`)}</title>
+          </rect>
+          <text x="${left + barWidth + 6}" y="${y + 13}" fill="#111827" font-size="10">${item.idlePct.toFixed(1)}%</text>
+        `;
+      })
+      .join('');
+    return `<svg viewBox="0 0 ${width} ${height}" role="img">
+      <line x1="${left}" y1="${top}" x2="${left}" y2="${height - 16}" stroke="${CHART_COLORS.grid}"></line>
+      <line x1="${avgX.toFixed(1)}" y1="${top}" x2="${avgX.toFixed(1)}" y2="${height - 16}" stroke="${CHART_COLORS.avg}" stroke-dasharray="3 3"></line>
+      ${bars}
+      <text x="${avgX.toFixed(1)}" y="${height - 4}" text-anchor="middle" fill="${CHART_COLORS.avg}" font-size="9">avg ${avg.toFixed(1)}%</text>
+    </svg>
+    <div class="chart-note">Color bands match the heatmap: 0–5, 5–10, 10–15, 15–20, 20–25, 25–30, 30%+. Dashed line is the group average.</div>`;
+  }
+
+  function svgMixDonut(logins) {
+    const idle = logins.reduce((sum, row) => sum + row.idleSeconds, 0);
+    const tot = logins.reduce((sum, row) => sum + row.totSeconds, 0);
+    const active = logins.reduce((sum, row) => sum + row.activeSeconds, 0);
+    const other = logins.reduce((sum, row) => sum + row.otherSeconds, 0);
+    const slices = [
+      { label: 'Idle', seconds: idle, color: CHART_COLORS.idle },
+      { label: 'ToT', seconds: tot, color: CHART_COLORS.tot },
+      { label: 'Active', seconds: active, color: CHART_COLORS.active },
+      { label: 'Other', seconds: other, color: CHART_COLORS.other },
+    ].filter((slice) => slice.seconds > 0);
+    const total = slices.reduce((sum, slice) => sum + slice.seconds, 0);
+    const onClock = logins.reduce((sum, row) => sum + row.onClockSeconds, 0);
+    if (!total) {
+      return '<div class="chart-empty">No on-clock time to graph.</div>';
+    }
+    let angle = 0;
+    const paths =
+      slices.length === 1
+        ? `<circle cx="70" cy="70" r="58" fill="${slices[0].color}"><title>${escapeHtml(
+            `${slices[0].label} ${formatSeconds(slices[0].seconds)}`
+          )}</title></circle>`
+        : slices
+            .map((slice) => {
+              const sweep = (slice.seconds / total) * 360;
+              const start = angle;
+              const end = angle + sweep;
+              angle = end;
+              return `<path d="${pieSlice(70, 70, 58, start, end)}" fill="${slice.color}"><title>${escapeHtml(
+                `${slice.label} ${formatSeconds(slice.seconds)}`
+              )}</title></path>`;
+            })
+            .join('');
+    let legendY = 28;
+    const legendRows = slices
+      .map((slice) => {
+        const row = `<g transform="translate(150 ${legendY})">
+          <rect width="10" height="10" rx="2" fill="${slice.color}"></rect>
+          <text x="16" y="10" fill="#374151" font-size="11">${escapeHtml(slice.label)} ${escapeHtml(
+          formatSeconds(slice.seconds)
+        )} · ${((slice.seconds / total) * 100).toFixed(1)}%</text>
+        </g>`;
+        legendY += 18;
+        return row;
+      })
+      .join('');
+    return `<svg viewBox="0 0 460 140" role="img">
+      ${paths}
+      <circle cx="70" cy="70" r="34" fill="#f8fafc"></circle>
+      <text x="70" y="66" text-anchor="middle" fill="#111827" font-size="13" font-weight="700">${escapeHtml(
+        formatPct(idle, onClock)
+      )}</text>
+      <text x="70" y="82" text-anchor="middle" fill="#6b7280" font-size="10">idle of on-clock</text>
+      ${legendRows}
+    </svg>`;
+  }
+
+  function svgScatter(items) {
+    const width = 460;
+    const height = 210;
+    const left = 42;
+    const right = 18;
+    const top = 14;
+    const bottom = 42;
+    const plotW = width - left - right;
+    const plotH = height - top - bottom;
+    const maxX = yTicks(Math.max(1, ...items.map((item) => item.onClockSeconds / 3600)), 4);
+    const maxY = 100;
+    const avg = items.length ? items.reduce((sum, item) => sum + item.idlePct, 0) / items.length : 0;
+    const avgY = top + plotH - (avg / maxY) * plotH;
+    const grid = maxX.values
+      .map((tick) => {
+        const x = left + (tick / maxX.max) * plotW;
+        return `<line x1="${x.toFixed(1)}" y1="${top}" x2="${x.toFixed(1)}" y2="${top + plotH}" stroke="${CHART_COLORS.grid}"></line>
+          <text x="${x.toFixed(1)}" y="${top + plotH + 14}" text-anchor="middle" fill="${CHART_COLORS.text}" font-size="9">${tick}h</text>`;
+      })
+      .join('');
+    const yGrid = [0, 25, 50, 75, 100]
+      .map((tick) => {
+        const y = top + plotH - (tick / maxY) * plotH;
+        return `<line x1="${left}" y1="${y.toFixed(1)}" x2="${left + plotW}" y2="${y.toFixed(1)}" stroke="${CHART_COLORS.grid}"></line>
+          <text x="${left - 6}" y="${y + 3}" text-anchor="end" fill="${CHART_COLORS.text}" font-size="9">${tick}%</text>`;
+      })
+      .join('');
+    const dots = items
+      .map((item) => {
+        const x = left + (item.onClockSeconds / 3600 / maxX.max) * plotW;
+        const y = top + plotH - (Math.min(100, item.idlePct) / maxY) * plotH;
+        const tip = `${item.login} · ${formatSeconds(item.onClockSeconds)} on clock · ${item.idlePct.toFixed(1)}% idle`;
+        return `<g data-tip="${escapeHtml(tip)}" style="cursor:pointer">
+          <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="14" fill="transparent"></circle>
+          <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="6" fill="${idleHeatColor(item.idlePct)}" stroke="#ffffff" stroke-width="1"></circle>
+        </g>`;
+      })
+      .join('');
+    return `<svg viewBox="0 0 ${width} ${height}" role="img">
+      ${grid}${yGrid}
+      <line x1="${left}" y1="${avgY.toFixed(1)}" x2="${left + plotW}" y2="${avgY.toFixed(1)}" stroke="${CHART_COLORS.avg}" stroke-dasharray="4 3"></line>
+      ${dots}
+      <text x="${left + plotW / 2}" y="${height - 6}" text-anchor="middle" fill="${CHART_COLORS.text}" font-size="9">On-clock hours</text>
+    </svg>
+    <div class="chart-note">Hover a dot to see the login. Higher and farther right means more hours with a higher idle rate.</div>`;
+  }
+
+  function svgHeatmap(series, days) {
+    const logins = series.slice(0, 12);
+    const cellW = 52;
+    const cellH = 24;
+    const left = 86;
+    const top = 26;
+    const width = Math.max(460, left + days.length * cellW + 12);
+    const height = top + logins.length * cellH + 10;
+    const headers = days
+      .map((day, index) => {
+        const x = left + index * cellW + cellW / 2;
+        return `<text x="${x}" y="16" text-anchor="middle" fill="${CHART_COLORS.text}" font-size="10">${escapeHtml(
+          formatDayLabel(day.start)
+        )}</text>`;
+      })
+      .join('');
+    const cells = logins
+      .map((row, rowIndex) => {
+        const byDay = new Map(row.points.map((point) => [point.start, point]));
+        const label = `<text x="${left - 8}" y="${top + rowIndex * cellH + 15}" text-anchor="end" fill="#4b5563" font-size="10">${escapeHtml(
+          row.login
+        )}</text>`;
+        const rects = days
+          .map((day, colIndex) => {
+            const point = byDay.get(day.start);
+            const pct = point ? point.idlePct : 0;
+            const seconds = point ? point.idleSeconds : 0;
+            const tip = `${row.login} · ${formatDayLabel(day.start)} · ${formatSeconds(seconds)} idle · ${pct.toFixed(1)}% · click to open time card`;
+            const href = buildDayTimeCardUrl(row.login, day.start);
+            return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" data-tip="${escapeHtml(tip)}">
+              <rect x="${left + colIndex * cellW + 4}" y="${top + rowIndex * cellH + 2}" width="${cellW - 8}" height="${cellH - 4}" rx="4" fill="${idleHeatColor(
+              pct
+            )}"></rect>
+            </a>`;
+          })
+          .join('');
+        return label + rects;
+      })
+      .join('');
+    return `<div class="chart-scroll"><svg viewBox="0 0 ${width} ${height}" role="img">${headers}${cells}</svg></div>
+      ${chartLegend(heatLegendItems())}
+      <div class="chart-note">Click a cell to open that associate's time card for that day.</div>`;
+  }
+
+  function svgMultiLine(series, days) {
+    const lines = series.slice(0, 6);
+    const width = 460;
+    const height = 200;
+    const left = 44;
+    const right = 12;
+    const top = 12;
+    const bottom = 28;
+    const plotW = width - left - right;
+    const plotH = height - top - bottom;
+    const maxIdleHours = Math.max(
+      0.25,
+      ...lines.flatMap((row) => row.points.map((point) => point.idleSeconds / 3600))
+    );
+    const ticks = yTicks(maxIdleHours, 4);
+    const xFor = (index) => left + (days.length === 1 ? plotW / 2 : (index / (days.length - 1)) * plotW);
+    const yFor = (seconds) => top + plotH - (seconds / 3600 / ticks.max) * plotH;
+    const grid = ticks.values
+      .map((tick) => {
+        const y = yFor(tick * 3600);
+        return `<line x1="${left}" y1="${y.toFixed(1)}" x2="${left + plotW}" y2="${y.toFixed(1)}" stroke="${CHART_COLORS.grid}"></line>
+          <text x="${left - 6}" y="${y + 3}" text-anchor="end" fill="${CHART_COLORS.text}" font-size="9">${tick}h</text>`;
+      })
+      .join('');
+    const xLabels = days
+      .map(
+        (day, index) =>
+          `<text x="${xFor(index).toFixed(1)}" y="${height - 8}" text-anchor="middle" fill="${CHART_COLORS.text}" font-size="9">${escapeHtml(
+            formatDayLabel(day.start)
+          )}</text>`
+      )
+      .join('');
+    const paths = lines
+      .map((row, seriesIndex) => {
+        const color = SERIES_COLORS[seriesIndex % SERIES_COLORS.length];
+        const byDay = new Map(row.points.map((point) => [point.start, point]));
+        const coords = days.map((day, index) => {
+          const point = byDay.get(day.start);
+          return `${xFor(index).toFixed(1)},${yFor(point ? point.idleSeconds : 0).toFixed(1)}`;
+        });
+        const dots = days
+          .map((day, index) => {
+            const point = byDay.get(day.start);
+            const seconds = point ? point.idleSeconds : 0;
+            const href = buildDayTimeCardUrl(row.login, day.start);
+            const tip = `${row.login} · ${formatDayLabel(day.start)} · ${formatSeconds(seconds)} idle · click to open time card`;
+            return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" data-tip="${escapeHtml(tip)}">
+              <circle cx="${xFor(index).toFixed(1)}" cy="${yFor(seconds).toFixed(1)}" r="10" fill="transparent"></circle>
+              <circle cx="${xFor(index).toFixed(1)}" cy="${yFor(seconds).toFixed(1)}" r="3.5" fill="${color}" stroke="#ffffff" stroke-width="1"></circle>
+            </a>`;
+          })
+          .join('');
+        return `<polyline fill="none" stroke="${color}" stroke-width="2" points="${coords.join(' ')}"></polyline>${dots}`;
+      })
+      .join('');
+    return `<svg viewBox="0 0 ${width} ${height}" role="img">${grid}${paths}${xLabels}</svg>${chartLegend(
+      lines.map((row, index) => ({
+        color: SERIES_COLORS[index % SERIES_COLORS.length],
+        label: row.login,
+      }))
+    )}
+    <div class="chart-note">Click a point to open that associate's time card for that day.</div>`;
+  }
+
+  function svgStackedDays(days) {
+    const width = 460;
+    const height = 180;
+    const left = 44;
+    const right = 12;
+    const top = 12;
+    const bottom = 28;
+    const plotW = width - left - right;
+    const plotH = height - top - bottom;
+    const maxHours = Math.max(
+      1,
+      ...days.map((day) => (day.idleSeconds + day.totSeconds + day.activeSeconds + Math.max(0, day.onClockSeconds - day.idleSeconds - day.totSeconds - day.activeSeconds)) / 3600)
+    );
+    const ticks = yTicks(maxHours, 4);
+    const gap = days.length > 10 ? 2 : 6;
+    const barWidth = Math.max(8, Math.floor((plotW - gap * (days.length - 1)) / days.length));
+    const grid = ticks.values
+      .map((tick) => {
+        const y = top + plotH - (tick / ticks.max) * plotH;
+        return `<line x1="${left}" y1="${y.toFixed(1)}" x2="${left + plotW}" y2="${y.toFixed(1)}" stroke="${CHART_COLORS.grid}"></line>
+          <text x="${left - 6}" y="${y + 3}" text-anchor="end" fill="${CHART_COLORS.text}" font-size="9">${tick}h</text>`;
+      })
+      .join('');
+    const bars = days
+      .map((day, index) => {
+        const x = left + index * (barWidth + gap);
+        const parts = [
+          { seconds: day.idleSeconds, color: CHART_COLORS.idle, label: 'Idle' },
+          { seconds: day.totSeconds, color: CHART_COLORS.tot, label: 'ToT' },
+          { seconds: day.activeSeconds, color: CHART_COLORS.active, label: 'Active' },
+        ];
+        let y = top + plotH;
+        const rects = parts
+          .map((part) => {
+            const h = (part.seconds / 3600 / ticks.max) * plotH;
+            y -= h;
+            if (h <= 0) {
+              return '';
+            }
+            return `<rect x="${x}" y="${y.toFixed(1)}" width="${barWidth}" height="${Math.max(1, h).toFixed(1)}" fill="${part.color}">
+              <title>${escapeHtml(`${formatDayLabel(day.start)} · ${part.label} ${formatSeconds(part.seconds)}`)}</title>
+            </rect>`;
+          })
+          .join('');
+        return `${rects}<text x="${x + barWidth / 2}" y="${height - 8}" text-anchor="middle" fill="${CHART_COLORS.text}" font-size="9">${escapeHtml(
+          formatDayLabel(day.start)
+        )}</text>`;
+      })
+      .join('');
+    return `<svg viewBox="0 0 ${width} ${height}" role="img">${grid}${bars}</svg>${chartLegend([
+      { color: CHART_COLORS.idle, label: 'Idle' },
+      { color: CHART_COLORS.tot, label: 'Time off task' },
+      { color: CHART_COLORS.active, label: 'Active' },
+    ])}`;
+  }
+
+  function chartCard(title, bodyHtml) {
+    return `<div class="chart-card">
+      <div class="chart-card-head">
+        <div class="chart-title">${escapeHtml(title)}</div>
+        <button type="button" class="chart-download" title="Download PNG">Download</button>
+      </div>
+      <div class="chart-visual">${bodyHtml}</div>
+    </div>`;
+  }
+
+  function slugChartName(title) {
+    return String(title || 'chart')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '') || 'chart';
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(function () {
+      URL.revokeObjectURL(url);
+    }, 1000);
+  }
+
+  function wrapCanvasText(ctx, text, maxWidth) {
+    const words = String(text || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .split(' ')
+      .filter(Boolean);
+    if (!words.length) {
+      return [];
+    }
+    const lines = [];
+    let current = '';
+    words.forEach((word) => {
+      const next = current ? `${current} ${word}` : word;
+      if (ctx.measureText(next).width <= maxWidth) {
+        current = next;
+        return;
+      }
+      if (current) {
+        lines.push(current);
+      }
+      current = word;
+    });
+    if (current) {
+      lines.push(current);
+    }
+    return lines;
+  }
+
+  function readChartLegend(card) {
+    return Array.from(card.querySelectorAll('.chart-legend span')).map((span) => {
+      const swatch = span.querySelector('.chart-swatch');
+      let color = '#0f766e';
+      if (swatch) {
+        const styled = String(swatch.getAttribute('style') || '');
+        const match = styled.match(/background(?:-color)?\s*:\s*([^;]+)/i);
+        color = (match && match[1].trim()) || window.getComputedStyle(swatch).backgroundColor || color;
+      }
+      return {
+        color,
+        label: String(span.textContent || '')
+          .replace(/\s+/g, ' ')
+          .trim(),
+      };
+    });
+  }
+
+  function readChartNotes(card) {
+    return Array.from(card.querySelectorAll('.chart-note'))
+      .map((node) =>
+        String(node.textContent || '')
+          .replace(/\s+/g, ' ')
+          .trim()
+      )
+      .filter(Boolean);
+  }
+
+  function downloadChartPng(card) {
+    if (!card) {
+      return;
+    }
+    const svg = card.querySelector('svg');
+    const title = (card.querySelector('.chart-title') && card.querySelector('.chart-title').textContent) || 'chart';
+    if (!svg) {
+      updateStatus('This card has no graph to download.', 'error');
+      return;
+    }
+    const clone = svg.cloneNode(true);
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    const box = svg.viewBox && svg.viewBox.baseVal;
+    const graphWidth = Math.max(1, Math.round(box && box.width ? box.width : svg.clientWidth || 460));
+    const graphHeight = Math.max(1, Math.round(box && box.height ? box.height : svg.clientHeight || 200));
+    clone.setAttribute('width', String(graphWidth));
+    clone.setAttribute('height', String(graphHeight));
+    const xml = new XMLSerializer().serializeToString(clone);
+    const legend = readChartLegend(card);
+    const notes = readChartNotes(card);
+    const image = new Image();
+    image.onload = function () {
+      const scale = 2;
+      const pad = 28;
+      const gap = 16;
+      const contentW = Math.max(graphWidth, 560);
+      const measure = document.createElement('canvas').getContext('2d');
+      measure.font = '700 18px "Segoe UI", system-ui, sans-serif';
+      const titleLines = wrapCanvasText(measure, title.toUpperCase(), contentW);
+      measure.font = '600 13px "Segoe UI", system-ui, sans-serif';
+      const noteLines = notes.flatMap((note) => wrapCanvasText(measure, note, contentW));
+      const swatch = 10;
+      const legendGap = 16;
+      const legendItems = legend.map((item) => {
+        const textW = measure.measureText(item.label).width;
+        return { ...item, width: swatch + 6 + textW };
+      });
+      const legendRows = [];
+      let row = [];
+      let rowWidth = 0;
+      legendItems.forEach((item) => {
+        const next = rowWidth + (row.length ? legendGap : 0) + item.width;
+        if (row.length && next > contentW) {
+          legendRows.push(row);
+          row = [item];
+          rowWidth = item.width;
+          return;
+        }
+        row.push(item);
+        rowWidth = next;
+      });
+      if (row.length) {
+        legendRows.push(row);
+      }
+      const titleH = titleLines.length * 24;
+      const legendH = legendRows.length ? legendRows.length * 22 : 0;
+      const notesH = noteLines.length ? noteLines.length * 18 : 0;
+      const extra =
+        pad +
+        titleH +
+        (titleH ? gap : 0) +
+        (legendH ? gap : 0) +
+        legendH +
+        (notesH ? gap : 0) +
+        notesH +
+        pad;
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round((contentW + pad * 2) * scale);
+      canvas.height = Math.round((graphHeight + extra) * scale);
+      const ctx = canvas.getContext('2d');
+      ctx.scale(scale, scale);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width / scale, canvas.height / scale);
+      ctx.fillStyle = '#f8fafc';
+      roundRect(ctx, 8, 8, canvas.width / scale - 16, canvas.height / scale - 16, 12);
+      ctx.fill();
+      let y = pad + 8;
+      ctx.fillStyle = '#6b7280';
+      ctx.font = '700 14px "Segoe UI", system-ui, sans-serif';
+      ctx.textBaseline = 'top';
+      titleLines.forEach((line) => {
+        ctx.fillText(line, pad, y);
+        y += 24;
+      });
+      if (titleH) {
+        y += gap / 2;
+      }
+      const graphX = pad + Math.max(0, (contentW - graphWidth) / 2);
+      ctx.drawImage(image, graphX, y, graphWidth, graphHeight);
+      y += graphHeight;
+      if (legendRows.length) {
+        y += gap;
+        ctx.font = '600 12px "Segoe UI", system-ui, sans-serif';
+        ctx.textBaseline = 'middle';
+        legendRows.forEach((legendRow) => {
+          const total = legendRow.reduce((sum, item, index) => sum + item.width + (index ? legendGap : 0), 0);
+          let x = pad + Math.max(0, (contentW - total) / 2);
+          legendRow.forEach((item) => {
+            ctx.fillStyle = item.color;
+            roundRect(ctx, x, y + 6, swatch, swatch, 2);
+            ctx.fill();
+            ctx.fillStyle = '#4b5563';
+            ctx.fillText(item.label, x + swatch + 6, y + 11);
+            x += item.width + legendGap;
+          });
+          y += 22;
+        });
+      }
+      if (noteLines.length) {
+        y += gap / 2;
+        ctx.fillStyle = '#6b7280';
+        ctx.font = '500 12px "Segoe UI", system-ui, sans-serif';
+        ctx.textBaseline = 'top';
+        noteLines.forEach((line) => {
+          ctx.fillText(line, pad, y);
+          y += 18;
+        });
+      }
+      canvas.toBlob(function (blob) {
+        if (!blob) {
+          updateStatus('Could not create PNG.', 'error');
+          return;
+        }
+        const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+        downloadBlob(blob, `fclm-idle-${slugChartName(title)}-${stamp}.png`);
+        updateStatus(`Downloaded ${title} as PNG.`, 'success');
+      }, 'image/png');
+    };
+    image.onerror = function () {
+      updateStatus('Could not render chart PNG.', 'error');
+    };
+    image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(xml)}`;
+  }
+
+  function roundRect(ctx, x, y, width, height, radius) {
+    const r = Math.min(radius, width / 2, height / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + width, y, x + width, y + height, r);
+    ctx.arcTo(x + width, y + height, x, y + height, r);
+    ctx.arcTo(x, y + height, x, y, r);
+    ctx.arcTo(x, y, x + width, y, r);
+    ctx.closePath();
+  }
+
+  function bindChartDownloads(root) {
+    if (!root) {
+      return;
+    }
+    root.querySelectorAll('.chart-download').forEach(function (button) {
+      button.addEventListener('click', function () {
+        downloadChartPng(button.closest('.chart-card'));
+      });
+    });
+  }
+
+  function renderCharts() {
+    const node = document.getElementById(`${SCRIPT_ID}-charts`);
+    if (!node) {
+      return;
+    }
+    if (!isVisualizeOn()) {
+      node.className = 'is-hidden';
+      node.id = `${SCRIPT_ID}-charts`;
+      node.innerHTML = '';
+      return;
+    }
+    node.className = '';
+    node.id = `${SCRIPT_ID}-charts`;
+    const data = lastChartData || { logins: [], days: [], series: [] };
+    if (!data.logins.length) {
+      node.innerHTML = '<div class="chart-card"><div class="chart-empty">Run Check Idle to graph results.</div></div>';
+      return;
+    }
+    const pctRows = [...data.logins].sort((a, b) => b.idlePct - a.idlePct);
+    const hasDaySeries = data.days.length > 1 && data.series && data.series.length > 0;
+    const daySection =
+      data.days.length > 1
+        ? `${
+            hasDaySeries
+              ? `${chartCard('Idle % heatmap', svgHeatmap(data.series, data.days))}
+          ${chartCard('Idle hours by day', svgMultiLine(data.series, data.days))}`
+              : ''
+          }
+          ${chartCard('On-clock mix by day', svgStackedDays(data.days))}`
+        : '';
+    node.innerHTML = `
+      ${chartCard('On-clock mix', svgMixDonut(data.logins))}
+      ${chartCard('Time composition by login', svgCompositionBars(data.logins))}
+      ${chartCard('Idle % vs group average', svgPctBarsWithAverage(pctRows))}
+      ${chartCard('Idle rate vs hours worked', svgScatter(data.logins))}
+      ${daySection}
+    `;
+    bindChartTooltips(node);
+    bindChartDownloads(node);
+  }
+
+  function getTableRows(results) {
+    if (getTableMode() === 'day') {
+      return (results || []).map((result) => [
+        result.login || '',
+        result.day || '',
+        result.idleTime || '',
+        result.onClockTime || '',
+        result.idlePct || '',
+      ]);
+    }
+    return (results || []).map((result) => [
+      result.login || '',
+      result.idleTime || '',
+      result.onClockTime || '',
+      result.idlePct || '',
+    ]);
+  }
+
+  function toDelimitedTable(results, delimiter) {
+    const columns = getTableMode() === 'day' ? DAY_TABLE_COLUMNS : TABLE_COLUMNS;
+    const rows = [columns, ...getTableRows(results)];
+    return rows
+      .map((row) =>
+        row
+          .map((cell) => {
+            const text = String(cell == null ? '' : cell);
+            if (text.includes('"') || text.includes('\n') || text.includes(delimiter)) {
+              return `"${text.replace(/"/g, '""')}"`;
+            }
+            return text;
+          })
+          .join(delimiter)
+      )
+      .join('\n');
+  }
+
+  async function copyTableToClipboard() {
+    if (!lastTableResults.length) {
+      updateStatus('No table to copy yet. Run Check Idle first.', 'error');
+      return;
+    }
+    try {
+      await writeClipboard(toDelimitedTable(lastTableResults, '\t'));
+      updateStatus(`Copied ${lastTableResults.length} row(s) to clipboard.`, 'success');
+    } catch (error) {
+      addDebugError('copyTableToClipboard', error);
+      updateStatus(`Copy table failed: ${formatError(error)}`, 'error');
+    }
+  }
+
+  function exportTable() {
+    if (!lastTableResults.length) {
+      updateStatus('No table to export yet. Run Check Idle first.', 'error');
+      return;
+    }
+    const csv = `${toDelimitedTable(lastTableResults, ',')}\n`;
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `fclm-idle-table-${stamp}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(function () {
+      URL.revokeObjectURL(url);
+    }, 1000);
+    updateStatus(`Exported ${lastTableResults.length} row(s) as CSV.`, 'success');
+  }
+
+  async function copyDebugToClipboard() {
+    lastDebugPayload.generatedAt = new Date().toISOString();
+    lastDebugPayload.version = VERSION;
+    const text = JSON.stringify(lastDebugPayload, null, 2);
+    try {
+      await writeClipboard(text);
+      updateStatus('Debug copied. Paste it in chat so idle parsing can be fixed.', 'success');
+    } catch (error) {
+      addDebugError('copyDebugToClipboard', error);
+      updateStatus(`Copy failed: ${formatError(error)}`, 'error');
+    }
+  }
+
+  async function writeClipboard(text) {
+    try {
+      if (typeof GM_setClipboard === 'function') {
+        GM_setClipboard(text, 'text');
+        return;
+      }
+    } catch {
+      // Fall through to browser clipboard.
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', 'readonly');
+    textarea.style.position = 'fixed';
+    textarea.style.top = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    if (!ok) {
+      throw new Error('Clipboard copy failed.');
+    }
+  }
+
+  async function runLookup() {
+    const warehouseInput = document.getElementById(`${SCRIPT_ID}-warehouse`);
+    const loginInput = document.getElementById(`${SCRIPT_ID}-logins`);
+    const warehouseId = cleanText(warehouseInput.value).toUpperCase() || DEFAULT_WAREHOUSE_ID;
+    const { start, end } = readRangeFromInputs(true);
+    const logins = parseLogins(loginInput.value);
+    const rangeError = validateRange(start, end);
+
+    warehouseInput.value = warehouseId;
+    storeState({
+      warehouseId,
+      startLocal: formatDatetimeLocal(start),
+      endLocal: formatDatetimeLocal(end),
+      logins: loginInput.value,
+    });
+    resetDebug(warehouseId, start, end, logins);
+    updateSummary(warehouseId, start, end, logins.length);
+
+    if (rangeError) {
+      updateStatus(rangeError, 'error');
+      addDebugError('validate', rangeError);
+      return;
+    }
+
+    if (logins.length === 0) {
+      updateStatus('Paste at least one login.', 'error');
+      addDebugError('validate', 'No logins provided');
+      return;
+    }
+
+    const windows = splitRangeIntoChunks(start, end);
+    const totalRequests = logins.length * windows.length;
+    startRunControl(totalRequests);
+    renderResults([]);
+    updateStatus(
+      windows.length > 1
+        ? `Checking idle time for ${logins.length} login(s) across ${windows.length} 24h windows…`
+        : `Checking idle time for ${logins.length} login(s)…`
+    );
+
+    try {
+      const resolved = await mapWithConcurrency(logins, LOOKUP_CONCURRENCY, async (login) => {
+        try {
+          const parsed = await lookupIdleForLogin(login, warehouseId, start, end);
+          return {
+            login,
+            ok: parsed.ok,
+            ...parsed,
+          };
+        } catch (error) {
+          if (isStoppedError(error)) {
+            return stoppedPartialResult(login, [], windows.length);
+          }
+          addDebugError(`lookup:${login}`, error);
+          markRequestDone();
+          return {
+            login,
+            ok: false,
+            idleSeconds: 0,
+            onClockSeconds: 0,
+            idleTime: '—',
+            onClockTime: '—',
+            idlePct: '—',
+            totTime: '—',
+            note: formatError(error),
+            debug: { error: formatError(error) },
+          };
+        }
+      });
+
+      const results = resolved
+        .map((entry) => ({
+          login: entry.login,
+          resolvedLogin: entry.resolvedLogin || entry.login,
+          displayName: entry.displayName || '',
+          employeeId: entry.employeeId || '',
+          idleSeconds: entry.idleSeconds || 0,
+          totSeconds: entry.totSeconds || 0,
+          activeSeconds: entry.activeSeconds || 0,
+          onClockSeconds: entry.onClockSeconds || 0,
+          idleTime: entry.idleTime || '0m',
+          totTime: entry.totTime || '0m',
+          activeTime: entry.activeTime || '0m',
+          onClockTime: entry.onClockTime || '0m',
+          idlePct: entry.idlePct || '0.0%',
+          note: entry.note || '',
+          ok: Boolean(entry.ok),
+        }));
+
+      lastDebugPayload.results = resolved.map((entry) => ({
+        login: entry.login,
+        ok: entry.ok,
+        displayName: entry.displayName || '',
+        employeeId: entry.employeeId || '',
+        idleTime: entry.idleTime,
+        idlePct: entry.idlePct,
+        onClockTime: entry.onClockTime,
+        totTime: entry.totTime,
+        note: entry.note || '',
+        parse: entry.debug || null,
+      }));
+
+      addDebugStep(runControl.stopRequested ? 'stopped' : 'completed', {
+        count: results.length,
+        failures: results.filter((item) => !item.ok).length,
+        withIdle: results.filter((item) => item.idleSeconds > 0).length,
+        done: runControl.done,
+        total: runControl.total,
+      });
+
+      renderResults(results);
+      layoutOverlay();
+      const failures = results.filter((item) => !item.ok).length;
+      const stopped = runControl.stopRequested;
+      let statusMessage;
+      if (stopped) {
+        statusMessage = `Stopped. ${results.length} login(s) kept (${runControl.done}/${runControl.total} requests).`;
+      } else if (failures > 0) {
+        statusMessage = `Done. ${results.length - failures} ok, ${failures} failed. Copy Debug if idle looks wrong.`;
+      } else {
+        statusMessage = `Done. Idle time loaded for ${results.length} login(s).`;
+      }
+      updateStatus(statusMessage, stopped || failures > 0 ? 'error' : 'success');
+      persistFormState();
+      persistSession(results, statusMessage);
+    } catch (error) {
+      addDebugError('runLookup', error);
+      updateStatus(`Lookup failed: ${formatError(error)}`, 'error');
+    } finally {
+      resetRunControl();
+      setLookupButtons(false);
+      updateProgress();
+    }
+  }
+
+  function createToggleButton() {
+    if (document.getElementById(`${SCRIPT_ID}-toggle`)) {
+      return;
+    }
+    const toggle = document.createElement('button');
+    toggle.id = `${SCRIPT_ID}-toggle`;
+    toggle.type = 'button';
+    toggle.textContent = 'I';
+    toggle.title = 'FCLM Login Idle Time (abelrigm)';
+    document.body.appendChild(toggle);
+    placeToggleAtBottomCenter(toggle);
+    initializeToggleDragging(toggle);
+    toggle.addEventListener('click', function () {
+      if (toggle.dataset.dragging === 'true') {
+        toggle.dataset.dragging = 'false';
+        return;
+      }
+      togglePanel();
+    });
+  }
+
+  function createPanel() {
+    if (document.getElementById(`${SCRIPT_ID}-panel`)) {
+      return;
+    }
+    const saved = loadState();
+    const warehouseId = saved.warehouseId || detectWarehouseId() || DEFAULT_WAREHOUSE_ID;
+    const defaultRange = getDefaultRange();
+    const savedRange = clampRange(parseDatetimeLocal(saved.startLocal), parseDatetimeLocal(saved.endLocal));
+    const startValue = saved.startLocal ? savedRange.start : defaultRange.start;
+    const endValue = saved.startLocal ? savedRange.end : defaultRange.end;
+    const panel = document.createElement('div');
+    panel.id = `${SCRIPT_ID}-panel`;
+    panel.className = 'is-hidden';
+    panel.innerHTML = `
+      <div class="idle-header">
+        <div class="idle-header-text">
+          <div class="idle-title">Login Idle Time (abelrigm)</div>
+          <div id="${SCRIPT_ID}-summary"></div>
+        </div>
+        <button id="${SCRIPT_ID}-close" type="button" aria-label="Close panel">×</button>
+      </div>
+      <div class="idle-body">
+        <div class="idle-row">
+          <div>
+            <label for="${SCRIPT_ID}-warehouse">Warehouse</label>
+            <input id="${SCRIPT_ID}-warehouse" type="text" value="${escapeHtml(warehouseId)}" />
+          </div>
+        </div>
+        <div class="idle-row">
+          <div>
+            <label for="${SCRIPT_ID}-start">Start</label>
+            <input id="${SCRIPT_ID}-start" type="datetime-local" step="60" value="${escapeHtml(formatDatetimeLocal(startValue))}" />
+          </div>
+          <div>
+            <label for="${SCRIPT_ID}-end">End</label>
+            <input id="${SCRIPT_ID}-end" type="datetime-local" step="60" value="${escapeHtml(formatDatetimeLocal(endValue))}" />
+          </div>
+        </div>
+        <div class="idle-hint">Range can be up to ${MAX_RANGE_DAYS} days. FCLM is queried in 24h windows and idle is summed.</div>
+        <label for="${SCRIPT_ID}-logins">Logins</label>
+        <textarea id="${SCRIPT_ID}-logins" placeholder="Paste one login per line, or comma-separated">${escapeHtml(
+          saved.logins || ''
+        )}</textarea>
+        <div class="idle-actions">
+          <button id="${SCRIPT_ID}-run" type="button">Check Idle</button>
+          <button id="${SCRIPT_ID}-stop" type="button" disabled>Stop</button>
+        </div>
+        <div class="idle-actions">
+          <button id="${SCRIPT_ID}-copy-table" type="button">Copy Table</button>
+          <button id="${SCRIPT_ID}-export-table" type="button">Export Table</button>
+        </div>
+        <div id="${SCRIPT_ID}-progress" class="is-hidden">
+          <div class="idle-progress-track">
+            <div id="${SCRIPT_ID}-progress-fill"></div>
+          </div>
+          <div id="${SCRIPT_ID}-progress-label">0 / 0 requests</div>
+        </div>
+        <button id="${SCRIPT_ID}-copy" type="button">Copy Debug</button>
+        <div id="${SCRIPT_ID}-status">Paste logins, then Check Idle. Stay signed into FCLM.</div>
+        <div id="${SCRIPT_ID}-viz-row">
+          <label class="idle-switch" for="${SCRIPT_ID}-visualize">
+            <input id="${SCRIPT_ID}-visualize" type="checkbox"${saved.visualize ? ' checked' : ''} />
+            <span class="idle-switch-ui"></span>
+            Visualize
+          </label>
+        </div>
+        <div id="${SCRIPT_ID}-charts" class="is-hidden"></div>
+        <div id="${SCRIPT_ID}-findings" class="is-empty"></div>
+        <div id="${SCRIPT_ID}-table-mode">
+          <button type="button" data-mode="cumulative"${saved.tableMode === 'day' ? '' : ' class="is-active"'}>Cumulative</button>
+          <button type="button" data-mode="day"${saved.tableMode === 'day' ? ' class="is-active"' : ''}>Day Progression</button>
+        </div>
+        <div id="${SCRIPT_ID}-results">
+          <table>
+            <thead>
+              <tr id="${SCRIPT_ID}-results-head">
+                <th>Login</th>
+                <th>Idle</th>
+                <th>On Clock</th>
+                <th>Idle %</th>
+              </tr>
+            </thead>
+            <tbody id="${SCRIPT_ID}-results-body">
+              <tr><td class="idle-empty" colspan="4">No results yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(panel);
+    document.getElementById(`${SCRIPT_ID}-run`).addEventListener('click', runLookup);
+    document.getElementById(`${SCRIPT_ID}-stop`).addEventListener('click', stopLookup);
+    document.getElementById(`${SCRIPT_ID}-copy-table`).addEventListener('click', copyTableToClipboard);
+    document.getElementById(`${SCRIPT_ID}-export-table`).addEventListener('click', exportTable);
+    document.getElementById(`${SCRIPT_ID}-copy`).addEventListener('click', copyDebugToClipboard);
+    document.getElementById(`${SCRIPT_ID}-visualize`).addEventListener('change', handleVisualizeChange);
+    document.querySelectorAll(`#${SCRIPT_ID}-table-mode button`).forEach((button) => {
+      button.addEventListener('click', handleTableModeClick);
+    });
+    document.getElementById(`${SCRIPT_ID}-close`).addEventListener('click', togglePanel);
+    document.getElementById(`${SCRIPT_ID}-start`).addEventListener('change', handleRangeInputChange);
+    document.getElementById(`${SCRIPT_ID}-end`).addEventListener('change', handleRangeInputChange);
+    document.getElementById(`${SCRIPT_ID}-warehouse`).addEventListener('input', persistFormStateSoon);
+    document.getElementById(`${SCRIPT_ID}-warehouse`).addEventListener('change', persistFormState);
+    document.getElementById(`${SCRIPT_ID}-logins`).addEventListener('input', persistFormStateSoon);
+    document.getElementById(`${SCRIPT_ID}-logins`).addEventListener('change', persistFormState);
+    const restoredResults = Array.isArray(saved.results) ? saved.results.map(slimResult) : [];
+    lastChartData =
+      saved.chartData && Array.isArray(saved.chartData.logins)
+        ? {
+            logins: saved.chartData.logins,
+            days: Array.isArray(saved.chartData.days) ? saved.chartData.days : [],
+            series: Array.isArray(saved.chartData.series) ? saved.chartData.series : [],
+          }
+        : buildChartData(restoredResults, []);
+    updateSummary(warehouseId, startValue, endValue, restoredResults.length || parseLogins(saved.logins || '').length);
+    if (restoredResults.length) {
+      renderResults(restoredResults);
+      if (saved.statusMessage) {
+        updateStatus(saved.statusMessage);
+      }
+    } else {
+      renderCharts();
+    }
+    if (saved.panelOpen) {
+      panel.classList.remove('is-hidden');
+    }
+    layoutOverlay();
+  }
+
+  function handleRangeInputChange() {
+    const warehouseInput = document.getElementById(`${SCRIPT_ID}-warehouse`);
+    const { start, end } = readRangeFromInputs(true);
+    const warehouseId = cleanText(warehouseInput && warehouseInput.value).toUpperCase() || DEFAULT_WAREHOUSE_ID;
+    storeState({
+      warehouseId,
+      startLocal: formatDatetimeLocal(start),
+      endLocal: formatDatetimeLocal(end),
+      logins: document.getElementById(`${SCRIPT_ID}-logins`)
+        ? document.getElementById(`${SCRIPT_ID}-logins`).value
+        : '',
+    });
+    updateSummary(warehouseId, start, end, 0);
+    const rangeError = validateRange(start, end);
+    if (rangeError) {
+      updateStatus(rangeError, 'error');
+      return;
+    }
+    const windows = splitRangeIntoChunks(start, end);
+    const windowNote = windows.length > 1 ? `, ${windows.length} × 24h windows` : '';
+    updateStatus(`Range set to ${formatRangeDuration(start, end)}${windowNote} (max ${MAX_RANGE_DAYS}d).`);
+  }
+
+  function togglePanel() {
+    const panel = document.getElementById(`${SCRIPT_ID}-panel`);
+    if (!panel) {
+      return;
+    }
+    panel.classList.toggle('is-hidden');
+    storeState({ panelOpen: !panel.classList.contains('is-hidden') });
+    layoutOverlay();
+  }
+
+  function getViewportSize() {
+    const viewport = window.visualViewport;
+    return {
+      width: Math.max(1, Math.round(viewport && viewport.width ? viewport.width : window.innerWidth)),
+      height: Math.max(1, Math.round(viewport && viewport.height ? viewport.height : window.innerHeight)),
+    };
+  }
+
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+
+  function placeToggleAtBottomCenter(toggle) {
+    if (!toggle || toggle.dataset.moved === 'true') {
+      return;
+    }
+    const size = getViewportSize();
+    const left = Math.max(0, (size.width - toggle.offsetWidth) / 2);
+    const top = Math.max(0, size.height - toggle.offsetHeight - TOGGLE_EDGE);
+    toggle.style.position = 'fixed';
+    toggle.style.left = `${left}px`;
+    toggle.style.top = `${top}px`;
+    toggle.style.right = 'auto';
+    toggle.style.bottom = 'auto';
+    toggle.style.transform = 'none';
+  }
+
+  function keepToggleInViewport(toggle) {
+    if (!toggle) {
+      return;
+    }
+    const size = getViewportSize();
+    const rect = toggle.getBoundingClientRect();
+    const left = clamp(rect.left, 0, Math.max(0, size.width - rect.width));
+    const top = clamp(rect.top, 0, Math.max(0, size.height - rect.height));
+    toggle.style.position = 'fixed';
+    toggle.style.left = `${left}px`;
+    toggle.style.top = `${top}px`;
+    toggle.style.right = 'auto';
+    toggle.style.bottom = 'auto';
+    toggle.style.transform = 'none';
+  }
+
+  function layoutOverlay() {
+    const toggle = document.getElementById(`${SCRIPT_ID}-toggle`);
+    const panel = document.getElementById(`${SCRIPT_ID}-panel`);
+    if (!toggle) {
+      return;
+    }
+    if (toggle.dataset.moved === 'true') {
+      keepToggleInViewport(toggle);
+    } else {
+      placeToggleAtBottomCenter(toggle);
+    }
+    if (!panel) {
+      return;
+    }
+    const size = getViewportSize();
+    const toggleRect = toggle.getBoundingClientRect();
+    const maxWidth = Math.max(160, Math.min(PANEL_WIDTH, size.width - VIEW_PAD * 2));
+    panel.style.position = 'fixed';
+    panel.style.width = `${maxWidth}px`;
+    panel.style.maxWidth = `${Math.max(280, size.width - VIEW_PAD * 2)}px`;
+    panel.style.right = 'auto';
+    panel.style.transform = 'none';
+
+    const spaceAbove = toggleRect.top - TOGGLE_GAP - VIEW_PAD;
+    const spaceBelow = size.height - toggleRect.bottom - TOGGLE_GAP - VIEW_PAD;
+    const placeAbove = spaceAbove >= 160 || spaceAbove >= spaceBelow;
+    const available = Math.max(120, placeAbove ? spaceAbove : spaceBelow);
+    const maxHeight = Math.min(available, size.height - VIEW_PAD * 2);
+    panel.style.maxHeight = `${maxHeight}px`;
+    panel.style.height = 'auto';
+
+    let left = toggleRect.left + toggleRect.width / 2 - maxWidth / 2;
+    left = clamp(left, VIEW_PAD, Math.max(VIEW_PAD, size.width - maxWidth - VIEW_PAD));
+    panel.style.left = `${left}px`;
+
+    if (placeAbove) {
+      panel.style.top = 'auto';
+      panel.style.bottom = `${size.height - toggleRect.top + TOGGLE_GAP}px`;
+    } else {
+      panel.style.bottom = 'auto';
+      panel.style.top = `${toggleRect.bottom + TOGGLE_GAP}px`;
+    }
+  }
+
+  function initializeToggleDragging(toggle) {
+    let pointerId = null;
+    let startX = 0;
+    let startY = 0;
+    let originLeft = 0;
+    let originTop = 0;
+    let moved = false;
+
+    toggle.addEventListener('pointerdown', function (event) {
+      pointerId = event.pointerId;
+      startX = event.clientX;
+      startY = event.clientY;
+      const rect = toggle.getBoundingClientRect();
+      originLeft = rect.left;
+      originTop = rect.top;
+      moved = false;
+      toggle.dataset.dragging = 'false';
+      toggle.style.left = `${originLeft}px`;
+      toggle.style.top = `${originTop}px`;
+      toggle.style.right = 'auto';
+      toggle.style.bottom = 'auto';
+      toggle.style.transform = 'none';
+      toggle.setPointerCapture(pointerId);
+    });
+
+    toggle.addEventListener('pointermove', function (event) {
+      if (pointerId !== event.pointerId) {
+        return;
+      }
+      const deltaX = event.clientX - startX;
+      const deltaY = event.clientY - startY;
+      if (Math.abs(deltaX) > 4 || Math.abs(deltaY) > 4) {
+        moved = true;
+        toggle.dataset.dragging = 'true';
+        toggle.dataset.moved = 'true';
+      }
+      if (!moved) {
+        return;
+      }
+      const size = getViewportSize();
+      const left = clamp(originLeft + deltaX, 0, Math.max(0, size.width - toggle.offsetWidth));
+      const top = clamp(originTop + deltaY, 0, Math.max(0, size.height - toggle.offsetHeight));
+      toggle.style.left = `${left}px`;
+      toggle.style.top = `${top}px`;
+      layoutOverlay();
+    });
+
+    function stopDragging(event) {
+      if (pointerId !== event.pointerId) {
+        return;
+      }
+      pointerId = null;
+      toggle.releasePointerCapture(event.pointerId);
+      if (moved) {
+        layoutOverlay();
+      }
+      window.setTimeout(function () {
+        toggle.dataset.dragging = 'false';
+      }, 0);
+    }
+
+    toggle.addEventListener('pointerup', stopDragging);
+    toggle.addEventListener('pointercancel', stopDragging);
+  }
+
+  function bindViewportLayout() {
+    window.addEventListener('resize', layoutOverlay);
+    window.addEventListener('orientationchange', layoutOverlay);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', layoutOverlay);
+      window.visualViewport.addEventListener('scroll', layoutOverlay);
+    }
+  }
+
+  function init() {
+    if (!document.body) {
+      setTimeout(init, 100);
+      return;
+    }
+    injectStyles();
+    createToggleButton();
+    createPanel();
+    bindViewportLayout();
+    layoutOverlay();
+    window.addEventListener('load', layoutOverlay);
+  }
+
+  init();
+})();

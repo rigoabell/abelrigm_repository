@@ -1,0 +1,2019 @@
+// ==UserScript==
+// @name         Peculiar Inventory Scan Panel
+// @namespace    cursor.local
+// @version      0.3.0
+// @description  Centered scan panel for Peculiar Inventory container lookups
+// @match        https://peculiar-inventory-na.aka.corp.amazon.com/*
+// @grant        GM_setClipboard
+// @require      https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  "use strict";
+
+  const SELECTORS = {
+    siteSearchInput: "#searchContainerInput",
+    siteSearchButton: "#searchContainerButton > span.a-button-inner > input.a-button-input",
+    popoverHeader: "h4[id^='a-popover-header-']",
+    popoverContent: "#find-container-content",
+    detailsList: "#find-container-content dl",
+    resultsTable: "#result-inventory-details",
+    noRecordAlert: "#find-container-no-record-error-alert .a-alert-content",
+  };
+
+  const PANEL_ID = "tm-container-scan-panel";
+  const HISTORY_LIMIT = 250;
+  const SCAN_RESET_MS = 80;
+  const HISTORY_STORAGE_KEY = `${PANEL_ID}:history:v1`;
+  const ACTION_RECORDS_STORAGE_KEY = `${PANEL_ID}:action-records:v1`;
+  const CUSTOM_ACTIONS_STORAGE_KEY = `${PANEL_ID}:custom-actions:v1`;
+  const DEFAULT_ACTIONS = ["Nothing", "Deleted", "Dropzoned"];
+  const CUSTOM_ACTION_SENTINEL = "__custom__";
+
+  const state = {
+    lastScan: "",
+    lastResult: null,
+    history: [],
+    historySearchQuery: "",
+    actionRecords: {},
+    customActions: [],
+    busy: false,
+    globalCapture: true,
+    scanBuffer: "",
+    lastKeystrokeAt: 0,
+    panelHidden: false,
+    suppressAutoFocusUntil: 0,
+    focusRestoreTimerIds: [],
+  };
+
+  function setNativeValue(input, value) {
+    const descriptor =
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value") ||
+      Object.getOwnPropertyDescriptor(input, "value");
+
+    if (descriptor && descriptor.set) {
+      descriptor.set.call(input, value);
+    } else {
+      input.value = value;
+    }
+
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  async function waitFor(predicate, timeoutMs) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const value = predicate();
+      if (value) {
+        return value;
+      }
+      await sleep(150);
+    }
+    throw new Error("Timed out waiting for page state");
+  }
+
+  function normalizeText(text) {
+    return (text || "").replace(/\s+/g, " ").trim();
+  }
+
+  function formatHumanDateTime(value) {
+    if (!value) {
+      return "";
+    }
+
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return String(value);
+    }
+
+    return date.toLocaleString(undefined, {
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  }
+
+  function getWorkbookSheetName(date = new Date()) {
+    const pad = (value) => String(value).padStart(2, "0");
+    const year = String(date.getFullYear()).slice(-2);
+    const safeName = `scan-history ${pad(date.getMonth() + 1)}-${pad(date.getDate())}-${year} ${pad(
+      date.getHours()
+    )}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`;
+
+    // Excel sheet names cannot contain : \ / ? * [ ] and cannot exceed 31 chars.
+    return safeName.replace(/[:\\/?*\[\]]/g, "-").slice(0, 31);
+  }
+
+  function escapeHtml(value) {
+    return String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function escapeAttribute(value) {
+    return escapeHtml(value).replace(/`/g, "&#96;");
+  }
+
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+
+  function parseAgeToMinutes(value) {
+    const text = normalizeText(value);
+    if (!text) {
+      return null;
+    }
+
+    const days = Number((text.match(/(\d+)d/i) || [])[1] || 0);
+    const hours = Number((text.match(/(\d+)h/i) || [])[1] || 0);
+    const minutes = Number((text.match(/(\d+)m/i) || [])[1] || 0);
+    return days * 24 * 60 + hours * 60 + minutes;
+  }
+
+  function interpolateColor(start, end, progress) {
+    return start.map((channel, index) => Math.round(channel + (end[index] - channel) * progress));
+  }
+
+  function rgbToCss(rgb) {
+    return `rgb(${rgb.join(", ")})`;
+  }
+
+  function mixWithWhite(rgb, amount) {
+    return rgb.map((channel) => Math.round(channel + (255 - channel) * amount));
+  }
+
+  function getAgeVisuals(ageText) {
+    const ageMinutes = parseAgeToMinutes(ageText);
+    const green = [67, 190, 92];
+    const yellow = [235, 194, 59];
+    const red = [222, 76, 63];
+    const yellowThreshold = 3 * 24 * 60;
+    const redThreshold = 5 * 24 * 60;
+
+    let baseColor = green;
+    if (ageMinutes != null) {
+      if (ageMinutes <= yellowThreshold) {
+        const progress = clamp(ageMinutes / yellowThreshold, 0, 1);
+        baseColor = interpolateColor(green, yellow, progress);
+      } else if (ageMinutes < redThreshold) {
+        const progress = clamp((ageMinutes - yellowThreshold) / (redThreshold - yellowThreshold), 0, 1);
+        baseColor = interpolateColor(yellow, red, progress);
+      } else {
+        baseColor = red;
+      }
+    }
+
+    const start = mixWithWhite(baseColor, 0.86);
+    const end = mixWithWhite(baseColor, 0.78);
+    const border = mixWithWhite(baseColor, 0.56);
+
+    return {
+      textColor: rgbToCss(baseColor),
+      borderColor: rgbToCss(border),
+      background: `linear-gradient(135deg, ${rgbToCss(start)} 0%, ${rgbToCss(end)} 100%)`,
+    };
+  }
+
+  function copyText(text) {
+    if (typeof GM_setClipboard === "function") {
+      GM_setClipboard(text);
+      return Promise.resolve();
+    }
+
+    if (navigator.clipboard?.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+
+    throw new Error("Clipboard API unavailable");
+  }
+
+  function ensureXLSXLoaded() {
+    const library =
+      window.XLSX ||
+      globalThis.XLSX ||
+      (typeof XLSX !== "undefined" ? XLSX : null);
+
+    if (!library) {
+      return Promise.reject(
+        new Error("XLSX library unavailable. Re-save the Tampermonkey script so the @require dependency loads.")
+      );
+    }
+
+    return Promise.resolve(library);
+  }
+
+  function getPanel() {
+    return document.getElementById(PANEL_ID);
+  }
+
+  function getLauncher() {
+    return document.getElementById(`${PANEL_ID}-launcher`);
+  }
+
+  function getPanelScanInput() {
+    return document.querySelector(`#${PANEL_ID} [data-role='scan-input']`);
+  }
+
+  function focusPanelInput() {
+    if (Date.now() < state.suppressAutoFocusUntil) {
+      return;
+    }
+
+    const scanInput = getPanelScanInput();
+    if (scanInput instanceof HTMLInputElement && !state.panelHidden) {
+      window.requestAnimationFrame(() => {
+        scanInput.focus();
+        scanInput.select();
+      });
+    }
+  }
+
+  function getScaleMode() {
+    const pixelRatio = window.devicePixelRatio || 1;
+    return pixelRatio >= 1.4 ? "high" : "normal";
+  }
+
+  function applyPanelScaleMode() {
+    const panel = getPanel();
+    const launcher = getLauncher();
+    if (panel) {
+      panel.setAttribute("data-scale-mode", getScaleMode());
+    }
+    if (launcher) {
+      launcher.setAttribute("data-scale-mode", getScaleMode());
+    }
+  }
+
+  function clearScheduledFocusRestore() {
+    state.focusRestoreTimerIds.forEach((timerId) => window.clearTimeout(timerId));
+    state.focusRestoreTimerIds = [];
+  }
+
+  function schedulePanelFocusRestore(delays) {
+    clearScheduledFocusRestore();
+    state.focusRestoreTimerIds = delays.map((delay) =>
+      window.setTimeout(() => {
+        focusPanelInput();
+      }, delay)
+    );
+  }
+
+  function suppressAutoFocus(ms) {
+    state.suppressAutoFocusUntil = Date.now() + ms;
+    clearScheduledFocusRestore();
+  }
+
+  function isEditableTarget(target) {
+    if (!(target instanceof Element)) {
+      return false;
+    }
+
+    return Boolean(target.closest("input, textarea, select, [contenteditable=''], [contenteditable='true']"));
+  }
+
+  function isVisibleElement(element) {
+    return Boolean(
+      element &&
+        element instanceof HTMLElement &&
+        element.isConnected &&
+        element.getClientRects().length > 0 &&
+        window.getComputedStyle(element).visibility !== "hidden" &&
+        window.getComputedStyle(element).display !== "none"
+    );
+  }
+
+  function queryPreferredElement(selector) {
+    const matches = Array.from(document.querySelectorAll(selector));
+    return matches.reverse().find(isVisibleElement) || matches[0] || null;
+  }
+
+  function queryVisibleElement(selector) {
+    return Array.from(document.querySelectorAll(selector)).reverse().find(isVisibleElement) || null;
+  }
+
+  function getSiteElements() {
+    return {
+      searchInput: queryPreferredElement(SELECTORS.siteSearchInput),
+      searchButton: queryPreferredElement(SELECTORS.siteSearchButton),
+      popoverHeader: queryPreferredElement(SELECTORS.popoverHeader),
+      popoverContent: queryPreferredElement(SELECTORS.popoverContent),
+      detailsList: queryPreferredElement(SELECTORS.detailsList),
+      resultsTable: queryPreferredElement(SELECTORS.resultsTable),
+      noRecordAlert: queryVisibleElement(SELECTORS.noRecordAlert),
+      tablePrevious: queryPreferredElement("#result-inventory-details_previous"),
+      tableNext: queryPreferredElement("#result-inventory-details_next"),
+    };
+  }
+
+  function isDefaultAction(action) {
+    return DEFAULT_ACTIONS.includes(normalizeText(action));
+  }
+
+  function normalizeActionValue(action) {
+    const normalized = normalizeText(action);
+    if (!normalized || normalized === "Idle") {
+      return "Nothing";
+    }
+
+    return normalized;
+  }
+
+  function getAvailableActions() {
+    return [...DEFAULT_ACTIONS, ...state.customActions.filter((action) => !isDefaultAction(action))];
+  }
+
+  function toHistoryEntry(entry) {
+    return {
+      historyEntryId: normalizeText(entry?.historyEntryId || "") || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      scannedValue: normalizeText(entry?.scannedValue),
+      containerDisplay: normalizeText(entry?.containerDisplay || entry?.scannedValue),
+      capturedAt: entry?.capturedAt || new Date().toISOString(),
+      details: {
+        "Total units": normalizeText(entry?.details?.["Total units"] || ""),
+        "Oldest Units Age": normalizeText(entry?.details?.["Oldest Units Age"] || ""),
+        "Parent Container": normalizeText(entry?.details?.["Parent Container"] || ""),
+        "Grandparent Container": normalizeText(entry?.details?.["Grandparent Container"] || ""),
+      },
+      totalRecords: Number(entry?.totalRecords || 0),
+      reasonCodes: Array.isArray(entry?.reasonCodes) ? entry.reasonCodes.map(normalizeText).filter(Boolean) : [],
+      notFound: Boolean(entry?.notFound),
+    };
+  }
+
+  function toActionRecord(entry, existingAction) {
+    return {
+      scannedValue: normalizeText(entry?.scannedValue),
+      containerDisplay: normalizeText(entry?.containerDisplay || entry?.scannedValue),
+      capturedAt: entry?.capturedAt || new Date().toISOString(),
+      totalUnits: normalizeText(entry?.details?.["Total units"] || entry?.totalUnits || ""),
+      oldestUnitsAge: normalizeText(entry?.details?.["Oldest Units Age"] || entry?.oldestUnitsAge || ""),
+      parentContainer: normalizeText(entry?.details?.["Parent Container"] || entry?.parentContainer || ""),
+      grandparentContainer: normalizeText(entry?.details?.["Grandparent Container"] || entry?.grandparentContainer || ""),
+      reasonCodes: Array.isArray(entry?.reasonCodes) ? entry.reasonCodes.map(normalizeText).filter(Boolean) : [],
+      notFound: Boolean(entry?.notFound),
+      action: normalizeActionValue(existingAction || entry?.action || "Nothing"),
+    };
+  }
+
+  function saveHistory() {
+    try {
+      localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(state.history.map(toHistoryEntry)));
+    } catch (_error) {
+      // Ignore storage failures and keep runtime history working.
+    }
+  }
+
+  function saveActionRecords() {
+    try {
+      localStorage.setItem(ACTION_RECORDS_STORAGE_KEY, JSON.stringify(state.actionRecords));
+    } catch (_error) {
+      // Ignore storage failures and keep runtime behavior working.
+    }
+  }
+
+  function loadActionRecords() {
+    try {
+      const raw = localStorage.getItem(ACTION_RECORDS_STORAGE_KEY);
+      if (!raw) {
+        return {};
+      }
+
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return {};
+      }
+
+      return Object.fromEntries(
+        Object.entries(parsed)
+          .map(([key, value]) => [key, toActionRecord(value)])
+          .filter(([, value]) => value.scannedValue)
+      );
+    } catch (_error) {
+      return {};
+    }
+  }
+
+  function saveCustomActions() {
+    try {
+      localStorage.setItem(CUSTOM_ACTIONS_STORAGE_KEY, JSON.stringify(state.customActions));
+    } catch (_error) {
+      // Ignore storage failures and keep runtime behavior working.
+    }
+  }
+
+  function loadCustomActions() {
+    try {
+      const raw = localStorage.getItem(CUSTOM_ACTIONS_STORAGE_KEY);
+      if (!raw) {
+        return [];
+      }
+
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        return [];
+      }
+
+      return parsed
+        .map(normalizeText)
+        .filter(Boolean)
+        .filter((action) => !isDefaultAction(action));
+    } catch (_error) {
+      return [];
+    }
+  }
+
+  function loadHistory() {
+    try {
+      const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
+      if (!raw) {
+        return [];
+      }
+
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        return [];
+      }
+
+      return parsed
+        .map(toHistoryEntry)
+        .filter((entry) => entry.scannedValue)
+        .slice(0, HISTORY_LIMIT);
+    } catch (_error) {
+      return [];
+    }
+  }
+
+  function extractNodeData(node) {
+    if (!node) {
+      return {
+        text: "",
+        href: "",
+        html: "",
+        links: [],
+      };
+    }
+
+    const text = normalizeText(node.textContent);
+    const html = node.innerHTML || "";
+    const links = Array.from(node.querySelectorAll("a"))
+      .map((anchor) => ({
+        text: normalizeText(anchor.textContent),
+        href: anchor.href || anchor.getAttribute("href") || "",
+      }))
+      .filter((link) => link.text || link.href);
+
+    return {
+      text,
+      href: links[0]?.href || "",
+      html,
+      links,
+    };
+  }
+
+  function renderLinkedValue(valueData, fallbackText) {
+    const text = normalizeText(valueData?.text || fallbackText || "-") || "-";
+    const href = valueData?.href || "";
+    if (!href) {
+      return escapeHtml(text);
+    }
+
+    return `<a class="tm-link" href="${escapeAttribute(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`;
+  }
+
+  function parseDetailsList(container) {
+    if (!container) {
+      return {
+        pairs: {},
+        meta: {},
+      };
+    }
+
+    const pairs = {};
+    const meta = {};
+    const nodes = Array.from(container.children);
+    let currentKey = "";
+
+    for (const node of nodes) {
+      const tag = node.tagName?.toLowerCase();
+      const text = normalizeText(node.textContent);
+      if (!text) {
+        continue;
+      }
+
+      if (tag === "dt") {
+        currentKey = text;
+        if (!(currentKey in pairs)) {
+          pairs[currentKey] = "";
+        }
+      } else if (tag === "dd" && currentKey) {
+        const data = extractNodeData(node);
+        pairs[currentKey] = data.text;
+        meta[currentKey] = data;
+      }
+    }
+
+    return { pairs, meta };
+  }
+
+  function parseTable(table) {
+    if (!table) {
+      return { headers: [], rows: [] };
+    }
+
+    const headers = Array.from(table.querySelectorAll("thead th")).map((th, index) => {
+      const clone = th.cloneNode(true);
+      clone.querySelectorAll("script, style").forEach((node) => node.remove());
+      return normalizeText(clone.textContent) || `Column ${index + 1}`;
+    });
+
+    const rows = Array.from(table.querySelectorAll("tbody tr")).map((tr) => {
+      const cellsData = Array.from(tr.querySelectorAll("td")).map((td) => extractNodeData(td));
+      const cells = cellsData.map((cell) => cell.text);
+      const mapped = {};
+      const mappedMeta = {};
+
+      cells.forEach((value, index) => {
+        mapped[headers[index] || `Column ${index + 1}`] = value;
+        mappedMeta[headers[index] || `Column ${index + 1}`] = cellsData[index];
+      });
+
+      return { values: cells, mapped, cellsData, mappedMeta };
+    });
+
+    return { headers, rows };
+  }
+
+  function parseTotalRecords(rawText, fallback) {
+    const match = normalizeText(rawText).match(/Showing\s+\d+\s+to\s+\d+\s+of\s+(\d+)\s+inventory records/i);
+    return match ? Number(match[1]) : fallback;
+  }
+
+  function buildPaginationState(previousButton, nextButton) {
+    function getButtonState(button) {
+      if (!(button instanceof HTMLElement)) {
+        return {
+          visible: false,
+          enabled: false,
+          text: "",
+          className: "",
+        };
+      }
+
+      const className = button.className || "";
+      const disabled = /paginate_disabled/i.test(className) || button.getAttribute("aria-disabled") === "true";
+      return {
+        visible: true,
+        enabled: !disabled,
+        text: normalizeText(button.textContent),
+        className,
+      };
+    }
+
+    return {
+      previous: getButtonState(previousButton),
+      next: getButtonState(nextButton),
+    };
+  }
+
+  function extractResult(scannedValue) {
+    const { popoverHeader, popoverContent, detailsList, resultsTable, tablePrevious, tableNext } = getSiteElements();
+    const detailInfo = parseDetailsList(detailsList);
+    const table = parseTable(resultsTable);
+    const title = normalizeText(popoverHeader?.textContent) || "Container details";
+    const rawText = normalizeText(popoverContent?.innerText || "");
+    const containerDisplay = normalizeText((rawText.match(/^(.+?)\s+Total units\b/i) || [])[1] || scannedValue);
+    const contentLinks = extractNodeData(popoverContent).links;
+    const reasonCodes = Array.from(
+      new Set(
+        table.rows
+          .map((row) => row.mapped.Disposition || row.mapped["Reason Code"] || row.mapped["Inventory Type"] || row.mapped.Owner || "")
+          .map(normalizeText)
+          .filter(Boolean)
+      )
+    );
+
+    return {
+      scannedValue,
+      title,
+      capturedAt: new Date().toISOString(),
+      containerDisplay,
+      details: detailInfo.pairs,
+      detailMeta: detailInfo.meta,
+      table,
+      totalRecords: parseTotalRecords(rawText, table.rows.length),
+      reasonCodes,
+      rawText,
+      contentLinks,
+      pagination: buildPaginationState(tablePrevious, tableNext),
+      debugHtml: {
+        popoverHeaderHtml: popoverHeader?.outerHTML || "",
+        popoverContentHtml: popoverContent?.innerHTML || "",
+        detailsListHtml: detailsList?.innerHTML || "",
+        resultsTableHtml: resultsTable?.outerHTML || "",
+      },
+    };
+  }
+
+  function isPlaceholderResult(result) {
+    const detailsValues = Object.values(result.details || {}).map(normalizeText);
+    const hasOnlyNoneDetails = detailsValues.length > 0 && detailsValues.every((value) => !value || value === "None");
+    const hasNoRows = !result.table?.rows?.length;
+    const rawText = normalizeText(result.rawText);
+
+    return hasOnlyNoneDetails && hasNoRows && rawText.includes("Total units None") && rawText.includes("Oldest Units Age None");
+  }
+
+  function resultContainsScan(result, scannedValue) {
+    const normalizedScan = normalizeText(scannedValue).toLowerCase();
+    if (!normalizedScan) {
+      return false;
+    }
+
+    const normalizedDisplay = normalizeText(result.containerDisplay).toLowerCase();
+    const normalizedRawText = normalizeText(result.rawText).toLowerCase();
+    return normalizedDisplay.includes(normalizedScan) || normalizedRawText.includes(normalizedScan);
+  }
+
+  function isResolvedResult(result, scannedValue) {
+    if (!result) {
+      return false;
+    }
+
+    if (isPlaceholderResult(result)) {
+      return false;
+    }
+
+    return resultContainsScan(result, scannedValue);
+  }
+
+  function buildNotFoundResult(scannedValue) {
+    return {
+      scannedValue,
+      title: "Container details",
+      capturedAt: new Date().toISOString(),
+      containerDisplay: scannedValue,
+      details: {
+        "Total units": "0",
+        "Oldest Units Age": "--",
+        "Parent Container": "Not found",
+        "Grandparent Container": "Not found",
+      },
+      table: { headers: [], rows: [] },
+      totalRecords: 0,
+      reasonCodes: [],
+      rawText: "",
+      notFound: true,
+    };
+  }
+
+  function buildNoRecordFoundResult(scannedValue) {
+    return {
+      scannedValue,
+      title: "Container details",
+      capturedAt: new Date().toISOString(),
+      containerDisplay: scannedValue,
+      details: {
+        "Total units": "No record found",
+        "Oldest Units Age": "--",
+        "Parent Container": "No record found",
+        "Grandparent Container": "No record found",
+      },
+      table: { headers: [], rows: [] },
+      totalRecords: 0,
+      reasonCodes: [],
+      rawText: "No record found",
+      notFound: true,
+    };
+  }
+
+  function upsertHistory(entry) {
+    const historyEntry = toHistoryEntry(entry);
+    const existingIndex = state.history.findIndex((item) => item.scannedValue === historyEntry.scannedValue);
+    if (existingIndex >= 0) {
+      state.history = [
+        historyEntry,
+        ...state.history.filter((item) => item.scannedValue !== historyEntry.scannedValue),
+      ].slice(0, HISTORY_LIMIT);
+    } else {
+      state.history = [historyEntry, ...state.history].slice(0, HISTORY_LIMIT);
+    }
+    saveHistory();
+  }
+
+  function setRecentHistoryScan(scannedValue) {
+    const normalizedScan = normalizeText(scannedValue);
+    if (!normalizedScan) {
+      return;
+    }
+
+    upsertHistory({
+      scannedValue: normalizedScan,
+      containerDisplay: normalizedScan,
+      capturedAt: new Date().toISOString(),
+      details: {
+        "Total units": "",
+        "Oldest Units Age": "",
+        "Parent Container": "",
+        "Grandparent Container": "",
+      },
+      totalRecords: 0,
+      reasonCodes: [],
+      notFound: false,
+    });
+  }
+
+  function upsertActionRecord(entry) {
+    const existing = state.actionRecords[entry.scannedValue];
+    const nextRecord = toActionRecord(entry, existing?.action);
+    state.actionRecords[nextRecord.scannedValue] = nextRecord;
+    saveActionRecords();
+    return nextRecord;
+  }
+
+  function getCurrentAction() {
+    if (!state.lastResult?.scannedValue) {
+      return "Nothing";
+    }
+
+    return state.actionRecords[state.lastResult.scannedValue]?.action || "Nothing";
+  }
+
+  function setActionForContainer(scannedValue, action) {
+    const normalizedScan = normalizeText(scannedValue);
+    const normalizedAction = normalizeActionValue(action);
+    if (!normalizedScan) {
+      return;
+    }
+
+    const existing = state.actionRecords[normalizedScan];
+    const source = existing || state.lastResult || { scannedValue: normalizedScan };
+    state.actionRecords[normalizedScan] = {
+      ...toActionRecord(source, normalizedAction),
+      scannedValue: normalizedScan,
+      action: normalizedAction,
+    };
+    saveActionRecords();
+  }
+
+  function addCustomAction(actionName) {
+    const normalizedAction = normalizeText(actionName);
+    if (!normalizedAction || isDefaultAction(normalizedAction)) {
+      return null;
+    }
+
+    if (!state.customActions.includes(normalizedAction)) {
+      state.customActions = [...state.customActions, normalizedAction];
+      saveCustomActions();
+    }
+
+    return normalizedAction;
+  }
+
+  function deleteCustomAction(actionName) {
+    const normalizedAction = normalizeText(actionName);
+    if (!normalizedAction || isDefaultAction(normalizedAction)) {
+      return false;
+    }
+
+    state.customActions = state.customActions.filter((action) => action !== normalizedAction);
+    Object.keys(state.actionRecords).forEach((scan) => {
+      if (state.actionRecords[scan]?.action === normalizedAction) {
+        state.actionRecords[scan].action = "Nothing";
+      }
+    });
+    saveCustomActions();
+    saveActionRecords();
+    return true;
+  }
+
+  function renderHistory(historyElement) {
+    const searchQuery = normalizeText(state.historySearchQuery).toLowerCase();
+    const filteredHistory = state.history.filter((entry) => {
+      if (!searchQuery) {
+        return true;
+      }
+
+      return (
+        normalizeText(entry.scannedValue).toLowerCase().includes(searchQuery) ||
+        normalizeText(entry.containerDisplay).toLowerCase().includes(searchQuery)
+      );
+    });
+
+    historyElement.innerHTML = filteredHistory.length
+      ? filteredHistory
+          .map(
+            (entry) => `
+              <button class="tm-history-item" data-scan="${escapeHtml(entry.scannedValue)}" type="button">
+                <span>${escapeHtml(entry.scannedValue)}</span>
+              </button>
+            `
+          )
+          .join("")
+      : `<div class='tm-empty'>${state.history.length ? "No matching scans." : "No scans yet."}</div>`;
+  }
+
+  function buildHistoryExportPayload() {
+    const records = Object.values(state.actionRecords).sort((left, right) =>
+      String(right.capturedAt || "").localeCompare(String(left.capturedAt || ""))
+    );
+    const summaryCounts = records.reduce((accumulator, entry) => {
+      const action = normalizeActionValue(entry.action);
+      accumulator[action] = (accumulator[action] || 0) + 1;
+      return accumulator;
+    }, {});
+    const summary = Object.entries(summaryCounts)
+      .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+      .map(([action, count]) => ({
+        action,
+        count,
+        percent: records.length ? `${((count / records.length) * 100).toFixed(1)}%` : "0.0%",
+      }));
+
+    return {
+      exportedAt: new Date().toISOString(),
+      count: records.length,
+      summary,
+      scans: records.map((entry) => ({
+        scannedValue: entry.scannedValue,
+        containerDisplay: entry.containerDisplay || entry.scannedValue,
+        capturedAt: formatHumanDateTime(entry.capturedAt || ""),
+        totalUnits: entry.totalUnits || "",
+        oldestUnitsAge: entry.oldestUnitsAge || "",
+        parentContainer: entry.parentContainer || "",
+        grandparentContainer: entry.grandparentContainer || "",
+        reasonCodes: entry.reasonCodes?.join(", ") || "",
+        notFound: entry.notFound ? "Yes" : "",
+        action: entry.action || "Nothing",
+      })),
+    };
+  }
+
+  function clearHistoryWithConfirmation() {
+    if (!state.history.length) {
+      return false;
+    }
+
+    const confirmed = window.confirm("Clear all saved scan history?");
+    if (!confirmed) {
+      return false;
+    }
+
+    state.history = [];
+    saveHistory();
+    render();
+    return true;
+  }
+
+  function getWorkbookType(fileName) {
+    const normalized = String(fileName || "").toLowerCase();
+    if (normalized.endsWith(".xlsm")) {
+      return "xlsm";
+    }
+    if (normalized.endsWith(".xlsb")) {
+      return "xlsb";
+    }
+    if (normalized.endsWith(".xls")) {
+      return "xls";
+    }
+    return "xlsx";
+  }
+
+  function buildHistoryWorksheet(XLSX) {
+    const payload = buildHistoryExportPayload();
+    const rows = [
+      ["Action Summary"],
+      ["Action", "Count", "Percent"],
+      ...payload.summary.map((entry) => [entry.action, entry.count, entry.percent]),
+      [],
+      [
+        "Scanned Value",
+        "Container Display",
+        "Captured At",
+        "Total Units",
+        "Oldest Units Age",
+        "Parent Container",
+        "Grandparent Container",
+        "Reason Codes",
+        "Not Found",
+        "Action",
+      ],
+      ...payload.scans.map((entry) => [
+        entry.scannedValue,
+        entry.containerDisplay,
+        entry.capturedAt,
+        entry.totalUnits,
+        entry.oldestUnitsAge,
+        entry.parentContainer,
+        entry.grandparentContainer,
+        entry.reasonCodes,
+        entry.notFound,
+        entry.action,
+      ]),
+    ];
+    const worksheet = XLSX.utils.aoa_to_sheet(rows);
+    worksheet["!cols"] = [
+      { wch: 18 },
+      { wch: 28 },
+      { wch: 24 },
+      { wch: 12 },
+      { wch: 16 },
+      { wch: 30 },
+      { wch: 30 },
+      { wch: 24 },
+      { wch: 10 },
+      { wch: 16 },
+    ];
+    return worksheet;
+  }
+
+  async function downloadHistoryWorkbook() {
+    const XLSX = await ensureXLSXLoaded();
+    const workbook = XLSX.utils.book_new();
+    const worksheet = buildHistoryWorksheet(XLSX);
+    XLSX.utils.book_append_sheet(workbook, worksheet, getWorkbookSheetName());
+    const buffer = XLSX.write(workbook, {
+      bookType: "xlsm",
+      type: "array",
+      bookVBA: true,
+    });
+    const blob = new Blob([buffer], { type: "application/vnd.ms-excel.sheet.macroEnabled.12" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    anchor.href = url;
+    anchor.download = `scan-history-${timestamp}.xlsm`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return anchor.download;
+  }
+
+  function buildLineCards(rows) {
+    return rows
+      .map((row, index) => {
+        const inventoryType = row.mappedMeta["Inventory Type"] || row.mappedMeta.Owner || row.cellsData[3] || { text: "-" };
+        const disposition = row.mappedMeta.Disposition || row.cellsData[4] || { text: "-" };
+        const age = row.mappedMeta.Age || row.cellsData[0] || { text: "-" };
+        const fcSku = row.mappedMeta.FcSku || row.cellsData[1] || { text: "-" };
+        const quantity = row.mappedMeta.Quantity || row.cellsData[2] || { text: "-" };
+        const lineAgeVisuals = getAgeVisuals(age.text);
+
+        return `
+          <div class="tm-line-card" style="background:${escapeAttribute(lineAgeVisuals.background)};border-color:${escapeAttribute(
+            lineAgeVisuals.borderColor
+          )};">
+            <div class="tm-line-title">Line ${index + 1}</div>
+            <div class="tm-line-row">
+              <span class="tm-line-key">Age</span>
+              <span class="tm-line-value tm-line-age" style="color:${escapeAttribute(lineAgeVisuals.textColor)};">${renderLinkedValue(
+                age,
+                age.text
+              )}</span>
+            </div>
+            <div class="tm-line-row">
+              <span class="tm-line-key">FcSku</span>
+              <span class="tm-line-value">${renderLinkedValue(fcSku, fcSku.text)}</span>
+            </div>
+            <div class="tm-line-row">
+              <span class="tm-line-key">Quantity</span>
+              <span class="tm-line-value">${renderLinkedValue(quantity, quantity.text)}</span>
+            </div>
+            <div class="tm-line-row">
+              <span class="tm-line-key">Inventory Type</span>
+              <span class="tm-line-value">${renderLinkedValue(inventoryType, inventoryType.text)}</span>
+            </div>
+            <div class="tm-line-row">
+              <span class="tm-line-key">Disposition</span>
+              <span class="tm-line-value">${renderLinkedValue(disposition, disposition.text)}</span>
+            </div>
+          </div>
+        `;
+      })
+      .join("");
+  }
+
+  async function navigateResultPage(direction) {
+    if (!state.lastResult || state.busy) {
+      return;
+    }
+
+    const { tablePrevious, tableNext } = getSiteElements();
+    const button = direction === "previous" ? tablePrevious : tableNext;
+    if (!(button instanceof HTMLElement)) {
+      return;
+    }
+
+    const className = button.className || "";
+    if (/paginate_disabled/i.test(className) || button.getAttribute("aria-disabled") === "true") {
+      return;
+    }
+
+    const currentRawText = normalizeText(state.lastResult.rawText || "");
+    state.busy = true;
+    render();
+
+    try {
+      button.click();
+      const result = await waitFor(() => {
+        const candidate = extractResult(state.lastResult.scannedValue);
+        const candidateRawText = normalizeText(candidate.rawText || "");
+        if (!candidateRawText || candidateRawText === currentRawText) {
+          return false;
+        }
+
+        return resultContainsScan(candidate, state.lastResult.scannedValue) ? candidate : false;
+      }, 10000);
+
+      state.lastResult = result;
+      upsertHistory(result);
+    } finally {
+      state.busy = false;
+      render();
+      schedulePanelFocusRestore([50]);
+    }
+  }
+
+  function renderResults(resultsElement) {
+    if (!state.lastResult) {
+      resultsElement.innerHTML = "<div class='tm-empty tm-results-empty'>Scan a container to load details.</div>";
+      return;
+    }
+
+    const oldestAge = state.lastResult.details["Oldest Units Age"] || "-";
+    const summaryRows = [
+      ["Container", { text: state.lastResult.containerDisplay || state.lastResult.scannedValue, href: state.lastResult.contentLinks?.[0]?.href || "" }],
+      ["Total Units", { text: state.lastResult.details["Total units"] || "-" }],
+      ["Oldest Units Age", { text: oldestAge }],
+      ["Parent Container", state.lastResult.detailMeta?.["Parent Container"] || { text: state.lastResult.details["Parent Container"] || "-" }],
+      ["Grandparent Container", state.lastResult.detailMeta?.["Grandparent Container"] || { text: state.lastResult.details["Grandparent Container"] || "-" }],
+      ["Rows Loaded", { text: String(state.lastResult.table.rows.length) }],
+      ["Total Records", { text: String(state.lastResult.totalRecords || state.lastResult.table.rows.length) }],
+    ];
+
+    const summaryHtml = summaryRows
+      .map(
+        ([key, value]) => `
+          <div class="tm-summary-row">
+            <div class="tm-summary-key">${escapeHtml(key)}</div>
+            <div class="tm-summary-value">${renderLinkedValue(value, value?.text)}</div>
+          </div>
+        `
+      )
+      .join("");
+
+    const pagination = state.lastResult.pagination || { previous: { enabled: false }, next: { enabled: false } };
+    const hasPager = pagination.previous.visible || pagination.next.visible;
+    const currentAction = getCurrentAction();
+    const actionButtons = getAvailableActions()
+      .map(
+        (action) => `
+          <button
+            class="tm-btn tm-action-btn ${action === currentAction ? "tm-action-btn-active" : ""}"
+            data-role="action-button"
+            data-action="${escapeAttribute(action)}"
+            type="button"
+          >
+            ${escapeHtml(action)}
+          </button>
+        `
+      )
+      .join("");
+    const canDeleteCustomAction = !isDefaultAction(currentAction);
+
+    resultsElement.innerHTML = `
+      <div class="tm-results-heading">Showing results for ${escapeHtml(
+        state.lastResult.containerDisplay || state.lastResult.scannedValue
+      )}</div>
+      <div class="tm-result-card">
+        <div class="tm-summary-list">${summaryHtml}</div>
+      </div>
+      <div class="tm-results-subtitle">Action</div>
+      <div class="tm-action-card">
+        <div class="tm-action-controls">
+          <div class="tm-action-button-list">
+            ${actionButtons}
+            <button class="tm-btn tm-action-btn" data-role="custom-action-button" type="button">Custom</button>
+          </div>
+          <button class="tm-btn" data-role="delete-custom-action" type="button" ${canDeleteCustomAction ? "" : "disabled"}>Delete Custom</button>
+        </div>
+      </div>
+      <div class="tm-results-subtitle">Container Details</div>
+      <div class="tm-line-list">
+        ${buildLineCards(state.lastResult.table.rows) || "<div class='tm-empty'>No result rows found.</div>"}
+      </div>
+      ${
+        hasPager
+          ? `<div class="tm-pager">
+              <button class="tm-btn tm-pager-btn" data-role="prev-page" type="button" ${pagination.previous.enabled ? "" : "disabled"}>Previous</button>
+              <button class="tm-btn tm-pager-btn" data-role="next-page" type="button" ${pagination.next.enabled ? "" : "disabled"}>Next</button>
+            </div>`
+          : ""
+      }
+    `;
+  }
+
+  function render() {
+    const panel = getPanel();
+    const launcher = getLauncher();
+    const backdrop = document.getElementById(`${PANEL_ID}-backdrop`);
+    if (!panel || !launcher || !backdrop) {
+      return;
+    }
+
+    applyPanelScaleMode();
+
+    panel.style.display = state.panelHidden ? "none" : "block";
+    launcher.style.display = state.panelHidden ? "inline-flex" : "none";
+    backdrop.style.display = state.panelHidden ? "none" : "block";
+
+    const status = panel.querySelector("[data-role='status']");
+    const history = panel.querySelector("[data-role='history']");
+    const results = panel.querySelector("[data-role='results']");
+    const oldestAgeCard = panel.querySelector("[data-role='oldest-age']");
+    const oldestAgeValue = panel.querySelector("[data-role='oldest-age-value']");
+
+    if (status) {
+      status.textContent = state.busy
+        ? `Searching ${state.lastScan || "container"}...`
+        : state.lastResult
+          ? `Showing results for ${state.lastResult.scannedValue}.`
+          : "Ready to scan.";
+    }
+
+    const oldestAgeText = state.lastResult?.details?.["Oldest Units Age"] || "--";
+    const ageVisuals = getAgeVisuals(oldestAgeText);
+
+    if (oldestAgeCard instanceof HTMLElement) {
+      oldestAgeCard.style.background = ageVisuals.background;
+      oldestAgeCard.style.borderColor = ageVisuals.borderColor;
+    }
+
+    if (oldestAgeValue instanceof HTMLElement) {
+      oldestAgeValue.textContent = oldestAgeText;
+      oldestAgeValue.style.color = ageVisuals.textColor;
+    }
+
+    if (history) {
+      renderHistory(history);
+    }
+
+    if (results) {
+      renderResults(results);
+    }
+  }
+
+  function buildDebugPayload() {
+    const elements = getSiteElements();
+    return {
+      url: window.location.href,
+      scannedValue: state.lastScan,
+      selectors: SELECTORS,
+      elementStatus: Object.fromEntries(Object.entries(elements).map(([key, value]) => [key, Boolean(value)])),
+      lastResult: state.lastResult,
+      globalCapture: state.globalCapture,
+      scanBuffer: state.scanBuffer,
+      activeElement: document.activeElement?.tagName || null,
+      activeElementHtml:
+        document.activeElement instanceof HTMLElement ? document.activeElement.outerHTML.slice(0, 2000) : null,
+      historyExportPreview: buildHistoryExportPayload(),
+      currentAction: getCurrentAction(),
+      customActions: state.customActions,
+      visiblePopoverHtml: {
+        header: elements.popoverHeader?.outerHTML || "",
+        content: elements.popoverContent?.innerHTML || "",
+        details: elements.detailsList?.innerHTML || "",
+        table: elements.resultsTable?.outerHTML || "",
+      },
+      paginationState: buildPaginationState(elements.tablePrevious, elements.tableNext),
+      visibleLinks: {
+        content: extractNodeData(elements.popoverContent).links,
+        details: extractNodeData(elements.detailsList).links,
+        table: extractNodeData(elements.resultsTable).links,
+      },
+      bodyClasses: Array.from(document.body?.classList || []),
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  function flushGlobalScanBuffer() {
+    const value = state.scanBuffer.trim();
+    state.scanBuffer = "";
+    state.lastKeystrokeAt = 0;
+    if (value) {
+      performLookup(value);
+    }
+  }
+
+  function clearActiveResult() {
+    state.lastScan = "";
+    state.lastResult = null;
+    state.scanBuffer = "";
+    state.lastKeystrokeAt = 0;
+    const scanInput = getPanelScanInput();
+    if (scanInput instanceof HTMLInputElement) {
+      scanInput.value = "";
+    }
+    render();
+    focusPanelInput();
+  }
+
+  function handleGlobalScannerKeydown(event) {
+    if (!state.globalCapture || state.busy || state.panelHidden) {
+      return;
+    }
+
+    if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey) {
+      return;
+    }
+
+    const panel = getPanel();
+    if (!panel) {
+      return;
+    }
+
+    const target = event.target;
+    if (target instanceof Element && panel.contains(target)) {
+      return;
+    }
+
+    if (isEditableTarget(target)) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - state.lastKeystrokeAt > SCAN_RESET_MS) {
+      state.scanBuffer = "";
+    }
+    state.lastKeystrokeAt = now;
+
+    if (event.key === "Enter") {
+      if (!state.scanBuffer) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      flushGlobalScanBuffer();
+      return;
+    }
+
+    if (event.key.length !== 1) {
+      return;
+    }
+
+    state.scanBuffer += event.key;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const scanInput = getPanelScanInput();
+    if (scanInput instanceof HTMLInputElement) {
+      scanInput.value = state.scanBuffer;
+    }
+  }
+
+  async function performLookup(scannedValue) {
+    if (!scannedValue || state.busy) {
+      return;
+    }
+
+    state.busy = true;
+    state.lastScan = scannedValue;
+      setRecentHistoryScan(scannedValue);
+    render();
+
+    try {
+      const { searchInput, searchButton } = getSiteElements();
+      if (!searchInput || !searchButton) {
+        throw new Error("Could not find the site search controls.");
+      }
+
+      const previousRawText = normalizeText(state.lastResult?.rawText || "");
+
+      setNativeValue(searchInput, scannedValue);
+      searchButton.click();
+
+      const result = await waitFor(() => {
+        const { popoverHeader, popoverContent, noRecordAlert } = getSiteElements();
+        if (normalizeText(noRecordAlert?.textContent).includes("No record found")) {
+          return buildNoRecordFoundResult(scannedValue);
+        }
+
+        if (
+          !normalizeText(popoverHeader?.textContent).includes("Container details") ||
+          normalizeText(popoverContent?.innerText).length === 0
+        ) {
+          return false;
+        }
+
+        const candidate = extractResult(scannedValue);
+        if (normalizeText(candidate.rawText || "") === previousRawText) {
+          return false;
+        }
+
+        return isResolvedResult(candidate, scannedValue) ? candidate : false;
+      }, 15000);
+
+      state.lastResult = result;
+      upsertHistory(result);
+      upsertActionRecord(result);
+    } catch (error) {
+      const { noRecordAlert } = getSiteElements();
+      if (normalizeText(noRecordAlert?.textContent).includes("No record found")) {
+        state.lastResult = buildNoRecordFoundResult(scannedValue);
+        upsertHistory(state.lastResult);
+        upsertActionRecord(state.lastResult);
+        return;
+      }
+
+      const latestResult = extractResult(scannedValue);
+      const previousRawText = normalizeText(state.lastResult?.rawText || "");
+
+      if (
+        isPlaceholderResult(latestResult) &&
+        normalizeText(latestResult.rawText || "") !== previousRawText
+      ) {
+        state.lastResult = buildNotFoundResult(scannedValue);
+      } else {
+        state.lastResult = {
+          scannedValue,
+          title: "Lookup failed",
+          capturedAt: new Date().toISOString(),
+          containerDisplay: scannedValue,
+          details: {
+            "Total units": "",
+            Error: error instanceof Error ? error.message : String(error),
+            "Oldest Units Age": "--",
+            "Parent Container": "",
+            "Grandparent Container": "",
+          },
+          table: { headers: [], rows: [] },
+          totalRecords: 0,
+          reasonCodes: [],
+          rawText: "",
+        };
+      }
+      upsertHistory(state.lastResult);
+      upsertActionRecord(state.lastResult);
+    } finally {
+      state.busy = false;
+      state.scanBuffer = "";
+      state.lastKeystrokeAt = 0;
+
+      const scanInput = getPanelScanInput();
+      if (scanInput instanceof HTMLInputElement) {
+        scanInput.value = "";
+      }
+
+      render();
+      schedulePanelFocusRestore([50, 250, 750]);
+    }
+  }
+
+  function installPanel() {
+    if (getPanel()) {
+      return;
+    }
+
+    const style = document.createElement("style");
+    style.textContent = `
+      #${PANEL_ID} {
+        --tm-panel-width: 920px;
+        --tm-panel-padding-y: 16px;
+        --tm-panel-padding-x: 18px;
+        --tm-radius-xl: 20px;
+        --tm-radius-lg: 14px;
+        --tm-radius-md: 13px;
+        --tm-gap: 12px;
+        --tm-gap-tight: 10px;
+        --tm-font-body: 14px;
+        --tm-font-small: 12px;
+        --tm-font-title: 16px;
+        --tm-font-age: 36px;
+        --tm-input-height: 38px;
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: min(var(--tm-panel-width), calc(100vw - 12px));
+        max-height: calc(100vh - 12px);
+        z-index: 999999;
+        overflow: auto;
+        padding: var(--tm-panel-padding-y) var(--tm-panel-padding-x);
+        background: #ffffff;
+        border: 1px solid #d7dfed;
+        border-radius: var(--tm-radius-xl);
+        color: #10213a;
+        box-shadow: 0 22px 56px rgba(16, 33, 58, 0.22);
+        font-family: Arial, sans-serif;
+      }
+
+      #${PANEL_ID}[data-scale-mode='high'] {
+        --tm-panel-width: 860px;
+        --tm-panel-padding-y: 12px;
+        --tm-panel-padding-x: 14px;
+        --tm-radius-xl: 16px;
+        --tm-radius-lg: 12px;
+        --tm-radius-md: 10px;
+        --tm-gap: 10px;
+        --tm-gap-tight: 8px;
+        --tm-font-body: 12px;
+        --tm-font-small: 11px;
+        --tm-font-title: 14px;
+        --tm-font-age: 28px;
+        --tm-input-height: 34px;
+      }
+
+      #${PANEL_ID}-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 999998;
+        background: rgba(3, 9, 20, 0.78);
+        backdrop-filter: blur(1px);
+        display: none;
+      }
+
+      #${PANEL_ID}-launcher {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        z-index: 999999;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        min-height: 42px;
+        padding: 0 16px;
+        background: #ffffff;
+        border: 1px solid #d7dfed;
+        border-radius: 999px;
+        color: #1f4fc8;
+        box-shadow: 0 12px 36px rgba(16, 33, 58, 0.2);
+        cursor: pointer;
+        font-weight: 700;
+      }
+
+      #${PANEL_ID}-launcher[data-scale-mode='high'] {
+        min-height: 38px;
+        padding: 0 12px;
+        font-size: 12px;
+      }
+
+      #${PANEL_ID} * {
+        box-sizing: border-box;
+      }
+
+      #${PANEL_ID} .tm-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: var(--tm-gap);
+      }
+
+      #${PANEL_ID} .tm-title {
+        font-size: var(--tm-font-title);
+        font-weight: 700;
+        color: #0f2241;
+      }
+
+      #${PANEL_ID} .tm-subtitle {
+        margin-top: 4px;
+        font-size: var(--tm-font-small);
+        color: #6780a8;
+      }
+
+      #${PANEL_ID} .tm-body {
+        display: grid;
+        gap: var(--tm-gap);
+      }
+
+      #${PANEL_ID} .tm-input,
+      #${PANEL_ID} .tm-btn {
+        min-height: var(--tm-input-height);
+        border-radius: var(--tm-radius-md);
+        border: 1px solid #c8d4e7;
+        font-family: inherit;
+      }
+
+      #${PANEL_ID} .tm-input {
+        width: 100%;
+        padding: 0 12px;
+        background: #ffffff;
+        color: #10213a;
+        font-size: var(--tm-font-body);
+      }
+
+      #${PANEL_ID} .tm-actions {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: var(--tm-gap-tight);
+      }
+
+      #${PANEL_ID} .tm-btn {
+        padding: 0 14px;
+        background: #ffffff;
+        color: #10213a;
+        cursor: pointer;
+        font-size: var(--tm-font-body);
+        font-weight: 700;
+      }
+
+      #${PANEL_ID} .tm-btn:hover {
+        background: #f5f8ff;
+      }
+
+      #${PANEL_ID} .tm-btn-primary {
+        background: #3567df;
+        border-color: #3567df;
+        color: #ffffff;
+      }
+
+      #${PANEL_ID} .tm-btn-primary:hover {
+        background: #2a59c9;
+      }
+
+      #${PANEL_ID} .tm-age-card {
+        padding: 12px 14px;
+        border: 1px solid #b8ddb0;
+        border-radius: var(--tm-radius-lg);
+      }
+
+      #${PANEL_ID} .tm-age-label {
+        margin-bottom: 8px;
+        color: #2f63dc;
+        font-size: var(--tm-font-small);
+        font-weight: 700;
+      }
+
+      #${PANEL_ID} .tm-age-value {
+        font-size: var(--tm-font-age);
+        line-height: 1;
+        font-weight: 800;
+      }
+
+      #${PANEL_ID} .tm-status-line {
+        color: #0a6a43;
+        font-size: var(--tm-font-small);
+      }
+
+      #${PANEL_ID} .tm-layout {
+        display: grid;
+        grid-template-columns: 220px minmax(0, 1fr);
+        gap: var(--tm-gap);
+        align-items: start;
+      }
+
+      #${PANEL_ID}[data-scale-mode='high'] .tm-layout {
+        grid-template-columns: 190px minmax(0, 1fr);
+      }
+
+      #${PANEL_ID} .tm-history-panel {
+        min-height: 320px;
+        padding: 12px 10px;
+        background: #081126;
+        border-radius: var(--tm-radius-lg);
+        color: #ffffff;
+      }
+
+      #${PANEL_ID} .tm-history-title {
+        margin-bottom: var(--tm-gap);
+        font-size: var(--tm-font-title);
+        font-weight: 700;
+      }
+
+      #${PANEL_ID} .tm-history-search {
+        width: 100%;
+        min-height: calc(var(--tm-input-height) - 2px);
+        margin-bottom: var(--tm-gap-tight);
+        padding: 0 10px;
+        border: 1px solid #31415f;
+        border-radius: var(--tm-radius-md);
+        background: #111a2c;
+        color: #ffffff;
+        font-size: var(--tm-font-small);
+      }
+
+      #${PANEL_ID} .tm-history-search::placeholder {
+        color: #9caed3;
+      }
+
+      #${PANEL_ID} .tm-history {
+        display: grid;
+        gap: 8px;
+        max-height: min(54vh, 520px);
+        overflow: auto;
+      }
+
+      #${PANEL_ID} .tm-history-item {
+        display: block;
+        width: 100%;
+        padding: 10px 12px;
+        background: #192235;
+        border: 1px solid #31415f;
+        border-radius: var(--tm-radius-md);
+        color: #ffffff;
+        text-align: left;
+        cursor: pointer;
+        font-size: var(--tm-font-small);
+        font-weight: 700;
+      }
+
+      #${PANEL_ID} .tm-results-heading {
+        margin-bottom: 10px;
+        font-size: calc(var(--tm-font-body) + 1px);
+        color: #0f2241;
+      }
+
+      #${PANEL_ID} .tm-link {
+        color: #2456cf;
+        text-decoration: underline;
+      }
+
+      #${PANEL_ID} .tm-pager {
+        display: flex;
+        gap: 10px;
+        margin-top: 12px;
+      }
+
+      #${PANEL_ID} .tm-pager-btn[disabled] {
+        opacity: 0.5;
+        cursor: default;
+      }
+
+      #${PANEL_ID} .tm-result-card,
+      #${PANEL_ID} .tm-action-card,
+      #${PANEL_ID} .tm-line-list,
+      #${PANEL_ID} .tm-results-empty {
+        background: #ffffff;
+        border: 1px solid #c8d4e7;
+        border-radius: var(--tm-radius-lg);
+      }
+
+      #${PANEL_ID} .tm-summary-list {
+        display: grid;
+        gap: 10px;
+        padding: 12px 14px;
+      }
+
+      #${PANEL_ID} .tm-summary-row {
+        display: grid;
+        grid-template-columns: 132px minmax(0, 1fr);
+        gap: 14px;
+        font-size: calc(var(--tm-font-body) - 1px);
+      }
+
+      #${PANEL_ID}[data-scale-mode='high'] .tm-summary-row {
+        grid-template-columns: 108px minmax(0, 1fr);
+        gap: 10px;
+      }
+
+      #${PANEL_ID} .tm-summary-key {
+        color: #607ba9;
+        font-weight: 700;
+      }
+
+      #${PANEL_ID} .tm-summary-value {
+        color: #10213a;
+        word-break: break-word;
+      }
+
+      #${PANEL_ID} .tm-results-subtitle {
+        margin: 14px 0 8px;
+        color: #2456cf;
+        font-size: calc(var(--tm-font-body) + 1px);
+        font-weight: 700;
+      }
+
+      #${PANEL_ID} .tm-action-card {
+        padding: 12px 14px;
+      }
+
+      #${PANEL_ID} .tm-action-controls {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: var(--tm-gap-tight);
+      }
+
+      #${PANEL_ID} .tm-action-button-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--tm-gap-tight);
+      }
+
+      #${PANEL_ID} .tm-action-btn {
+        min-height: calc(var(--tm-input-height) - 4px);
+        padding: 6px 12px;
+      }
+
+      #${PANEL_ID} .tm-action-btn-active {
+        background: #3567df;
+        border-color: #3567df;
+        color: #ffffff;
+      }
+
+      #${PANEL_ID} .tm-line-list {
+        display: grid;
+        gap: 12px;
+        max-height: min(34vh, 320px);
+        overflow: auto;
+        padding: 12px 14px;
+      }
+
+      #${PANEL_ID} .tm-line-card {
+        color: #10213a;
+        font-size: calc(var(--tm-font-body) - 1px);
+        line-height: 1.45;
+        border: 1px solid #c8d4e7;
+        border-radius: var(--tm-radius-lg);
+        padding: 12px 14px;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4);
+      }
+
+      #${PANEL_ID} .tm-line-title {
+        margin-bottom: 8px;
+        font-weight: 700;
+      }
+
+      #${PANEL_ID} .tm-line-row {
+        display: grid;
+        grid-template-columns: 96px minmax(0, 1fr);
+        gap: 10px;
+        margin-top: 4px;
+      }
+
+      #${PANEL_ID} .tm-line-key {
+        color: #607ba9;
+        font-weight: 700;
+      }
+
+      #${PANEL_ID} .tm-line-value {
+        color: #10213a;
+        word-break: break-word;
+      }
+
+      #${PANEL_ID} .tm-line-age,
+      #${PANEL_ID} .tm-line-age .tm-link {
+        font-weight: 700;
+      }
+
+      #${PANEL_ID} .tm-empty {
+        color: #6c84a9;
+        font-size: var(--tm-font-small);
+      }
+
+      #${PANEL_ID} .tm-results-empty {
+        padding: 18px;
+        background: #f8fbff;
+      }
+
+      @media (max-width: 840px) {
+        #${PANEL_ID} {
+          width: calc(100vw - 8px);
+          max-height: calc(100vh - 8px);
+          padding: 12px;
+        }
+
+        #${PANEL_ID} .tm-layout,
+        #${PANEL_ID} .tm-actions {
+          grid-template-columns: 1fr;
+        }
+      }
+    `;
+
+    const backdrop = document.createElement("div");
+    backdrop.id = `${PANEL_ID}-backdrop`;
+
+    const panel = document.createElement("section");
+    panel.id = PANEL_ID;
+    panel.innerHTML = `
+      <div class="tm-header">
+        <div>
+          <div class="tm-title">Container Scan Panel</div>
+          <div class="tm-subtitle">This rebuild uses only the native page search and native Next button.</div>
+        </div>
+        <button class="tm-btn" data-role="close-btn" type="button">Close</button>
+      </div>
+      <div class="tm-body">
+        <input class="tm-input" data-role="scan-input" type="text" placeholder="Scan or type container and press Enter" />
+        <div class="tm-actions">
+          <button class="tm-btn tm-btn-primary" data-role="scan-btn" type="button">Search</button>
+          <button class="tm-btn" data-role="export-history-btn" type="button">Export</button>
+          <button class="tm-btn" data-role="clear-history-btn" type="button">Clear History</button>
+          <button class="tm-btn" data-role="debug-btn" type="button">Copy Debug</button>
+        </div>
+        <div class="tm-age-card" data-role="oldest-age">
+          <div class="tm-age-label">Oldest Units Age</div>
+          <div class="tm-age-value" data-role="oldest-age-value">--</div>
+        </div>
+        <div class="tm-status-line" data-role="status">Ready to scan.</div>
+        <div class="tm-layout">
+          <div class="tm-history-panel">
+            <div class="tm-history-title">Scan History</div>
+            <input class="tm-history-search" data-role="history-search" type="text" placeholder="Search history" />
+            <div class="tm-history" data-role="history"></div>
+          </div>
+          <div data-role="results"></div>
+        </div>
+      </div>
+    `;
+
+    const launcher = document.createElement("button");
+    launcher.id = `${PANEL_ID}-launcher`;
+    launcher.type = "button";
+    launcher.textContent = "Open Scan Panel";
+
+    document.head.appendChild(style);
+    document.body.appendChild(backdrop);
+    document.body.appendChild(panel);
+    document.body.appendChild(launcher);
+
+    const scanInput = panel.querySelector("[data-role='scan-input']");
+    const scanButton = panel.querySelector("[data-role='scan-btn']");
+    const debugButton = panel.querySelector("[data-role='debug-btn']");
+    const exportHistoryButton = panel.querySelector("[data-role='export-history-btn']");
+    const clearHistoryButton = panel.querySelector("[data-role='clear-history-btn']");
+    const closeButton = panel.querySelector("[data-role='close-btn']");
+    const historySearch = panel.querySelector("[data-role='history-search']");
+    const history = panel.querySelector("[data-role='history']");
+    const results = panel.querySelector("[data-role='results']");
+
+    if (scanInput instanceof HTMLInputElement) {
+      scanInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          performLookup(scanInput.value.trim());
+        }
+      });
+
+      schedulePanelFocusRestore([200]);
+    }
+
+    scanButton?.addEventListener("click", () => {
+      const value = scanInput instanceof HTMLInputElement ? scanInput.value.trim() : "";
+      performLookup(value);
+    });
+
+    debugButton?.addEventListener("click", async () => {
+      try {
+        await copyText(JSON.stringify(buildDebugPayload(), null, 2));
+        const status = panel.querySelector("[data-role='status']");
+        if (status) {
+          status.textContent = "Debug copied to clipboard.";
+        }
+      } catch (error) {
+        const status = panel.querySelector("[data-role='status']");
+        if (status) {
+          status.textContent = `Copy failed: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
+    });
+
+    exportHistoryButton?.addEventListener("click", async () => {
+      const status = panel.querySelector("[data-role='status']");
+      try {
+        const fileName = await downloadHistoryWorkbook();
+        if (status) {
+          status.textContent = `History exported as ${fileName}.`;
+        }
+      } catch (error) {
+        if (status) {
+          status.textContent = `History export failed: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
+    });
+
+    clearHistoryButton?.addEventListener("click", () => {
+      const status = panel.querySelector("[data-role='status']");
+      const cleared = clearHistoryWithConfirmation();
+      if (status && cleared) {
+        status.textContent = "Scan history cleared.";
+      }
+    });
+
+    history?.addEventListener("click", (event) => {
+      const target = event.target instanceof Element ? event.target.closest("[data-scan]") : null;
+      const value = target?.getAttribute("data-scan");
+      if (value) {
+        performLookup(value);
+      }
+    });
+
+    if (historySearch instanceof HTMLInputElement) {
+      historySearch.value = state.historySearchQuery;
+      historySearch.addEventListener("input", () => {
+        state.historySearchQuery = historySearch.value;
+        render();
+      });
+    }
+
+    results?.addEventListener("click", (event) => {
+      const target = event.target instanceof Element
+        ? event.target.closest(
+            "[data-role='prev-page'], [data-role='next-page'], [data-role='delete-custom-action'], [data-role='action-button'], [data-role='custom-action-button']"
+          )
+        : null;
+      if (!target) {
+        return;
+      }
+
+      if (target.getAttribute("data-role") === "prev-page") {
+        navigateResultPage("previous");
+      } else if (target.getAttribute("data-role") === "next-page") {
+        navigateResultPage("next");
+      } else if (target.getAttribute("data-role") === "delete-custom-action") {
+        const currentAction = getCurrentAction();
+        if (!currentAction || isDefaultAction(currentAction)) {
+          return;
+        }
+
+        const confirmed = window.confirm(`Delete custom action "${currentAction}"? Containers using it will be set to Nothing.`);
+        if (confirmed) {
+          deleteCustomAction(currentAction);
+          render();
+        }
+      } else if (target.getAttribute("data-role") === "action-button" && state.lastResult) {
+        const action = target.getAttribute("data-action") || "Nothing";
+        setActionForContainer(state.lastResult.scannedValue, action);
+        render();
+      } else if (target.getAttribute("data-role") === "custom-action-button" && state.lastResult) {
+        const actionName = window.prompt("Enter custom action name:");
+        const addedAction = addCustomAction(actionName || "");
+        if (addedAction) {
+          setActionForContainer(state.lastResult.scannedValue, addedAction);
+        }
+        render();
+      }
+    });
+
+    panel.addEventListener("pointerdown", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+
+      if (
+        target.closest(
+          "[data-role='action-button'], [data-role='custom-action-button'], [data-role='delete-custom-action'], [data-role='history-search']"
+        )
+      ) {
+        suppressAutoFocus(4000);
+      }
+    });
+
+    closeButton?.addEventListener("click", () => {
+      state.panelHidden = true;
+      render();
+    });
+
+    launcher.addEventListener("click", () => {
+      state.panelHidden = false;
+      render();
+      focusPanelInput();
+    });
+
+    window.addEventListener("resize", () => {
+      applyPanelScaleMode();
+      render();
+    });
+
+    document.addEventListener("keydown", handleGlobalScannerKeydown, true);
+    document.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element) || !panel.contains(target)) {
+        state.suppressAutoFocusUntil = 0;
+        schedulePanelFocusRestore([0]);
+      }
+    });
+    window.addEventListener("focus", () => {
+      state.suppressAutoFocusUntil = 0;
+      schedulePanelFocusRestore([0]);
+    });
+
+    render();
+  }
+
+  function boot() {
+    if (!document.body || !document.head) {
+      window.setTimeout(boot, 250);
+      return;
+    }
+
+    state.history = loadHistory();
+    state.actionRecords = loadActionRecords();
+    state.customActions = loadCustomActions();
+    installPanel();
+  }
+
+  boot();
+})();

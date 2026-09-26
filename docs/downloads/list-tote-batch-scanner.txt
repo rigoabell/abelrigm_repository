@@ -1,0 +1,763 @@
+// ==UserScript==
+// @name         List Tote - Batch Scanner
+// @namespace    https://wd-repair-portal-na.aka.amazon.com/
+// @version      0.7.1
+// @description  Paste tote IDs, run a batch scan, capture each #destination and #units-count, export TSV. Auto-resume across page refreshes.
+// @author       you
+// @match        https://wd-repair-portal-na.aka.amazon.com/resources/ReCommerceFCWebToolsUI/html/listTote.html*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // ---------- Config ----------
+  const TOTE_RESULT_SELECTOR = '#tote-scannable-id-text';
+  const TOTE_INPUT_SELECTOR  = '#tote-id-input-textfield';
+  const DEST_SELECTOR        = '#destination';
+  const UNITS_SELECTOR       = '#units-count';
+  const KEY_DELAY_MS         = 0;
+  const PRE_ENTER_MS         = 30;
+  const RESULT_WAIT_MS       = 2500;
+  const POST_MATCH_SETTLE_MS = 350;
+  const POST_SUBMIT_POLL_MS  = 50;
+  const BETWEEN_SCANS_MS     = 120;
+  const LOG_PREFIX           = '[ListToteAuto]';
+  const MAX_DEBUG_ENTRIES    = 1000;
+  const STORAGE_KEY          = 'listToteAuto_v1';
+
+  // ---------- State ----------
+  const state = {
+    debug: [],
+    batch: {
+      running: false,
+      abort: false,
+      total: 0,
+      processed: 0,
+      scanned: 0,
+      skipped: 0,
+      current: null,
+      results: [],          // [{tote, destination, ts, status}]
+      startedAt: null,
+    },
+    ui: {
+      minimized: false,
+      pos: null,            // {left, top}
+    },
+  };
+
+  // ---------- Storage ----------
+  function loadStorage() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch (_) { return {}; }
+  }
+  function saveStorage(partial) {
+    try {
+      const current = loadStorage();
+      const merged = { ...current, ...partial };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+    } catch (e) { warn('saveStorage failed', e && e.message); }
+  }
+  let saveInputTimer = null;
+  function saveInputDebounced(value) {
+    clearTimeout(saveInputTimer);
+    saveInputTimer = setTimeout(() => saveStorage({ batchInput: value }), 300);
+  }
+
+  // ---------- Debug log ----------
+  function pushDebug(level, args) {
+    const msg = args.map(a => {
+      if (a instanceof Element) return describeEl(a);
+      if (a && typeof a === 'object') {
+        try { return JSON.stringify(a); } catch (_) { return String(a); }
+      }
+      return String(a);
+    }).join(' ');
+    state.debug.push({ ts: nowStr(), level, msg });
+    if (state.debug.length > MAX_DEBUG_ENTRIES) state.debug.shift();
+  }
+  const log  = (...a) => { pushDebug('LOG',  a); console.log(LOG_PREFIX, ...a); };
+  const warn = (...a) => { pushDebug('WARN', a); console.warn(LOG_PREFIX, ...a); };
+  const err  = (...a) => { pushDebug('ERR',  a); console.error(LOG_PREFIX, ...a); };
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function nowStr() {
+    const d = new Date();
+    return d.toLocaleTimeString([], { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+  }
+
+  function describeEl(el) {
+    if (!el) return 'null';
+    if (el === document) return 'document';
+    if (el === document.body) return 'body';
+    const id = el.id ? '#' + el.id : '';
+    const cls = el.className && typeof el.className === 'string'
+      ? '.' + el.className.split(/\s+/).filter(Boolean).join('.') : '';
+    const tag = (el.tagName || '').toLowerCase();
+    const type = el.type ? `[type=${el.type}]` : '';
+    return `${tag}${id}${cls}${type}`;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+  }
+
+  function fmtDuration(ms) {
+    if (!isFinite(ms) || ms < 0) return '—';
+    const s = Math.round(ms / 1000);
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    if (m < 60) return m + 'm ' + r + 's';
+    const h = Math.floor(m / 60);
+    return h + 'h ' + (m % 60) + 'm';
+  }
+
+  // ---------- DOM helpers ----------
+  function findResultEl() { return document.querySelector(TOTE_RESULT_SELECTOR); }
+  function findInputEl()  { return document.querySelector(TOTE_INPUT_SELECTOR); }
+  function findDestEl()   { return document.querySelector(DEST_SELECTOR); }
+  function findUnitsEl()  { return document.querySelector(UNITS_SELECTOR); }
+
+  function readToteResult() {
+    const el = findResultEl();
+    return el ? ((el.textContent || '').trim() || null) : null;
+  }
+  function readDestination() {
+    const el = findDestEl();
+    return el ? ((el.textContent || '').trim() || null) : null;
+  }
+  function readUnits() {
+    const el = findUnitsEl();
+    return el ? ((el.textContent || '').trim() || null) : null;
+  }
+
+  // ---------- Typing ----------
+  function keyInitFor(ch, ctrl) {
+    let code = '';
+    if (/[a-zA-Z]/.test(ch))   code = 'Key'   + ch.toUpperCase();
+    else if (/[0-9]/.test(ch)) code = 'Digit' + ch;
+    return {
+      key: ch, code,
+      bubbles: true, cancelable: true, composed: true,
+      ctrlKey: !!ctrl,
+      keyCode: ch.charCodeAt(0),
+      which:   ch.charCodeAt(0),
+    };
+  }
+  function dispatchKey(target, type, init) {
+    target.dispatchEvent(new KeyboardEvent(type, init));
+  }
+  function setNativeInputValue(input, value) {
+    const proto = input instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && desc.set) desc.set.call(input, value);
+    else input.value = value;
+  }
+  function resolveTypeTarget() {
+    const input = findInputEl();
+    if (input) {
+      try { input.focus({ preventScroll: true }); } catch (_) { input.focus(); }
+      return input;
+    }
+    return document.activeElement && document.activeElement !== document.body
+      ? document.activeElement : document.body;
+  }
+
+  // "both" strategy: send Ctrl-held key events AND set value via native setter + input/change/Enter + form submit.
+  async function performType(value, target) {
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+      target.focus();
+
+      dispatchKey(target, 'keydown', {
+        key: 'Control', code: 'ControlLeft',
+        bubbles: true, cancelable: true, composed: true,
+        ctrlKey: true, location: 1,
+      });
+      for (const ch of value) {
+        const init = keyInitFor(ch, true);
+        dispatchKey(target, 'keydown',  init);
+        dispatchKey(target, 'keypress', { ...init, charCode: ch.charCodeAt(0) });
+        dispatchKey(target, 'keyup',    init);
+        if (KEY_DELAY_MS) await sleep(KEY_DELAY_MS);
+      }
+      dispatchKey(target, 'keyup', {
+        key: 'Control', code: 'ControlLeft',
+        bubbles: true, cancelable: true, composed: true,
+        ctrlKey: false, location: 1,
+      });
+
+      setNativeInputValue(target, value);
+      target.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: value, inputType: 'insertText' }));
+      target.dispatchEvent(new InputEvent('input',       { bubbles: true, cancelable: true, data: value, inputType: 'insertText' }));
+      target.dispatchEvent(new Event('change',           { bubbles: true }));
+
+      await sleep(PRE_ENTER_MS);
+
+      const enterInit = {
+        key: 'Enter', code: 'Enter',
+        bubbles: true, cancelable: true, composed: true,
+        keyCode: 13, which: 13,
+      };
+      dispatchKey(target, 'keydown',  enterInit);
+      dispatchKey(target, 'keypress', enterInit);
+      dispatchKey(target, 'keyup',    enterInit);
+
+      const form = target.form;
+      if (form) form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    } else {
+      warn('No input target found for typing');
+    }
+  }
+
+  async function waitForResultMatch(expected, timeoutMs) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (readToteResult() === expected) return true;
+      await sleep(POST_SUBMIT_POLL_MS);
+    }
+    return false;
+  }
+
+  async function doType(value, source) {
+    if (!value) return { ok: false, destination: null, units: null, matched: false };
+    const target = resolveTypeTarget();
+    log('doType', source, value, 'target=' + describeEl(target));
+    try {
+      await performType(value, target);
+    } catch (e) {
+      err('type error', e && e.message);
+      return { ok: false, destination: null, units: null, matched: false };
+    }
+    const matched = await waitForResultMatch(value, RESULT_WAIT_MS);
+    let dest = null, units = null;
+    if (matched) {
+      await sleep(POST_MATCH_SETTLE_MS);
+      dest = readDestination();
+      units = readUnits();
+    } else {
+      log('no-match for', value, 'current=', readToteResult());
+    }
+    return { ok: true, destination: dest, units, matched };
+  }
+
+  // ---------- UI ----------
+  function buildPanel() {
+    if (document.getElementById('lta-panel')) return;
+
+    const css = `
+      #lta-panel {
+        position: fixed; top: 16px; right: 16px; width: 480px; z-index: 2147483647;
+        font: 13px/1.4 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+        color: #e5e7eb; background: #0f1117;
+        border: 1px solid #2a2d36; border-radius: 10px;
+        box-shadow: 0 12px 32px rgba(0,0,0,.45), 0 2px 6px rgba(0,0,0,.3);
+      }
+      /* Defensive resets: the host page has aggressive global rules
+         (e.g. tr:nth-child(odd) opacity) that bleed into our table. */
+      #lta-panel, #lta-panel * {
+        box-sizing: border-box;
+        opacity: 1 !important;
+        text-shadow: none !important;
+        text-transform: none;
+      }
+      #lta-panel header {
+        display: flex; align-items: center; gap: 8px;
+        padding: 10px 12px;
+        background: linear-gradient(180deg, #1b1f2a 0%, #161922 100%);
+        border-bottom: 1px solid #2a2d36;
+        border-top-left-radius: 10px; border-top-right-radius: 10px;
+        cursor: move; user-select: none;
+      }
+      #lta-panel header .dot { width: 8px; height: 8px; border-radius: 50%; background: #3b82f6; box-shadow: 0 0 6px #3b82f6; }
+      #lta-panel header .title { font-weight: 600; letter-spacing: .2px; }
+      #lta-panel header .ver { opacity:.5; font-size: 11px; margin-left: 2px; }
+      #lta-panel header .spacer { flex: 1; }
+      #lta-panel header .min {
+        cursor: pointer; opacity: .65; padding: 2px 8px; border-radius: 4px;
+        font-size: 14px; line-height: 1;
+      }
+      #lta-panel header .min:hover { background: #2a2d36; opacity: 1; }
+
+      #lta-body { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+      #lta-panel.min #lta-body { display: none; }
+
+      #lta-panel label.label {
+        font-size: 11px; opacity: .65; font-weight: 600;
+        letter-spacing: .5px; text-transform: uppercase;
+      }
+
+      #lta-panel textarea {
+        width: 100%; height: 110px; resize: vertical; box-sizing: border-box;
+        background: #0a0c12; color: #e5e7eb;
+        border: 1px solid #2a2d36; border-radius: 6px;
+        padding: 8px 10px;
+        font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        outline: none;
+      }
+      #lta-panel textarea:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,.15); }
+
+      #lta-panel .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+      #lta-panel button {
+        background: #1f2937; color: #e5e7eb;
+        border: 1px solid #2a2d36; padding: 7px 12px;
+        border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 12px;
+        transition: background .15s, border-color .15s;
+      }
+      #lta-panel button:hover:not(:disabled) { background: #2a3441; border-color: #3a4051; }
+      #lta-panel button:disabled { opacity: .4; cursor: not-allowed; }
+      #lta-panel button.primary { background: #3b82f6; border-color: #3b82f6; color: #fff; }
+      #lta-panel button.primary:hover:not(:disabled) { background: #2563eb; border-color: #2563eb; }
+      #lta-panel button.danger { background: transparent; border-color: #3a2a2a; color: #fca5a5; }
+      #lta-panel button.danger:hover:not(:disabled) { background: #2a1a1a; border-color: #553030; }
+
+      #lta-panel .progress-bar {
+        height: 6px; background: #0a0c12; border: 1px solid #2a2d36;
+        border-radius: 999px; overflow: hidden; flex: 1;
+      }
+      #lta-panel .progress-fill {
+        height: 100%; background: linear-gradient(90deg, #3b82f6 0%, #60a5fa 100%);
+        width: 0%; transition: width .2s ease;
+      }
+      #lta-panel .stats {
+        font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        opacity: .75;
+      }
+      #lta-panel .counter {
+        font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        min-width: 60px; text-align: right; color: #cbd5e1;
+      }
+
+      #lta-panel .results-wrap {
+        max-height: 320px; overflow: auto;
+        border: 1px solid #2a2d36; border-radius: 6px;
+        background: #0a0c12;
+      }
+      #lta-panel table.results {
+        width: 100%; border-collapse: separate; border-spacing: 0;
+        font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        color: #e5e7eb !important; background: transparent !important;
+      }
+      #lta-panel table.results thead th {
+        position: sticky; top: 0; z-index: 1;
+        background: #161922 !important; color: #94a3b8 !important;
+        font-weight: 600 !important; font-size: 10px; letter-spacing: .5px; text-transform: uppercase;
+        padding: 7px 10px; border-bottom: 1px solid #2a2d36; text-align: left;
+      }
+      #lta-panel table.results tbody tr,
+      #lta-panel table.results tbody tr td {
+        background-color: transparent !important;
+        color: #e5e7eb !important;
+        font-style: normal !important;
+        text-decoration: none !important;
+      }
+      #lta-panel table.results tbody tr:nth-child(odd)  td { background-color: #0c0f17 !important; }
+      #lta-panel table.results tbody tr:nth-child(even) td { background-color: #0a0c12 !important; }
+      #lta-panel table.results tbody tr:hover td        { background-color: #141a26 !important; }
+      #lta-panel table.results td {
+        padding: 6px 10px; border-bottom: 1px solid #181b22;
+        vertical-align: top; word-break: break-word;
+      }
+      #lta-panel table.results td.idx    { color: #6b7280 !important; text-align: right; width: 34px; }
+      #lta-panel table.results td.tote   { color: #e5e7eb !important; font-weight: 600 !important; white-space: nowrap; }
+      #lta-panel table.results td.dest   { color: #93c5fd !important; }
+      #lta-panel table.results td.units  { color: #fcd34d !important; text-align: right; width: 50px; white-space: nowrap; }
+      #lta-panel table.results td.status { width: 78px; white-space: nowrap; }
+      #lta-panel table.results tr.r-ok    td.status { color: #4ade80 !important; }
+      #lta-panel table.results tr.r-skip  td.status { color: #94a3b8 !important; }
+      #lta-panel table.results tr.r-warn  td.status { color: #fbbf24 !important; }
+      #lta-panel table.results tr.r-fail  td.status { color: #fca5a5 !important; }
+
+      #lta-results-empty {
+        padding: 18px; text-align: center; color: #6b7280;
+        font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+
+      #lta-panel .footer {
+        display: flex; align-items: center; gap: 8px;
+        padding-top: 4px; border-top: 1px solid #1c1f28; margin-top: 2px;
+      }
+      #lta-panel .footer .hint { opacity: .45; font-size: 11px; flex: 1; }
+      #lta-panel .footer button {
+        padding: 4px 8px; font-size: 11px; font-weight: 500;
+        background: transparent; border-color: #2a2d36; color: #94a3b8;
+      }
+    `;
+    const styleEl = document.createElement('style');
+    styleEl.textContent = css;
+    document.head.appendChild(styleEl);
+
+    const wrap = document.createElement('div');
+    wrap.id = 'lta-panel';
+    wrap.innerHTML = `
+      <header>
+        <span class="dot"></span>
+        <span class="title">List Tote Batch</span>
+        <span class="ver">v0.7.1</span>
+        <span class="spacer"></span>
+        <span class="min" id="lta-min" title="Toggle">–</span>
+      </header>
+      <div id="lta-body">
+        <label class="label" for="lta-batch-input">Tote IDs (one per line)</label>
+        <textarea id="lta-batch-input" placeholder="tsX107fjn4t&#10;tsX10dgxx6t&#10;tsX320dykwp"></textarea>
+
+        <div class="row">
+          <button id="lta-batch-run" class="primary">Run batch</button>
+          <button id="lta-batch-stop" disabled>Stop</button>
+          <span class="spacer" style="flex:1;"></span>
+          <button id="lta-batch-copy">Copy TSV</button>
+          <button id="lta-batch-clear" class="danger">Clear results</button>
+        </div>
+
+        <div class="row">
+          <div class="progress-bar"><div class="progress-fill" id="lta-progress-fill"></div></div>
+          <span id="lta-progress-text" class="counter">0/0</span>
+        </div>
+        <div class="row">
+          <span id="lta-progress-stats" class="stats">—</span>
+        </div>
+
+        <div class="results-wrap">
+          <table class="results" id="lta-results">
+            <thead><tr><th>#</th><th>Tote</th><th>Destination</th><th>Units</th><th>Status</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <div id="lta-results-empty">No results yet</div>
+        </div>
+
+        <div class="footer">
+          <span class="hint">Saved locally · resumes on refresh</span>
+          <button id="lta-copy-debug">Copy debug log</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(wrap);
+
+    // Drag
+    const hdr = wrap.querySelector('header');
+    let drag = null;
+    hdr.addEventListener('mousedown', (e) => {
+      if (e.target.id === 'lta-min') return;
+      const r = wrap.getBoundingClientRect();
+      drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!drag) return;
+      wrap.style.left = (e.clientX - drag.dx) + 'px';
+      wrap.style.top  = (e.clientY - drag.dy) + 'px';
+      wrap.style.right = 'auto';
+    });
+    window.addEventListener('mouseup', () => {
+      if (!drag) return;
+      drag = null;
+      const r = wrap.getBoundingClientRect();
+      state.ui.pos = { left: r.left, top: r.top };
+      saveStorage({ panelPos: state.ui.pos });
+    });
+
+    // Minimize toggle
+    wrap.querySelector('#lta-min').addEventListener('click', () => {
+      state.ui.minimized = !state.ui.minimized;
+      wrap.classList.toggle('min', state.ui.minimized);
+      saveStorage({ panelMin: state.ui.minimized });
+    });
+
+    // Buttons
+    wrap.querySelector('#lta-batch-run').addEventListener('click', onBatchRun);
+    wrap.querySelector('#lta-batch-stop').addEventListener('click', onBatchStop);
+    wrap.querySelector('#lta-batch-copy').addEventListener('click', onBatchCopy);
+    wrap.querySelector('#lta-batch-clear').addEventListener('click', onBatchClear);
+    wrap.querySelector('#lta-copy-debug').addEventListener('click', onCopyDebug);
+
+    // Textarea persistence
+    const ta = wrap.querySelector('#lta-batch-input');
+    ta.addEventListener('input', () => saveInputDebounced(ta.value));
+  }
+
+  function applyPersistedUI() {
+    const stored = loadStorage();
+    const wrap = document.getElementById('lta-panel');
+    if (!wrap) return;
+    if (stored.panelPos && Number.isFinite(stored.panelPos.left) && Number.isFinite(stored.panelPos.top)) {
+      wrap.style.left = stored.panelPos.left + 'px';
+      wrap.style.top  = stored.panelPos.top  + 'px';
+      wrap.style.right = 'auto';
+      state.ui.pos = stored.panelPos;
+    }
+    if (stored.panelMin) {
+      state.ui.minimized = true;
+      wrap.classList.add('min');
+    }
+    if (typeof stored.batchInput === 'string') {
+      const ta = wrap.querySelector('#lta-batch-input');
+      if (ta) ta.value = stored.batchInput;
+    }
+    if (Array.isArray(stored.batchResults)) {
+      state.batch.results = stored.batchResults;
+    }
+  }
+
+  // ---------- Render ----------
+  function setControlsRunning(running) {
+    const run   = document.querySelector('#lta-batch-run');
+    const stop  = document.querySelector('#lta-batch-stop');
+    const clr   = document.querySelector('#lta-batch-clear');
+    const ta    = document.querySelector('#lta-batch-input');
+    if (run)   run.disabled  = running;
+    if (stop)  stop.disabled = !running;
+    if (clr)   clr.disabled  = running;
+    if (ta)    ta.disabled   = running;
+  }
+
+  function renderProgress() {
+    const b = state.batch;
+    const fill = document.querySelector('#lta-progress-fill');
+    const text = document.querySelector('#lta-progress-text');
+    const stats = document.querySelector('#lta-progress-stats');
+    const total = b.total || (b.results.length || 0);
+    const done = b.running ? b.processed : (b.results.length || b.processed);
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    if (fill) fill.style.width = pct + '%';
+    if (text) text.textContent = `${done}/${total}${b.running && b.current ? ' · ' + b.current : ''}`;
+    if (stats) {
+      if (b.startedAt && b.scanned > 0) {
+        const elapsed = Date.now() - b.startedAt;
+        const avg = elapsed / b.scanned;
+        const remaining = Math.max(0, total - b.processed);
+        const eta = remaining > 0 && b.running ? avg * remaining : 0;
+        const parts = [
+          `avg ${(avg / 1000).toFixed(2)}s/scan`,
+          `scanned ${b.scanned}`,
+        ];
+        if (b.skipped) parts.push(`skipped ${b.skipped}`);
+        parts.push(`elapsed ${fmtDuration(elapsed)}`);
+        if (b.running) parts.push(`ETA ${fmtDuration(eta)}`);
+        stats.textContent = parts.join(' · ');
+      } else if (b.results.length) {
+        stats.textContent = `${b.results.length} saved result${b.results.length === 1 ? '' : 's'}`;
+      } else {
+        stats.textContent = '—';
+      }
+    }
+  }
+
+  function renderResults() {
+    const tbody = document.querySelector('#lta-results tbody');
+    const empty = document.querySelector('#lta-results-empty');
+    if (!tbody) return;
+    const rows = state.batch.results;
+    if (empty) empty.style.display = rows.length === 0 ? 'block' : 'none';
+    tbody.innerHTML = rows.map((r, i) => {
+      let cls = 'r-ok';
+      if (r.status === 'type-fail' || r.status === 'no-match') cls = 'r-fail';
+      else if (r.status === 'no-dest') cls = 'r-warn';
+      else if (r.status === 'skipped') cls = 'r-skip';
+      return `<tr class="${cls}">
+        <td class="idx">${i + 1}</td>
+        <td class="tote">${escapeHtml(r.tote)}</td>
+        <td class="dest">${escapeHtml(r.destination ?? '')}</td>
+        <td class="units">${escapeHtml(r.units ?? '')}</td>
+        <td class="status">${escapeHtml(r.status)}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  function flashButton(sel, text) {
+    const btn = document.querySelector(sel);
+    if (!btn) return;
+    const prev = btn.textContent;
+    btn.textContent = text;
+    setTimeout(() => { btn.textContent = prev; }, 1200);
+  }
+
+  // ---------- Batch ----------
+  function parseBatchInput(text) {
+    return text
+      .split(/[\r\n,;\s]+/)
+      .map(s => s.trim())
+      .filter(Boolean);
+  }
+
+  function upsertResult(entry) {
+    const i = state.batch.results.findIndex(r => r.tote === entry.tote);
+    if (i >= 0) state.batch.results[i] = entry;
+    else state.batch.results.push(entry);
+  }
+
+  function persistResults() {
+    saveStorage({ batchResults: state.batch.results });
+  }
+
+  async function onBatchRun() {
+    if (state.batch.running) return;
+    const ta = document.querySelector('#lta-batch-input');
+    const totes = parseBatchInput(ta?.value || '');
+    if (!totes.length) { warn('No tote IDs in input.'); return; }
+
+    const doneOk = new Set(state.batch.results.filter(r => r.status === 'ok').map(r => r.tote));
+
+    state.batch.running = true;
+    state.batch.abort = false;
+    state.batch.total = totes.length;
+    state.batch.processed = 0;
+    state.batch.scanned = 0;
+    state.batch.skipped = 0;
+    state.batch.current = null;
+    state.batch.startedAt = Date.now();
+    log(`Batch started, totes=${totes.length}, already-done=${doneOk.size}`);
+    setControlsRunning(true);
+    renderProgress();
+
+    for (let i = 0; i < totes.length; i++) {
+      if (state.batch.abort) { log('Batch aborted at index ' + i); break; }
+      const tote = totes[i];
+      state.batch.processed = i;
+      state.batch.current = tote;
+      renderProgress();
+
+      if (doneOk.has(tote)) {
+        state.batch.skipped++;
+        state.batch.processed = i + 1;
+        renderProgress();
+        continue;
+      }
+
+      let result;
+      try {
+        result = await doType(tote, `batch[${i + 1}/${totes.length}]`);
+      } catch (e) {
+        err('batch item error', e && e.message);
+        result = { ok: false, destination: null, matched: false };
+      }
+
+      const status = !result.ok ? 'type-fail'
+        : !result.matched ? 'no-match'
+        : (result.destination == null ? 'no-dest' : 'ok');
+
+      upsertResult({
+        tote,
+        destination: result.destination,
+        units: result.units,
+        ts: nowStr(),
+        status,
+      });
+      state.batch.scanned++;
+      state.batch.processed = i + 1;
+      renderResults();
+      renderProgress();
+      persistResults();
+
+      if (i < totes.length - 1) await sleep(BETWEEN_SCANS_MS);
+    }
+
+    state.batch.running = false;
+    state.batch.current = null;
+    setControlsRunning(false);
+    renderProgress();
+    log(`Batch finished, scanned=${state.batch.scanned}, skipped=${state.batch.skipped}, total-results=${state.batch.results.length}`);
+  }
+
+  function onBatchStop() {
+    if (!state.batch.running) return;
+    state.batch.abort = true;
+    log('Batch stop requested');
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (_) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch (_) {}
+      document.body.removeChild(ta);
+      return ok;
+    }
+  }
+
+  async function onBatchCopy() {
+    const rows = state.batch.results;
+    const header = 'tote\tdestination\tunits\tstatus\ttimestamp';
+    const body = rows.map(r => `${r.tote}\t${r.destination ?? ''}\t${r.units ?? ''}\t${r.status}\t${r.ts}`).join('\n');
+    const text = header + '\n' + body;
+    const ok = await copyText(text);
+    flashButton('#lta-batch-copy', ok ? 'Copied!' : 'Copy failed');
+  }
+
+  function onBatchClear() {
+    if (state.batch.running) return;
+    state.batch.results = [];
+    state.batch.total = 0;
+    state.batch.processed = 0;
+    state.batch.scanned = 0;
+    state.batch.skipped = 0;
+    state.batch.startedAt = null;
+    persistResults();
+    renderResults();
+    renderProgress();
+  }
+
+  async function onCopyDebug() {
+    const text = buildDebugDump();
+    const ok = await copyText(text);
+    flashButton('#lta-copy-debug', ok ? 'Copied!' : 'Copy failed');
+  }
+
+  function buildDebugDump() {
+    return [
+      '=== List Tote Auto debug dump ===',
+      'time: ' + new Date().toISOString(),
+      'url: ' + location.href,
+      'ua: ' + navigator.userAgent,
+      'inputPresent: ' + !!findInputEl(),
+      'resultPresent: ' + !!findResultEl(),
+      'destPresent: ' + !!findDestEl(),
+      'unitsPresent: ' + !!findUnitsEl(),
+      'currentTote: ' + readToteResult(),
+      'currentDestination: ' + readDestination(),
+      'currentUnits: ' + readUnits(),
+      '',
+      '--- Batch state ---',
+      JSON.stringify({
+        running: state.batch.running,
+        total: state.batch.total,
+        processed: state.batch.processed,
+        scanned: state.batch.scanned,
+        skipped: state.batch.skipped,
+        results: state.batch.results.length,
+      }),
+      '',
+      '--- Batch results (' + state.batch.results.length + ') ---',
+      ...state.batch.results.map((r, i) => `${i + 1}\t${r.ts}\t${r.status}\t${r.tote}\t${r.destination ?? ''}\t${r.units ?? ''}`),
+      '',
+      '--- Debug log (' + state.debug.length + ') ---',
+      ...state.debug.map(d => `${d.ts}  [${d.level}]  ${d.msg}`),
+    ].join('\n');
+  }
+
+  // ---------- Boot ----------
+  function boot() {
+    buildPanel();
+    applyPersistedUI();
+    renderResults();
+    renderProgress();
+    log('booted on', location.href, 'results-loaded=' + state.batch.results.length);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
+})();

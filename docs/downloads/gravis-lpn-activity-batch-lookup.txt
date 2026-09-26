@@ -1,0 +1,2782 @@
+// ==UserScript==
+// @name         Gravis – LPN Activity Batch Lookup
+// @namespace    gravis-tools
+// @version      1.8.2
+// @description  Gravis: batch by LPN or container (MEM3→LPN→grading). FCResearch: copy LPN column header.
+// @author       abelrigm
+// @match        https://na-cretfc-tools-iad.iad.proxy.amazon.com/gravis/*
+// @match        https://qi-fcresearch-na.corp.amazon.com/*
+// @match        https://qifcr.na.aftx.amazonoperations.app/*
+// @match        https://qifcr.eu.aftx.amazonoperations.app/*
+// @match        https://qifcr.fe.aftx.amazonoperations.app/*
+// @grant        GM_setClipboard
+// @grant        GM_addStyle
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_xmlhttpRequest
+// @grant        GM_openInTab
+// @connect      qi-fcresearch-na.corp.amazon.com
+// @connect      qifcr.na.aftx.amazonoperations.app
+// @connect      qifcr.eu.aftx.amazonoperations.app
+// @connect      qifcr.fe.aftx.amazonoperations.app
+// @run-at       document-idle
+// ==/UserScript==
+
+/* globals GM_xmlhttpRequest, GM_openInTab */
+
+(function () {
+  'use strict';
+
+  const ORIGIN = location.origin;
+  const GRAVIS_BASE = `${ORIGIN}/gravis`;
+  const MIN_SIDE_NAV = 3;
+  const LOG_PREFIX = '[GravisLpnBatch]';
+  const PANEL_ID = 'gravis-lpn-batch-panel';
+  const LAUNCHER_ID = 'gravis-lpn-batch-launcher';
+  const STORAGE_KEY = 'gravis_lpn_batch_v3';
+  const FCR_INVENTORY_TABLE_ID = 'table-inventory';
+  const FCR_LPN_COLUMN_INDEX = 4;
+  const FCR_LPN_HEADER_BTN_ID = 'gravis-fcr-copy-lpns-btn';
+  const DEFAULT_FCR_ORIGIN = 'https://qi-fcresearch-na.corp.amazon.com';
+  const INPUT_MODE_LPN = 'lpn';
+  const INPUT_MODE_CONTAINER = 'container';
+
+  const LPN_PATTERN = /^LPN[A-Z0-9]+$/i;
+  const CONTAINER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{2,}$/;
+  const IFRAME_TIMEOUT_MS = 45000;
+  const FCR_TABLE_TIMEOUT_MS = 3000;
+  const FCR_TABLE_HARD_MAX_MS = 12000;
+  const IFRAME_POLL_MS = 100;
+  const BETWEEN_CONTAINER_MS = 80;
+  const GRAVIS_PARALLEL = 3;
+  const MEM3_PARALLEL = 3;
+  const MEM3_CACHE_TTL_MS = 20 * 60 * 1000;
+  const MEM3_FAIL_CACHE_TTL_MS = 5 * 60 * 1000;
+  const MEM3_CACHE_KEY = 'gravis_mem3_lpn_cache';
+  const SNAPSHOT_THROTTLE_MS = 350;
+  const ROW_LOADING_NOTE = 'loading';
+  const MAX_DEBUG_ENTRIES = 500;
+  const GRAVIS_FCR_WORKER_HEARTBEAT_KEY = 'gravis_fcr_worker_heartbeat';
+  const GRAVIS_FCR_WORKER_CMD_KEY = 'gravis_fcr_worker_cmd';
+  const GRAVIS_FCR_WORKER_RES_KEY = 'gravis_fcr_worker_res';
+  const GRAVIS_FCR_WORKER_LOCK_KEY = 'gravis_fcr_worker_lock';
+  const GRAVIS_FCR_WORKER_QUEUE_KEY = 'gravis_fcr_worker_queue';
+  const GRAVIS_FCR_WORKER_RESULTS_KEY = 'gravis_fcr_worker_results';
+  const GRAVIS_FCR_WORKER_CANCEL_ALL_KEY = 'gravis_fcr_worker_cancel_all';
+  const GRAVIS_FCR_WORKER_HEARTBEAT_TTL_MS = 12000;
+  const GRAVIS_FCR_WORKER_START_TIMEOUT_MS = 25000;
+  const GRAVIS_FCR_WORKER_POLL_MS = 120;
+  const GRAVIS_FCR_WORKER_LOOKUP_TIMEOUT_MS = FCR_TABLE_HARD_MAX_MS + 2000;
+
+  const KNOWN_STATUSES = new Set([
+    'COMPLETED',
+    'ESCALATED',
+    'IN_PROGRESS',
+    'PENDING',
+    'CANCELLED',
+    'FAILED',
+    'OPEN',
+    'CLOSED',
+  ]);
+
+  let sharedIframe = null;
+  let fcrWorkerIframe = null;
+  const fcrWorkerIframePool = [];
+  const fcrWorkerSlotBusy = new Array(MEM3_PARALLEL).fill(false);
+  const gravisIframePool = [];
+  let prewarmInFlight = false;
+  let searchGeneration = 0;
+  let batchRunning = false;
+  let batchAbort = false;
+  let fcrWorkerLoopStarted = false;
+  const fcrWorkerOwnerId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  function normalizeText(text) {
+    return (text || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function parseLpnList(raw) {
+    return [...new Set(
+      (raw || '')
+        .split(/[\s,;]+/)
+        .map((s) => normalizeText(s).toUpperCase())
+        .filter((s) => LPN_PATTERN.test(s))
+    )];
+  }
+
+  function parseContainerList(raw) {
+    return [...new Set(
+      (raw || '')
+        .split(/[\s,;]+/)
+        .map((s) => normalizeText(s))
+        .filter((s) => CONTAINER_PATTERN.test(s) && !LPN_PATTERN.test(s))
+    )];
+  }
+
+  function getFcrOrigin(stored) {
+    const origin = normalizeText(stored?.fcrOrigin || DEFAULT_FCR_ORIGIN).replace(/\/$/, '');
+    return origin || DEFAULT_FCR_ORIGIN;
+  }
+
+  function fcrResultsUrl(containerId, fcrOrigin) {
+    return `${getFcrOrigin({ fcrOrigin })}/MEM3/results?s=${encodeURIComponent(containerId)}`;
+  }
+
+  function fcrHostMatchesPage(fcrOrigin) {
+    try {
+      return new URL(fcrOrigin).hostname === location.hostname;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function gmRequest(url) {
+    return new Promise((resolve, reject) => {
+      if (typeof GM_xmlhttpRequest !== 'function') {
+        reject(new Error('GM_xmlhttpRequest not available'));
+        return;
+      }
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url,
+        onload(response) {
+          resolve(response);
+        },
+        onerror(err) {
+          reject(new Error(`Network error: ${JSON.stringify(err)}`));
+        },
+      });
+    });
+  }
+
+  function htmlToDocument(html) {
+    return new DOMParser().parseFromString(html, 'text/html');
+  }
+
+  function returnUnitUrl(lpn) {
+    return `${GRAVIS_BASE}/returnUnit/${encodeURIComponent(lpn)}?selectedLocale=default`;
+  }
+
+  function sideNavNumber(id) {
+    const m = (id || '').match(/side-nav-(\d+)/i);
+    return m ? parseInt(m[1], 10) : 0;
+  }
+
+  function parseTitleCard(titleEl) {
+    if (!titleEl) return '';
+    const clone = titleEl.cloneNode(true);
+    const badge = clone.querySelector('.number');
+    if (badge) badge.remove();
+    return normalizeText(clone.textContent);
+  }
+
+  function parseBadgeCount(titleEl) {
+    const badge = titleEl && titleEl.querySelector('.number');
+    const n = badge ? parseInt(normalizeText(badge.textContent), 10) : NaN;
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function rowLabel(row) {
+    const first = row && row.querySelector('td:first-child');
+    return normalizeText(first ? first.textContent : '');
+  }
+
+  function rowValue(row) {
+    const valueEl = row && row.querySelector('td:nth-child(2) attribute > div');
+    if (valueEl) return normalizeText(valueEl.textContent);
+    const cell = row && row.querySelector('td:nth-child(2)');
+    return normalizeText(cell ? cell.textContent : '');
+  }
+
+  const MEMPHIS_TZ = 'America/Chicago';
+
+  function parseGravisUtcTime(text) {
+    const raw = normalizeText(text);
+    if (!raw) return null;
+    const m = raw.match(
+      /^(?:\w{3},\s+)?(\w{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+UTC\s+(\d{4})$/
+    );
+    if (!m) {
+      const fallback = Date.parse(raw.replace(/\s+UTC\s+/i, ' GMT '));
+      return Number.isNaN(fallback) ? null : new Date(fallback);
+    }
+    const months = {
+      Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
+      Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11,
+    };
+    const month = months[m[1]];
+    if (month === undefined) return null;
+    const d = new Date(Date.UTC(
+      parseInt(m[6], 10),
+      month,
+      parseInt(m[2], 10),
+      parseInt(m[3], 10),
+      parseInt(m[4], 10),
+      parseInt(m[5], 10)
+    ));
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  function formatMemphisTime(utcText) {
+    const raw = normalizeText(utcText);
+    if (!raw) return '';
+    const d = parseGravisUtcTime(raw);
+    if (!d) return raw;
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: MEMPHIS_TZ,
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+      timeZoneName: 'short',
+    }).formatToParts(d);
+    const get = (type) => parts.find((p) => p.type === type)?.value || '';
+    return `${get('weekday')} ${get('month')} ${get('day')} ${get('hour')}:${get('minute')}:${get('second')} ${get('timeZoneName')} ${get('year')}`.trim();
+  }
+
+  function activityField(activity, label) {
+    const fields = activity?.fields || [];
+    const needle = normalizeText(label).toLowerCase();
+    const match = fields.find((f) => normalizeText(f.label).toLowerCase() === needle);
+    return match ? match.value : '';
+  }
+
+  function lastActivityMeta(sorted) {
+    const last = sorted[sorted.length - 1];
+    const endTimeUtc = activityField(last, 'End Time');
+    return {
+      lastAssociate: activityField(last, 'Associate'),
+      endTime: formatMemphisTime(endTimeUtc),
+      endTimeUtc,
+    };
+  }
+
+  function extractActivityTableRows(root) {
+    const rows = [];
+    root.querySelectorAll('mat-card-content table tbody tr').forEach((row) => {
+      const label = rowLabel(row);
+      const value = rowValue(row);
+      if (!label && !value) return;
+      rows.push({ label, value });
+    });
+    return rows;
+  }
+
+  function findStatusInActivity(root) {
+    const rows = root.querySelectorAll('mat-card-content table tbody tr');
+    for (const row of rows) {
+      if (/^status$/i.test(rowLabel(row))) return rowValue(row);
+    }
+    for (const row of rows) {
+      const value = rowValue(row);
+      if (KNOWN_STATUSES.has(value)) return value;
+    }
+    return '';
+  }
+
+  function extractActivitiesFromDoc(doc, minSideNav = MIN_SIDE_NAV) {
+    const activities = [];
+    const cards = doc.querySelectorAll('[id^="side-nav-"] > socrates-activity-data');
+
+    cards.forEach((card) => {
+      const sideNav = card.closest('[id^="side-nav-"]');
+      const sideNavId = sideNav ? sideNav.id : '';
+      if (sideNavNumber(sideNavId) < minSideNav) return;
+
+      const titleEl = card.querySelector('.title-card');
+      const name = parseTitleCard(titleEl);
+      if (!name) return;
+
+      activities.push({
+        sideNavId,
+        activity: name,
+        count: parseBadgeCount(titleEl),
+        status: findStatusInActivity(card),
+        fields: extractActivityTableRows(card),
+      });
+    });
+
+    return activities;
+  }
+
+  function assessPageState(doc) {
+    const bodyText = normalizeText(doc.body?.textContent || '').slice(0, 500);
+    if (/sign in with midway/i.test(bodyText) && !doc.querySelector('return-unit-data')) {
+      return { state: 'error', reason: 'midway-login' };
+    }
+
+    const returnUnit = doc.querySelector('return-unit-data');
+    if (!returnUnit) {
+      return { state: 'loading', reason: 'no-return-unit-data' };
+    }
+
+    const cards = doc.querySelectorAll('[id^="side-nav-"] > socrates-activity-data .title-card');
+    const gradingCards = Array.from(cards).filter((el) => {
+      const nav = el.closest('[id^="side-nav-"]');
+      return sideNavNumber(nav?.id) >= MIN_SIDE_NAV;
+    });
+
+    if (gradingCards.length > 0) {
+      return { state: 'ready', reason: 'grading-cards-present', cardCount: gradingCards.length };
+    }
+
+    const anySideNav = doc.querySelector('[id^="side-nav-"]');
+    if (anySideNav && doc.querySelector('socrates-activity-data')) {
+      return { state: 'ready', reason: 'activities-loaded-empty-grading', cardCount: 0 };
+    }
+
+    const loading = doc.querySelector('mat-spinner, .mat-progress-spinner, [class*="loading"]');
+    if (loading) return { state: 'loading', reason: 'spinner-visible' };
+
+    return { state: 'loading', reason: 'waiting-for-activities' };
+  }
+
+  function extractFromDocument(doc, lpn, meta = {}) {
+    const pageState = assessPageState(doc);
+    const activities = pageState.state === 'ready'
+      ? extractActivitiesFromDoc(doc)
+      : [];
+
+    return {
+      lpn,
+      url: returnUnitUrl(lpn),
+      pageState,
+      activities,
+      activityCount: activities.length,
+      ...meta,
+    };
+  }
+
+  function getSharedIframe() {
+    if (sharedIframe) return sharedIframe;
+    sharedIframe = document.createElement('iframe');
+    sharedIframe.setAttribute('aria-hidden', 'true');
+    sharedIframe.style.cssText =
+      'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;border:0;opacity:0;pointer-events:none;';
+    document.body.appendChild(sharedIframe);
+    return sharedIframe;
+  }
+
+  function getFcrWorkerIframeSlot(slot) {
+    const index = slot % MEM3_PARALLEL;
+    if (!fcrWorkerIframePool[index]) {
+      const iframe = document.createElement('iframe');
+      iframe.setAttribute('aria-hidden', 'true');
+      iframe.dataset.fcrWorkerSlot = String(index);
+      iframe.style.cssText =
+        'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;border:0;opacity:0;pointer-events:none;';
+      document.body.appendChild(iframe);
+      fcrWorkerIframePool[index] = iframe;
+    }
+    return fcrWorkerIframePool[index];
+  }
+
+  function getFcrWorkerIframe() {
+    return getFcrWorkerIframeSlot(0);
+  }
+
+  function getGravisIframe(slot) {
+    const index = slot % GRAVIS_PARALLEL;
+    if (!gravisIframePool[index]) {
+      const iframe = document.createElement('iframe');
+      iframe.setAttribute('aria-hidden', 'true');
+      iframe.dataset.gravisSlot = String(index);
+      iframe.style.cssText =
+        'position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;border:0;opacity:0;pointer-events:none;';
+      document.body.appendChild(iframe);
+      gravisIframePool[index] = iframe;
+    }
+    return gravisIframePool[index];
+  }
+
+  function getMem3Cache() {
+    return gmJsonGet(MEM3_CACHE_KEY) || {};
+  }
+
+  function getMem3CacheEntry(containerId, fcrOrigin) {
+    const entry = getMem3Cache()[containerId];
+    if (!entry || !Array.isArray(entry.lpns)) return null;
+    if (entry.fcrOrigin !== getFcrOrigin({ fcrOrigin })) return null;
+    const ttl = entry.failReason ? MEM3_FAIL_CACHE_TTL_MS : MEM3_CACHE_TTL_MS;
+    if (Date.now() - entry.ts > ttl) return null;
+    return entry;
+  }
+
+  function getCachedContainerLpns(containerId, fcrOrigin) {
+    const entry = getMem3CacheEntry(containerId, fcrOrigin);
+    return entry ? entry.lpns : null;
+  }
+
+  function setCachedContainerLpns(containerId, fcrOrigin, lpns, failReason) {
+    const cache = getMem3Cache();
+    const row = {
+      lpns: [...(lpns || [])],
+      ts: Date.now(),
+      fcrOrigin: getFcrOrigin({ fcrOrigin }),
+    };
+    if (failReason) row.failReason = failReason;
+    cache[containerId] = row;
+    gmJsonSet(MEM3_CACHE_KEY, cache);
+  }
+
+  async function mapWithConcurrency(items, concurrency, mapper) {
+    const results = new Array(items.length);
+    let nextIndex = 0;
+
+    async function worker() {
+      while (nextIndex < items.length) {
+        const i = nextIndex;
+        nextIndex += 1;
+        if (i >= items.length) break;
+        results[i] = await mapper(items[i], i);
+      }
+    }
+
+    const workers = Math.min(concurrency, items.length);
+    await Promise.all(Array.from({ length: workers }, () => worker()));
+    return results;
+  }
+
+  function waitForPage(doc, lpn, generation, timeoutMs) {
+    const started = performance.now();
+
+    return new Promise((resolve) => {
+      let settled = false;
+
+      const finish = (payload) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        clearInterval(pollId);
+        resolve(payload);
+      };
+
+      const poll = () => {
+        if (generation !== searchGeneration) {
+          finish({ ok: false, error: 'cancelled', lpn });
+          return;
+        }
+
+        const readiness = assessPageState(doc);
+        if (readiness.state === 'error') {
+          finish({
+            ok: false,
+            error: readiness.reason,
+            lpn,
+            ...extractFromDocument(doc, lpn, {
+              durationMs: Math.round(performance.now() - started),
+            }),
+          });
+          return;
+        }
+
+        if (readiness.state === 'ready') {
+          finish({
+            ok: true,
+            ...extractFromDocument(doc, lpn, {
+              durationMs: Math.round(performance.now() - started),
+              readyReason: readiness.reason,
+            }),
+          });
+          return;
+        }
+      };
+
+      const timeoutId = setTimeout(() => {
+        finish({
+          ok: false,
+          error: 'timeout',
+          lpn,
+          partial: extractFromDocument(doc, lpn, {
+            timedOut: true,
+            durationMs: Math.round(performance.now() - started),
+          }),
+        });
+      }, timeoutMs);
+
+      const pollId = setInterval(poll, IFRAME_POLL_MS);
+      poll();
+    });
+  }
+
+  function isFcrProcessingVisible(doc) {
+    const el = doc.querySelector('.dataTables_processing, #table-inventory_processing');
+    if (!el) return false;
+    const style = doc.defaultView?.getComputedStyle(el);
+    if (style && (style.display === 'none' || style.visibility === 'hidden')) return false;
+    return el.offsetParent !== null || normalizeText(el.textContent).length > 0;
+  }
+
+  function assessFcrTableState(doc) {
+    const bodyText = normalizeText(doc.body?.textContent || '').slice(0, 1200);
+    if (/sign in with midway/i.test(bodyText) && !doc.getElementById(FCR_INVENTORY_TABLE_ID)) {
+      return { state: 'error', reason: 'midway-login' };
+    }
+
+    if (
+      /no (matching )?records found/i.test(bodyText)
+      || /no data available in table/i.test(bodyText)
+      || /container (id )?not found/i.test(bodyText)
+      || /invalid container/i.test(bodyText)
+      || /unable to (find|load) (the )?container/i.test(bodyText)
+    ) {
+      return { state: 'ready', reason: 'not-found-text', emptyInventory: true };
+    }
+
+    const table = doc.getElementById(FCR_INVENTORY_TABLE_ID);
+    if (!table) return { state: 'loading', reason: 'no-table' };
+    if (isFcrProcessingVisible(doc)) {
+      return { state: 'loading', reason: 'datatables-processing' };
+    }
+
+    const info = doc.getElementById('table-inventory_info');
+    const infoText = normalizeText(info?.textContent);
+    if (/of 0 entries/i.test(infoText) || /Showing 0 to 0 of 0/i.test(infoText)) {
+      return { state: 'ready', reason: 'zero-entries', emptyInventory: true };
+    }
+
+    const tbody = table.querySelector('tbody');
+    const emptyCell = tbody?.querySelector('td.dataTables_empty');
+    if (emptyCell && /no data available/i.test(normalizeText(emptyCell.textContent))) {
+      return { state: 'ready', reason: 'empty-row', emptyInventory: true };
+    }
+
+    const dataRows = tbody
+      ? Array.from(tbody.querySelectorAll('tr')).filter(isDataInventoryRow)
+      : [];
+    if (dataRows.length > 0) {
+      return { state: 'ready', reason: 'has-data', emptyInventory: false };
+    }
+
+    const wrapper = doc.getElementById('table-inventory_wrapper');
+    if (table.classList.contains('dataTable') && wrapper && !isFcrProcessingVisible(doc)) {
+      return { state: 'ready', reason: 'initialized-empty', emptyInventory: true };
+    }
+
+    return { state: 'loading', reason: 'waiting' };
+  }
+
+  function fcrTableWaitLimitMs(doc, readiness) {
+    if (readiness.state === 'ready' || readiness.state === 'error') return 0;
+    const table = doc.getElementById(FCR_INVENTORY_TABLE_ID);
+    if (!table) return FCR_TABLE_TIMEOUT_MS;
+    const stillWorking = isFcrProcessingVisible(doc) || readiness.reason === 'waiting';
+    return stillWorking ? FCR_TABLE_HARD_MAX_MS : FCR_TABLE_TIMEOUT_MS;
+  }
+
+  function finishFcrTableWait(doc, containerId, started, finish) {
+    const lastReadiness = assessFcrTableState(doc);
+    const lpns = extractLpnsFromInventoryTable(doc);
+    if (lastReadiness.state === 'ready' && lastReadiness.emptyInventory) {
+      finish({
+        ok: true,
+        containerId,
+        lpns: [],
+        emptyInventory: true,
+        durationMs: Math.round(performance.now() - started),
+        readyReason: lastReadiness.reason,
+      });
+      return;
+    }
+    if (lpns.length > 0) {
+      finish({
+        ok: true,
+        containerId,
+        lpns,
+        emptyInventory: false,
+        durationMs: Math.round(performance.now() - started),
+        readyReason: 'timeout-with-data',
+      });
+      return;
+    }
+    finish({
+      ok: false,
+      error: 'timeout',
+      containerId,
+      lpns: [],
+    });
+  }
+
+  function waitForFcrTable(doc, containerId, generation, _timeoutMs, shouldCancel) {
+    const started = performance.now();
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (payload) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(hardTimeoutId);
+        clearInterval(pollId);
+        resolve(payload);
+      };
+
+      const poll = () => {
+        if (shouldCancel && shouldCancel()) {
+          finish({ ok: false, error: 'cancelled', containerId });
+          return;
+        }
+        if (generation != null && generation !== searchGeneration) {
+          finish({ ok: false, error: 'cancelled', containerId });
+          return;
+        }
+        const readiness = assessFcrTableState(doc);
+        if (readiness.state === 'error') {
+          finish({ ok: false, error: readiness.reason, containerId });
+          return;
+        }
+        if (readiness.state === 'ready') {
+          const lpns = extractLpnsFromInventoryTable(doc);
+          finish({
+            ok: true,
+            containerId,
+            lpns,
+            emptyInventory: Boolean(readiness.emptyInventory),
+            durationMs: Math.round(performance.now() - started),
+            readyReason: readiness.reason,
+          });
+          return;
+        }
+        const elapsed = performance.now() - started;
+        const limit = fcrTableWaitLimitMs(doc, readiness);
+        if (elapsed >= limit) {
+          finishFcrTableWait(doc, containerId, started, finish);
+        }
+      };
+
+      const hardTimeoutId = setTimeout(() => {
+        finishFcrTableWait(doc, containerId, started, finish);
+      }, FCR_TABLE_HARD_MAX_MS);
+
+      const pollId = setInterval(poll, IFRAME_POLL_MS);
+      poll();
+    });
+  }
+
+  function navigateIframe(url, generation, waitFn, iframeEl) {
+    const iframe = iframeEl || getSharedIframe();
+    return new Promise((resolve) => {
+      let loadHandled = false;
+      const onLoad = () => {
+        loadHandled = true;
+        let doc;
+        try {
+          doc = iframe.contentDocument;
+        } catch (err) {
+          resolve({ ok: false, error: 'iframe-document-blocked', detail: String(err) });
+          return;
+        }
+        if (!doc) {
+          resolve({
+            ok: false,
+            error: 'iframe-no-document',
+            hint: 'Cross-origin: MEM3 must be fetched via XHR from this page (update script) or run batch on FCResearch.',
+          });
+          return;
+        }
+        waitFn(doc).then(resolve);
+      };
+
+      iframe.addEventListener('load', onLoad, { once: true });
+      if ((iframe.src || '') === url && !loadHandled) {
+        try {
+          const doc = iframe.contentDocument;
+          if (doc?.body) {
+            iframe.removeEventListener('load', onLoad);
+            waitFn(doc).then(resolve);
+            return;
+          }
+        } catch (_) {
+          /* navigate */
+        }
+      }
+      iframe.src = url;
+    });
+  }
+
+  async function fetchContainerLpnsViaXhr(containerId, generation, fcrOrigin) {
+    const url = fcrResultsUrl(containerId, fcrOrigin);
+    try {
+      const response = await gmRequest(url);
+      if (generation !== searchGeneration) {
+        return { ok: false, error: 'cancelled', containerId };
+      }
+
+      const status = response.status;
+      if (status === 401 || status === 403) {
+        return { ok: false, error: 'mem3-auth-denied', containerId, httpStatus: status };
+      }
+      if (status < 200 || status >= 300) {
+        return {
+          ok: false,
+          error: `mem3-http-${status}`,
+          containerId,
+          httpStatus: status,
+        };
+      }
+
+      const doc = htmlToDocument(response.responseText || '');
+      const readiness = assessFcrTableState(doc);
+      if (readiness.state === 'error') {
+        return { ok: false, error: readiness.reason, containerId, fetchMethod: 'xhr' };
+      }
+
+      const lpns = extractLpnsFromInventoryTable(doc);
+      if (readiness.state === 'ready') {
+        return {
+          ok: true,
+          containerId,
+          lpns,
+          emptyInventory: Boolean(readiness.emptyInventory),
+          fetchMethod: 'xhr',
+          readyReason: readiness.reason,
+        };
+      }
+
+      return {
+        ok: false,
+        error: 'mem3-table-not-ready-in-html',
+        containerId,
+        lpns,
+        fetchMethod: 'xhr',
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: 'mem3-xhr-failed',
+        containerId,
+        detail: String(err),
+        fetchMethod: 'xhr',
+      };
+    }
+  }
+
+  function fetchContainerLpnsViaIframe(containerId, generation, fcrOrigin, iframeEl, shouldCancel) {
+    const url = fcrResultsUrl(containerId, fcrOrigin);
+    return navigateIframe(
+      url,
+      generation,
+      (doc) => waitForFcrTable(doc, containerId, generation, FCR_TABLE_TIMEOUT_MS, shouldCancel),
+      iframeEl
+    ).then((result) => ({ ...result, fetchMethod: 'worker-iframe' }));
+  }
+
+  function workerEnqueueLookup(containerId) {
+    const requestId = `gfv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const queue = gmJsonGet(GRAVIS_FCR_WORKER_QUEUE_KEY) || [];
+    queue.push({ requestId, containerId, ts: Date.now() });
+    gmJsonSet(GRAVIS_FCR_WORKER_QUEUE_KEY, queue);
+    return requestId;
+  }
+
+  function workerTakeResult(requestId) {
+    const results = gmJsonGet(GRAVIS_FCR_WORKER_RESULTS_KEY) || {};
+    const res = results[requestId];
+    if (!res) return null;
+    delete results[requestId];
+    gmJsonSet(GRAVIS_FCR_WORKER_RESULTS_KEY, results);
+    return res;
+  }
+
+  function workerStoreResult(requestId, result) {
+    const results = gmJsonGet(GRAVIS_FCR_WORKER_RESULTS_KEY) || {};
+    results[requestId] = { ...result, requestId };
+    gmJsonSet(GRAVIS_FCR_WORKER_RESULTS_KEY, results);
+  }
+
+  function workerCancelAllPending() {
+    gmJsonSet(GRAVIS_FCR_WORKER_CANCEL_ALL_KEY, Date.now());
+    gmJsonSet(GRAVIS_FCR_WORKER_QUEUE_KEY, []);
+  }
+
+  async function fetchContainerLpnsViaWorker(containerId, generation, panel, fcrOrigin) {
+    const requestId = workerEnqueueLookup(containerId);
+    const deadline = Date.now() + GRAVIS_FCR_WORKER_LOOKUP_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (generation !== searchGeneration) {
+        return { ok: false, error: 'cancelled', containerId, fetchMethod: 'worker' };
+      }
+      const res = workerTakeResult(requestId);
+      if (res) {
+        return { ...res, fetchMethod: 'worker' };
+      }
+      await sleep(GRAVIS_FCR_WORKER_POLL_MS);
+    }
+    return { ok: false, error: 'fcr-worker-timeout', containerId, fetchMethod: 'worker' };
+  }
+
+  async function ensureGravisFcrWorker(panel, fcrOrigin, quiet) {
+    if (isFcrWorkerAlive()) return true;
+
+    if (!quiet) {
+      debugWarn(panel, 'FCResearch worker tab not detected');
+      setProgress(panel, 'Starting FCResearch worker tab…');
+    }
+
+    const origin = getFcrOrigin({ fcrOrigin });
+    if (typeof GM_openInTab === 'function') {
+      GM_openInTab(`${origin}/MEM3/results?s=`, { active: false, insert: true, load: true });
+    }
+
+    const deadline = Date.now() + GRAVIS_FCR_WORKER_START_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (isFcrWorkerAlive()) {
+        debugLog(panel, 'FCResearch worker ready');
+        if (!quiet && panel) {
+          setProgress(panel, 'FCResearch worker ready.');
+        }
+        return true;
+      }
+      await sleep(GRAVIS_FCR_WORKER_POLL_MS);
+    }
+
+    setProgress(
+      panel,
+      'Open FCResearch MEM3 in a tab (logged in), then Run batch again.'
+    );
+    return false;
+  }
+
+  function prewarmFcrWorker(panel) {
+    if (isFcrWorkerAlive() || prewarmInFlight || !panel) return;
+    prewarmInFlight = true;
+    const fcrOrigin = panel.querySelector('.gravis-fcr-origin')?.value || DEFAULT_FCR_ORIGIN;
+    ensureGravisFcrWorker(panel, fcrOrigin, true)
+      .then((ok) => {
+        if (ok) debugLog(panel, 'FCResearch worker pre-warmed');
+      })
+      .finally(() => {
+        prewarmInFlight = false;
+      });
+  }
+
+  async function fetchContainerLpns(containerId, generation, fcrOrigin, panel) {
+    const origin = getFcrOrigin({ fcrOrigin });
+    const cachedEntry = getMem3CacheEntry(containerId, origin);
+    if (cachedEntry) {
+      if (cachedEntry.failReason) {
+        debugLog(panel, 'MEM3 cache hit (fail)', containerId, cachedEntry.failReason);
+        return {
+          ok: false,
+          error: cachedEntry.failReason,
+          containerId,
+          lpns: [],
+          fetchMethod: 'cache',
+        };
+      }
+      debugLog(panel, 'MEM3 cache hit', containerId, cachedEntry.lpns.length, 'LPN(s)');
+      return {
+        ok: true,
+        containerId,
+        lpns: cachedEntry.lpns,
+        fetchMethod: 'cache',
+        emptyInventory: cachedEntry.lpns.length === 0,
+      };
+    }
+
+    if (fcrHostMatchesPage(origin)) {
+      return fetchContainerLpnsViaIframe(
+        containerId,
+        generation,
+        origin,
+        getFcrWorkerIframe(),
+        null
+      );
+    }
+
+    if (!isFcrWorkerAlive()) {
+      await ensureGravisFcrWorker(panel, origin);
+    }
+    if (isFcrWorkerAlive()) {
+      return fetchContainerLpnsViaWorker(containerId, generation, panel, origin);
+    }
+
+    const xhrResult = await fetchContainerLpnsViaXhr(containerId, generation, origin);
+    if (xhrResult.ok) {
+      setCachedContainerLpns(containerId, origin, xhrResult.lpns || []);
+      return xhrResult;
+    }
+
+    return {
+      ...xhrResult,
+      error: xhrResult.error === 'mem3-table-not-ready-in-html'
+        ? 'fcr-worker-required'
+        : xhrResult.error,
+      hint: 'Keep https://qi-fcresearch-na.corp.amazon.com/MEM3/results open in a tab while logged in.',
+    };
+  }
+
+  function workerShouldCancelQueueItem(cmd) {
+    const cancelAt = gmJsonGet(GRAVIS_FCR_WORKER_CANCEL_ALL_KEY) || 0;
+    return cmd.ts < cancelAt;
+  }
+
+  async function workerRunLookupSlot(cmd, slot) {
+    try {
+      const result = await fetchContainerLpnsViaIframe(
+        cmd.containerId,
+        null,
+        location.origin,
+        getFcrWorkerIframeSlot(slot),
+        () => workerShouldCancelQueueItem(cmd)
+      );
+      workerStoreResult(cmd.requestId, result);
+    } catch (err) {
+      console.warn(LOG_PREFIX, 'worker lookup error', err);
+      workerStoreResult(cmd.requestId, {
+        ok: false,
+        error: 'worker-exception',
+        containerId: cmd.containerId,
+        detail: String(err),
+      });
+    }
+  }
+
+  function workerDrainQueue() {
+    let queue = gmJsonGet(GRAVIS_FCR_WORKER_QUEUE_KEY) || [];
+    if (!queue.length) return;
+
+    for (let slot = 0; slot < MEM3_PARALLEL; slot += 1) {
+      if (fcrWorkerSlotBusy[slot] || !queue.length) continue;
+      const cmd = queue.shift();
+      fcrWorkerSlotBusy[slot] = true;
+      workerRunLookupSlot(cmd, slot).finally(() => {
+        fcrWorkerSlotBusy[slot] = false;
+      });
+    }
+    gmJsonSet(GRAVIS_FCR_WORKER_QUEUE_KEY, queue);
+  }
+
+  function startGravisFcrWorkerHost() {
+    if (fcrWorkerLoopStarted || !isFcrWorkerHost()) return;
+    fcrWorkerLoopStarted = true;
+
+    setInterval(() => {
+      gmJsonSet(GRAVIS_FCR_WORKER_HEARTBEAT_KEY, {
+        ts: Date.now(),
+        url: location.href,
+        owner: fcrWorkerOwnerId,
+      });
+    }, 1000);
+
+    setTimeout(() => {
+      try {
+        for (let i = 0; i < MEM3_PARALLEL; i += 1) {
+          getFcrWorkerIframeSlot(i).src = `${location.origin}/MEM3/results?s=`;
+        }
+      } catch (_) {
+        /* ignore */
+      }
+    }, 500);
+
+    setInterval(() => workerDrainQueue(), 150);
+
+    console.log(LOG_PREFIX, 'FCResearch worker host started');
+  }
+
+  function applyMem3ContainerResult(workItems, containerId, result, fcrOrigin, onLpnFound) {
+    if (result.ok && result.fetchMethod !== 'cache') {
+      setCachedContainerLpns(containerId, fcrOrigin, result.lpns || []);
+    }
+    if (!result.ok) {
+      if (
+        result.fetchMethod !== 'cache'
+        && (result.error === 'timeout' || result.error === 'fcr-worker-timeout')
+      ) {
+        setCachedContainerLpns(containerId, fcrOrigin, [], result.error);
+      }
+      workItems.push({
+        lpn: '',
+        container: containerId,
+        resolveError: result.error || 'container-lookup-failed',
+      });
+      return;
+    }
+    if (!result.lpns.length) {
+      if (result.fetchMethod !== 'cache') {
+        setCachedContainerLpns(containerId, fcrOrigin, []);
+      }
+      workItems.push({
+        lpn: '',
+        container: containerId,
+        resolveError: 'no-lpns-in-container',
+      });
+      return;
+    }
+    for (const lpn of result.lpns) {
+      const item = { lpn, container: containerId, resolveError: '' };
+      workItems.push(item);
+      if (onLpnFound) onLpnFound(item);
+    }
+  }
+
+  async function resolveContainersToWorkItems(containers, generation, panel, fcrOrigin, onLpnFound) {
+    const workItems = [];
+    const total = containers.length;
+    let mem3Finished = 0;
+
+    const lookups = await mapWithConcurrency(containers, MEM3_PARALLEL, async (containerId, i) => {
+      if (batchAbort || generation !== searchGeneration) {
+        return { index: i, containerId, result: { ok: false, error: 'cancelled', containerId } };
+      }
+
+      const stepStarted = Date.now();
+      setJobProgressTotals(panel, {
+        phase: 'mem3',
+        phaseDetail: `MEM3 ${mem3Finished + 1}/${total}: ${containerId}… (${MEM3_PARALLEL} parallel)`,
+      });
+
+      const result = await fetchContainerLpns(containerId, generation, fcrOrigin, panel);
+      mem3Finished += 1;
+      recordJobStep(panel, {
+        mem3Inc: 1,
+        durationMs: Date.now() - stepStarted,
+        phase: 'mem3',
+        phaseDetail: result.ok
+          ? `MEM3 ${mem3Finished}/${total}: ${containerId} → ${result.lpns?.length ?? 0} LPN(s)`
+          : `MEM3 ${mem3Finished}/${total}: ${containerId} (${result.error || 'failed'})`,
+      });
+      debugLog(
+        panel,
+        'MEM3',
+        containerId,
+        result.ok
+          ? `${result.lpns?.length ?? 0} LPN(s) [${result.fetchMethod || '?'}]`
+          : result.error
+      );
+      return { index: i, containerId, result };
+    });
+
+    lookups
+      .filter(Boolean)
+      .sort((a, b) => a.index - b.index)
+      .forEach(({ containerId, result }) => {
+        applyMem3ContainerResult(workItems, containerId, result, fcrOrigin, onLpnFound);
+      });
+
+    return workItems;
+  }
+
+  function fetchLpnViaIframe(lpn, generation, iframeEl) {
+    const url = returnUnitUrl(lpn);
+    const iframe = iframeEl || getSharedIframe();
+
+    return new Promise((resolve) => {
+      let loadHandled = false;
+
+      const onLoad = () => {
+        loadHandled = true;
+        let doc;
+        try {
+          doc = iframe.contentDocument;
+        } catch (err) {
+          resolve({ ok: false, error: 'iframe-document-blocked', lpn, detail: String(err) });
+          return;
+        }
+        if (!doc) {
+          resolve({ ok: false, error: 'iframe-no-document', lpn });
+          return;
+        }
+        waitForPage(doc, lpn, generation, IFRAME_TIMEOUT_MS).then(resolve);
+      };
+
+      iframe.addEventListener('load', onLoad, { once: true });
+
+      if ((iframe.src || '') === url && !loadHandled) {
+        try {
+          const doc = iframe.contentDocument;
+          if (doc?.body) {
+            iframe.removeEventListener('load', onLoad);
+            waitForPage(doc, lpn, generation, IFRAME_TIMEOUT_MS).then(resolve);
+            return;
+          }
+        } catch (_) {
+          /* navigate */
+        }
+      }
+
+      iframe.src = url;
+    });
+  }
+
+  function lpnFromCurrentPage() {
+    const m = location.pathname.match(/\/returnUnit\/([^/]+)/i);
+    return m ? decodeURIComponent(m[1]).toUpperCase() : null;
+  }
+
+  async function fetchLpn(lpn, generation, iframeSlot, useParallel) {
+    if (!useParallel) {
+      const onPage = lpnFromCurrentPage();
+      if (onPage && onPage === lpn.toUpperCase()) {
+        const readiness = assessPageState(document);
+        if (readiness.state === 'ready') {
+          return { ok: true, source: 'live-page', ...extractFromDocument(document, lpn) };
+        }
+        return waitForPage(document, lpn, generation, IFRAME_TIMEOUT_MS).then((r) => ({
+          ...r,
+          source: 'live-page',
+        }));
+      }
+    }
+    const iframe = iframeSlot != null ? getGravisIframe(iframeSlot) : getSharedIframe();
+    const result = await fetchLpnViaIframe(lpn, generation, iframe);
+    return { ...result, source: result.source || 'iframe' };
+  }
+
+  function loadStorage() {
+    try {
+      const raw = GM_getValue(STORAGE_KEY, '{}');
+      return typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function gmJsonGet(key) {
+    try {
+      const raw = GM_getValue(key, null);
+      if (!raw) return null;
+      return typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function gmJsonSet(key, value) {
+    try {
+      GM_setValue(key, value === null ? '' : JSON.stringify(value));
+    } catch (err) {
+      console.warn(LOG_PREFIX, 'GM_setValue failed', key, err);
+    }
+  }
+
+  function isFcrWorkerHost() {
+    return (
+      /^(qi-fcresearch-na\.corp\.amazon\.com|qifcr\.(na|eu|fe)\.aftx\.amazonoperations\.app)$/i.test(
+        location.hostname
+      ) && window === window.top
+    );
+  }
+
+  function isFcrWorkerAlive() {
+    const hb = gmJsonGet(GRAVIS_FCR_WORKER_HEARTBEAT_KEY);
+    return Boolean(hb && Date.now() - hb.ts < GRAVIS_FCR_WORKER_HEARTBEAT_TTL_MS);
+  }
+
+  function saveStorage(partial) {
+    try {
+      const merged = { ...loadStorage(), ...partial };
+      GM_setValue(STORAGE_KEY, JSON.stringify(merged));
+    } catch (_) {}
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    })[c]);
+  }
+
+  function statusClass(status) {
+    const s = (status || '').toUpperCase();
+    if (s === 'ESCALATED') return 'gravis-st-escalated';
+    if (s === 'COMPLETED') return 'gravis-st-completed';
+    return 'gravis-st-other';
+  }
+
+  function sortActivitiesBySideNav(activities) {
+    return [...activities].sort(
+      (a, b) => sideNavNumber(a.sideNavId) - sideNavNumber(b.sideNavId)
+    );
+  }
+
+  function formatActivityFieldDiscoveryLines(activities, meta = {}) {
+    const lines = [];
+    const prefix = meta.prefix || '';
+    if (!activities?.length) {
+      lines.push(`${prefix}(no grading activities)`);
+      return lines;
+    }
+    const sorted = sortActivitiesBySideNav(activities);
+    const last = sorted[sorted.length - 1];
+    lines.push(
+      `${prefix}LAST CARD: ${last.sideNavId} | ${last.activity} | status=${last.status || '—'}`
+    );
+    const fields = last.fields || [];
+    if (!fields.length) {
+      lines.push(`${prefix}  (no table fields — re-run batch after script update)`);
+      return lines;
+    }
+    for (const f of fields) {
+      const mark = /end time|associate/i.test(f.label) ? ' *' : '';
+      lines.push(`${prefix}  ${f.label}\t${f.value}${mark}`);
+    }
+    return lines;
+  }
+
+  function buildActivityFieldDiscovery(batchResults, panel) {
+    const lines = [
+      'Purpose: find DOM labels for Last associate + End Time columns.',
+      'Rows marked * match associate/end-time related labels.',
+      '',
+    ];
+    const allLabels = new Set();
+    const lastCardSamples = [];
+
+    const okRows = (batchResults || []).filter((r) => r.ok && r.activities?.length);
+    if (okRows.length) {
+      lines.push(`--- From batch results (${okRows.length} LPN(s) with activities) ---`);
+      const sample = okRows.slice(0, 5);
+      for (const item of sample) {
+        lines.push(`LPN ${item.lpn}${item.container ? ` | container ${item.container}` : ''}`);
+        formatActivityFieldDiscoveryLines(item.activities).forEach((l) => lines.push(l));
+        lines.push('');
+        const last = sortActivitiesBySideNav(item.activities).slice(-1)[0];
+        (last.fields || []).forEach((f) => allLabels.add(f.label));
+        lastCardSamples.push({
+          lpn: item.lpn,
+          container: item.container || '',
+          sideNavId: last.sideNavId,
+          activity: last.activity,
+          fields: last.fields || [],
+        });
+      }
+      if (okRows.length > 5) {
+        lines.push(`… ${okRows.length - 5} more LPN(s) omitted; full labels in JSON export.`);
+        okRows.slice(5).forEach((item) => {
+          const last = sortActivitiesBySideNav(item.activities).slice(-1)[0];
+          (last.fields || []).forEach((f) => allLabels.add(f.label));
+        });
+        lines.push('');
+      }
+    } else {
+      lines.push('--- From batch results ---');
+      lines.push('(none — run a batch first, or use visible page below)');
+      lines.push('');
+    }
+
+    if (/\/gravis\/returnUnit\//i.test(location.pathname)) {
+      const visibleLpn = decodeURIComponent(
+        (location.pathname.match(/\/returnUnit\/([^/]+)/i) || [])[1] || ''
+      );
+      const visibleActivities = extractActivitiesFromDoc(document);
+      lines.push(`--- From visible Gravis page (${visibleLpn || location.pathname}) ---`);
+      formatActivityFieldDiscoveryLines(visibleActivities).forEach((l) => lines.push(l));
+      const last = sortActivitiesBySideNav(visibleActivities).slice(-1)[0];
+      if (last) (last.fields || []).forEach((f) => allLabels.add(f.label));
+      lines.push('');
+    }
+
+    lines.push('--- All unique field labels (last activity card) ---');
+    lines.push(
+      allLabels.size
+        ? [...allLabels].sort().join(', ')
+        : '(none yet)'
+    );
+    lines.push('');
+    lines.push('--- End Time / Associate values on last cards (sample) ---');
+    for (const sample of lastCardSamples) {
+      const endTime = (sample.fields.find((f) => /^end time$/i.test(f.label)) || {}).value || '';
+      const associate = (sample.fields.find((f) => /associate/i.test(f.label)) || {}).value || '';
+      if (endTime || associate) {
+        lines.push(
+          `${sample.lpn}: End Time="${endTime}" | associate-like="${associate}"`
+        );
+      }
+    }
+    if (!lastCardSamples.some((s) => s.fields.some((f) => /end time|associate/i.test(f.label)))) {
+      lines.push('(no End Time / associate labels matched yet — send full section above)');
+    }
+
+    return {
+      text: lines.join('\n'),
+      allLabels: [...allLabels].sort(),
+      lastCardSamples,
+    };
+  }
+
+  function emptyLpnRow(base, error) {
+    return {
+      ...base,
+      lastActivity: '',
+      lastStatus: '',
+      lastAssociate: '',
+      endTime: '',
+      others: [],
+      error: error || '',
+    };
+  }
+
+  function buildLpnRows(batchResults) {
+    const rows = [];
+    for (const item of batchResults) {
+      const base = {
+        container: item.container || '',
+        lpn: item.lpn || '',
+        loading: Boolean(item.loading),
+      };
+
+      if (item.loading) {
+        rows.push(emptyLpnRow(base, ROW_LOADING_NOTE));
+        continue;
+      }
+
+      if (item.resolveError) {
+        rows.push(emptyLpnRow(base, item.resolveError));
+        continue;
+      }
+
+      if (!item.ok) {
+        rows.push(emptyLpnRow(base, item.error || 'failed'));
+        continue;
+      }
+      const sorted = sortActivitiesBySideNav(item.activities || []);
+      if (!sorted.length) {
+        rows.push(emptyLpnRow(base, 'no-grading-activities'));
+        continue;
+      }
+      const last = sorted[sorted.length - 1];
+      const { lastAssociate, endTime } = lastActivityMeta(sorted);
+      rows.push({
+        ...base,
+        lastActivity: last.activity,
+        lastStatus: last.status,
+        lastAssociate,
+        endTime,
+        others: sorted.slice(0, -1).map((a) => ({
+          activity: a.activity,
+          status: a.status,
+          sideNavId: a.sideNavId,
+        })),
+        error: '',
+      });
+    }
+    return rows;
+  }
+
+  function showContainerColumn(lpnRows, inputMode) {
+    if (inputMode === INPUT_MODE_CONTAINER) return true;
+    return lpnRows.some((r) => r.container);
+  }
+
+  function maxOtherActivitySlots(rows) {
+    let max = 0;
+    for (const r of rows) {
+      if (r.others.length > max) max = r.others.length;
+    }
+    return max;
+  }
+
+  function rowsToTsv(lpnRows, inputMode) {
+    const maxOthers = maxOtherActivitySlots(lpnRows);
+    const withContainer = showContainerColumn(lpnRows, inputMode);
+    const header = [];
+    if (withContainer) header.push('Container');
+    header.push('LPN', 'Last activity', 'Last status', 'Associate', 'End Time (Memphis)');
+    for (let i = 0; i < maxOthers; i += 1) {
+      header.push(`Activity ${i + 1}`, `Status ${i + 1}`);
+    }
+    header.push('Note');
+    const lines = [header.join('\t')];
+    for (const r of lpnRows) {
+      const cells = [];
+      if (withContainer) cells.push(r.container || '');
+      cells.push(r.lpn, r.lastActivity, r.lastStatus, r.lastAssociate || '', r.endTime || '');
+      for (let i = 0; i < maxOthers; i += 1) {
+        const o = r.others[i];
+        cells.push(o ? o.activity : '', o ? o.status : '');
+      }
+      cells.push(r.error || '');
+      lines.push(cells.join('\t'));
+    }
+    return lines.join('\n');
+  }
+
+  function persistGravisState(partial) {
+    saveStorage(partial);
+  }
+
+  function getInputMode(panel) {
+    const checked = panel.querySelector('input[name="gravis-batch-mode"]:checked');
+    return checked?.value === INPUT_MODE_CONTAINER ? INPUT_MODE_CONTAINER : INPUT_MODE_LPN;
+  }
+
+  function nowIso() {
+    return new Date().toISOString();
+  }
+
+  function getDebugLog(panel) {
+    if (!panel._debugLog) panel._debugLog = [];
+    return panel._debugLog;
+  }
+
+  function pushDebug(panel, level, ...args) {
+    const msg = args.map((a) => {
+      if (a instanceof Error) return a.message;
+      if (a && typeof a === 'object') {
+        try {
+          return JSON.stringify(a);
+        } catch (_) {
+          return String(a);
+        }
+      }
+      return String(a);
+    }).join(' ');
+    const log = getDebugLog(panel);
+    log.push({ ts: nowIso(), level, msg });
+    if (log.length > MAX_DEBUG_ENTRIES) log.shift();
+    const fn = level === 'WARN' ? console.warn : level === 'ERR' ? console.error : console.log;
+    fn(LOG_PREFIX, ...args);
+  }
+
+  function debugLog(panel, ...args) {
+    pushDebug(panel, 'LOG', ...args);
+  }
+
+  function debugWarn(panel, ...args) {
+    pushDebug(panel, 'WARN', ...args);
+  }
+
+  function buildExportPayload(panel) {
+    const mode = getInputMode(panel);
+    const batchResults = panel._batchResults || [];
+    const lpnRows = buildLpnRows(batchResults);
+    const tsv = panel.dataset.lastTsv || rowsToTsv(lpnRows, mode);
+    const fieldDiscovery = buildActivityFieldDiscovery(batchResults, panel);
+    return {
+      exportedAt: nowIso(),
+      scriptVersion: '1.8.2',
+      pageUrl: location.href,
+      inputMode: mode,
+      fcrOrigin: panel.querySelector('.gravis-fcr-origin')?.value ?? '',
+      lpnInput: panel._savedLpnInput ?? loadStorage().lpnInput ?? '',
+      containerInput: panel._savedContainerInput ?? loadStorage().containerInput ?? '',
+      currentInput: panel.querySelector('.gravis-batch-input')?.value ?? '',
+      progress: panel.querySelector('.gravis-batch-progress')?.textContent ?? '',
+      batchRunning,
+      rowCount: lpnRows.length,
+      lpnRows,
+      tsv,
+      batchResults,
+      activityFieldDiscovery: fieldDiscovery,
+      debugLog: getDebugLog(panel).slice(),
+    };
+  }
+
+  function buildDebugDump(panel) {
+    const payload = buildExportPayload(panel);
+    const lines = [
+      '=== Gravis LPN batch debug ===',
+      `exportedAt: ${payload.exportedAt}`,
+      `scriptVersion: ${payload.scriptVersion}`,
+      `url: ${payload.pageUrl}`,
+      `inputMode: ${payload.inputMode}`,
+      `fcrOrigin: ${payload.fcrOrigin}`,
+      `progress: ${payload.progress}`,
+      `batchRunning: ${payload.batchRunning}`,
+      `resultRows: ${payload.rowCount}`,
+      '',
+      '--- Activity field discovery (Last associate / End Time) ---',
+      payload.activityFieldDiscovery.text,
+      '',
+      '--- Current input ---',
+      payload.currentInput || '(empty)',
+      '',
+      '--- TSV ---',
+      payload.tsv || '(empty)',
+      '',
+      '--- Flat rows (' + payload.lpnRows.length + ') ---',
+      ...payload.lpnRows.map((r, i) => {
+        const others = r.others.map((o) => `${o.activity}=${o.status}`).join('; ');
+        return [
+          i + 1,
+          r.container || '',
+          r.lpn,
+          r.lastActivity,
+          r.lastStatus,
+          r.lastAssociate || '',
+          r.endTime || '',
+          others,
+          r.error || '',
+        ].join('\t');
+      }),
+      '',
+      '--- Raw batchResults (' + payload.batchResults.length + ') ---',
+      JSON.stringify(payload.batchResults, null, 2),
+      '',
+      '--- Debug log (' + payload.debugLog.length + ') ---',
+      ...payload.debugLog.map((d) => `${d.ts}  [${d.level}]  ${d.msg}`),
+    ];
+    return lines.join('\n');
+  }
+
+  function downloadBlob(filename, content, mimeType) {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function exportResults(panel) {
+    const payload = buildExportPayload(panel);
+    const stamp = payload.exportedAt.replace(/[:.]/g, '-');
+    downloadBlob(
+      `gravis-batch-${stamp}.json`,
+      JSON.stringify(payload, null, 2),
+      'application/json'
+    );
+    const tsv = payload.tsv;
+    if (tsv) {
+      downloadBlob(`gravis-batch-${stamp}.tsv`, tsv, 'text/tab-separated-values');
+    }
+    debugLog(panel, 'exported results', payload.rowCount, 'rows');
+  }
+
+  async function copyDebug(panel, btn) {
+    try {
+      await copyText(buildDebugDump(panel));
+      flashButton(btn, 'Copied');
+    } catch (e) {
+      debugWarn(panel, 'copy debug failed', e);
+      flashButton(btn, 'Failed');
+    }
+  }
+
+  function clearBatchOutput(panel, progressText) {
+    panel._batchResults = [];
+    delete panel.dataset.lastTsv;
+    panel._lastSnapshotAt = 0;
+    renderResultTable(panel, []);
+    const copyBtn = panel.querySelector('.gravis-batch-copy');
+    if (copyBtn) copyBtn.disabled = true;
+    if (progressText != null) setProgress(panel, progressText);
+  }
+
+  function formatClock(seconds) {
+    const s = Math.max(0, Math.floor(seconds));
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}:${String(r).padStart(2, '0')}`;
+  }
+
+  function stopProgressTimer(panel) {
+    if (panel._jobProgress?.timerId) {
+      clearInterval(panel._jobProgress.timerId);
+      panel._jobProgress.timerId = null;
+    }
+  }
+
+  function initJobProgress(panel, opts = {}) {
+    stopProgressTimer(panel);
+    panel._jobProgress = {
+      startedAt: Date.now(),
+      mem3Done: 0,
+      mem3Total: opts.mem3Total || 0,
+      gravisDone: 0,
+      gravisTotal: opts.gravisTotal || 0,
+      phase: opts.phase || 'starting',
+      phaseDetail: opts.phaseDetail || 'Starting…',
+      stepDurations: [],
+      etaSec: null,
+      timerId: null,
+    };
+    panel._jobProgress.timerId = setInterval(() => renderJobProgress(panel), 250);
+    renderJobProgress(panel);
+  }
+
+  function setJobProgressTotals(panel, opts = {}) {
+    const p = panel._jobProgress;
+    if (!p) return;
+    if (opts.mem3Total != null) p.mem3Total = opts.mem3Total;
+    if (opts.gravisTotal != null) p.gravisTotal = opts.gravisTotal;
+    if (opts.phase) p.phase = opts.phase;
+    if (opts.phaseDetail != null) p.phaseDetail = opts.phaseDetail;
+    renderJobProgress(panel);
+  }
+
+  function recordJobStep(panel, opts = {}) {
+    const p = panel._jobProgress;
+    if (!p) return;
+    const started = opts.startedAt || Date.now();
+    const durationMs = opts.durationMs ?? (Date.now() - started);
+    if (durationMs > 50) {
+      p.stepDurations.push(durationMs);
+      if (p.stepDurations.length > 40) p.stepDurations.shift();
+    }
+    if (opts.mem3Inc) p.mem3Done += opts.mem3Inc;
+    if (opts.gravisInc) p.gravisDone += opts.gravisInc;
+    if (opts.phase) p.phase = opts.phase;
+    if (opts.phaseDetail != null) p.phaseDetail = opts.phaseDetail;
+    renderJobProgress(panel);
+  }
+
+  function renderJobProgress(panel) {
+    const p = panel._jobProgress;
+    const track = panel.querySelector('.gravis-batch-progress-track');
+    if (!p || !track) return;
+
+    const total = p.mem3Total + p.gravisTotal;
+    const done = Math.min(p.mem3Done + p.gravisDone, total);
+    let pct = 0;
+    if (total > 0) {
+      pct = Math.round((done / total) * 100);
+    } else if (batchRunning) {
+      pct = p.phase === 'worker' ? 8 : 3;
+    }
+
+    const elapsedSec = Math.floor((Date.now() - p.startedAt) / 1000);
+    const remainingJobs = Math.max(0, total - done);
+    let etaSec = null;
+    if (remainingJobs > 0 && p.stepDurations.length >= 1) {
+      const avgMs = p.stepDurations.reduce((a, b) => a + b, 0) / p.stepDurations.length;
+      const parallel = p.phase === 'gravis' ? GRAVIS_PARALLEL : 1;
+      etaSec = Math.ceil((remainingJobs * avgMs) / parallel / 1000);
+    }
+    p.etaSec = etaSec;
+
+    const fill = panel.querySelector('.gravis-batch-progress-fill');
+    const phaseEl = panel.querySelector('.gravis-batch-phase-label');
+    const etaEl = panel.querySelector('.gravis-batch-eta');
+    const stepEl = panel.querySelector('.gravis-batch-step-count');
+    const elapsedEl = panel.querySelector('.gravis-batch-elapsed');
+    const remainEl = panel.querySelector('.gravis-batch-remaining');
+    const liveEl = panel.querySelector('.gravis-batch-live-status');
+
+    if (fill) fill.style.width = `${pct}%`;
+    if (phaseEl) phaseEl.textContent = p.phaseDetail || 'Working…';
+    if (stepEl) {
+      const mem3Part = p.mem3Total
+        ? `MEM3 ${p.mem3Done}/${p.mem3Total}`
+        : '';
+      const gravisPart = p.gravisTotal
+        ? `Gravis ${p.gravisDone}/${p.gravisTotal}`
+        : '';
+      const join = mem3Part && gravisPart ? ' · ' : '';
+      stepEl.textContent = total
+        ? `Jobs ${done}/${total} (${mem3Part}${join}${gravisPart})`
+        : `Jobs ${done}/…`;
+    }
+    if (elapsedEl) elapsedEl.textContent = `Elapsed ${formatClock(elapsedSec)}`;
+    if (remainEl) {
+      remainEl.textContent = etaSec != null
+        ? `Remaining ${formatClock(etaSec)}`
+        : batchRunning
+          ? 'Remaining estimating…'
+          : 'Remaining —';
+    }
+    if (etaEl) {
+      etaEl.textContent = etaSec != null && batchRunning
+        ? `ETA ${formatClock(elapsedSec + etaSec)}`
+        : 'ETA —';
+    }
+    if (liveEl) {
+      liveEl.hidden = !batchRunning;
+      liveEl.textContent = p.phaseDetail || '';
+    }
+    const prog = panel.querySelector('.gravis-batch-progress');
+    if (prog && batchRunning) prog.textContent = p.phaseDetail || 'Working…';
+    track.classList.toggle('gravis-progress-indeterminate', batchRunning && total === 0);
+  }
+
+  function finalizeLoadingRows(batchResults, note) {
+    for (const row of batchResults) {
+      if (!row.loading) continue;
+      row.loading = false;
+      row.ok = false;
+      row.resolveError = note || 'cancelled';
+    }
+  }
+
+  function beginBatchRun(panel) {
+    panel._liveBatch = true;
+    clearBatchOutput(panel, 'Starting batch…');
+    const liveEl = panel.querySelector('.gravis-batch-live-status');
+    if (liveEl) {
+      liveEl.hidden = false;
+      liveEl.textContent = 'Starting batch…';
+    }
+  }
+
+  function endBatchRun(panel) {
+    panel._liveBatch = false;
+    stopProgressTimer(panel);
+    const p = panel._jobProgress;
+    const track = panel.querySelector('.gravis-batch-progress-track');
+    const fill = panel.querySelector('.gravis-batch-progress-fill');
+    const remainEl = panel.querySelector('.gravis-batch-remaining');
+    if (p) {
+      p.phase = 'done';
+      p.phaseDetail = 'Complete';
+      if (p.mem3Total + p.gravisTotal > 0) {
+        p.mem3Done = p.mem3Total;
+        p.gravisDone = p.gravisTotal;
+      }
+      renderJobProgress(panel);
+    }
+    if (track) track.classList.remove('gravis-progress-indeterminate');
+    if (fill) fill.style.width = '100%';
+    if (remainEl) remainEl.textContent = 'Remaining 0:00';
+    const liveEl = panel.querySelector('.gravis-batch-live-status');
+    if (liveEl) liveEl.hidden = true;
+  }
+
+  function liveBatchSnapshot(panel, batchResults, progressText) {
+    panel._batchResults = batchResults;
+    pushBatchSnapshot(panel, batchResults, progressText, true);
+  }
+
+  function batchRowIndex(batchResults, lpn, container) {
+    return batchResults.findIndex(
+      (r) => r.lpn === lpn && (r.container || '') === (container || '')
+    );
+  }
+
+  function upsertBatchRow(batchResults, row) {
+    const index = batchRowIndex(batchResults, row.lpn, row.container);
+    const merged = { ...(index >= 0 ? batchResults[index] : {}), ...row, loading: false };
+    if (index >= 0) batchResults[index] = merged;
+    else batchResults.push(merged);
+  }
+
+  function clearResults(panel) {
+    if (batchRunning) {
+      debugWarn(panel, 'clear blocked — batch is running');
+      setProgress(panel, 'Stop the batch before clearing.');
+      return;
+    }
+
+    const mode = getInputMode(panel);
+    const inputVal = panel.querySelector('.gravis-batch-input')?.value ?? '';
+    const fcrOrigin = panel.querySelector('.gravis-fcr-origin')?.value ?? '';
+
+    clearBatchOutput(panel, 'Ready.');
+    panel._debugLog = [];
+
+    const payload = {
+      inputMode: mode,
+      fcrOrigin,
+      panelHidden: panel.hidden,
+      panelMinimized: panel.classList.contains('minimized'),
+      batchResults: [],
+      lastTsv: '',
+      debugLog: [],
+      progress: 'Ready.',
+    };
+    if (mode === INPUT_MODE_CONTAINER) {
+      payload.containerInput = inputVal;
+      payload.lpnInput = panel._savedLpnInput ?? loadStorage().lpnInput ?? '';
+    } else {
+      payload.lpnInput = inputVal;
+      payload.containerInput = panel._savedContainerInput ?? loadStorage().containerInput ?? '';
+    }
+    persistGravisState(payload);
+    pushDebug(panel, 'LOG', 'cleared results; input queue kept');
+  }
+
+  function persistFromPanel(panel, batchResults, progressText) {
+    const mode = getInputMode(panel);
+    const inputVal = panel.querySelector('.gravis-batch-input')?.value ?? '';
+    const lpnRows = buildLpnRows(batchResults || []);
+    const payload = {
+      inputMode: mode,
+      panelHidden: panel.hidden,
+      panelMinimized: panel.classList.contains('minimized'),
+      progress: progressText ?? panel.querySelector('.gravis-batch-progress')?.textContent ?? '',
+      batchResults: batchResults || [],
+      lastTsv: rowsToTsv(lpnRows, mode),
+      fcrOrigin: panel.querySelector('.gravis-fcr-origin')?.value ?? '',
+      debugLog: getDebugLog(panel).slice(-MAX_DEBUG_ENTRIES),
+    };
+    if (mode === INPUT_MODE_CONTAINER) {
+      payload.containerInput = inputVal;
+      payload.lpnInput = panel._savedLpnInput ?? loadStorage().lpnInput ?? '';
+    } else {
+      payload.lpnInput = inputVal;
+      payload.containerInput = panel._savedContainerInput ?? loadStorage().containerInput ?? '';
+    }
+    persistGravisState(payload);
+  }
+
+  function updateModeUi(panel) {
+    const mode = getInputMode(panel);
+    const label = panel.querySelector('.gravis-batch-label');
+    const input = panel.querySelector('.gravis-batch-input');
+    const fcrRow = panel.querySelector('.gravis-fcr-origin-row');
+
+    if (mode === INPUT_MODE_CONTAINER) {
+      label.textContent =
+        'Containers (MEM3 tote IDs). Requires an FCResearch MEM3 tab open in this browser.';
+      input.placeholder = 'tsPROB013790\nts...';
+      if (fcrRow) fcrRow.hidden = false;
+    } else {
+      label.textContent = 'LPNs (one per line or separated by spaces/commas)';
+      input.placeholder = 'LPNNC6ZNKMZ3Q\nLPN...';
+      if (fcrRow) fcrRow.hidden = true;
+    }
+    panel.dataset.inputMode = mode;
+  }
+
+  function switchInputMode(panel, newMode) {
+    const input = panel.querySelector('.gravis-batch-input');
+    const prev = panel.dataset.inputMode || INPUT_MODE_LPN;
+    if (prev === INPUT_MODE_LPN) {
+      panel._savedLpnInput = input.value;
+    } else {
+      panel._savedContainerInput = input.value;
+    }
+
+    const stored = loadStorage();
+    if (newMode === INPUT_MODE_CONTAINER) {
+      input.value = panel._savedContainerInput ?? stored.containerInput ?? '';
+    } else {
+      input.value = panel._savedLpnInput ?? stored.lpnInput ?? '';
+    }
+    updateModeUi(panel);
+    persistFromPanel(panel, panel._batchResults || []);
+  }
+
+  function copyText(text) {
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(text, 'text');
+      return Promise.resolve();
+    }
+    return navigator.clipboard.writeText(text);
+  }
+
+  function isGravisHost() {
+    return /\/gravis(\/|$)/i.test(location.pathname);
+  }
+
+  function isFcresearchMem3Results() {
+    return /\/MEM3\/results/i.test(location.pathname);
+  }
+
+  function isDataInventoryRow(row) {
+    if (row.querySelector('td.dataTables_empty')) return false;
+    return row.querySelectorAll('td').length > 1;
+  }
+
+  function extractLpnsFromInventoryTable(doc = document) {
+    const table = doc.getElementById(FCR_INVENTORY_TABLE_ID);
+    if (!table) return [];
+
+    const tbody = table.querySelector('tbody');
+    if (!tbody) return [];
+
+    const lpns = [];
+    for (const row of tbody.querySelectorAll('tr')) {
+      if (!isDataInventoryRow(row)) continue;
+      const cells = row.querySelectorAll('td');
+      const cell = cells[FCR_LPN_COLUMN_INDEX];
+      const value = normalizeText(cell ? cell.textContent : '').toUpperCase();
+      if (LPN_PATTERN.test(value)) lpns.push(value);
+    }
+    return [...new Set(lpns)];
+  }
+
+  async function copyInventoryLpns(btn) {
+    const lpns = extractLpnsFromInventoryTable();
+    if (!lpns.length) {
+      flashButton(btn, 'No LPNs');
+      return;
+    }
+    const text = lpns.join('\n');
+    try {
+      await copyText(text);
+      flashButton(btn, `Copied ${lpns.length}`);
+    } catch (e) {
+      console.warn(LOG_PREFIX, 'FCResearch LPN copy failed', e);
+      flashButton(btn, 'Copy failed');
+    }
+  }
+
+  function flashButton(btn, message) {
+    if (!btn) return;
+    const prev = btn.textContent;
+    btn.textContent = message;
+    btn.disabled = true;
+    setTimeout(() => {
+      btn.textContent = prev;
+      btn.disabled = false;
+    }, 1400);
+  }
+
+  function injectFcresearchLpnHeaderButton() {
+    const headerCell = document.getElementById('inventory-lpn');
+    if (!headerCell || headerCell.querySelector(`#${FCR_LPN_HEADER_BTN_ID}`)) return;
+
+    const labelDiv = headerCell.querySelector(':scope > div');
+    if (!labelDiv) return;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = FCR_LPN_HEADER_BTN_ID;
+    btn.className = 'gravis-fcr-lpn-copy-btn';
+    btn.textContent = 'Copy';
+    btn.title = 'Copy all LPNs from this table (one per line)';
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      copyInventoryLpns(btn);
+    });
+
+    headerCell.classList.add('gravis-fcr-lpn-header-cell');
+    headerCell.appendChild(btn);
+  }
+
+  function setupFcresearchLpnHeaderButton() {
+    const tryInject = () => injectFcresearchLpnHeaderButton();
+
+    tryInject();
+    let attempts = 0;
+    const pollId = setInterval(() => {
+      attempts += 1;
+      tryInject();
+      if (document.getElementById(FCR_LPN_HEADER_BTN_ID) || attempts > 80) {
+        clearInterval(pollId);
+      }
+    }, 250);
+
+    const root =
+      document.getElementById('table-inventory_wrapper') ||
+      document.getElementById('results-content') ||
+      document.body;
+
+    const observer = new MutationObserver(() => tryInject());
+    observer.observe(root, { childList: true, subtree: true });
+  }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function ensureLauncher(onOpen) {
+    let launcher = document.getElementById(LAUNCHER_ID);
+    if (launcher) return launcher;
+    launcher = document.createElement('button');
+    launcher.type = 'button';
+    launcher.id = LAUNCHER_ID;
+    launcher.textContent = 'Gravis batch';
+    launcher.title = 'Open Gravis LPN batch panel';
+    launcher.addEventListener('click', onOpen);
+    document.body.appendChild(launcher);
+    return launcher;
+  }
+
+  function setPanelVisible(panel, visible) {
+    panel.hidden = !visible;
+    const launcher = document.getElementById(LAUNCHER_ID);
+    if (launcher) launcher.hidden = visible;
+    persistFromPanel(panel, panel._batchResults || [], null);
+  }
+
+  function buildResultsTableHead(maxOthers, withContainer) {
+    let extra = '';
+    for (let i = 0; i < maxOthers; i += 1) {
+      extra += `<th>Activity ${i + 1}</th><th>Status ${i + 1}</th>`;
+    }
+    const containerCol = withContainer ? '<th>Container</th>' : '';
+    return `<tr>
+      ${containerCol}
+      <th>LPN</th>
+      <th>Last activity</th>
+      <th>Last status</th>
+      <th>Associate</th>
+      <th>End Time (Memphis)</th>
+      ${extra}
+      <th>Note</th>
+    </tr>`;
+  }
+
+  function buildPanel() {
+    if (document.getElementById(PANEL_ID)) return;
+
+    const stored = loadStorage();
+    const panel = document.createElement('div');
+    panel.id = PANEL_ID;
+    panel.innerHTML = `
+      <header class="gravis-batch-header">
+        <strong>Gravis LPN batch</strong>
+        <span class="gravis-batch-sub">side-nav-${MIN_SIDE_NAV}+ · MEM3 ${MEM3_PARALLEL}× · Gravis ${GRAVIS_PARALLEL}×</span>
+        <button type="button" class="gravis-batch-min" title="Minimize">−</button>
+        <button type="button" class="gravis-batch-close" title="Close panel">×</button>
+      </header>
+      <div class="gravis-batch-body">
+        <div class="gravis-batch-mode" role="radiogroup" aria-label="Input type">
+          <label class="gravis-mode-option">
+            <input type="radio" name="gravis-batch-mode" value="lpn" checked>
+            LPNs
+          </label>
+          <label class="gravis-mode-option">
+            <input type="radio" name="gravis-batch-mode" value="container">
+            Containers
+          </label>
+        </div>
+        <label class="gravis-fcr-origin-row gravis-fcr-origin-wrap" hidden>
+          <span class="gravis-fcr-origin-label">FCResearch host</span>
+          <input type="text" class="gravis-fcr-origin" spellcheck="false">
+        </label>
+        <label class="gravis-batch-label">LPNs (one per line or separated by spaces/commas)</label>
+        <textarea class="gravis-batch-input" rows="6" placeholder="LPNNC6ZNKMZ3Q&#10;LPN..."></textarea>
+        <div class="gravis-batch-actions">
+          <button type="button" class="gravis-batch-run primary">Run batch</button>
+          <button type="button" class="gravis-batch-stop" disabled>Stop</button>
+          <button type="button" class="gravis-batch-copy" disabled>Copy TSV</button>
+          <button type="button" class="gravis-batch-clear" title="Clear results and debug; keep input queue">Clear</button>
+        </div>
+        <div class="gravis-batch-overall">
+          <div class="gravis-batch-overall-labels">
+            <span class="gravis-batch-phase-label">Ready</span>
+            <span class="gravis-batch-eta">ETA —</span>
+          </div>
+          <div class="gravis-batch-progress-track">
+            <div class="gravis-batch-progress-fill"></div>
+          </div>
+          <div class="gravis-batch-overall-meta">
+            <span class="gravis-batch-step-count">Jobs 0/0</span>
+            <span class="gravis-batch-elapsed">Elapsed 0:00</span>
+            <span class="gravis-batch-remaining">Remaining —</span>
+          </div>
+        </div>
+        <div class="gravis-batch-live-status" hidden>Ready.</div>
+        <div class="gravis-batch-progress">Ready.</div>
+        <div class="gravis-batch-results-wrap">
+          <table class="gravis-batch-table">
+            <thead class="gravis-batch-thead"></thead>
+            <tbody class="gravis-batch-tbody">
+              <tr><td colspan="4" class="gravis-batch-placeholder">Results appear here.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="gravis-batch-footer">
+          <button type="button" class="gravis-batch-copy-debug">Copy debug</button>
+          <button type="button" class="gravis-batch-export">Export results</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(panel);
+    panel._batchResults = Array.isArray(stored.batchResults) ? stored.batchResults : [];
+    panel._debugLog = Array.isArray(stored.debugLog) ? stored.debugLog : [];
+
+    const openPanel = () => setPanelVisible(panel, true);
+    ensureLauncher(openPanel);
+
+    const input = panel.querySelector('.gravis-batch-input');
+    const fcrOriginInput = panel.querySelector('.gravis-fcr-origin');
+    panel._savedLpnInput = stored.lpnInput || '';
+    panel._savedContainerInput = stored.containerInput || '';
+
+    const initialMode = stored.inputMode === INPUT_MODE_CONTAINER
+      ? INPUT_MODE_CONTAINER
+      : INPUT_MODE_LPN;
+    const modeRadio = panel.querySelector(`input[name="gravis-batch-mode"][value="${initialMode}"]`);
+    if (modeRadio) modeRadio.checked = true;
+    input.value = initialMode === INPUT_MODE_CONTAINER
+      ? panel._savedContainerInput
+      : panel._savedLpnInput;
+    if (fcrOriginInput) {
+      fcrOriginInput.value = stored.fcrOrigin || DEFAULT_FCR_ORIGIN;
+    }
+    updateModeUi(panel);
+
+    panel.querySelectorAll('input[name="gravis-batch-mode"]').forEach((radio) => {
+      radio.addEventListener('change', () => {
+        if (!radio.checked) return;
+        switchInputMode(panel, radio.value);
+        if (radio.value === INPUT_MODE_CONTAINER) {
+          prewarmFcrWorker(panel);
+        }
+      });
+    });
+
+    if (initialMode === INPUT_MODE_CONTAINER) {
+      prewarmFcrWorker(panel);
+    }
+
+    let saveTimer = null;
+    const scheduleSave = () => {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => persistFromPanel(panel, panel._batchResults), 300);
+    };
+    input.addEventListener('input', scheduleSave);
+    if (fcrOriginInput) fcrOriginInput.addEventListener('input', scheduleSave);
+
+    panel.querySelector('.gravis-batch-min').addEventListener('click', () => {
+      panel.classList.toggle('minimized');
+      persistFromPanel(panel, panel._batchResults);
+    });
+
+    panel.querySelector('.gravis-batch-close').addEventListener('click', () => {
+      setPanelVisible(panel, false);
+    });
+
+    panel.querySelector('.gravis-batch-run').addEventListener('click', () => {
+      runBatch(panel);
+    });
+
+    panel.querySelector('.gravis-batch-stop').addEventListener('click', () => {
+      batchAbort = true;
+      searchGeneration += 1;
+      workerCancelAllPending();
+      setJobProgressTotals(panel, {
+        phase: 'stopping',
+        phaseDetail: 'Stopping…',
+      });
+    });
+
+    panel.querySelector('.gravis-batch-clear').addEventListener('click', () => {
+      clearResults(panel);
+    });
+
+    panel.querySelector('.gravis-batch-copy').addEventListener('click', async () => {
+      const tsv = panel.dataset.lastTsv;
+      if (!tsv) return;
+      try {
+        await copyText(tsv);
+        const btn = panel.querySelector('.gravis-batch-copy');
+        flashButton(btn, 'Copied');
+        debugLog(panel, 'copied TSV', tsv.split('\n').length - 1, 'data rows');
+      } catch (e) {
+        debugWarn(panel, 'TSV copy failed', e);
+      }
+    });
+
+    panel.querySelector('.gravis-batch-copy-debug').addEventListener('click', () => {
+      copyDebug(panel, panel.querySelector('.gravis-batch-copy-debug'));
+    });
+
+    panel.querySelector('.gravis-batch-export').addEventListener('click', () => {
+      const btn = panel.querySelector('.gravis-batch-export');
+      try {
+        exportResults(panel);
+        flashButton(btn, 'Exported');
+      } catch (e) {
+        debugWarn(panel, 'export failed', e);
+        flashButton(btn, 'Failed');
+      }
+    });
+
+    if (stored.panelMinimized) panel.classList.add('minimized');
+    if (stored.progress) setProgress(panel, stored.progress);
+
+    const lpnRows = buildLpnRows(panel._batchResults);
+    if (lpnRows.length) {
+      const tsv = stored.lastTsv || rowsToTsv(lpnRows, initialMode);
+      panel.dataset.lastTsv = tsv;
+      renderResultTable(panel, lpnRows);
+      panel.querySelector('.gravis-batch-copy').disabled = false;
+    }
+
+    setPanelVisible(panel, !stored.panelHidden);
+    debugLog(panel, 'panel ready', location.href, 'restored', panel._batchResults.length, 'results');
+  }
+
+  function setProgress(panel, text) {
+    const el = panel.querySelector('.gravis-batch-progress');
+    if (el) el.textContent = text;
+  }
+
+  function renderResultTable(panel, lpnRows) {
+    const thead = panel.querySelector('.gravis-batch-thead');
+    const tbody = panel.querySelector('.gravis-batch-tbody');
+    const maxOthers = maxOtherActivitySlots(lpnRows);
+    const withContainer = showContainerColumn(lpnRows, getInputMode(panel));
+    const colCount = (withContainer ? 1 : 0) + 6 + maxOthers * 2;
+
+    thead.innerHTML = buildResultsTableHead(maxOthers, withContainer);
+
+    if (!lpnRows.length) {
+      tbody.innerHTML = `<tr><td colspan="${colCount}" class="gravis-batch-placeholder">Results appear here.</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = lpnRows.map((r) => {
+      const lastStCls = r.lastStatus ? statusClass(r.lastStatus) : '';
+      const note = r.error ? escapeHtml(r.error) : '';
+      const rowCls = r.loading || r.error === ROW_LOADING_NOTE ? ' class="gravis-row-loading"' : '';
+      let otherCells = '';
+      for (let i = 0; i < maxOthers; i += 1) {
+        const o = r.others[i];
+        const stCls = o?.status ? statusClass(o.status) : '';
+        otherCells += `<td>${escapeHtml(o?.activity || '')}</td>
+          <td class="${stCls}">${escapeHtml(o?.status || '')}</td>`;
+      }
+      const containerCell = withContainer
+        ? `<td class="gravis-mono">${escapeHtml(r.container || '')}</td>`
+        : '';
+      return `<tr${rowCls}>
+        ${containerCell}
+        <td class="gravis-mono">${escapeHtml(r.lpn)}</td>
+        <td>${escapeHtml(r.lastActivity)}</td>
+        <td class="${lastStCls}">${escapeHtml(r.lastStatus)}</td>
+        <td class="gravis-mono">${escapeHtml(r.lastAssociate || '')}</td>
+        <td class="gravis-mono gravis-end-time">${escapeHtml(r.endTime || '')}</td>
+        ${otherCells}
+        <td class="gravis-note">${note}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  function pushBatchSnapshot(panel, batchResults, progressText, force) {
+    const now = Date.now();
+    const live = panel._liveBatch || force;
+    if (!live) {
+      if (!panel._lastSnapshotAt) panel._lastSnapshotAt = 0;
+      if (now - panel._lastSnapshotAt < SNAPSHOT_THROTTLE_MS) return;
+    }
+    panel._lastSnapshotAt = now;
+    const mode = getInputMode(panel);
+    const lpnRows = buildLpnRows(batchResults);
+    renderResultTable(panel, lpnRows);
+    const tsv = rowsToTsv(lpnRows, mode);
+    panel.dataset.lastTsv = tsv;
+    panel.querySelector('.gravis-batch-copy').disabled = lpnRows.length === 0;
+    persistFromPanel(panel, batchResults, progressText);
+  }
+
+  async function runBatch(panel) {
+    if (batchRunning) return;
+
+    const mode = getInputMode(panel);
+    const raw = panel.querySelector('.gravis-batch-input').value;
+    const fcrOrigin = panel.querySelector('.gravis-fcr-origin')?.value || DEFAULT_FCR_ORIGIN;
+
+    debugLog(panel, 'batch start', mode, normalizeText(raw).slice(0, 120));
+    batchRunning = true;
+    batchAbort = false;
+    searchGeneration += 1;
+    workerCancelAllPending();
+    const generation = searchGeneration;
+
+    const runBtn = panel.querySelector('.gravis-batch-run');
+    const stopBtn = panel.querySelector('.gravis-batch-stop');
+    const copyBtn = panel.querySelector('.gravis-batch-copy');
+    runBtn.disabled = true;
+    stopBtn.disabled = false;
+    copyBtn.disabled = true;
+
+    beginBatchRun(panel);
+
+    let workItems = [];
+    let batchResults = [];
+
+    if (mode === INPUT_MODE_LPN) {
+      const lpns = parseLpnList(raw);
+      if (!lpns.length) {
+        setProgress(panel, 'No valid LPNs found. Expected format: LPNNC6ZNKMZ3Q');
+        debugWarn(panel, 'no valid LPNs in input');
+        endBatchRun(panel);
+        batchRunning = false;
+        runBtn.disabled = false;
+        stopBtn.disabled = true;
+        return;
+      }
+      workItems = lpns.map((lpn) => ({ lpn, container: '', resolveError: '' }));
+      debugLog(panel, 'LPN mode', lpns.length, 'unit(s)');
+      initJobProgress(panel, {
+        mem3Total: 0,
+        gravisTotal: lpns.length,
+        phase: 'gravis',
+        phaseDetail: `Gravis 0/${lpns.length}…`,
+      });
+    } else {
+      const containers = parseContainerList(raw);
+      if (!containers.length) {
+        setProgress(panel, 'No valid containers found. Example: tsPROB013790');
+        debugWarn(panel, 'no valid containers in input');
+        endBatchRun(panel);
+        batchRunning = false;
+        runBtn.disabled = false;
+        stopBtn.disabled = true;
+        return;
+      }
+      debugLog(panel, 'container mode', containers.length, 'container(s)', fcrOrigin);
+      const needsWorker = !isFcrWorkerAlive();
+      initJobProgress(panel, {
+        mem3Total: containers.length + (needsWorker ? 1 : 0),
+        gravisTotal: 0,
+        phase: needsWorker ? 'worker' : 'mem3',
+        phaseDetail: needsWorker
+          ? 'Starting FCResearch worker tab…'
+          : `MEM3 0/${containers.length}…`,
+      });
+      if (needsWorker) {
+        const workerStarted = Date.now();
+        await ensureGravisFcrWorker(panel, fcrOrigin, false);
+        recordJobStep(panel, {
+          mem3Inc: 1,
+          durationMs: Date.now() - workerStarted,
+          phase: 'mem3',
+          phaseDetail: isFcrWorkerAlive() ? 'FCResearch worker ready' : 'FCResearch worker not ready',
+        });
+      }
+      setJobProgressTotals(panel, {
+        mem3Total: containers.length,
+        phase: 'mem3',
+        phaseDetail: `MEM3 0/${containers.length}…`,
+      });
+      workItems = await resolveContainersToWorkItems(
+        containers,
+        generation,
+        panel,
+        fcrOrigin,
+        (item) => {
+          if (item.resolveError || !item.lpn) return;
+          batchResults.push({
+            lpn: item.lpn,
+            container: item.container,
+            loading: true,
+            ok: false,
+          });
+          if (panel._jobProgress) {
+            panel._jobProgress.gravisTotal += 1;
+            renderJobProgress(panel);
+          }
+          liveBatchSnapshot(panel, batchResults);
+        }
+      );
+      debugLog(panel, 'resolved', workItems.length, 'work item(s)');
+      if (!workItems.length) {
+        setProgress(panel, 'No LPNs resolved from containers.');
+        endBatchRun(panel);
+        batchRunning = false;
+        runBtn.disabled = false;
+        stopBtn.disabled = true;
+        return;
+      }
+      for (const item of workItems) {
+        if (item.resolveError || !item.lpn) {
+          batchResults.push({
+            lpn: item.lpn,
+            container: item.container,
+            resolveError: item.resolveError,
+            ok: false,
+          });
+        }
+      }
+      const gravisCount = workItems.filter((w) => w.lpn && !w.resolveError).length;
+      setJobProgressTotals(panel, {
+        gravisTotal: gravisCount,
+        phase: 'gravis',
+        phaseDetail: `Gravis 0/${gravisCount}…`,
+      });
+      liveBatchSnapshot(panel, batchResults);
+    }
+
+    if (mode === INPUT_MODE_LPN) {
+      for (const item of workItems) {
+        if (item.resolveError || !item.lpn) {
+          batchResults.push({
+            lpn: item.lpn,
+            container: item.container,
+            resolveError: item.resolveError,
+            ok: false,
+          });
+        } else {
+          batchResults.push({
+            lpn: item.lpn,
+            container: item.container,
+            loading: true,
+            ok: false,
+          });
+        }
+      }
+      liveBatchSnapshot(panel, batchResults);
+    }
+
+    const gravisItems = workItems.filter((w) => w.lpn && !w.resolveError);
+    const total = gravisItems.length;
+    const useParallel = total > 1;
+
+    let completed = 0;
+    setJobProgressTotals(panel, {
+      gravisTotal: total,
+      phase: 'gravis',
+      phaseDetail: total ? `Gravis 0/${total}…` : 'No LPNs to load',
+    });
+
+    if (useParallel) {
+      await mapWithConcurrency(gravisItems, GRAVIS_PARALLEL, async (item, index) => {
+        if (batchAbort || generation !== searchGeneration) {
+          const cancelled = {
+            ok: false,
+            error: 'cancelled',
+            lpn: item.lpn,
+            container: item.container,
+          };
+          upsertBatchRow(batchResults, cancelled);
+          completed += 1;
+          recordJobStep(panel, {
+            gravisInc: 1,
+            phase: 'gravis',
+            phaseDetail: `Stopped at Gravis ${completed}/${total}`,
+          });
+          liveBatchSnapshot(panel, batchResults);
+          return cancelled;
+        }
+        const stepStarted = Date.now();
+        setJobProgressTotals(panel, {
+          phase: 'gravis',
+          phaseDetail: `Gravis ${completed}/${total} (${GRAVIS_PARALLEL} parallel) · ${item.lpn}…`,
+        });
+        const result = await fetchLpn(item.lpn, generation, index % GRAVIS_PARALLEL, true);
+        const row = { ...result, container: item.container };
+        upsertBatchRow(batchResults, row);
+        completed += 1;
+        recordJobStep(panel, {
+          gravisInc: 1,
+          durationMs: Date.now() - stepStarted,
+          phase: 'gravis',
+          phaseDetail: `Gravis ${completed}/${total} · ${item.lpn} ${result.ok ? 'ok' : result.error || 'err'}`,
+        });
+        debugLog(
+          panel,
+          'gravis',
+          item.lpn,
+          result.ok ? 'ok' : result.error,
+          result.activities?.length ?? 0,
+          'activities'
+        );
+        liveBatchSnapshot(panel, batchResults);
+        return row;
+      });
+    } else if (total === 1) {
+      const item = gravisItems[0];
+      const stepStarted = Date.now();
+      setJobProgressTotals(panel, {
+        phase: 'gravis',
+        phaseDetail: `Gravis 0/1 · ${item.lpn}…`,
+      });
+      const result = await fetchLpn(item.lpn, generation, 0, false);
+      const row = { ...result, container: item.container };
+      upsertBatchRow(batchResults, row);
+      completed = 1;
+      recordJobStep(panel, {
+        gravisInc: 1,
+        durationMs: Date.now() - stepStarted,
+        phase: 'gravis',
+        phaseDetail: `Gravis 1/1 · ${item.lpn} done`,
+      });
+      debugLog(panel, 'gravis', item.lpn, result.ok ? 'ok' : result.error);
+      liveBatchSnapshot(panel, batchResults);
+    }
+
+    finalizeLoadingRows(batchResults, batchAbort ? 'cancelled' : 'incomplete');
+
+    panel._batchResults = batchResults;
+    pushBatchSnapshot(panel, batchResults, null, true);
+
+    const okCount = batchResults.filter((r) => r.ok && r.activities?.length).length;
+    const errCount = batchResults.length - okCount;
+    const stopped = batchAbort ? ' (stopped)' : '';
+    const finalMsg = mode === INPUT_MODE_CONTAINER
+      ? `Done${stopped}: ${parseContainerList(raw).length} container(s) → ${batchResults.length} row(s), ${okCount} with activities, ${errCount} issue(s).`
+      : `Done${stopped}: ${batchResults.length} LPN(s), ${okCount} with activities, ${errCount} empty/error.`;
+    setProgress(panel, finalMsg);
+    persistFromPanel(panel, batchResults, finalMsg);
+
+    endBatchRun(panel);
+    batchRunning = false;
+    runBtn.disabled = false;
+    stopBtn.disabled = true;
+    debugLog(panel, 'batch complete', finalMsg);
+  }
+
+  function injectStyles() {
+    const css = `
+      #${PANEL_ID} {
+        position: fixed;
+        left: 16px;
+        bottom: 16px;
+        z-index: 2147483000;
+        width: min(920px, calc(100vw - 32px));
+        max-height: min(78vh, 720px);
+        display: flex;
+        flex-direction: column;
+        font: 13px/1.4 system-ui, Segoe UI, sans-serif;
+        color: #111;
+        background: #fff;
+        border: 1px solid #b8b8b8;
+        border-radius: 10px;
+        box-shadow: 0 10px 32px rgba(0,0,0,.2);
+        overflow: hidden;
+      }
+      #${PANEL_ID}[hidden] { display: none !important; }
+      #${PANEL_ID}.minimized .gravis-batch-body { display: none; }
+      #${LAUNCHER_ID} {
+        position: fixed;
+        left: 16px;
+        bottom: 16px;
+        z-index: 2147482999;
+        padding: 10px 14px;
+        font: 600 12px system-ui, Segoe UI, sans-serif;
+        color: #fff;
+        background: #1d4ed8;
+        border: 1px solid #1e40af;
+        border-radius: 8px;
+        box-shadow: 0 4px 14px rgba(29, 78, 216, 0.45);
+        cursor: pointer;
+      }
+      #${LAUNCHER_ID}[hidden] { display: none !important; }
+      #${LAUNCHER_ID}:hover { background: #1e40af; }
+      #${PANEL_ID} .gravis-batch-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 14px;
+        background: linear-gradient(#f7f9fb, #eef2f6);
+        border-bottom: 1px solid #dde3ea;
+      }
+      #${PANEL_ID} .gravis-batch-sub {
+        flex: 1;
+        font-size: 12px;
+        color: #555;
+      }
+      #${PANEL_ID} .gravis-batch-body {
+        padding: 12px 14px 14px;
+        overflow: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      #${PANEL_ID} .gravis-batch-mode {
+        display: flex;
+        gap: 16px;
+        padding: 4px 0;
+      }
+      #${PANEL_ID} .gravis-mode-option {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      #${PANEL_ID} .gravis-fcr-origin-wrap {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        font-size: 12px;
+        color: #444;
+      }
+      #${PANEL_ID} .gravis-fcr-origin-wrap[hidden] { display: none !important; }
+      #${PANEL_ID} .gravis-fcr-origin {
+        width: 100%;
+        box-sizing: border-box;
+        font-family: ui-monospace, Consolas, monospace;
+        font-size: 11px;
+        padding: 6px 8px;
+        border: 1px solid #ccc;
+        border-radius: 6px;
+      }
+      #${PANEL_ID} .gravis-batch-label { font-size: 12px; color: #444; }
+      #${PANEL_ID} .gravis-batch-input {
+        width: 100%;
+        box-sizing: border-box;
+        font-family: ui-monospace, Consolas, monospace;
+        font-size: 12px;
+        padding: 8px;
+        border: 1px solid #ccc;
+        border-radius: 6px;
+        resize: vertical;
+      }
+      #${PANEL_ID} .gravis-batch-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+      #${PANEL_ID} button {
+        border: 1px solid #aab;
+        background: #fff;
+        border-radius: 6px;
+        padding: 6px 12px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      #${PANEL_ID} button:disabled { opacity: .5; cursor: not-allowed; }
+      #${PANEL_ID} button.primary {
+        background: #1d4ed8;
+        border-color: #1d4ed8;
+        color: #fff;
+        font-weight: 600;
+      }
+      #${PANEL_ID} button.gravis-batch-clear {
+        border-color: #dc2626;
+        color: #b91c1c;
+      }
+      #${PANEL_ID} button.gravis-batch-clear:hover {
+        background: #fef2f2;
+      }
+      #${PANEL_ID} .gravis-batch-overall {
+        padding: 6px 0 4px;
+        border-bottom: 1px solid #e5e7eb;
+        margin-bottom: 4px;
+      }
+      #${PANEL_ID} .gravis-batch-overall-labels {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #1e293b;
+        margin-bottom: 6px;
+      }
+      #${PANEL_ID} .gravis-batch-eta { color: #1d4ed8; }
+      #${PANEL_ID} .gravis-batch-progress-track {
+        height: 10px;
+        background: #e2e8f0;
+        border-radius: 999px;
+        overflow: hidden;
+      }
+      #${PANEL_ID} .gravis-batch-progress-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #3b82f6, #1d4ed8);
+        border-radius: 999px;
+        transition: width 0.25s ease-out;
+      }
+      #${PANEL_ID} .gravis-batch-progress-track.gravis-progress-indeterminate .gravis-batch-progress-fill {
+        width: 35% !important;
+        animation: gravis-progress-pulse 1.2s ease-in-out infinite;
+      }
+      @keyframes gravis-progress-pulse {
+        0% { transform: translateX(-100%); width: 35%; }
+        50% { transform: translateX(80%); width: 45%; }
+        100% { transform: translateX(220%); width: 35%; }
+      }
+      #${PANEL_ID} .gravis-batch-overall-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 14px;
+        margin-top: 6px;
+        font-size: 11px;
+        color: #64748b;
+      }
+      #${PANEL_ID} .gravis-batch-remaining {
+        font-weight: 700;
+        color: #0f172a;
+        font-variant-numeric: tabular-nums;
+      }
+      #${PANEL_ID} .gravis-batch-live-status {
+        font-size: 12px;
+        color: #1d4ed8;
+        background: #eff6ff;
+        border: 1px solid #bfdbfe;
+        border-radius: 6px;
+        padding: 8px 10px;
+        margin-bottom: 6px;
+      }
+      #${PANEL_ID} .gravis-batch-live-status[hidden] { display: none !important; }
+      #${PANEL_ID} .gravis-batch-progress {
+        font-size: 11px;
+        color: #64748b;
+        padding: 2px 0 4px;
+      }
+      #${PANEL_ID} .gravis-batch-footer {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        padding-top: 4px;
+        border-top: 1px solid #e5e7eb;
+      }
+      #${PANEL_ID} .gravis-batch-footer button {
+        font-size: 11px;
+        padding: 5px 10px;
+      }
+      #${PANEL_ID} .gravis-batch-results-wrap {
+        overflow: auto;
+        max-height: 38vh;
+        border: 1px solid #e5e7eb;
+        border-radius: 6px;
+      }
+      #${PANEL_ID} .gravis-batch-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+      #${PANEL_ID} .gravis-batch-table th,
+      #${PANEL_ID} .gravis-batch-table td {
+        padding: 6px 10px;
+        text-align: left;
+        border-bottom: 1px solid #f0f0f0;
+        vertical-align: top;
+      }
+      #${PANEL_ID} .gravis-batch-table thead th {
+        position: sticky;
+        top: 0;
+        background: #f8fafc;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: .03em;
+        color: #64748b;
+      }
+      #${PANEL_ID} .gravis-mono { font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+      #${PANEL_ID} .gravis-batch-placeholder { color: #888; font-style: italic; }
+      #${PANEL_ID} .gravis-st-escalated { color: #b45309; font-weight: 700; }
+      #${PANEL_ID} .gravis-st-completed { color: #15803d; font-weight: 600; }
+      #${PANEL_ID} .gravis-st-other { color: #334155; }
+      #${PANEL_ID} .gravis-note { color: #b91c1c; font-size: 11px; }
+      #${PANEL_ID} tr.gravis-row-loading td {
+        color: #64748b;
+        font-style: italic;
+      }
+      #${PANEL_ID} tr.gravis-row-loading .gravis-note {
+        color: #64748b;
+      }
+      #${PANEL_ID} .gravis-batch-min,
+      #${PANEL_ID} .gravis-batch-close { margin-left: 0; padding: 2px 10px; }
+      #${PANEL_ID} .gravis-batch-min { margin-left: auto; }
+      th.gravis-fcr-lpn-header-cell {
+        white-space: nowrap;
+      }
+      th.gravis-fcr-lpn-header-cell > div {
+        display: inline;
+      }
+      #${FCR_LPN_HEADER_BTN_ID} {
+        margin-left: 6px;
+        padding: 1px 7px;
+        font-size: 11px;
+        line-height: 1.3;
+        vertical-align: middle;
+        border: 1px solid #888c8c;
+        border-radius: 4px;
+        background: #fff;
+        cursor: pointer;
+        font-weight: 600;
+        color: #1d4ed8;
+      }
+      #${FCR_LPN_HEADER_BTN_ID}:hover {
+        background: #eff6ff;
+        border-color: #1d4ed8;
+      }
+      #${FCR_LPN_HEADER_BTN_ID}:disabled {
+        opacity: 0.7;
+        cursor: default;
+      }
+    `;
+    if (typeof GM_addStyle === 'function') {
+      GM_addStyle(css);
+    } else {
+      const style = document.createElement('style');
+      style.textContent = css;
+      document.head.appendChild(style);
+    }
+  }
+
+  injectStyles();
+  if (isFcrWorkerHost()) {
+    startGravisFcrWorkerHost();
+  }
+  if (isGravisHost()) {
+    buildPanel();
+  }
+  if (isFcresearchMem3Results()) {
+    setupFcresearchLpnHeaderButton();
+  }
+  console.log(LOG_PREFIX, 'ready on', location.href);
+})();

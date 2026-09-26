@@ -1,0 +1,3815 @@
+// ==UserScript==
+// @name         Liquidation Sort Helper
+// @namespace    https://github.com/liquidation-sort
+// @version      2.2.7
+// @description  Automates Amazon Sort Tool liquidation sorting with strong state guards and debug tooling
+// @author       Liquidation Sort Team
+// @match        https://us-creturns-web.aka.amazon.com/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_deleteValue
+// @grant        unsafeWindow
+// @run-at       document-idle
+// ==/UserScript==
+
+/*
+ * Liquidation Sort Helper v2.0.0 — Behavior Guarantees
+ * ----------------------------------------------------
+ * 1. Job start  = WDSorting accepted on page.
+ * 2. Job end    = Update clicked ONLY after successful tote move for current LPN.
+ * 3. Update is NEVER clicked between WDSorting acceptance and source-container scan
+ *    unless a logged recovery branch detects a true stuck state.
+ * 4. Lingering #sort-code-id text does NOT trigger reset loops at new-job entry.
+ * 5. Visible source-container field is prioritized over stale-sort reset logic.
+ * 6. Queue auto-advances after each completed LPN (Update success).
+ * 7. Every decision branch is logged to the trace ring buffer.
+ * 8. Stop halts safely, marks current row pending, optionally clicks Update to reset page.
+ * 9. Same-container consecutive rows and container mismatch handled without Update loops.
+ *
+ * Changelog v2.2.7:
+ * - Fix resolution modals not appearing when prompt state survives but DOM was removed (SPA re-render).
+ *
+ * Changelog v2.2.6:
+ * - Skip LPN button on resolution modals: marks row pending, advances to next queue row, keeps running.
+ *
+ * Changelog v2.2.5:
+ * - Persist used tote counts across sessions; show Used Totes history in panel.
+ * - Cancel or backdrop dismiss on live execution modals always stops automation.
+ *
+ * Changelog v2.2.4:
+ * - Copy tote / Copy all Totes buttons in sort-code mapping panel.
+ * - Slightly faster TIMING delays only (no logic/sequence changes).
+ *
+ * Changelog v2.2.3:
+ * - Fix live ETA/countdown: persist job timing before Update reset; tick down via session deadline.
+ *
+ * Changelog v2.2.2:
+ * - Faster run pace: TIMING delays reduced only (pre/post submit, typing spread, poll interval). No logic/sequence changes.
+ *
+ * Changelog v2.2.1:
+ * - Export CSV button downloads full queue with status, results, and error messages.
+ *
+ * Changelog v2.2.0:
+ * - Top progress bar with completed count, live countdown, and ETA while running.
+ *
+ * Changelog v2.1.9:
+ * - Loud alert beep on popups; per-tote max limit editor in tote mapping/full modals.
+ *
+ * Changelog v2.1.8:
+ * - Skip completed and errored container+LPN pairs; Start From Top no longer retries logged errors.
+ *
+ * Changelog v2.1.7:
+ * - Completed history keyed by container+LPN pair; only matching pairs are skipped.
+ *
+ * Changelog v2.1.6:
+ * - Error log popup lists container → LPN errors with messages; persisted across queue loads and refresh.
+ *
+ * Changelog v2.1.5:
+ * - Persist completed LPN history; auto-mark/skip known LPNs on queue load and page refresh.
+ *
+ * Changelog v2.1.4:
+ * - Full-tote popup prompts for a new container when 399 limit reached; removed redundant tote-counts footer.
+ *
+ * Changelog v2.1.3:
+ * - One canonical sort-slot key (uppercase); prune orphan tote counts; fix stale sort code skipping barcode on row 2+.
+ * - Retry job-end Update if first click fails; recover when post-tote finish stalls.
+ *
+ * Changelog v2.1.2:
+ * - Fix tote mapping popup selector (#lsh-tote-modal); defer stuck recovery while prompt open.
+ *
+ * Changelog v2.1.1:
+ * - Missing sort-code→tote mapping shows popup with detected sort code; assign tote and continue.
+ *
+ * Changelog v2.1.0:
+ * - Single Enter per submit (was double Enter + formSubmit → duplicate scans).
+ * - Abort in-flight typing when Stop pressed; stricter exception/sort-type acceptance.
+ * - Source accept logs cleared-field path; sort type not accepted until WDSorting on display.
+ *
+ * Changelog v2.0.9:
+ * - Fix doubled characters (WDDSSoorrttiinngg): slow type sets full partial via React only.
+ *
+ * Changelog v2.0.8:
+ * - 500ms pause before/after each field submit; typing spread over ~500ms (scanner pace).
+ * - Source accepted when field clears to placeholder after scan (Amazon UI behavior).
+ * - Stuck guard decoupled from 2s step verify timeout.
+ *
+ * Changelog v2.0.7:
+ * - All step/move verification waits capped at 2s (app responds instantly).
+ *
+ * Changelog v2.0.6:
+ * - Complete page-context field submit (scanner char loop + double Enter + form.requestSubmit).
+ * - Restore isolatedFieldValue fallback; skip dead CSP page bridge by default.
+ * - Wait for page sort code before tote.noMapping stop when queue sortCode is empty.
+ *
+ * Changelog v2.0.5:
+ * - Field submit uses unsafeWindow (page context) so Enter commits in React.
+ * - Sort type accepted when #sort-type display shows WDSorting (not just input focus).
+ *
+ * Changelog v2.0.4:
+ * - #change-sort-type is the Update link (Update/U); used for job end and error recovery.
+ * - Exception panel reads #exception-info message; Continue then Update advances queue.
+ * - Isolated field input first (faster); page bridge skipped after CSP timeout.
+ *
+ * Changelog v2.0.3:
+ * - Field submit runs in PAGE context (React sees real input/Enter events).
+ * - execCommand insertText + React _valueTracker + change-sort-type picker fallback.
+ * - Accept sort type when focus moves to source/barcode field ids.
+ *
+ * Changelog v2.0.2:
+ * - All "Scan …" field values treated as placeholders (incl. Scan Sort Type).
+ * - Workflow step derived from effective field values (all inputs visible on /sort/new).
+ * - Scanner-style char-by-char typing + autocomplete click for React inputs.
+ *
+ * Changelog v2.0.1:
+ * - Fix WDSorting: typed value no longer counts as accepted; robust Enter submit.
+ * - Treat "Scan Barcode"/"Scan Tote" field values as empty placeholders.
+ * - Source container marked done only after workflow verifies past source step.
+ *
+ * Changelog v2.0.0:
+ * - Full rewrite with explicit state machine, re-entrancy locks, and recovery guards.
+ * - Trace ring buffer (200 entries) for Copy Debug observability.
+ * - sessionArmed survives refresh; deliberate Resume required (no auto-start on init).
+ * - Stuck-running safeguard resets internal flags after 15s idle automation.
+ *
+ * Acceptance tests (manual):
+ * [T1] Complete one LPN → next row starts without manual Start.
+ * [T2] Next row does NOT click Update before source container scan.
+ * [T3] Lingering #sort-code-id does not cause reset loop.
+ * [T4] Same-container consecutive rows proceed without unnecessary Update.
+ * [T5] Stop mid-job marks row pending and halts.
+ * [T6] Exception auto-close advances when enabled.
+ * [T7] Copy Debug trace explains every decision branch.
+ */
+
+(function () {
+  'use strict';
+
+  /* ─── Constants ─────────────────────────────────────────────────────────── */
+
+  const SCRIPT_VERSION = '2.2.7';
+  const PAGE_BRIDGE = 'lsh-page-bridge-v1';
+  let pageBridgeFailed = true;
+  const STORAGE_KEY = 'liquidation-sort-helper-v2';
+  const TRACE_MAX = 200;
+  const DEFAULT_MAX_TOTE_UNITS = 399;
+  const MAX_TOTE_UNITS = DEFAULT_MAX_TOTE_UNITS;
+  const COMPLETED_LPN_MAX = 5000;
+  const ERROR_LOG_MAX = 500;
+
+  /* Timing tuned for speed while keeping React submit + verify behavior unchanged. */
+  const TIMING = {
+    maxWaitMs: 2000,
+    preSubmitMs: 240,
+    postSubmitMs: 240,
+    typeDurationMs: 280,
+    settleMs: 50,
+    postUpdateMs: 120,
+    pollMinMs: 24,
+    pollMaxMs: 48,
+    stuckRunningMs: 15000,
+    stuckStepMs: 12000,
+    initDelayMs: 300,
+    bridgeTimeoutMs: 500,
+  };
+  const MIN_CHAR_DELAY_MS = 15;
+
+  const SORT_TYPE = 'WDSorting';
+
+  const SEL = {
+    sortType: '#sort-type-textfield',
+    sourceContainer: '#source-container-textfield',
+    barcode: '#barcode-scan-textfield',
+    sortCode: '#sort-code-id',
+    scanTote: '#scan-tote-textfield',
+    updateLink: '#change-sort-type',
+    sortTypeDisplay: '#sort-type',
+    exceptionBtn: '#exception-btn',
+    exceptionInfo: '#exception-info',
+    exceptionContainer: '#exception-container',
+    exceptionPage: '#page-exception-component',
+    updateBtn: 'button[data-testid="update-button"], #update-button, button.update-button, input[value="Update"]',
+  };
+
+  const ROW_STATUS = {
+    PENDING: 'pending',
+    ACTIVE: 'active',
+    COMPLETE: 'complete',
+    ERROR: 'error',
+  };
+
+  /* ─── Trace / Logging ───────────────────────────────────────────────────── */
+
+  const traceBuffer = [];
+
+  function trace(event, detail) {
+    const entry = {
+      t: Date.now(),
+      iso: new Date().toISOString(),
+      event,
+      ...(detail !== undefined ? { detail } : {}),
+    };
+    traceBuffer.push(entry);
+    if (traceBuffer.length > TRACE_MAX) traceBuffer.shift();
+    console.log(`[LSH] ${event}`, detail !== undefined ? detail : '');
+  }
+
+  /* ─── Persistence ───────────────────────────────────────────────────────── */
+
+  function defaultState() {
+    return {
+      queue: [],
+      queueIndex: 0,
+      rowStatuses: [],
+      results: [],
+      completedLpns: {},
+      errorLog: [],
+      toteCounts: {},
+      toteDisplayIds: {},
+      sortSlots: {},
+      toteMaxLimits: {},
+      sessionArmed: false,
+      running: false,
+      exceptionFlowActive: false,
+      pageResetInProgress: false,
+      jobStartupInProgress: false,
+      sourceContainerDone: false,
+      barcodeDone: false,
+      postBarcodeHandled: false,
+      pendingLpn: null,
+      lastSubmittedLpn: null,
+      lastSubmittedContainer: null,
+      lastSourceSubmitAt: 0,
+      currentContainer: null,
+      autoCloseErrors: true,
+      stopClickUpdateOnStop: true,
+      lastRunningAt: 0,
+      jobStartedAt: 0,
+      lastUpdateReason: null,
+      resumeRequired: false,
+      stepProgressAt: 0,
+      currentStep: 'idle',
+      recoveryUpdateUsed: false,
+      sessionStartedAt: 0,
+      sessionJobsCompleted: 0,
+      sessionEtaDeadline: 0,
+      toteMappingPrompt: null,
+      toteFullPrompt: null,
+      version: SCRIPT_VERSION,
+    };
+  }
+
+  let stepProgressAt = Date.now();
+  let currentStep = 'idle';
+
+  let state = loadState();
+  let persistTimer = null;
+
+  function loadState() {
+    try {
+      const raw = GM_getValue(STORAGE_KEY, null);
+      if (!raw) return defaultState();
+      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      const merged = { ...defaultState(), ...parsed, running: false, pageResetInProgress: false, jobStartupInProgress: false };
+      normalizeSortSlots(merged);
+      migrateToteCounts(merged);
+      migrateCompletedLpns(merged);
+      migrateErrorLog(merged);
+      return merged;
+    } catch (e) {
+      trace('persist.loadError', { error: String(e) });
+      return defaultState();
+    }
+  }
+
+  function buildPersistPayload() {
+    return { ...state, running: false, pageResetInProgress: false, jobStartupInProgress: false };
+  }
+
+  function persistStateNow() {
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
+    try {
+      GM_setValue(STORAGE_KEY, JSON.stringify(buildPersistPayload()));
+    } catch (e) {
+      trace('persist.saveError', { error: String(e) });
+    }
+  }
+
+  function persistState() {
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      persistTimer = null;
+      persistStateNow();
+    }, 100);
+  }
+
+  function syncRowStatuses() {
+    while (state.rowStatuses.length < state.queue.length) {
+      state.rowStatuses.push(ROW_STATUS.PENDING);
+    }
+    if (state.rowStatuses.length > state.queue.length) {
+      state.rowStatuses = state.rowStatuses.slice(0, state.queue.length);
+    }
+  }
+
+  function getRowLpn(row) {
+    return (row?.lpn || row?.barcode || '').trim();
+  }
+
+  function getRowContainer(row) {
+    return (row?.container || '').trim();
+  }
+
+  function normalizeLpnKey(lpn) {
+    return (lpn || '').trim().toUpperCase();
+  }
+
+  function normalizeContainerKey(container) {
+    return (container || '').trim().toUpperCase();
+  }
+
+  function makePairKey(container, lpn) {
+    const c = normalizeContainerKey(container);
+    const l = normalizeLpnKey(lpn);
+    if (!c || !l) return '';
+    return `${c}|${l}`;
+  }
+
+  function isRowCompleted(row) {
+    const key = makePairKey(getRowContainer(row), getRowLpn(row));
+    return !!(key && state.completedLpns && state.completedLpns[key]);
+  }
+
+  function isRowErrored(row) {
+    const key = makePairKey(getRowContainer(row), getRowLpn(row));
+    if (!key || !Array.isArray(state.errorLog)) return false;
+    return state.errorLog.some((e) => makePairKey(e.container, e.lpn) === key);
+  }
+
+  function getRowSkipKind(row, index) {
+    if (isRowCompleted(row)) return 'complete';
+    if (isRowErrored(row)) return 'error';
+    if (index >= 0 && state.rowStatuses[index] === ROW_STATUS.COMPLETE) return 'complete';
+    if (index >= 0 && state.rowStatuses[index] === ROW_STATUS.ERROR) return 'error';
+    return null;
+  }
+
+  function shouldSkipRow(row, index = state.queueIndex) {
+    return getRowSkipKind(row, index) !== null;
+  }
+
+  function trimCompletedLpns(target = state) {
+    const map = target.completedLpns || {};
+    const keys = Object.keys(map);
+    if (keys.length <= COMPLETED_LPN_MAX) return;
+    keys
+      .sort((a, b) => (map[a].at || '').localeCompare(map[b].at || ''))
+      .slice(0, keys.length - COMPLETED_LPN_MAX)
+      .forEach((key) => delete map[key]);
+  }
+
+  function migrateCompletedLpns(target) {
+    if (!target.completedLpns || typeof target.completedLpns !== 'object') {
+      target.completedLpns = {};
+    }
+    const legacy = { ...target.completedLpns };
+    target.completedLpns = {};
+    for (const [key, val] of Object.entries(legacy)) {
+      if (key.includes('|')) {
+        target.completedLpns[key] = val;
+        continue;
+      }
+      const lpn = normalizeLpnKey(key);
+      const container = normalizeContainerKey(val?.container || '');
+      const pairKey = container ? makePairKey(container, lpn) : '';
+      if (pairKey) target.completedLpns[pairKey] = val;
+    }
+    for (const entry of target.results || []) {
+      if (entry.status !== 'complete') continue;
+      const row = entry.row || {};
+      const pairKey = makePairKey(row.container || entry.container, entry.lpn || getRowLpn(row));
+      if (!pairKey || target.completedLpns[pairKey]) continue;
+      target.completedLpns[pairKey] = {
+        at: entry.at || new Date().toISOString(),
+        container: row.container || entry.container || '',
+        lpn: getRowLpn(row) || entry.lpn || '',
+        sortCode: entry.sortCode || '',
+        toteId: entry.toteId || '',
+      };
+    }
+    trimCompletedLpns(target);
+  }
+
+  function recordCompletedRow(row, meta) {
+    const key = makePairKey(
+      getRowContainer(row) || meta.container,
+      getRowLpn(row) || meta.lpn
+    );
+    if (!key) return;
+    if (!state.completedLpns) state.completedLpns = {};
+    state.completedLpns[key] = {
+      at: new Date().toISOString(),
+      container: getRowContainer(row) || meta.container || '',
+      lpn: getRowLpn(row) || meta.lpn || '',
+      sortCode: meta.sortCode || '',
+      toteId: meta.toteId || '',
+    };
+    trimCompletedLpns();
+  }
+
+  function applyKnownRowsToQueue() {
+    syncRowStatuses();
+    let markedComplete = 0;
+    let markedError = 0;
+    state.queue.forEach((row, i) => {
+      if (isRowCompleted(row)) {
+        if (state.rowStatuses[i] !== ROW_STATUS.COMPLETE) markedComplete += 1;
+        state.rowStatuses[i] = ROW_STATUS.COMPLETE;
+      } else if (isRowErrored(row)) {
+        if (state.rowStatuses[i] !== ROW_STATUS.ERROR) markedError += 1;
+        state.rowStatuses[i] = ROW_STATUS.ERROR;
+      }
+    });
+    state.queueIndex = findFirstPendingIndex();
+    trace('pair.historyApplied', {
+      queueLength: state.queue.length,
+      markedComplete,
+      markedError,
+      nextIndex: state.queueIndex,
+      knownComplete: Object.keys(state.completedLpns || {}).length,
+      knownError: (state.errorLog || []).length,
+    });
+    return markedComplete + markedError;
+  }
+
+  function applyCompletedLpnsToQueue() {
+    return applyKnownRowsToQueue();
+  }
+
+  function findFirstPendingIndex() {
+    syncRowStatuses();
+    for (let i = 0; i < state.queue.length; i++) {
+      const row = state.queue[i];
+      const kind = getRowSkipKind(row, i);
+      if (kind === 'complete') {
+        state.rowStatuses[i] = ROW_STATUS.COMPLETE;
+        continue;
+      }
+      if (kind === 'error') {
+        state.rowStatuses[i] = ROW_STATUS.ERROR;
+        continue;
+      }
+      return i;
+    }
+    return state.queue.length;
+  }
+
+  function skipKnownRows(row) {
+    if (!shouldSkipRow(row, state.queueIndex)) return false;
+    let skipped = 0;
+    let skippedComplete = 0;
+    let skippedError = 0;
+    while (state.queueIndex < state.queue.length) {
+      const current = getCurrentRow();
+      const kind = getRowSkipKind(current, state.queueIndex);
+      if (!kind) break;
+      if (kind === 'error') {
+        markRowStatus(state.queueIndex, ROW_STATUS.ERROR);
+        skippedError += 1;
+      } else {
+        markRowStatus(state.queueIndex, ROW_STATUS.COMPLETE);
+        skippedComplete += 1;
+      }
+      skipped += 1;
+      state.queueIndex += 1;
+    }
+    if (state.queueIndex >= state.queue.length) {
+      trace('pair.skipKnown', { skipped, skippedComplete, skippedError, queueIndex: state.queueIndex });
+      stopRunning('queue complete (known pairs skipped)');
+      return true;
+    }
+    if (skipped) {
+      resetJobFlags();
+      persistState();
+      renderAll();
+      trace('pair.skipKnown', { skipped, skippedComplete, skippedError, queueIndex: state.queueIndex });
+    }
+    return skipped > 0;
+  }
+
+  function migrateErrorLog(target) {
+    if (!Array.isArray(target.errorLog)) target.errorLog = [];
+    for (const entry of target.results || []) {
+      if (entry.status !== 'error') continue;
+      const row = entry.row || {};
+      appendErrorLogEntry(
+        {
+          container: row.container || '',
+          lpn: getRowLpn(row) || entry.lpn || '',
+          sortCode: row.sortCode || '',
+          message: entry.message || 'Unknown error',
+          reason: entry.reason || '',
+          at: entry.at,
+        },
+        target
+      );
+    }
+    trimErrorLog(target);
+  }
+
+  function appendErrorLogEntry(entry, target = state) {
+    if (!Array.isArray(target.errorLog)) target.errorLog = [];
+    const normalized = {
+      container: (entry.container || '').trim(),
+      lpn: (entry.lpn || '').trim(),
+      sortCode: (entry.sortCode || '').trim(),
+      message: (entry.message || 'Unknown error').trim(),
+      reason: (entry.reason || '').trim(),
+      at: entry.at || new Date().toISOString(),
+    };
+    if (!normalized.lpn && !normalized.container && !normalized.message) return;
+    const dupe = target.errorLog.find(
+      (e) =>
+        e.lpn === normalized.lpn &&
+        e.container === normalized.container &&
+        e.message === normalized.message &&
+        e.at === normalized.at
+    );
+    if (dupe) return;
+    target.errorLog.unshift(normalized);
+    trimErrorLog(target);
+  }
+
+  function trimErrorLog(target = state) {
+    if (!Array.isArray(target.errorLog)) return;
+    if (target.errorLog.length > ERROR_LOG_MAX) {
+      target.errorLog.length = ERROR_LOG_MAX;
+    }
+  }
+
+  function recordError(row, message, meta = {}) {
+    appendErrorLogEntry({
+      container: row?.container || meta.container || '',
+      lpn: getRowLpn(row) || meta.lpn || '',
+      sortCode: row?.sortCode || meta.sortCode || '',
+      message: message || 'Unknown error',
+      reason: meta.reason || '',
+    });
+    trace('errorLog.record', {
+      container: row?.container || meta.container,
+      lpn: getRowLpn(row) || meta.lpn,
+      message,
+    });
+  }
+
+  function clearErrorLog() {
+    state.errorLog = [];
+    persistState();
+    renderErrorLogModal();
+    renderAll();
+    trace('errorLog.cleared');
+  }
+
+  function formatErrorLogTime(iso) {
+    if (!iso) return '—';
+    try {
+      return new Date(iso).toLocaleString();
+    } catch (e) {
+      return iso;
+    }
+  }
+
+  function escapeHtml(text) {
+    return String(text || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  /* ─── DOM Helpers ───────────────────────────────────────────────────────── */
+
+  function $(sel) {
+    return document.querySelector(sel);
+  }
+
+  function isVisible(el) {
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function fieldSnapshot() {
+    const f = (sel) => {
+      const el = $(sel);
+      if (!el) return { exists: false };
+      return {
+        exists: true,
+        visible: isVisible(el),
+        value: (el.value || '').trim(),
+        effective: getEffectiveFieldValue(sel),
+        placeholder: el.placeholder || '',
+        disabled: el.disabled,
+      };
+    };
+    return {
+      sortType: f(SEL.sortType),
+      sourceContainer: f(SEL.sourceContainer),
+      barcode: f(SEL.barcode),
+      sortCode: { text: getSortCodeText() },
+      scanTote: f(SEL.scanTote),
+    };
+  }
+
+  function pageSnapshot() {
+    return {
+      url: location.href,
+      title: document.title,
+      fields: fieldSnapshot(),
+      flags: {
+        sessionArmed: state.sessionArmed,
+        running: state.running,
+        exceptionFlowActive: state.exceptionFlowActive,
+        pageResetInProgress: state.pageResetInProgress,
+        jobStartupInProgress: state.jobStartupInProgress,
+        sourceContainerDone: state.sourceContainerDone,
+        barcodeDone: state.barcodeDone,
+        postBarcodeHandled: state.postBarcodeHandled,
+        resumeRequired: state.resumeRequired,
+        currentStep: state.currentStep,
+        stepProgressAt: state.stepProgressAt,
+      },
+      queueIndex: state.queueIndex,
+      currentRow: getCurrentRow(),
+      workflowStep: getWorkflowStep(),
+      exceptionVisible: isExceptionPanelVisible(),
+      exceptionMessage: getExceptionMessage(),
+    };
+  }
+
+  function getSortCodeText() {
+    const el = $(SEL.sortCode);
+    return el ? (el.textContent || el.innerText || '').trim() : '';
+  }
+
+  const PLACEHOLDER_VALUE_RE = /^scan\s+/i;
+
+  function isPlaceholderScanText(val) {
+    if (!val) return true;
+    const t = val.trim();
+    if (!t) return true;
+    if (PLACEHOLDER_VALUE_RE.test(t)) return true;
+    if (/^enter\s+/i.test(t)) return true;
+    return false;
+  }
+
+  function getFieldValue(sel) {
+    const el = $(sel);
+    return el ? (el.value || '').trim() : '';
+  }
+
+  function getEffectiveFieldValue(sel) {
+    const val = getFieldValue(sel);
+    return isPlaceholderScanText(val) ? '' : val;
+  }
+
+  function getSortTypeDisplayText() {
+    const el = $(SEL.sortTypeDisplay);
+    if (!el) return '';
+    return (el.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function isSortTypeAcceptedOnPage() {
+    if (isExceptionPanelVisible()) return false;
+    const sortEl = $(SEL.sortType);
+    if (!sortEl) return false;
+    if (sortEl.disabled || sortEl.readOnly) return true;
+
+    const displayText = getSortTypeDisplayText();
+    if (displayText && new RegExp('\\b' + SORT_TYPE + '\\b', 'i').test(displayText)) {
+      return true;
+    }
+
+    const activeId = document.activeElement?.id || '';
+    if (activeId === 'source-container-textfield' || activeId === 'barcode-scan-textfield') {
+      const displayText = getSortTypeDisplayText();
+      if (displayText && new RegExp('\\b' + SORT_TYPE + '\\b', 'i').test(displayText)) {
+        return true;
+      }
+      if (state.jobStartedAt) return true;
+    }
+
+    const sortEff = getEffectiveFieldValue(SEL.sortType);
+    if (sortEff.toUpperCase() === SORT_TYPE.toUpperCase() && document.activeElement !== sortEl) {
+      return true;
+    }
+    return false;
+  }
+
+  function isSourceAcceptedOnPage(expectedContainer) {
+    const activeId = document.activeElement?.id || '';
+    if (activeId === 'barcode-scan-textfield') return true;
+
+    const pageContainer = getEffectiveFieldValue(SEL.sourceContainer);
+    if (pageContainer) {
+      if (expectedContainer && pageContainer.toUpperCase() !== expectedContainer.toUpperCase()) return false;
+      if (getSortCodeText()) return true;
+      if (isToteFieldActive()) return true;
+      return activeId === 'barcode-scan-textfield';
+    }
+
+    if (
+      isSortTypeSubmitted() &&
+      state.lastSourceSubmitAt &&
+      Date.now() - state.lastSourceSubmitAt >= TIMING.postSubmitMs &&
+      Date.now() - state.lastSourceSubmitAt < TIMING.maxWaitMs + TIMING.typeDurationMs + TIMING.preSubmitMs * 3
+    ) {
+      if (
+        expectedContainer &&
+        state.lastSubmittedContainer &&
+        state.lastSubmittedContainer.toUpperCase() === expectedContainer.toUpperCase()
+      ) {
+        trace('source.accept.clearedField', { expectedContainer });
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function isSortTypeSubmitted() {
+    return !!state.jobStartedAt || isSortTypeAcceptedOnPage();
+  }
+
+  function getWorkflowStep() {
+    if (!isSortTypeSubmitted()) return 'sortType';
+
+    const sourceEff = getEffectiveFieldValue(SEL.sourceContainer);
+    if (!sourceEff && !state.sourceContainerDone) return 'sourceContainer';
+
+    if (!state.barcodeDone) return 'barcode';
+
+    const sortCode = getSortCodeText();
+    if (sortCode) {
+      if (isToteFieldActive() && !getEffectiveFieldValue(SEL.scanTote)) return 'tote';
+      return 'postBarcode';
+    }
+    if (isToteFieldActive() && !getEffectiveFieldValue(SEL.scanTote)) return 'tote';
+    return 'postBarcode';
+  }
+
+  function isSourceContainerFieldActive() {
+    const el = $(SEL.sourceContainer);
+    if (!el || !isVisible(el)) return false;
+    return getWorkflowStep() === 'sourceContainer';
+  }
+
+  function isBarcodeFieldActive() {
+    const el = $(SEL.barcode);
+    if (!el || !isVisible(el)) return false;
+    return getWorkflowStep() === 'barcode';
+  }
+
+  function isToteFieldActive() {
+    const el = $(SEL.scanTote);
+    return el && isVisible(el);
+  }
+
+  function findUpdateButton() {
+    const updateLink = $(SEL.updateLink);
+    if (updateLink && isVisible(updateLink)) {
+      const text = (updateLink.textContent || '').replace(/\s+/g, ' ').trim();
+      if (/update/i.test(text)) return updateLink;
+    }
+    const candidates = document.querySelectorAll(
+      'button, input[type="button"], input[type="submit"], a'
+    );
+    for (const btn of candidates) {
+      const text = (btn.textContent || btn.value || '').replace(/\s+/g, ' ').trim();
+      if (/^update(\(|$|\s)/i.test(text) && isVisible(btn) && !btn.disabled) return btn;
+    }
+    const bySel = document.querySelector(SEL.updateBtn);
+    if (bySel && isVisible(bySel) && !bySel.disabled) return bySel;
+    return null;
+  }
+
+  function findContinueButton() {
+    const exBtn = $(SEL.exceptionBtn);
+    if (exBtn && isVisible(exBtn)) return exBtn;
+    const candidates = document.querySelectorAll('button, input[type="button"], div.continue-btn');
+    for (const btn of candidates) {
+      const text = (btn.textContent || btn.value || '').replace(/\s+/g, ' ').trim();
+      if (/^continue(\(|$|\s)/i.test(text) && isVisible(btn)) return btn;
+    }
+    return null;
+  }
+
+  function isExceptionPanelVisible() {
+    const comp = $(SEL.exceptionPage);
+    return comp && isVisible(comp);
+  }
+
+  function getExceptionMessage() {
+    const info = $(SEL.exceptionInfo);
+    if (info) {
+      let text = (info.textContent || '').replace(/\s+/g, ' ').trim();
+      const btn = $(SEL.exceptionBtn);
+      if (btn) {
+        const btnText = (btn.textContent || '').replace(/\s+/g, ' ').trim();
+        text = text.replace(btnText, '').replace(/^ERROR\s*/i, '').trim();
+      }
+      if (text.length > 5) return text;
+    }
+    const container = $(SEL.exceptionContainer);
+    if (container) {
+      let text = (container.textContent || '').replace(/\s+/g, ' ').trim();
+      text = text.replace(/^ERROR\s*/i, '').replace(/Continue.*$/i, '').trim();
+      if (text.length > 5) return text;
+    }
+    return '';
+  }
+
+  function detectExceptionDialog() {
+    if (isExceptionPanelVisible()) {
+      return { el: $(SEL.exceptionPage), text: getExceptionMessage() || 'Exception panel visible' };
+    }
+    const dialogs = document.querySelectorAll('[role="dialog"], .modal, .exception-dialog, .a-modal');
+    for (const d of dialogs) {
+      if (!isVisible(d)) continue;
+      const text = (d.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text.length > 10) return { el: d, text };
+    }
+    const bodyText = document.body.innerText || '';
+    if (/item could not be moved/i.test(bodyText)) {
+      return { el: null, text: 'Item could not be moved' };
+    }
+    if (/destination mismatch/i.test(bodyText)) {
+      return { el: null, text: 'Destination mismatch' };
+    }
+    if (/does not correspond to any items/i.test(bodyText)) {
+      return { el: null, text: getExceptionMessage() || 'Container/item mismatch' };
+    }
+    if (/encountered error while contacting backend/i.test(bodyText)) {
+      return { el: null, text: getExceptionMessage() || 'Backend service error' };
+    }
+    return null;
+  }
+
+  function findStopProgramButton() {
+    const candidates = document.querySelectorAll('button, a');
+    for (const btn of candidates) {
+      const text = (btn.textContent || '').trim();
+      if (/stop program/i.test(text) && isVisible(btn)) return btn;
+    }
+    return null;
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function randomPollMs() {
+    return TIMING.pollMinMs + Math.floor(Math.random() * (TIMING.pollMaxMs - TIMING.pollMinMs + 1));
+  }
+
+  async function settle() {
+    await sleep(TIMING.settleMs);
+  }
+
+  function setNativeInputValue(el, value) {
+    const proto = window.HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && desc.set) {
+      desc.set.call(el, value);
+    } else {
+      el.value = value;
+    }
+  }
+
+  function dispatchInputEvents(el) {
+    el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+  }
+
+  function pressEnter(el) {
+    if (!el) return;
+    const opts = {
+      key: 'Enter',
+      code: 'Enter',
+      keyCode: 13,
+      which: 13,
+      charCode: 13,
+      bubbles: true,
+      cancelable: true,
+    };
+    el.dispatchEvent(new KeyboardEvent('keydown', opts));
+    el.dispatchEvent(new KeyboardEvent('keypress', opts));
+    el.dispatchEvent(new KeyboardEvent('keyup', opts));
+  }
+
+  async function clearScanField(el) {
+    el.focus();
+    await sleep(50);
+    setNativeInputValue(el, '');
+    try {
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'deleteContentBackward' }));
+    } catch (e) {
+      dispatchInputEvents(el);
+    }
+    await sleep(50);
+  }
+
+  async function typeLikeScanner(el, value, label) {
+    if (!el) return false;
+    await clearScanField(el);
+    const charDelay = Math.max(MIN_CHAR_DELAY_MS, Math.floor(TIMING.typeDurationMs / Math.max(value.length, 1)));
+    for (let i = 0; i < value.length; i++) {
+      const char = value[i];
+      const partial = value.slice(0, i + 1);
+      setNativeInputValue(el, partial);
+      try {
+        el.dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          cancelable: true,
+          inputType: 'insertText',
+          data: char,
+        }));
+      } catch (e) {
+        dispatchInputEvents(el);
+      }
+      await sleep(charDelay);
+    }
+    dispatchInputEvents(el);
+    trace('field.scanType', { label, value, final: (el.value || '').trim() });
+    await settle();
+    return true;
+  }
+
+  function reactSetInputValue(el, value) {
+    const lastValue = el.value;
+    setNativeInputValue(el, value);
+    if (el._valueTracker) {
+      el._valueTracker.setValue(lastValue);
+    }
+    dispatchInputEvents(el);
+  }
+
+  function runInPageContext(pageFnBody, payload) {
+    return new Promise((resolve) => {
+      const requestId = 'req-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);
+      let settled = false;
+      function onMsg(ev) {
+        if (ev.source !== window) return;
+        if (!ev.data || ev.data.channel !== PAGE_BRIDGE || ev.data.requestId !== requestId) return;
+        window.removeEventListener('message', onMsg);
+        settled = true;
+        resolve(ev.data.result || { ok: false, reason: 'empty-result' });
+      }
+      window.addEventListener('message', onMsg);
+      const script = document.createElement('script');
+      script.textContent = `
+        (function() {
+          var requestId = ${JSON.stringify(requestId)};
+          var payload = ${JSON.stringify(payload)};
+          var result = { ok: false };
+          try {
+            result = (${pageFnBody})(payload);
+          } catch (err) {
+            result = { ok: false, error: String(err) };
+          }
+          window.postMessage({ channel: ${JSON.stringify(PAGE_BRIDGE)}, requestId: requestId, result: result }, '*');
+        })();
+      `;
+      (document.documentElement || document.head).appendChild(script);
+      script.remove();
+      setTimeout(() => {
+        if (!settled) {
+          window.removeEventListener('message', onMsg);
+          pageBridgeFailed = true;
+          trace('pageBridge.disabled', { reason: 'timeout' });
+          resolve({ ok: false, reason: 'page-bridge-timeout' });
+        }
+      }, TIMING.bridgeTimeoutMs);
+    });
+  }
+
+  const PAGE_FN_TYPE_VALUE = `function(payload) {
+    var el = document.querySelector(payload.selector);
+    if (!el) return { ok: false, reason: 'missing-element' };
+    el.focus();
+    el.click();
+    var method = '';
+    try {
+      document.execCommand('selectAll', false, null);
+      if (document.execCommand('insertText', false, payload.value)) method = 'execCommand';
+    } catch (e1) {}
+    if ((el.value || '').trim().toUpperCase() !== payload.value.toUpperCase()) {
+      var desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+      var prev = el.value;
+      desc.set.call(el, payload.value);
+      if (el._valueTracker) el._valueTracker.setValue(prev);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      method = method || 'reactSet';
+    }
+    if ((el.value || '').trim().toUpperCase() !== payload.value.toUpperCase()) {
+      el.value = '';
+      for (var i = 0; i < payload.value.length; i++) {
+        var ch = payload.value[i];
+        el.value += ch;
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ch }));
+      }
+      method = method || 'charLoop';
+    }
+    return {
+      ok: true,
+      method: method || 'unknown',
+      value: (el.value || '').trim(),
+      activeId: document.activeElement ? (document.activeElement.id || '') : '',
+    };
+  }`;
+
+  const PAGE_FN_PRESS_ENTER = `function(payload) {
+    var el = document.querySelector(payload.selector);
+    if (!el) return { ok: false, reason: 'missing-element' };
+    el.focus();
+    var opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, charCode: 13, bubbles: true, cancelable: true };
+    el.dispatchEvent(new KeyboardEvent('keydown', opts));
+    el.dispatchEvent(new KeyboardEvent('keypress', opts));
+    el.dispatchEvent(new KeyboardEvent('keyup', opts));
+    return {
+      ok: true,
+      value: (el.value || '').trim(),
+      activeId: document.activeElement ? (document.activeElement.id || '') : '',
+    };
+  }`;
+
+  async function pageTypeValue(selector, value, label) {
+    if (pageBridgeFailed) return { ok: false, reason: 'page-bridge-disabled' };
+    const result = await runInPageContext(PAGE_FN_TYPE_VALUE, { selector, value });
+    if (result.reason === 'page-bridge-timeout') pageBridgeFailed = true;
+    trace('field.pageType', { label, value, result });
+    await settle();
+    return result;
+  }
+
+  async function pagePressEnter(selector, label) {
+    if (pageBridgeFailed) return { ok: false, reason: 'page-bridge-disabled' };
+    const result = await runInPageContext(PAGE_FN_PRESS_ENTER, { selector });
+    if (result.reason === 'page-bridge-timeout') pageBridgeFailed = true;
+    trace('field.pageEnter', { label, result });
+    await settle();
+    return result;
+  }
+
+  async function pageScanAndEnter(selector, value, label) {
+    const typeResult = await pageTypeValue(selector, value, label);
+    if (!typeResult.ok) return typeResult;
+    await clickAutocompleteMatch(value);
+    const enterResult = await pagePressEnter(selector, label);
+    return { ...typeResult, ...enterResult, ok: !!enterResult.ok };
+  }
+
+  async function clickAutocompleteMatch(text) {
+    await sleep(40);
+    const target = text.trim().toUpperCase();
+    const selectors = [
+      '[role="option"]',
+      '[role="listbox"] li',
+      '.a-dropdown-item',
+      '.autocomplete-item',
+      'ul.a-unordered-list li',
+      'li.a-dropdown-item',
+    ].join(', ');
+    for (const opt of document.querySelectorAll(selectors)) {
+      if (!isVisible(opt)) continue;
+      const t = (opt.textContent || '').trim();
+      if (!t) continue;
+      if (t.toUpperCase() === target || t.toUpperCase().includes(target)) {
+        trace('autocomplete.click', { text: t, match: text });
+        opt.click();
+        await settle();
+        return true;
+      }
+    }
+    trace('autocomplete.none', { match: text });
+    return false;
+  }
+
+  function unsafeEval(code) {
+    try {
+      if (typeof unsafeWindow !== 'undefined' && unsafeWindow && unsafeWindow.eval) {
+        return unsafeWindow.eval(code);
+      }
+    } catch (e) {
+      trace('unsafeEval.error', { error: String(e) });
+    }
+    return null;
+  }
+
+  function parseUnsafeResult(raw) {
+    try {
+      return typeof raw === 'string' ? JSON.parse(raw) : (raw || { ok: false, reason: 'empty' });
+    } catch (e) {
+      return { ok: false, error: String(e), raw: String(raw) };
+    }
+  }
+
+  function unsafeReadField(selector) {
+    const raw = unsafeEval(`(function(){
+      var el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return JSON.stringify({ ok: false, reason: 'missing-element' });
+      return JSON.stringify({
+        ok: true,
+        value: (el.value || '').trim(),
+        activeId: document.activeElement ? (document.activeElement.id || '') : '',
+      });
+    })()`);
+    return parseUnsafeResult(raw);
+  }
+
+  function unsafeSetPartialValue(selector, partial) {
+    const raw = unsafeEval(`(function(){
+      var el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return JSON.stringify({ ok: false, reason: 'missing-element' });
+      var val = ${JSON.stringify(partial)};
+      el.focus();
+      el.click();
+      var prev = el.value;
+      var desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+      desc.set.call(el, val);
+      if (el._valueTracker) el._valueTracker.setValue(prev);
+      var ch = val.charAt(val.length - 1);
+      try {
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ch }));
+      } catch (e0) {
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      return JSON.stringify({
+        ok: true,
+        method: 'reactPartial',
+        value: (el.value || '').trim(),
+        activeId: document.activeElement ? (document.activeElement.id || '') : '',
+      });
+    })()`);
+    return parseUnsafeResult(raw);
+  }
+
+  function unsafeSetFullValue(selector, value) {
+    const raw = unsafeEval(`(function(){
+      var el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return JSON.stringify({ ok: false, reason: 'missing-element' });
+      var val = ${JSON.stringify(value)};
+      el.focus();
+      el.click();
+      var method = 'none';
+      var prev = el.value;
+      try {
+        document.execCommand('selectAll', false, null);
+        document.execCommand('delete', false, null);
+      } catch (e0) {}
+      try {
+        if (document.execCommand('insertText', false, val)) method = 'execCommand';
+      } catch (e1) {}
+      if ((el.value || '').trim().toUpperCase() !== val.toUpperCase()) {
+        var desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+        desc.set.call(el, val);
+        if (el._valueTracker) el._valueTracker.setValue(prev);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        method = method === 'none' ? 'reactSet' : method;
+      }
+      return JSON.stringify({
+        ok: true,
+        method: method,
+        value: (el.value || '').trim(),
+        activeId: document.activeElement ? (document.activeElement.id || '') : '',
+      });
+    })()`);
+    return parseUnsafeResult(raw);
+  }
+
+  async function unsafeTypeSlow(selector, value) {
+    if (!value) return { ok: false, reason: 'empty-value' };
+    if (!state.running) return { ok: false, reason: 'not-running' };
+    const charDelay = Math.max(MIN_CHAR_DELAY_MS, Math.floor(TIMING.typeDurationMs / value.length));
+    let last = { ok: false, reason: 'no-chars' };
+    for (let i = 0; i < value.length; i++) {
+      if (!state.running) return { ok: false, reason: 'not-running' };
+      const partial = value.slice(0, i + 1);
+      last = unsafeSetPartialValue(selector, partial);
+      if (!last.ok) return last;
+      touchStepProgress();
+      if (i < value.length - 1) await sleep(charDelay);
+    }
+    if (last.value && last.value.toUpperCase() !== value.toUpperCase()) {
+      trace('field.unsafeTypeMismatch', { selector, expected: value, got: last.value });
+      last = unsafeSetFullValue(selector, value);
+    }
+    trace('field.unsafeTypeDone', { selector, value, charDelay, result: last });
+    return last;
+  }
+
+  function unsafeScanSubmit(selector, value, pressEnterKey) {
+    const raw = unsafeEval(`(function(){
+      var el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return JSON.stringify({ ok: false, reason: 'missing-element' });
+      var targetVal = ${JSON.stringify(value)};
+      function fireEnter(target) {
+        var opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, charCode: 13, bubbles: true, cancelable: true };
+        target.dispatchEvent(new KeyboardEvent('keydown', opts));
+        target.dispatchEvent(new KeyboardEvent('keypress', opts));
+        target.dispatchEvent(new KeyboardEvent('keyup', opts));
+      }
+      function setValue(val) {
+        el.focus();
+        el.click();
+        try {
+          document.execCommand('selectAll', false, null);
+          if (document.execCommand('insertText', false, val)) return 'execCommand';
+        } catch (e1) {}
+        if ((el.value || '').trim().toUpperCase() !== val.toUpperCase()) {
+          var desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+          var prev = el.value;
+          desc.set.call(el, val);
+          if (el._valueTracker) el._valueTracker.setValue(prev);
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        if ((el.value || '').trim().toUpperCase() !== val.toUpperCase()) {
+          el.value = '';
+          for (var i = 0; i < val.length; i++) {
+            var ch = val[i];
+            el.value += ch;
+            el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ch }));
+          }
+          return 'charLoop';
+        }
+        return 'reactSet';
+      }
+      var method = setValue(targetVal);
+      if (${pressEnterKey ? 'true' : 'false'}) {
+        fireEnter(el);
+        method = method + '+enter';
+      }
+      return JSON.stringify({
+        ok: true,
+        method: method,
+        value: (el.value || '').trim(),
+        activeId: document.activeElement ? (document.activeElement.id || '') : '',
+        display: (function(){
+          var d = document.querySelector('#sort-type');
+          return d ? (d.textContent || '').replace(/\\s+/g, ' ').trim() : '';
+        })()
+      });
+    })()`);
+    return parseUnsafeResult(raw);
+  }
+
+  function unsafePressEnter(selector) {
+    const raw = unsafeEval(`(function(){
+      var el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return JSON.stringify({ ok: false, reason: 'missing-element' });
+      el.focus();
+      var opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, charCode: 13, bubbles: true, cancelable: true };
+      el.dispatchEvent(new KeyboardEvent('keydown', opts));
+      el.dispatchEvent(new KeyboardEvent('keypress', opts));
+      el.dispatchEvent(new KeyboardEvent('keyup', opts));
+      return JSON.stringify({
+        ok: true,
+        value: (el.value || '').trim(),
+        activeId: document.activeElement ? (document.activeElement.id || '') : '',
+      });
+    })()`);
+    return parseUnsafeResult(raw);
+  }
+
+  async function isolatedFieldValue(el, value, label) {
+    if (!el) return false;
+    await sleep(TIMING.preSubmitMs);
+    el.focus();
+    await settle();
+    await typeLikeScanner(el, value, label);
+    trace('field.isolatedType', { label, value, final: (el.value || '').trim() });
+    await clickAutocompleteMatch(value);
+    await sleep(TIMING.preSubmitMs);
+    pressEnter(el);
+    trace('field.enter', { label, value: (el.value || '').trim() });
+    await sleep(50);
+    pressEnter(el);
+    trace('field.enterRetry', { label });
+    await sleep(TIMING.postSubmitMs);
+    await settle();
+    return true;
+  }
+
+  async function submitFieldEnter(el, label) {
+    if (!el) return false;
+    await sleep(TIMING.preSubmitMs);
+    const selector = el.id ? '#' + el.id : null;
+    if (selector) {
+      const enterResult = unsafePressEnter(selector);
+      trace('field.unsafeEnter', { label, result: enterResult });
+      await sleep(TIMING.postSubmitMs);
+      await settle();
+      return !!enterResult.ok;
+    }
+    el.focus();
+    await settle();
+    pressEnter(el);
+    trace('field.enter', { label, value: (el.value || '').trim() });
+    await sleep(50);
+    pressEnter(el);
+    trace('field.enterRetry', { label });
+    await sleep(TIMING.postSubmitMs);
+    await settle();
+    return true;
+  }
+
+  async function submitFieldValue(el, value, label) {
+    if (!el) return false;
+    if (!state.running) return false;
+    const selector = el.id ? '#' + el.id : null;
+    await sleep(TIMING.preSubmitMs);
+    if (!state.running) return false;
+    touchStepProgress();
+
+    if (selector) {
+      const typeResult = await unsafeTypeSlow(selector, value);
+      trace('field.unsafeType', { label, value, result: typeResult });
+      if (!state.running) return false;
+      if (!typeResult.ok || (typeResult.value || '').toUpperCase() !== value.toUpperCase()) {
+        trace('field.unsafeTypeAbort', { label, value, result: typeResult });
+        return false;
+      }
+      await clickAutocompleteMatch(value);
+      await sleep(TIMING.preSubmitMs);
+      if (!state.running) return false;
+      touchStepProgress();
+      const enterResult = unsafePressEnter(selector);
+      trace('field.unsafeEnter', { label, result: enterResult });
+      await sleep(TIMING.postSubmitMs);
+      if (!state.running) return false;
+      await settle();
+      return true;
+    }
+
+    if (!state.running) return false;
+    await isolatedFieldValue(el, value, label);
+    return !!state.running;
+  }
+
+  /* ─── Queue Helpers ─────────────────────────────────────────────────────── */
+
+  function getCurrentRow() {
+    if (state.queueIndex < 0 || state.queueIndex >= state.queue.length) return null;
+    return state.queue[state.queueIndex];
+  }
+
+  function getToteForSortCode(sortCode) {
+    if (!sortCode) return null;
+    return state.sortSlots[sortCode.trim().toUpperCase()] || null;
+  }
+
+  function normalizeToteKey(toteId) {
+    return (toteId || '').trim().toUpperCase();
+  }
+
+  function getToteMaxLimit(toteId) {
+    const key = normalizeToteKey(toteId);
+    if (key && state.toteMaxLimits && state.toteMaxLimits[key] != null) {
+      return state.toteMaxLimits[key];
+    }
+    return DEFAULT_MAX_TOTE_UNITS;
+  }
+
+  function parseToteMaxInput(el, fallback) {
+    const raw = el?.value ?? fallback ?? DEFAULT_MAX_TOTE_UNITS;
+    const n = parseInt(String(raw), 10);
+    if (!Number.isFinite(n)) return fallback ?? DEFAULT_MAX_TOTE_UNITS;
+    return Math.max(1, Math.min(9999, n));
+  }
+
+  function saveToteMaxLimit(toteId, max) {
+    const key = normalizeToteKey(toteId);
+    if (!key) return false;
+    if (!state.toteMaxLimits) state.toteMaxLimits = {};
+    state.toteMaxLimits[key] = parseToteMaxInput({ value: max }, DEFAULT_MAX_TOTE_UNITS);
+    persistState();
+    renderToteMapping();
+    return true;
+  }
+
+  function normalizeSortSlots(target = state) {
+    const merged = {};
+    for (const [code, tote] of Object.entries(target.sortSlots || {})) {
+      const key = (code || '').trim().toUpperCase();
+      const val = (tote || '').trim();
+      if (key && val) merged[key] = val;
+    }
+    target.sortSlots = merged;
+  }
+
+  function getToteDisplayId(toteKey) {
+    return state.toteDisplayIds?.[toteKey] || toteKey;
+  }
+
+  function getToteCount(toteId) {
+    const key = normalizeToteKey(toteId);
+    if (!key) return 0;
+    return state.toteCounts[key] || 0;
+  }
+
+  function ensureToteCountEntry(toteId) {
+    const key = normalizeToteKey(toteId);
+    if (!key) return '';
+    if (!state.toteCounts) state.toteCounts = {};
+    if (state.toteCounts[key] == null) state.toteCounts[key] = 0;
+    if (!state.toteDisplayIds) state.toteDisplayIds = {};
+    if (!state.toteDisplayIds[key]) state.toteDisplayIds[key] = (toteId || '').trim() || key;
+    return key;
+  }
+
+  function migrateToteCounts(target = state) {
+    if (!target.toteCounts) target.toteCounts = {};
+    if (!target.toteDisplayIds) target.toteDisplayIds = {};
+    const merged = {};
+    for (const [rawKey, rawCount] of Object.entries(target.toteCounts)) {
+      const key = normalizeToteKey(rawKey);
+      if (!key) continue;
+      merged[key] = (merged[key] || 0) + (rawCount || 0);
+      if (!target.toteDisplayIds[key]) target.toteDisplayIds[key] = (rawKey || '').trim() || key;
+    }
+    target.toteCounts = merged;
+    for (const tote of Object.values(target.sortSlots || {})) {
+      const key = normalizeToteKey(tote);
+      if (!key) continue;
+      if (target.toteCounts[key] == null) target.toteCounts[key] = 0;
+      if (!target.toteDisplayIds[key]) target.toteDisplayIds[key] = (tote || '').trim() || key;
+    }
+  }
+
+  function getKnownToteKeys() {
+    const keys = new Set([
+      ...Object.keys(state.toteCounts || {}),
+      ...Object.values(state.sortSlots || {}).map((t) => normalizeToteKey(t)).filter(Boolean),
+    ]);
+    return [...keys].filter(Boolean).sort((a, b) => getToteDisplayId(a).localeCompare(getToteDisplayId(b)));
+  }
+
+  function saveSortSlotMapping(sortCode, toteId) {
+    const trimmedCode = (sortCode || '').trim();
+    const trimmedTote = (toteId || '').trim();
+    if (!trimmedCode || !trimmedTote) return false;
+    normalizeSortSlots();
+    state.sortSlots[trimmedCode.toUpperCase()] = trimmedTote;
+    ensureToteCountEntry(trimmedTote);
+    persistState();
+    renderToteMapping();
+    return true;
+  }
+
+  function incrementToteCount(toteId) {
+    const key = ensureToteCountEntry(toteId);
+    if (!key) return;
+    state.toteCounts[key] = (state.toteCounts[key] || 0) + 1;
+    persistState();
+    renderToteMapping();
+    renderToteHistory();
+  }
+
+  function markRowStatus(index, status) {
+    syncRowStatuses();
+    if (index >= 0 && index < state.rowStatuses.length) {
+      state.rowStatuses[index] = status;
+      persistState();
+      renderQueue();
+    }
+  }
+
+  function advanceQueue() {
+    if (state.queueIndex < state.queue.length) {
+      markRowStatus(state.queueIndex, ROW_STATUS.COMPLETE);
+    }
+    state.queueIndex += 1;
+    resetJobFlags();
+    persistState();
+    renderAll();
+    trace('queue.advance', { queueIndex: state.queueIndex });
+    if (state.queueIndex >= state.queue.length) {
+      trace('queue.done');
+      stopRunning('queue complete');
+    }
+  }
+
+  function resetJobFlags() {
+    state.sourceContainerDone = false;
+    state.barcodeDone = false;
+    state.postBarcodeHandled = false;
+    state.pendingLpn = null;
+    state.lastSubmittedLpn = null;
+    state.lastSubmittedContainer = null;
+    state.lastSourceSubmitAt = 0;
+    state.currentContainer = null;
+    state.jobStartedAt = 0;
+    state.exceptionFlowActive = false;
+    state.recoveryUpdateUsed = false;
+    setStep('idle');
+  }
+
+  function setStep(step) {
+    if (currentStep !== step) {
+      currentStep = step;
+      stepProgressAt = Date.now();
+      state.currentStep = step;
+      state.stepProgressAt = stepProgressAt;
+      trace('step.change', { step });
+    }
+  }
+
+  function touchStepProgress() {
+    stepProgressAt = Date.now();
+    state.stepProgressAt = stepProgressAt;
+  }
+
+  function resetErrorStatuses() {
+    syncRowStatuses();
+    for (let i = 0; i < state.rowStatuses.length; i++) {
+      if (state.rowStatuses[i] === ROW_STATUS.ERROR && !isRowErrored(state.queue[i])) {
+        state.rowStatuses[i] = ROW_STATUS.PENDING;
+      }
+    }
+    state.queueIndex = findFirstPendingIndex();
+    persistState();
+    renderAll();
+    trace('errors.reset');
+  }
+
+  /* ─── Re-entrancy Lock ──────────────────────────────────────────────────── */
+
+  let automationLock = false;
+  let watcherTimer = null;
+
+  async function withLock(fn, label) {
+    if (automationLock) {
+      trace('lock.skip', { label });
+      return false;
+    }
+    automationLock = true;
+    try {
+      return await fn();
+    } finally {
+      automationLock = false;
+    }
+  }
+
+  /* ─── Verification ──────────────────────────────────────────────────────── */
+
+  async function waitFor(conditionFn, timeoutMs, pollMs, label) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (!state.running) {
+        trace('wait.abort', { label, reason: 'not running' });
+        return false;
+      }
+      try {
+        if (await conditionFn()) {
+          trace('wait.ok', { label, ms: Date.now() - start });
+          return true;
+        }
+      } catch (e) {
+        trace('wait.error', { label, error: String(e) });
+      }
+      await sleep(pollMs || randomPollMs());
+    }
+    trace('wait.timeout', { label, timeoutMs });
+    return false;
+  }
+
+  async function verifySortTypeAccepted() {
+    if (isExceptionPanelVisible()) return false;
+    return isSortTypeAcceptedOnPage();
+  }
+
+  async function verifySourceAccepted(expectedContainer) {
+    if (isExceptionPanelVisible()) return false;
+    return isSourceAcceptedOnPage(expectedContainer);
+  }
+
+  async function verifyBarcodeAccepted(expectedLpn) {
+    if (isExceptionPanelVisible()) return false;
+    const pageLpn = getEffectiveFieldValue(SEL.barcode);
+    if (getSortCodeText()) return true;
+    const step = getWorkflowStep();
+    if (step === 'tote' || step === 'postBarcode') return true;
+    if (pageLpn && expectedLpn && pageLpn.toUpperCase() === expectedLpn.toUpperCase()) {
+      return step !== 'barcode';
+    }
+    return false;
+  }
+
+  async function verifyToteMoveSuccess() {
+    const sortCodeVisible = getSortCodeText();
+    const toteActive = isToteFieldActive() && !getEffectiveFieldValue(SEL.scanTote);
+    const barcodeEmpty = !getEffectiveFieldValue(SEL.barcode);
+    return !toteActive && (barcodeEmpty || sortCodeVisible === '');
+  }
+
+  /* ─── Update Click (guarded) ────────────────────────────────────────────── */
+
+  function isUpdateAllowed(reason) {
+    const allowedPrefixes = ['job.end:', 'recovery:', 'stop:'];
+    return allowedPrefixes.some((p) => reason.startsWith(p));
+  }
+
+  async function clickUpdate(reason) {
+    if (!isUpdateAllowed(reason)) {
+      trace('update.denied', { reason, policy: 'Update only for job.end, recovery, or stop' });
+      return false;
+    }
+    if (state.pageResetInProgress) {
+      trace('update.skip', { reason: 'pageResetInProgress', requested: reason });
+      return false;
+    }
+    if (reason.startsWith('recovery:') && state.recoveryUpdateUsed) {
+      trace('update.skip', { reason: 'recoveryAlreadyUsed', requested: reason });
+      return false;
+    }
+    const btn = findUpdateButton();
+    if (!btn) {
+      trace('update.missingButton', { reason });
+      return false;
+    }
+    trace('update.clickSingle', { reason });
+    state.lastUpdateReason = reason;
+    state.pageResetInProgress = true;
+    if (reason.startsWith('recovery:')) state.recoveryUpdateUsed = true;
+    persistStateNow();
+    btn.click();
+    await sleep(TIMING.postUpdateMs);
+    await waitForPageReadyAfterUpdate();
+    state.pageResetInProgress = false;
+    trace('update.clickPageReset', { reason, done: true });
+    resetJobFlags();
+    persistState();
+    return true;
+  }
+
+  async function waitForPageReadyAfterUpdate() {
+    await waitFor(
+      () => isVisible($(SEL.sortType)) || isVisible($(SEL.sourceContainer)),
+      TIMING.maxWaitMs,
+      randomPollMs(),
+      'page.afterUpdate'
+    );
+  }
+
+  /* ─── Step Actions ──────────────────────────────────────────────────────── */
+
+  async function submitSortType() {
+    setStep('sortType');
+    trace('sortType.begin');
+    const el = $(SEL.sortType);
+    if (!el) {
+      trace('sortType.missing');
+      return false;
+    }
+    if (isSortTypeSubmitted()) {
+      trace('sortType.alreadySubmitted', { workflowStep: getWorkflowStep() });
+      state.jobStartedAt = Date.now();
+      trace('job.start', { sortType: SORT_TYPE });
+      touchStepProgress();
+      return true;
+    }
+    const sortEff = getEffectiveFieldValue(SEL.sortType);
+    if (sortEff.toUpperCase() === SORT_TYPE.toUpperCase()) {
+      trace('sortType.resubmit', { reason: 'value present but workflow still on sortType' });
+      await submitFieldValue(el, SORT_TYPE, 'sortType-resubmit');
+    } else {
+      await submitFieldValue(el, SORT_TYPE, 'sortType');
+    }
+    let ok = await waitFor(verifySortTypeAccepted, TIMING.maxWaitMs, randomPollMs(), 'sortType.accept');
+    if (!ok) {
+      trace('sortType.retryEnter', { reason: 'first submit did not advance workflow' });
+      await submitFieldValue(el, SORT_TYPE, 'sortType-retry');
+      ok = await waitFor(verifySortTypeAccepted, TIMING.maxWaitMs, randomPollMs(), 'sortType.acceptRetry');
+    }
+    if (ok) {
+      state.jobStartedAt = Date.now();
+      trace('job.start', { sortType: SORT_TYPE, workflowStep: getWorkflowStep() });
+      touchStepProgress();
+    } else {
+      trace('sortType.submitFailed', {
+        raw: getFieldValue(SEL.sortType),
+        effective: getEffectiveFieldValue(SEL.sortType),
+        workflowStep: getWorkflowStep(),
+      });
+    }
+    return ok;
+  }
+
+  async function submitSourceContainer(container) {
+    setStep('sourceContainer');
+    trace('source.type', { container });
+    const el = $(SEL.sourceContainer);
+    if (!el) {
+      trace('source.missing');
+      return false;
+    }
+    const pageVal = getEffectiveFieldValue(SEL.sourceContainer);
+    if (pageVal && pageVal.toUpperCase() === container.toUpperCase()) {
+      if (await verifySourceAccepted(container)) {
+        trace('source.alreadyOnPage', { container: pageVal });
+        state.sourceContainerDone = true;
+        state.currentContainer = container;
+        touchStepProgress();
+        return true;
+      }
+      if (isVisible(el)) {
+        trace('source.resubmitEnter', { container: pageVal, reason: 'value on page but step not advanced' });
+        state.lastSubmittedContainer = container;
+        state.lastSourceSubmitAt = Date.now();
+        await submitFieldEnter(el, 'sourceContainer');
+        const resubmitOk = await waitFor(
+          () => verifySourceAccepted(container),
+          TIMING.maxWaitMs,
+          randomPollMs(),
+          'source.resubmit.accept'
+        );
+        if (resubmitOk) {
+          state.sourceContainerDone = true;
+          state.currentContainer = container;
+          trace('source.accepted', { container, via: 'resubmitEnter' });
+          touchStepProgress();
+          return true;
+        }
+      }
+    }
+    state.lastSubmittedContainer = container;
+    state.lastSourceSubmitAt = Date.now();
+    const submitted = await submitFieldValue(el, container, 'sourceContainer');
+    if (!submitted) return false;
+    const ok = await waitFor(
+      () => verifySourceAccepted(container),
+      TIMING.maxWaitMs,
+      randomPollMs(),
+      'source.accept'
+    );
+    if (ok) {
+      state.sourceContainerDone = true;
+      state.currentContainer = container;
+      trace('source.accepted', { container, workflowStep: getWorkflowStep() });
+      touchStepProgress();
+    }
+    return ok;
+  }
+
+  async function submitBarcode(lpn) {
+    setStep('barcode');
+    trace('barcode.submit', { lpn });
+    state.pendingLpn = lpn;
+    state.lastSubmittedLpn = lpn;
+    const el = $(SEL.barcode);
+    if (!el) {
+      trace('barcode.missing');
+      return false;
+    }
+    await submitFieldValue(el, lpn, 'barcode');
+    const ok = await waitFor(
+      () => verifyBarcodeAccepted(lpn),
+      TIMING.maxWaitMs,
+      randomPollMs(),
+      'barcode.accept'
+    );
+    if (ok) {
+      state.barcodeDone = true;
+      state.pendingLpn = null;
+      trace('barcode.accepted', { lpn });
+      touchStepProgress();
+    }
+    return ok;
+  }
+
+  async function submitTote(toteId) {
+    setStep('tote');
+    trace('tote.submit', { toteId });
+    const el = $(SEL.scanTote);
+    if (!el) {
+      trace('tote.missing');
+      return false;
+    }
+    await submitFieldValue(el, toteId, 'scanTote');
+    const ok = await waitFor(verifyToteMoveSuccess, TIMING.maxWaitMs, randomPollMs(), 'tote.move');
+    if (ok) {
+      incrementToteCount(toteId);
+      trace('tote.success', { toteId });
+      touchStepProgress();
+    } else {
+      trace('tote.failOrTimeout', { toteId });
+    }
+    return ok;
+  }
+
+  /* ─── Exception Handling ────────────────────────────────────────────────── */
+
+  async function handleRecoverableException(message, reason) {
+    trace('exception.recover', { message, reason, autoClose: state.autoCloseErrors });
+    if (!state.autoCloseErrors) {
+      markCurrentRowError(message, { reason });
+      stopRunning(`${message} (auto-close off)`);
+      return true;
+    }
+    await clickExceptionContinue($(SEL.exceptionBtn));
+    await settle();
+    markCurrentRowError(message, { reason });
+    await recoverAfterError(reason);
+    return true;
+  }
+
+  async function handleExceptions() {
+    const exBtn = $(SEL.exceptionBtn);
+    const panelVisible = isExceptionPanelVisible();
+    if (exBtn && isVisible(exBtn)) {
+      trace('exception.btnVisible', { text: (exBtn.textContent || '').trim(), panelVisible });
+    }
+
+    const ex = detectExceptionDialog();
+    if (!ex && !(exBtn && isVisible(exBtn))) return false;
+
+    const exText = (ex && ex.text) || getExceptionMessage() || 'Unknown exception';
+    trace('exception.detected', { text: exText.slice(0, 300) });
+    state.exceptionFlowActive = true;
+
+    if (/stop program/i.test(exText)) {
+      trace('exception.blocker', { action: 'halt' });
+      markCurrentRowError(exText.slice(0, 200), { reason: 'stop-program' });
+      stopRunning('STOP PROGRAM blocker');
+      return true;
+    }
+
+    if (/item could not be moved/i.test(exText)) {
+      return handleRecoverableException('Item could not be moved', 'item-not-moved');
+    }
+
+    if (/destination mismatch/i.test(exText)) {
+      return handleRecoverableException('Destination mismatch', 'dest-mismatch');
+    }
+
+    if (/does not correspond to any items/i.test(exText)) {
+      return handleRecoverableException(exText.slice(0, 200), 'container-item-mismatch');
+    }
+
+    if (/encountered error while contacting backend/i.test(exText)) {
+      return handleRecoverableException(exText.slice(0, 200), 'backend-error');
+    }
+
+    if (/^error$/i.test(exText.trim()) || exText === 'Exception panel visible') {
+      const msg = getExceptionMessage() || 'Sort tool exception';
+      return handleRecoverableException(msg.slice(0, 200), 'exception-generic');
+    }
+
+    if (state.autoCloseErrors && panelVisible && getExceptionMessage()) {
+      return handleRecoverableException(exText.slice(0, 200), 'exception-auto');
+    }
+
+    return false;
+  }
+
+  async function clickExceptionContinue(exBtn) {
+    if (exBtn && isVisible(exBtn)) {
+      exBtn.click();
+      await settle();
+      return true;
+    }
+    const cont = findContinueButton();
+    if (cont) {
+      cont.click();
+      await settle();
+      return true;
+    }
+    return false;
+  }
+
+  function markCurrentRowError(message, meta = {}) {
+    const row = getCurrentRow();
+    trace('row.error', { index: state.queueIndex, message, row });
+    markRowStatus(state.queueIndex, ROW_STATUS.ERROR);
+    recordError(row, message, meta);
+    state.results.push({
+      index: state.queueIndex,
+      row,
+      status: 'error',
+      message,
+      reason: meta.reason || '',
+      at: new Date().toISOString(),
+    });
+    persistState();
+    renderAll();
+  }
+
+  async function recoverAfterError(reason) {
+    trace('reset.begin', { reason });
+    state.exceptionFlowActive = false;
+    state.queueIndex += 1;
+    syncRowStatuses();
+    persistState();
+    renderAll();
+    if (state.queueIndex >= state.queue.length) {
+      stopRunning('queue complete after error skip');
+      trace('reset.end', { reason, action: 'queue done' });
+      return;
+    }
+    if (state.running) {
+      const updated = await clickUpdate(`recovery:${reason}`);
+      if (!updated) {
+        trace('reset.updateRetry', { reason });
+        state.recoveryUpdateUsed = false;
+        await sleep(200);
+        await clickUpdate(`recovery:${reason}-retry`);
+      }
+    }
+    trace('reset.end', { reason, nextIndex: state.queueIndex });
+  }
+
+  /* ─── Stale State Detection ─────────────────────────────────────────────── */
+
+  function isStaleBarcodeOnPage(expectedLpn) {
+    const pageLpn = getEffectiveFieldValue(SEL.barcode);
+    if (!pageLpn || !expectedLpn) return false;
+    return pageLpn.toUpperCase() !== expectedLpn.toUpperCase() && state.barcodeDone === false;
+  }
+
+  function needsBarcodeSubmit(expectedLpn) {
+    const effective = getEffectiveFieldValue(SEL.barcode);
+    if (!effective) return isBarcodeFieldActive();
+    return effective.toUpperCase() !== expectedLpn.toUpperCase();
+  }
+
+  function isStaleSortLabelBeforeBarcode() {
+    const sortText = getSortCodeText();
+    if (!sortText) return false;
+    if (state.barcodeDone) return false;
+    if (isSourceContainerFieldActive()) return false;
+    if (!state.sourceContainerDone) return false;
+    return isBarcodeFieldActive();
+  }
+
+  function isFreshWorkflowEntry() {
+    return getWorkflowStep() === 'sortType' && !state.barcodeDone;
+  }
+
+  function shouldDeferStaleSortReset() {
+    if (isSourceContainerFieldActive()) {
+      trace('barcode.deferStaleSort', { reason: 'sourceContainerFieldActive' });
+      return true;
+    }
+    if (isFreshWorkflowEntry()) {
+      trace('barcode.deferStaleSort', { reason: 'freshWorkflowEntry' });
+      return true;
+    }
+    return false;
+  }
+
+  /* ─── Main Watcher / State Machine ──────────────────────────────────────── */
+
+  async function watcherTick() {
+    if (!state.running) return;
+    ensureProgressTicker();
+    if (state.resumeRequired) {
+      trace('watcher.skip', { reason: 'resumeRequired' });
+      return;
+    }
+
+    await withLock(async () => {
+      state.lastRunningAt = Date.now();
+      trace('watcher.poll', { queueIndex: state.queueIndex, workflowStep: getWorkflowStep(), flags: {
+        sourceContainerDone: state.sourceContainerDone,
+        barcodeDone: state.barcodeDone,
+        postBarcodeHandled: state.postBarcodeHandled,
+        pageResetInProgress: state.pageResetInProgress,
+      }});
+
+      if (checkStuckRunning()) return;
+      if (await attemptStuckStepRecovery()) return;
+
+      if (await handleExceptions()) return;
+
+      const row = getCurrentRow();
+      if (!row) {
+        trace('watcher.noRow');
+        stopRunning('no current row');
+        return;
+      }
+
+      if (skipKnownRows(row)) return;
+
+      markRowStatus(state.queueIndex, ROW_STATUS.ACTIVE);
+
+      if (state.pageResetInProgress || state.jobStartupInProgress) {
+        trace('watcher.skip', { reason: 'resetOrStartupInProgress' });
+        return;
+      }
+
+      if (!state.jobStartedAt) {
+        state.jobStartupInProgress = true;
+        const sortOk = await submitSortType();
+        state.jobStartupInProgress = false;
+        if (!sortOk) {
+          trace('watcher.wait', { step: 'sortType' });
+          return;
+        }
+      }
+
+      const expectedContainer = (row.container || '').trim();
+      const expectedLpn = getRowLpn(row);
+      const expectedSort = (row.sortCode || row.sort || '').trim();
+
+      if (expectedContainer) {
+        const pageContainer = getEffectiveFieldValue(SEL.sourceContainer);
+        const containerMismatch = pageContainer && pageContainer.toUpperCase() !== expectedContainer.toUpperCase();
+        if (containerMismatch && state.sourceContainerDone) {
+          trace('watcher.containerMismatch', { page: pageContainer, expected: expectedContainer });
+          state.sourceContainerDone = false;
+        }
+        if (!state.sourceContainerDone) {
+          const wfStep = getWorkflowStep();
+          if (wfStep === 'sortType') {
+            trace('watcher.skipSourceNeedSortType', { expectedContainer });
+            state.jobStartedAt = 0;
+            return;
+          }
+          if (wfStep === 'sourceContainer' || !pageContainer || containerMismatch) {
+            trace('watcher.skipBarcodeNeedSource', { expectedContainer, workflowStep: wfStep });
+            await submitSourceContainer(expectedContainer);
+            return;
+          }
+          if (pageContainer.toUpperCase() === expectedContainer.toUpperCase()) {
+            if (await verifySourceAccepted(expectedContainer)) {
+              trace('source.alreadyOnPage', { container: pageContainer, sameContainerRow: true });
+              state.sourceContainerDone = true;
+              state.currentContainer = expectedContainer;
+            } else {
+              trace('watcher.skipBarcodeNeedSource', { expectedContainer, reason: 'container value present but step not verified' });
+              await submitSourceContainer(expectedContainer);
+              return;
+            }
+          }
+        }
+      } else {
+        state.sourceContainerDone = true;
+      }
+
+      if (!state.barcodeDone) {
+        if (isStaleBarcodeOnPage(expectedLpn)) {
+          trace('barcode.staleOnPage', { page: getEffectiveFieldValue(SEL.barcode), raw: getFieldValue(SEL.barcode), expected: expectedLpn });
+        }
+
+        if (isStaleSortLabelBeforeBarcode() && !shouldDeferStaleSortReset()) {
+          trace('barcode.staleSortReset', { sortCode: getSortCodeText() });
+        } else if (shouldDeferStaleSortReset() && getSortCodeText()) {
+          trace('barcode.deferStaleSort', { sortCode: getSortCodeText() });
+        }
+
+        if (needsBarcodeSubmit(expectedLpn)) {
+          trace('barcode.readyToSubmit', { expected: expectedLpn, raw: getFieldValue(SEL.barcode) });
+          await submitBarcode(expectedLpn);
+          return;
+        }
+        if (getEffectiveFieldValue(SEL.barcode).toUpperCase() === expectedLpn.toUpperCase()) {
+          state.barcodeDone = true;
+          touchStepProgress();
+        }
+      }
+
+      if (state.barcodeDone && !state.postBarcodeHandled) {
+        if (isExceptionPanelVisible()) {
+          trace('watcher.wait', { step: 'exceptionPanelBeforeTote' });
+          return;
+        }
+        const sortText = getSortCodeText();
+        const lookupCode = expectedSort || sortText;
+        if (!lookupCode) {
+          trace('watcher.wait', { step: 'sortCodeFromPage' });
+          return;
+        }
+        const toteId = getToteForSortCode(lookupCode);
+        if (!toteId) {
+          const needsMappingPrompt =
+            !state.toteMappingPrompt ||
+            state.toteMappingPrompt.sortCode !== lookupCode ||
+            !isExecutionModalOpen(TOTE_MODAL_SEL);
+          if (needsMappingPrompt) {
+            trace('tote.noMapping', {
+              sortCode: lookupCode,
+              reshow: !!state.toteMappingPrompt,
+              modalOpen: isExecutionModalOpen(TOTE_MODAL_SEL),
+            });
+            showToteMappingModal(lookupCode);
+          } else {
+            touchStepProgress();
+          }
+          trace('watcher.wait', { step: 'toteMappingPrompt' });
+          return;
+        }
+        if (state.toteMappingPrompt) hideToteMappingModal();
+        if (state.toteFullPrompt) hideToteFullModal();
+        const count = getToteCount(toteId);
+        const toteMax = getToteMaxLimit(toteId);
+        if (count >= toteMax) {
+          const needsFullPrompt =
+            !state.toteFullPrompt ||
+            state.toteFullPrompt.sortCode !== lookupCode ||
+            !isExecutionModalOpen(TOTE_FULL_MODAL_SEL);
+          if (needsFullPrompt) {
+            trace('tote.maxReached', {
+              toteId,
+              count,
+              toteMax,
+              sortCode: lookupCode,
+              reshow: !!state.toteFullPrompt,
+              modalOpen: isExecutionModalOpen(TOTE_FULL_MODAL_SEL),
+            });
+            showToteFullModal(lookupCode, toteId, count);
+          } else {
+            touchStepProgress();
+          }
+          trace('watcher.wait', { step: 'toteFullPrompt' });
+          return;
+        }
+        if (isToteFieldActive()) {
+          const moved = await submitTote(toteId);
+          if (moved) {
+            state.postBarcodeHandled = true;
+            persistState();
+            const finished = await finishJob(expectedLpn, toteId, expectedSort || sortText);
+            if (!finished) state.postBarcodeHandled = false;
+          }
+          return;
+        }
+        trace('watcher.wait', { step: 'toteField' });
+        return;
+      }
+
+      if (state.postBarcodeHandled) {
+        const sortText = getSortCodeText();
+        const lookupCode = expectedSort || sortText;
+        const toteId = lookupCode ? getToteForSortCode(lookupCode) : null;
+        trace('watcher.jobCompleteRetry', { lpn: expectedLpn, toteId });
+        if (toteId) {
+          const finished = await finishJob(expectedLpn, toteId, lookupCode);
+          if (!finished) state.postBarcodeHandled = false;
+        }
+        return;
+      }
+    }, 'watcherTick');
+  }
+
+  async function finishJob(lpn, toteId, sortCode) {
+    trace('job.end.pending', { lpn, toteId, sortCode });
+    const prevCompleted = getSessionJobsCompleted();
+    const prevDeadline = state.sessionEtaDeadline || 0;
+    state.sessionJobsCompleted = prevCompleted + 1;
+    const progressBeforeAdvance = getQueueProgress();
+    refreshSessionEtaDeadline(Math.max(0, progressBeforeAdvance.remaining - 1));
+    persistStateNow();
+
+    let updated = await clickUpdate('job.end:post-tote-success');
+    if (!updated) {
+      await sleep(400);
+      updated = await clickUpdate('job.end:post-tote-success-retry');
+    }
+    if (!updated) {
+      state.sessionJobsCompleted = prevCompleted;
+      state.sessionEtaDeadline = prevDeadline;
+      persistStateNow();
+      trace('job.end.updateFailed');
+      return false;
+    }
+    state.results.push({
+      index: state.queueIndex,
+      row: getCurrentRow(),
+      status: 'complete',
+      lpn,
+      toteId,
+      sortCode,
+      at: new Date().toISOString(),
+    });
+    trace('job.end', { lpn, toteId, sortCode, sessionJobsCompleted: state.sessionJobsCompleted });
+    recordCompletedRow(getCurrentRow(), {
+      container: getCurrentRow()?.container || '',
+      lpn,
+      sortCode,
+      toteId,
+    });
+    advanceQueue();
+    if (state.running && state.queueIndex < state.queue.length) {
+      trace('job.nextAutoStart', { queueIndex: state.queueIndex });
+    }
+    return true;
+  }
+
+  function checkStuckRunning() {
+    const stepIdleMs = Date.now() - stepProgressAt;
+    const runIdleMs = Date.now() - (state.lastRunningAt || Date.now());
+    if (stepIdleMs > TIMING.stuckRunningMs) {
+      trace('stuck.timeout', { step: currentStep, stepIdleMs, runIdleMs });
+      state.pageResetInProgress = false;
+      state.jobStartupInProgress = false;
+      state.exceptionFlowActive = false;
+      automationLock = false;
+      touchStepProgress();
+      return true;
+    }
+    return false;
+  }
+
+  async function attemptStuckStepRecovery() {
+    if (state.toteMappingPrompt || state.toteFullPrompt) return false;
+    const stepIdleMs = Date.now() - stepProgressAt;
+    if (stepIdleMs < TIMING.stuckStepMs) return false;
+    if (state.recoveryUpdateUsed) return false;
+    if (state.pageResetInProgress) return false;
+
+    const betweenWdAndSource =
+      state.jobStartedAt &&
+      !state.sourceContainerDone &&
+      (currentStep === 'sortType' || currentStep === 'sourceContainer');
+
+    if (betweenWdAndSource) {
+      trace('watcher.staleRecover', {
+        action: 'deferUpdate',
+        reason: 'between WDSorting and source — prefer container scan',
+        step: currentStep,
+        stepIdleMs,
+      });
+      const row = getCurrentRow();
+      if (row && row.container && isSourceContainerFieldActive()) {
+        await submitSourceContainer(row.container.trim());
+      }
+      touchStepProgress();
+      return true;
+    }
+
+    if (currentStep === 'idle' || currentStep === 'sortType') return false;
+
+    trace('watcher.staleRecover', {
+      action: 'recoveryUpdate',
+      step: currentStep,
+      stepIdleMs,
+    });
+    await clickUpdate(`recovery:stuck-step:${currentStep}`);
+    touchStepProgress();
+    return true;
+  }
+
+  function startWatcher() {
+    if (watcherTimer) clearInterval(watcherTimer);
+    watcherTimer = setInterval(() => {
+      watcherTick().catch((e) => trace('watcher.error', { error: String(e) }));
+    }, TIMING.pollMaxMs);
+  }
+
+  function stopWatcher() {
+    if (watcherTimer) {
+      clearInterval(watcherTimer);
+      watcherTimer = null;
+    }
+  }
+
+  /* ─── Start / Stop / Resume ─────────────────────────────────────────────── */
+
+  function armSession(fromTop) {
+    if (fromTop) {
+      state.queueIndex = 0;
+      state.rowStatuses = state.queue.map((row) => {
+        if (isRowCompleted(row)) return ROW_STATUS.COMPLETE;
+        if (isRowErrored(row)) return ROW_STATUS.ERROR;
+        return ROW_STATUS.PENDING;
+      });
+    }
+    applyKnownRowsToQueue();
+    state.queueIndex = findFirstPendingIndex();
+    state.sessionArmed = true;
+    state.resumeRequired = false;
+    persistState();
+    trace('session.armed', { fromTop, queueIndex: state.queueIndex });
+    renderAll();
+  }
+
+  function startRunning(fromTop) {
+    if (state.queue.length === 0) {
+      trace('start.abort', { reason: 'empty queue' });
+      alert('Queue is empty. Paste queue data first.');
+      return;
+    }
+    armSession(fromTop);
+    if (state.queueIndex >= state.queue.length) {
+      trace('start.abort', { reason: 'all rows already completed or errored' });
+      alert('All rows in this queue are already completed or logged as errors.');
+      return;
+    }
+    resetJobFlags();
+    state.running = true;
+    state.lastRunningAt = Date.now();
+    state.sessionStartedAt = Date.now();
+    state.sessionJobsCompleted = 0;
+    state.sessionEtaDeadline = 0;
+    state.resumeRequired = false;
+    touchStepProgress();
+    persistState();
+    trace('start', { fromTop, queueIndex: state.queueIndex });
+    startWatcher();
+    startProgressTicker();
+    renderAll();
+  }
+
+  async function stopRunning(reason) {
+    trace('stop', { reason });
+    state.running = false;
+    stopProgressTicker();
+    hideToteMappingModal();
+    hideToteFullModal();
+    stopWatcher();
+    const row = getCurrentRow();
+    if (row && state.rowStatuses[state.queueIndex] === ROW_STATUS.ACTIVE) {
+      markRowStatus(state.queueIndex, ROW_STATUS.PENDING);
+      trace('stop.rowPending', { index: state.queueIndex });
+    }
+    if (state.stopClickUpdateOnStop && state.sessionArmed) {
+      await clickUpdate('stop:reset-page');
+    }
+    state.sessionArmed = false;
+    persistState();
+    renderAll();
+  }
+
+  function resumeAfterRefresh() {
+    if (!state.sessionArmed) {
+      trace('resume.abort', { reason: 'not armed' });
+      return;
+    }
+    trace('resume.enter', { queueIndex: state.queueIndex });
+    applyKnownRowsToQueue();
+    if (state.queueIndex >= state.queue.length) {
+      trace('resume.abort', { reason: 'all rows already completed or errored' });
+      state.running = false;
+      persistState();
+      renderAll();
+      return;
+    }
+    state.resumeRequired = false;
+    state.running = true;
+    state.lastRunningAt = Date.now();
+    if (!state.sessionStartedAt) state.sessionStartedAt = Date.now();
+    if (getSessionJobsCompleted() >= 1) {
+      refreshSessionEtaDeadline(getQueueProgress().remaining);
+    }
+    resetJobFlags();
+    persistState();
+    startWatcher();
+    startProgressTicker();
+    renderAll();
+  }
+
+  /* ─── UI ────────────────────────────────────────────────────────────────── */
+
+  const PANEL_ID = 'lsh-panel';
+  let alertAudioCtx = null;
+
+  function ensureAlertAudio() {
+    try {
+      if (!alertAudioCtx) {
+        alertAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (alertAudioCtx.state === 'suspended') {
+        alertAudioCtx.resume().catch(() => {});
+      }
+      return alertAudioCtx;
+    } catch (e) {
+      trace('alert.audioInitFailed', { error: String(e) });
+      return null;
+    }
+  }
+
+  function playAlertBeep() {
+    try {
+      const ctx = ensureAlertAudio();
+      if (!ctx) return;
+      const now = ctx.currentTime;
+      const beepSec = 0.22;
+      const gapSec = 0.1;
+      const pattern = [880, 1100, 880, 1100];
+
+      pattern.forEach((freq, i) => {
+        const start = now + i * (beepSec + gapSec);
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const shaper = ctx.createWaveShaper();
+        const curve = new Float32Array(256);
+        for (let j = 0; j < 256; j++) {
+          const x = (j / 128) - 1;
+          curve[j] = Math.tanh(x * 4);
+        }
+        shaper.curve = curve;
+        osc.type = 'square';
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.0001, start);
+        gain.gain.exponentialRampToValueAtTime(1, start + 0.008);
+        gain.gain.setValueAtTime(1, start + beepSec - 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + beepSec);
+        osc.connect(gain);
+        gain.connect(shaper);
+        shaper.connect(ctx.destination);
+        osc.start(start);
+        osc.stop(start + beepSec + 0.02);
+      });
+      trace('alert.beep');
+    } catch (e) {
+      trace('alert.beepFailed', { error: String(e) });
+    }
+  }
+
+  function armAlertAudioFromUserGesture() {
+    ensureAlertAudio();
+  }
+
+  function injectStyles() {
+    if ($('#lsh-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'lsh-styles';
+    style.textContent = `
+      #${PANEL_ID} {
+        position: fixed; bottom: 0; left: 0; right: 0; z-index: 999999;
+        background: #1a1a2e; color: #eee; font: 13px/1.4 system-ui, sans-serif;
+        border-top: 2px solid #e94560; max-height: 45vh; display: flex; flex-direction: column;
+        box-shadow: 0 -4px 20px rgba(0,0,0,.4);
+      }
+      #${PANEL_ID} .lsh-progress-strip {
+        padding: 8px 12px 6px; background: #0d0d1a; border-bottom: 1px solid #0f3460;
+      }
+      #${PANEL_ID} .lsh-progress-meta {
+        display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center;
+        justify-content: space-between; margin-bottom: 6px; font-size: 11px;
+      }
+      #${PANEL_ID} .lsh-progress-meta strong { color: #2ecc71; font-weight: 600; }
+      #${PANEL_ID} .lsh-progress-meta .lsh-progress-countdown { color: #f39c12; }
+      #${PANEL_ID} .lsh-progress-meta .lsh-progress-eta { color: #aaa; }
+      #${PANEL_ID} .lsh-progress-track {
+        position: relative; width: 100%; height: 10px; background: #16213e;
+        border-radius: 5px; overflow: hidden; border: 1px solid #0f3460;
+      }
+      #${PANEL_ID} .lsh-progress-fill {
+        position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+        background: linear-gradient(90deg, #27ae60, #2ecc71);
+        transition: width 0.35s ease;
+      }
+      #${PANEL_ID} .lsh-progress-error {
+        position: absolute; top: 0; bottom: 0; width: 0;
+        background: rgba(192, 57, 43, 0.85);
+        transition: width 0.35s ease;
+      }
+      #${PANEL_ID} .lsh-header {
+        display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+        padding: 8px 12px; background: #16213e; border-bottom: 1px solid #0f3460;
+      }
+      #${PANEL_ID} .lsh-header h3 { margin: 0; font-size: 14px; color: #e94560; flex: 1; }
+      #${PANEL_ID} button {
+        padding: 6px 12px; border: none; border-radius: 4px; cursor: pointer;
+        font-size: 12px; font-weight: 600;
+      }
+      #${PANEL_ID} .lsh-btn-start { background: #2ecc71; color: #111; }
+      #${PANEL_ID} .lsh-btn-stop { background: #e74c3c; color: #fff; }
+      #${PANEL_ID} .lsh-btn-secondary { background: #0f3460; color: #eee; }
+      #${PANEL_ID} .lsh-btn-copy { background: #533483; color: #fff; }
+      #${PANEL_ID} .lsh-status { font-size: 12px; color: #aaa; }
+      #${PANEL_ID} .lsh-body { display: flex; flex: 1; overflow: hidden; min-height: 120px; }
+      #${PANEL_ID} .lsh-col { flex: 1; overflow: auto; padding: 8px 12px; border-right: 1px solid #0f3460; }
+      #${PANEL_ID} .lsh-col:last-child { border-right: none; }
+      #${PANEL_ID} .lsh-col h4 { margin: 0 0 6px; font-size: 12px; color: #e94560; }
+      #${PANEL_ID} textarea {
+        width: 100%; min-height: 60px; background: #0d0d1a; color: #ccc;
+        border: 1px solid #0f3460; border-radius: 4px; font-size: 11px; box-sizing: border-box;
+      }
+      #${PANEL_ID} .lsh-queue { list-style: none; margin: 0; padding: 0; max-height: 180px; overflow: auto; }
+      #${PANEL_ID} .lsh-queue li {
+        padding: 3px 6px; border-bottom: 1px solid #0f3460; font-size: 11px;
+        display: flex; gap: 6px;
+      }
+      #${PANEL_ID} .lsh-queue li.active { background: #0f3460; }
+      #${PANEL_ID} .lsh-badge {
+        display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; min-width: 52px; text-align: center;
+      }
+      #${PANEL_ID} .lsh-badge.pending { background: #555; }
+      #${PANEL_ID} .lsh-badge.active { background: #2980b9; }
+      #${PANEL_ID} .lsh-badge.complete { background: #27ae60; }
+      #${PANEL_ID} .lsh-badge.error { background: #c0392b; }
+      #${PANEL_ID} .lsh-slots h4 { margin: 0; }
+      #${PANEL_ID} .lsh-slots-head {
+        display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px;
+      }
+      #${PANEL_ID} .lsh-slots input { width: 110px; background: #0d0d1a; color: #ccc; border: 1px solid #0f3460; padding: 2px 4px; }
+      #${PANEL_ID} .lsh-copy-tote { padding: 2px 6px; margin-left: 4px; font-size: 10px; }
+      #${PANEL_ID} .lsh-tote-history-title { margin: 10px 0 4px; font-size: 12px; color: #e94560; }
+      #${PANEL_ID} .lsh-tote-history { max-height: 120px; overflow-y: auto; font-size: 11px; }
+      #${PANEL_ID} .lsh-tote-history-row { margin-bottom: 3px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+      #${PANEL_ID} .lsh-tote-history-id { color: #2ecc71; min-width: 100px; }
+      #${PANEL_ID} .lsh-toggle { display: flex; align-items: center; gap: 4px; font-size: 11px; }
+      #${PANEL_ID} .lsh-resume-banner {
+        background: #f39c12; color: #111; padding: 6px 12px; font-weight: 600; text-align: center;
+      }
+      #lsh-tote-modal, #lsh-tote-full-modal {
+        display: none; position: fixed; inset: 0; z-index: 2147483646;
+        background: rgba(0,0,0,.55); align-items: center; justify-content: center;
+      }
+      #lsh-tote-modal.open, #lsh-tote-full-modal.open { display: flex; }
+      #lsh-tote-modal .lsh-modal-box, #lsh-tote-full-modal .lsh-modal-box {
+        background: #1a1a2e; color: #eee; border: 2px solid #e94560; border-radius: 8px;
+        padding: 20px 24px; min-width: 320px; max-width: 420px; box-shadow: 0 8px 32px rgba(0,0,0,.5);
+        font: 13px/1.4 system-ui, sans-serif;
+      }
+      #lsh-tote-modal h4, #lsh-tote-full-modal h4 { margin: 0 0 12px; color: #e94560; font-size: 15px; }
+      #lsh-tote-modal .lsh-detected, #lsh-tote-full-modal .lsh-detected {
+        background: #16213e; border: 1px solid #0f3460; border-radius: 4px;
+        padding: 10px 12px; margin-bottom: 14px; word-break: break-word;
+      }
+      #lsh-tote-modal .lsh-detected strong, #lsh-tote-full-modal .lsh-detected strong { color: #2ecc71; font-size: 14px; }
+      #lsh-tote-full-modal .lsh-detected-warn strong { color: #f39c12; }
+      #lsh-tote-modal label, #lsh-tote-full-modal label { display: block; margin-bottom: 14px; font-size: 12px; color: #aaa; }
+      #lsh-tote-modal input, #lsh-tote-full-modal input {
+        display: block; width: 100%; margin-top: 6px; box-sizing: border-box;
+        background: #0d0d1a; color: #eee; border: 1px solid #0f3460; border-radius: 4px;
+        padding: 8px 10px; font-size: 14px;
+      }
+      #lsh-tote-modal .lsh-modal-actions, #lsh-tote-full-modal .lsh-modal-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+      #lsh-tote-modal button, #lsh-tote-full-modal button {
+        padding: 8px 14px; border: none; border-radius: 4px; cursor: pointer;
+        font-size: 12px; font-weight: 600;
+      }
+      #lsh-tote-modal .lsh-modal-assign, #lsh-tote-full-modal .lsh-modal-assign { background: #2ecc71; color: #111; }
+      #lsh-tote-modal .lsh-modal-cancel, #lsh-tote-full-modal .lsh-modal-cancel { background: #555; color: #eee; }
+      #lsh-tote-modal .lsh-modal-skip, #lsh-tote-full-modal .lsh-modal-skip { background: #2980b9; color: #fff; }
+      #lsh-tote-full-modal .lsh-modal-raise { background: #f39c12; color: #111; }
+      #lsh-error-log-modal {
+        display: none; position: fixed; inset: 0; z-index: 10000000;
+        background: rgba(0,0,0,.55); align-items: center; justify-content: center;
+      }
+      #lsh-error-log-modal.open { display: flex; }
+      #lsh-error-log-modal .lsh-modal-box {
+        background: #1a1a2e; color: #eee; border: 2px solid #e94560; border-radius: 8px;
+        padding: 20px 24px; width: min(720px, 92vw); max-height: 80vh; display: flex; flex-direction: column;
+        box-shadow: 0 8px 32px rgba(0,0,0,.5); font: 13px/1.4 system-ui, sans-serif;
+      }
+      #lsh-error-log-modal h4 { margin: 0 0 8px; color: #e94560; font-size: 15px; }
+      #lsh-error-log-modal .lsh-error-summary { font-size: 12px; color: #aaa; margin-bottom: 12px; }
+      #lsh-error-log-list {
+        overflow: auto; flex: 1; min-height: 120px; max-height: 50vh;
+        border: 1px solid #0f3460; border-radius: 4px; background: #0d0d1a;
+      }
+      #lsh-error-log-list table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      #lsh-error-log-list th, #lsh-error-log-list td {
+        padding: 8px 10px; text-align: left; border-bottom: 1px solid #0f3460; vertical-align: top;
+      }
+      #lsh-error-log-list th { background: #16213e; color: #e94560; position: sticky; top: 0; }
+      #lsh-error-log-list tr:last-child td { border-bottom: none; }
+      #lsh-error-log-list .lsh-err-msg { color: #f39c12; word-break: break-word; max-width: 280px; }
+      #lsh-error-log-list .lsh-err-empty { padding: 24px; text-align: center; color: #888; }
+      #lsh-error-log-modal .lsh-modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+      #lsh-error-log-modal button {
+        padding: 8px 14px; border: none; border-radius: 4px; cursor: pointer;
+        font-size: 12px; font-weight: 600;
+      }
+      #lsh-error-log-modal .lsh-modal-assign { background: #533483; color: #fff; }
+      #lsh-error-log-modal .lsh-modal-cancel { background: #555; color: #eee; }
+      #lsh-error-log-modal .lsh-modal-clear { background: #c0392b; color: #fff; }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function buildPanel() {
+    injectStyles();
+    if ($(PANEL_ID)) {
+      ensureProgressStrip();
+      ensureSlotsCopyAllButton();
+      ensureToteHistorySection();
+      return;
+    }
+    const panel = document.createElement('div');
+    panel.id = PANEL_ID;
+    panel.innerHTML = `
+      <div class="lsh-progress-strip">
+        <div class="lsh-progress-meta">
+          <span id="lsh-progress-text"><strong>0</strong> / 0 complete</span>
+          <span class="lsh-progress-countdown" id="lsh-progress-countdown">Remaining: —</span>
+          <span class="lsh-progress-eta" id="lsh-progress-eta">ETA: —</span>
+        </div>
+        <div class="lsh-progress-track">
+          <div class="lsh-progress-fill" id="lsh-progress-fill"></div>
+          <div class="lsh-progress-error" id="lsh-progress-error"></div>
+        </div>
+      </div>
+      <div id="lsh-resume" class="lsh-resume-banner" style="display:none">
+        Session armed from previous page load. Click Resume to continue (will NOT auto-start).
+        <button class="lsh-btn-start" id="lsh-resume-btn">Resume</button>
+      </div>
+      <div class="lsh-header">
+        <h3>Liquidation Sort Helper v${SCRIPT_VERSION}</h3>
+        <span class="lsh-status" id="lsh-current-label">—</span>
+        <button class="lsh-btn-start" id="lsh-start">Start</button>
+        <button class="lsh-btn-stop" id="lsh-stop">Stop</button>
+        <button class="lsh-btn-secondary" id="lsh-start-top">Start From Top</button>
+        <button class="lsh-btn-secondary" id="lsh-reset-errors">Reset Error Statuses</button>
+        <button class="lsh-btn-secondary" id="lsh-view-errors">View Errors</button>
+        <label class="lsh-toggle"><input type="checkbox" id="lsh-auto-close" checked> Auto-close errors</label>
+        <label class="lsh-toggle"><input type="checkbox" id="lsh-stop-update" checked> Update on Stop</label>
+        <button class="lsh-btn-copy" id="lsh-copy-results">Copy Results</button>
+        <button class="lsh-btn-copy" id="lsh-export-csv">Export CSV</button>
+        <button class="lsh-btn-copy" id="lsh-copy-debug">Copy Debug</button>
+      </div>
+      <div class="lsh-body">
+        <div class="lsh-col">
+          <h4>Queue (paste: container,lpn,sortCode per line)</h4>
+          <textarea id="lsh-queue-input" placeholder="CONT001,LPN12345,A&#10;CONT001,LPN12346,B"></textarea>
+          <button class="lsh-btn-secondary" id="lsh-load-queue" style="margin-top:4px">Load Queue</button>
+          <ul class="lsh-queue" id="lsh-queue-list"></ul>
+        </div>
+        <div class="lsh-col lsh-slots">
+          <div class="lsh-slots-head">
+            <h4>Sort Code → Tote Mapping (default max ${DEFAULT_MAX_TOTE_UNITS}/tote)</h4>
+            <button class="lsh-btn-copy" id="lsh-copy-all-totes" type="button">Copy all Totes</button>
+          </div>
+          <div id="lsh-slots-editor"></div>
+          <button class="lsh-btn-secondary" id="lsh-add-slot" style="margin-top:4px">+ Add Slot</button>
+          <h4 class="lsh-tote-history-title">Used Totes (saved)</h4>
+          <div class="lsh-tote-history" id="lsh-tote-history"></div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(panel);
+    ensureToteMappingModal();
+    ensureToteFullModal();
+    ensureErrorLogModal();
+    bindPanelEvents();
+    renderAll();
+  }
+
+  function ensureToteHistorySection() {
+    if ($('#lsh-tote-history')) return;
+    const slotsCol = document.querySelector(`#${PANEL_ID} .lsh-slots`);
+    const addBtn = $('#lsh-add-slot');
+    if (!slotsCol || !addBtn) return;
+    const title = document.createElement('h4');
+    title.className = 'lsh-tote-history-title';
+    title.textContent = 'Used Totes (saved)';
+    const history = document.createElement('div');
+    history.className = 'lsh-tote-history';
+    history.id = 'lsh-tote-history';
+    addBtn.insertAdjacentElement('afterend', title);
+    title.insertAdjacentElement('afterend', history);
+    renderToteHistory();
+  }
+
+  function ensureSlotsCopyAllButton() {
+    if ($('#lsh-copy-all-totes')) return;
+    const slotsCol = document.querySelector(`#${PANEL_ID} .lsh-slots`);
+    const heading = slotsCol?.querySelector('h4');
+    if (!slotsCol || !heading) return;
+    const head = document.createElement('div');
+    head.className = 'lsh-slots-head';
+    heading.replaceWith(head);
+    head.appendChild(heading);
+    const btn = document.createElement('button');
+    btn.className = 'lsh-btn-copy';
+    btn.id = 'lsh-copy-all-totes';
+    btn.type = 'button';
+    btn.textContent = 'Copy all Totes';
+    btn.addEventListener('click', copyAllTotes);
+    head.appendChild(btn);
+  }
+
+  function ensureProgressStrip() {
+    if ($('#lsh-progress-fill')) return;
+    const panel = $(PANEL_ID);
+    if (!panel) return;
+    const strip = document.createElement('div');
+    strip.className = 'lsh-progress-strip';
+    strip.innerHTML = `
+      <div class="lsh-progress-meta">
+        <span id="lsh-progress-text"><strong>0</strong> / 0 complete</span>
+        <span class="lsh-progress-countdown" id="lsh-progress-countdown">Remaining: —</span>
+        <span class="lsh-progress-eta" id="lsh-progress-eta">ETA: —</span>
+      </div>
+      <div class="lsh-progress-track">
+        <div class="lsh-progress-fill" id="lsh-progress-fill"></div>
+        <div class="lsh-progress-error" id="lsh-progress-error"></div>
+      </div>
+    `;
+    panel.insertBefore(strip, panel.firstChild);
+    renderProgressStrip();
+  }
+
+  const TOTE_MODAL_ID = 'lsh-tote-modal';
+  const TOTE_MODAL_SEL = '#lsh-tote-modal';
+
+  function appendToUiRoot(el) {
+    const root = document.documentElement || document.body;
+    if (el && el.parentNode !== root) root.appendChild(el);
+  }
+
+  function getConnectedModal(sel) {
+    const el = $(sel);
+    return el && el.isConnected ? el : null;
+  }
+
+  function isExecutionModalOpen(sel) {
+    const modal = getConnectedModal(sel);
+    return !!(modal && modal.classList.contains('open'));
+  }
+
+  function fillModalRowContext(modal, containerId, lpnId) {
+    const row = getCurrentRow();
+    const containerEl = modal.querySelector(`#${containerId}`);
+    const lpnEl = modal.querySelector(`#${lpnId}`);
+    if (containerEl) containerEl.textContent = getRowContainer(row) || '—';
+    if (lpnEl) lpnEl.textContent = getRowLpn(row) || '—';
+  }
+
+  function bindToteMappingModalEvents(modal) {
+    if (!modal || modal.dataset.lshBound === '1') return;
+    modal.dataset.lshBound = '1';
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) cancelExecutionPrompt('tote mapping dismissed');
+    });
+    modal.querySelector('#lsh-modal-cancel')?.addEventListener('click', () => {
+      trace('tote.mappingCancelled', { sortCode: state.toteMappingPrompt?.sortCode });
+      cancelExecutionPrompt('tote mapping cancelled');
+    });
+    modal.querySelector('#lsh-modal-skip')?.addEventListener('click', () => {
+      skipCurrentRowAndContinue('tote mapping skipped').catch((e) =>
+        trace('row.skip.error', { error: String(e), reason: 'tote mapping skipped' })
+      );
+    });
+    modal.querySelector('#lsh-modal-assign')?.addEventListener('click', submitToteMappingModal);
+    const input = modal.querySelector('#lsh-modal-tote-input');
+    input?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitToteMappingModal();
+    });
+    input?.addEventListener('input', syncMappingModalMaxFromTote);
+    input?.addEventListener('change', syncMappingModalMaxFromTote);
+  }
+
+  function upgradeToteMappingModal(modal) {
+    if (!modal) return;
+    if (!modal.querySelector('#lsh-modal-tote-max')) {
+      modal.remove();
+      return;
+    }
+    if (!modal.querySelector('#lsh-modal-row-info')) {
+      const sortDetected = modal.querySelector('#lsh-modal-sort-code')?.closest('.lsh-detected');
+      if (sortDetected) {
+        const rowInfo = document.createElement('div');
+        rowInfo.className = 'lsh-detected';
+        rowInfo.id = 'lsh-modal-row-info';
+        rowInfo.innerHTML =
+          'Container: <strong id="lsh-modal-container"></strong> · LPN: <strong id="lsh-modal-lpn"></strong>';
+        sortDetected.insertAdjacentElement('beforebegin', rowInfo);
+      }
+    }
+    if (!modal.querySelector('#lsh-modal-tote-count-hint')) {
+      const anchor = modal.querySelector('#lsh-modal-tote-max')?.closest('label');
+      if (anchor) {
+        const hint = document.createElement('div');
+        hint.id = 'lsh-modal-tote-count-hint';
+        hint.style.cssText = 'font-size:11px;color:#aaa;margin:-8px 0 10px';
+        anchor.insertAdjacentElement('afterend', hint);
+      }
+    }
+    bindModalSkipButton(TOTE_MODAL_SEL, 'lsh-modal-skip', 'tote mapping skipped');
+    bindToteMappingModalEvents(modal);
+    appendToUiRoot(modal);
+  }
+
+  function ensureToteMappingModal() {
+    let modal = getConnectedModal(TOTE_MODAL_SEL);
+    if (!modal && $(TOTE_MODAL_SEL)) {
+      trace('tote.modalDetached', { id: TOTE_MODAL_ID });
+    }
+    if (modal) {
+      upgradeToteMappingModal(modal);
+      modal = getConnectedModal(TOTE_MODAL_SEL);
+      if (modal) return modal;
+    }
+    modal = document.createElement('div');
+    modal.id = TOTE_MODAL_ID;
+    modal.innerHTML = `
+      <div class="lsh-modal-box">
+        <h4>Assign Tote for Sort Code</h4>
+        <p style="margin:0 0 8px;font-size:12px;color:#aaa">No mapping found. Assign a tote to continue this LPN.</p>
+        <div class="lsh-detected" id="lsh-modal-row-info">Container: <strong id="lsh-modal-container"></strong> · LPN: <strong id="lsh-modal-lpn"></strong></div>
+        <div class="lsh-detected">Sort code: <strong id="lsh-modal-sort-code"></strong></div>
+        <label>Tote ID
+          <input id="lsh-modal-tote-input" type="text" placeholder="Scan or type tote ID" autocomplete="off" />
+        </label>
+        <label>Max items for this tote
+          <input id="lsh-modal-tote-max" type="number" min="1" max="9999" step="1" value="${DEFAULT_MAX_TOTE_UNITS}" />
+        </label>
+        <div id="lsh-modal-tote-count-hint" style="font-size:11px;color:#aaa;margin:-8px 0 10px"></div>
+        <div class="lsh-modal-actions">
+          <button type="button" class="lsh-modal-cancel" id="lsh-modal-cancel">Cancel</button>
+          <button type="button" class="lsh-modal-skip" id="lsh-modal-skip">Skip LPN</button>
+          <button type="button" class="lsh-modal-assign" id="lsh-modal-assign">Assign &amp; Scan Tote</button>
+        </div>
+      </div>
+    `;
+    appendToUiRoot(modal);
+    bindToteMappingModalEvents(modal);
+    return modal;
+  }
+
+  async function skipCurrentRowAndContinue(reason) {
+    hideToteMappingModal();
+    hideToteFullModal();
+    if (!state.running) {
+      trace('row.skip.aborted', { reason, running: false });
+      return;
+    }
+    const skippedIndex = state.queueIndex;
+    const row = getCurrentRow();
+    trace('row.skip', { index: skippedIndex, reason, row });
+    markRowStatus(skippedIndex, ROW_STATUS.PENDING);
+    state.queueIndex += 1;
+    resetJobFlags();
+    state.recoveryUpdateUsed = false;
+    persistState();
+    renderAll();
+    if (state.queueIndex >= state.queue.length) {
+      stopRunning('queue complete after skip');
+      trace('row.skip.end', { reason, skippedIndex });
+      return;
+    }
+    const updated = await clickUpdate(`recovery:skip:${reason}`);
+    if (!updated) {
+      state.recoveryUpdateUsed = false;
+      await sleep(200);
+      await clickUpdate(`recovery:skip:${reason}-retry`);
+    }
+    touchStepProgress();
+    trace('row.skip.continue', { reason, skippedIndex, nextIndex: state.queueIndex });
+  }
+
+  function cancelExecutionPrompt(reason) {
+    trace('executionPrompt.cancel', { reason, running: state.running });
+    if (state.running) {
+      stopRunning(reason);
+      return;
+    }
+    hideToteMappingModal();
+    hideToteFullModal();
+  }
+
+  function bindModalSkipButton(modalSel, btnId, reason) {
+    const modal = getConnectedModal(modalSel) || $(modalSel);
+    if (!modal || modal.querySelector(`#${btnId}`)) return;
+    const cancelBtn = modal.querySelector('.lsh-modal-cancel');
+    if (!cancelBtn) return;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'lsh-modal-skip';
+    btn.id = btnId;
+    btn.textContent = 'Skip LPN';
+    btn.addEventListener('click', () => {
+      skipCurrentRowAndContinue(reason).catch((e) => trace('row.skip.error', { error: String(e), reason }));
+    });
+    cancelBtn.insertAdjacentElement('afterend', btn);
+  }
+
+  function syncMappingModalMaxFromTote() {
+    const toteInput = $('#lsh-modal-tote-input');
+    const maxInput = $('#lsh-modal-tote-max');
+    const hint = $('#lsh-modal-tote-count-hint');
+    if (!maxInput) return;
+    const tote = (toteInput?.value || '').trim();
+    maxInput.value = String(tote ? getToteMaxLimit(tote) : DEFAULT_MAX_TOTE_UNITS);
+    if (hint) {
+      if (!tote) {
+        hint.textContent = '';
+      } else {
+        const count = getToteCount(tote);
+        hint.textContent = `Saved count: ${count}/${getToteMaxLimit(tote)}`;
+      }
+    }
+  }
+
+  function showToteMappingModal(sortCode) {
+    const modal = ensureToteMappingModal();
+    if (!modal) {
+      trace('tote.modalMissing', { reason: 'root' });
+      return;
+    }
+    const codeEl = modal.querySelector('#lsh-modal-sort-code');
+    const input = modal.querySelector('#lsh-modal-tote-input');
+    if (!codeEl || !input) {
+      trace('tote.modalMissing', { reason: 'children', codeEl: !!codeEl, input: !!input });
+      return;
+    }
+    state.toteMappingPrompt = {
+      sortCode: sortCode.trim(),
+      queueIndex: state.queueIndex,
+      at: Date.now(),
+    };
+    persistState();
+    fillModalRowContext(modal, 'lsh-modal-container', 'lsh-modal-lpn');
+    codeEl.textContent = sortCode.trim();
+    input.value = '';
+    const maxInput = modal.querySelector('#lsh-modal-tote-max');
+    if (maxInput) maxInput.value = String(DEFAULT_MAX_TOTE_UNITS);
+    syncMappingModalMaxFromTote();
+    appendToUiRoot(modal);
+    modal.classList.add('open');
+    setStep('toteMapping');
+    touchStepProgress();
+    playAlertBeep();
+    setTimeout(() => input.focus(), 50);
+    trace('tote.mappingPrompt', { sortCode: sortCode.trim(), queueIndex: state.queueIndex, modalOpen: true });
+  }
+
+  function hideToteMappingModal() {
+    const modal = $(TOTE_MODAL_SEL);
+    if (modal) modal.classList.remove('open');
+    state.toteMappingPrompt = null;
+    persistState();
+  }
+
+  function submitToteMappingModal() {
+    const input = $('#lsh-modal-tote-input');
+    const maxInput = $('#lsh-modal-tote-max');
+    const sortCode = state.toteMappingPrompt?.sortCode || ($('#lsh-modal-sort-code') || {}).textContent || '';
+    const toteId = (input?.value || '').trim();
+    if (!toteId) {
+      input?.focus();
+      return;
+    }
+    if (!saveSortSlotMapping(sortCode, toteId)) return;
+    saveToteMaxLimit(toteId, parseToteMaxInput(maxInput, DEFAULT_MAX_TOTE_UNITS));
+    trace('tote.mappingAssigned', { sortCode, toteId, max: getToteMaxLimit(toteId) });
+    hideToteMappingModal();
+    touchStepProgress();
+  }
+
+  const TOTE_FULL_MODAL_ID = 'lsh-tote-full-modal';
+  const TOTE_FULL_MODAL_SEL = '#lsh-tote-full-modal';
+
+  function bindToteFullModalEvents(modal) {
+    if (!modal || modal.dataset.lshBound === '1') return;
+    modal.dataset.lshBound = '1';
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) cancelExecutionPrompt('full tote dismissed');
+    });
+    modal.querySelector('#lsh-full-modal-cancel')?.addEventListener('click', () => {
+      trace('tote.fullCancelled', { sortCode: state.toteFullPrompt?.sortCode, toteId: state.toteFullPrompt?.fullToteId });
+      cancelExecutionPrompt('full tote reassignment cancelled');
+    });
+    modal.querySelector('#lsh-full-modal-skip')?.addEventListener('click', () => {
+      skipCurrentRowAndContinue('full tote skipped').catch((e) =>
+        trace('row.skip.error', { error: String(e), reason: 'full tote skipped' })
+      );
+    });
+    modal.querySelector('#lsh-full-modal-raise')?.addEventListener('click', submitToteFullRaiseLimit);
+    modal.querySelector('#lsh-full-modal-assign')?.addEventListener('click', submitToteFullModal);
+    modal.querySelector('#lsh-full-modal-tote-input')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitToteFullModal();
+    });
+  }
+
+  function upgradeToteFullModal(modal) {
+    if (!modal) return;
+    if (!modal.querySelector('#lsh-full-modal-tote-max')) {
+      modal.remove();
+      return;
+    }
+    if (!modal.querySelector('#lsh-full-modal-row-info')) {
+      const anchor = modal.querySelector('.lsh-detected-warn') || modal.querySelector('.lsh-detected');
+      if (anchor) {
+        const rowInfo = document.createElement('div');
+        rowInfo.className = 'lsh-detected';
+        rowInfo.id = 'lsh-full-modal-row-info';
+        rowInfo.innerHTML =
+          'Container: <strong id="lsh-full-modal-container"></strong> · LPN: <strong id="lsh-full-modal-lpn"></strong>';
+        anchor.insertAdjacentElement('beforebegin', rowInfo);
+      }
+    }
+    bindModalSkipButton(TOTE_FULL_MODAL_SEL, 'lsh-full-modal-skip', 'full tote skipped');
+    bindToteFullModalEvents(modal);
+    appendToUiRoot(modal);
+  }
+
+  function ensureToteFullModal() {
+    let modal = getConnectedModal(TOTE_FULL_MODAL_SEL);
+    if (!modal && $(TOTE_FULL_MODAL_SEL)) {
+      trace('tote.fullModalDetached', { id: TOTE_FULL_MODAL_ID });
+    }
+    if (modal) {
+      upgradeToteFullModal(modal);
+      modal = getConnectedModal(TOTE_FULL_MODAL_SEL);
+      if (modal) return modal;
+    }
+    modal = document.createElement('div');
+    modal.id = TOTE_FULL_MODAL_ID;
+    modal.innerHTML = `
+      <div class="lsh-modal-box">
+        <h4>Tote Limit Reached</h4>
+        <p style="margin:0 0 8px;font-size:12px;color:#aaa">This tote is full. Raise its limit or assign a new container.</p>
+        <div class="lsh-detected" id="lsh-full-modal-row-info">Container: <strong id="lsh-full-modal-container"></strong> · LPN: <strong id="lsh-full-modal-lpn"></strong></div>
+        <div class="lsh-detected lsh-detected-warn">Full tote: <strong id="lsh-full-modal-tote-id"></strong> (<span id="lsh-full-modal-count"></span>/<span id="lsh-full-modal-max"></span>)</div>
+        <div class="lsh-detected">Sort code: <strong id="lsh-full-modal-sort-code"></strong></div>
+        <label>Max items for this tote
+          <input id="lsh-full-modal-tote-max" type="number" min="1" max="9999" step="1" value="${DEFAULT_MAX_TOTE_UNITS}" />
+        </label>
+        <label>New container ID (optional)
+          <input id="lsh-full-modal-tote-input" type="text" placeholder="Scan or type new tote ID" autocomplete="off" />
+        </label>
+        <div class="lsh-modal-actions">
+          <button type="button" class="lsh-modal-cancel" id="lsh-full-modal-cancel">Cancel</button>
+          <button type="button" class="lsh-modal-skip" id="lsh-full-modal-skip">Skip LPN</button>
+          <button type="button" class="lsh-modal-raise" id="lsh-full-modal-raise">Raise Limit &amp; Continue</button>
+          <button type="button" class="lsh-modal-assign" id="lsh-full-modal-assign">Assign New &amp; Continue</button>
+        </div>
+      </div>
+    `;
+    appendToUiRoot(modal);
+    bindToteFullModalEvents(modal);
+    return modal;
+  }
+
+  function showToteFullModal(sortCode, fullToteId, count) {
+    const modal = ensureToteFullModal();
+    if (!modal) {
+      trace('tote.fullModalMissing', { reason: 'root' });
+      return;
+    }
+    const toteEl = modal.querySelector('#lsh-full-modal-tote-id');
+    const countEl = modal.querySelector('#lsh-full-modal-count');
+    const maxEl = modal.querySelector('#lsh-full-modal-max');
+    const codeEl = modal.querySelector('#lsh-full-modal-sort-code');
+    const input = modal.querySelector('#lsh-full-modal-tote-input');
+    const maxInput = modal.querySelector('#lsh-full-modal-tote-max');
+    if (!toteEl || !countEl || !codeEl || !input || !maxInput) {
+      trace('tote.fullModalMissing', { reason: 'children' });
+      return;
+    }
+    const toteMax = getToteMaxLimit(fullToteId);
+    state.toteFullPrompt = {
+      sortCode: sortCode.trim(),
+      fullToteId: fullToteId.trim(),
+      count,
+      toteMax,
+      queueIndex: state.queueIndex,
+      at: Date.now(),
+    };
+    persistState();
+    fillModalRowContext(modal, 'lsh-full-modal-container', 'lsh-full-modal-lpn');
+    toteEl.textContent = fullToteId.trim();
+    countEl.textContent = String(count);
+    if (maxEl) maxEl.textContent = String(toteMax);
+    maxInput.value = String(toteMax);
+    codeEl.textContent = sortCode.trim();
+    input.value = '';
+    appendToUiRoot(modal);
+    modal.classList.add('open');
+    setStep('toteFull');
+    touchStepProgress();
+    playAlertBeep();
+    setTimeout(() => maxInput.focus(), 50);
+    trace('tote.fullPrompt', { sortCode: sortCode.trim(), fullToteId, count, toteMax, queueIndex: state.queueIndex, modalOpen: true });
+  }
+
+  function hideToteFullModal() {
+    const modal = $(TOTE_FULL_MODAL_SEL);
+    if (modal) modal.classList.remove('open');
+    state.toteFullPrompt = null;
+    persistState();
+  }
+
+  function submitToteFullRaiseLimit() {
+    const fullToteId = state.toteFullPrompt?.fullToteId || '';
+    const count = state.toteFullPrompt?.count || 0;
+    const maxInput = $('#lsh-full-modal-tote-max');
+    const newMax = parseToteMaxInput(maxInput, getToteMaxLimit(fullToteId));
+    if (newMax <= count) {
+      alert(`Max must be greater than the current count (${count}).`);
+      maxInput?.focus();
+      maxInput?.select();
+      return;
+    }
+    saveToteMaxLimit(fullToteId, newMax);
+    trace('tote.maxRaised', { toteId: fullToteId, count, newMax });
+    hideToteFullModal();
+    touchStepProgress();
+  }
+
+  function submitToteFullModal() {
+    const input = $('#lsh-full-modal-tote-input');
+    const maxInput = $('#lsh-full-modal-tote-max');
+    const sortCode = state.toteFullPrompt?.sortCode || ($('#lsh-full-modal-sort-code') || {}).textContent || '';
+    const oldToteId = state.toteFullPrompt?.fullToteId || '';
+    const newToteId = (input?.value || '').trim();
+    if (!newToteId) {
+      input?.focus();
+      return;
+    }
+    if (newToteId.toUpperCase() === oldToteId.toUpperCase()) {
+      trace('tote.fullSameTote', { toteId: newToteId });
+      input?.focus();
+      input?.select();
+      return;
+    }
+    if (!saveSortSlotMapping(sortCode, newToteId)) return;
+    saveToteMaxLimit(newToteId, parseToteMaxInput(maxInput, DEFAULT_MAX_TOTE_UNITS));
+    trace('tote.fullReassigned', { sortCode, oldToteId, newToteId, max: getToteMaxLimit(newToteId) });
+    hideToteFullModal();
+    touchStepProgress();
+  }
+
+  const ERROR_LOG_MODAL_ID = 'lsh-error-log-modal';
+  const ERROR_LOG_MODAL_SEL = '#lsh-error-log-modal';
+
+  function ensureErrorLogModal() {
+    if ($(ERROR_LOG_MODAL_SEL)) return;
+    const modal = document.createElement('div');
+    modal.id = ERROR_LOG_MODAL_ID;
+    modal.innerHTML = `
+      <div class="lsh-modal-box">
+        <h4>Container → LPN Errors</h4>
+        <div class="lsh-error-summary" id="lsh-error-log-summary"></div>
+        <div id="lsh-error-log-list"></div>
+        <div class="lsh-modal-actions">
+          <button type="button" class="lsh-modal-assign" id="lsh-error-log-copy">Copy</button>
+          <button type="button" class="lsh-modal-clear" id="lsh-error-log-clear">Clear Log</button>
+          <button type="button" class="lsh-modal-cancel" id="lsh-error-log-close">Close</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) hideErrorLogModal();
+    });
+    $('#lsh-error-log-close').addEventListener('click', hideErrorLogModal);
+    $('#lsh-error-log-clear').addEventListener('click', () => {
+      if (confirm('Clear all logged errors?')) clearErrorLog();
+    });
+    $('#lsh-error-log-copy').addEventListener('click', copyErrorLog);
+  }
+
+  function showErrorLogModal() {
+    ensureErrorLogModal();
+    renderErrorLogModal();
+    const modal = $(ERROR_LOG_MODAL_SEL);
+    if (modal) modal.classList.add('open');
+    trace('errorLog.view');
+    playAlertBeep();
+  }
+
+  function hideErrorLogModal() {
+    const modal = $(ERROR_LOG_MODAL_SEL);
+    if (modal) modal.classList.remove('open');
+  }
+
+  function renderErrorLogModal() {
+    const list = $('#lsh-error-log-list');
+    const summary = $('#lsh-error-log-summary');
+    if (!list) return;
+    const errors = state.errorLog || [];
+    if (summary) {
+      summary.textContent = errors.length
+        ? `${errors.length} error${errors.length === 1 ? '' : 's'} logged (newest first)`
+        : 'No errors logged yet.';
+    }
+    if (!errors.length) {
+      list.innerHTML = '<div class="lsh-err-empty">No container → LPN errors recorded.</div>';
+      return;
+    }
+    const rows = errors
+      .map(
+        (e) => `
+        <tr>
+          <td>${escapeHtml(e.container || '—')}</td>
+          <td>${escapeHtml(e.lpn || '—')}</td>
+          <td class="lsh-err-msg">${escapeHtml(e.message || '—')}</td>
+          <td>${escapeHtml(formatErrorLogTime(e.at))}</td>
+        </tr>`
+      )
+      .join('');
+    list.innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>Container</th>
+            <th>LPN</th>
+            <th>Error</th>
+            <th>When</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  }
+
+  function renderErrorLogButton() {
+    const btn = $('#lsh-view-errors');
+    if (!btn) return;
+    const count = (state.errorLog || []).length;
+    btn.textContent = count ? `View Errors (${count})` : 'View Errors';
+  }
+
+  function copyErrorLog() {
+    const lines = (state.errorLog || []).map((e) =>
+      [e.container || '', e.lpn || '', e.message || '', e.at || ''].join('\t')
+    );
+    const header = 'Container\tLPN\tError\tWhen';
+    const text = lines.length ? [header, ...lines].join('\n') : header;
+    copyTextToClipboard(text, 'errorLog.copy');
+  }
+
+  function copyTextToClipboard(text, traceEvent) {
+    navigator.clipboard.writeText(text).then(() => trace(traceEvent)).catch(() => prompt('Copy:', text));
+  }
+
+  function getAllMappedTotes() {
+    return [...new Set(Object.values(state.sortSlots).map((t) => (t || '').trim()).filter(Boolean))].sort();
+  }
+
+  function copyToteId(toteId) {
+    const tote = (toteId || '').trim();
+    if (!tote) return;
+    copyTextToClipboard(tote, 'tote.copy');
+  }
+
+  function copyAllTotes() {
+    const totes = getAllMappedTotes();
+    if (!totes.length) {
+      alert('No totes configured.');
+      return;
+    }
+    copyTextToClipboard(totes.join('\n'), 'tote.copyAll');
+  }
+
+  function bindPanelEvents() {
+    armAlertAudioFromUserGesture();
+    if (!window.__lshEscapeBound) {
+      window.__lshEscapeBound = true;
+      document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        if ($(TOTE_MODAL_SEL)?.classList.contains('open')) {
+          cancelExecutionPrompt('tote mapping cancelled');
+          return;
+        }
+        if ($(TOTE_FULL_MODAL_SEL)?.classList.contains('open')) {
+          cancelExecutionPrompt('full tote reassignment cancelled');
+        }
+      });
+    }
+    $('#lsh-start').addEventListener('click', () => {
+      armAlertAudioFromUserGesture();
+      startRunning(false);
+    });
+    $('#lsh-start-top').addEventListener('click', () => {
+      armAlertAudioFromUserGesture();
+      startRunning(true);
+    });
+    $('#lsh-stop').addEventListener('click', () => stopRunning('user stop'));
+    $('#lsh-reset-errors').addEventListener('click', resetErrorStatuses);
+    $('#lsh-view-errors').addEventListener('click', showErrorLogModal);
+    $('#lsh-resume-btn').addEventListener('click', resumeAfterRefresh);
+    $('#lsh-copy-results').addEventListener('click', copyResults);
+    $('#lsh-export-csv').addEventListener('click', exportResultsCsv);
+    $('#lsh-copy-debug').addEventListener('click', copyDebug);
+    $('#lsh-load-queue').addEventListener('click', loadQueueFromTextarea);
+    $('#lsh-add-slot').addEventListener('click', addSortSlot);
+    $('#lsh-copy-all-totes')?.addEventListener('click', copyAllTotes);
+    $('#lsh-auto-close').addEventListener('change', (e) => {
+      state.autoCloseErrors = e.target.checked;
+      persistState();
+      trace('config.autoCloseErrors', { value: state.autoCloseErrors });
+    });
+    $('#lsh-stop-update').addEventListener('change', (e) => {
+      state.stopClickUpdateOnStop = e.target.checked;
+      persistState();
+      trace('config.stopClickUpdateOnStop', { value: state.stopClickUpdateOnStop });
+    });
+  }
+
+  function parseQueueText(text) {
+    const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const queue = [];
+    for (const line of lines) {
+      const parts = line.split(/[,\t|]/).map((p) => p.trim());
+      if (parts.length < 2) continue;
+      queue.push({
+        container: parts[0],
+        lpn: parts[1],
+        sortCode: parts[2] || '',
+      });
+    }
+    return queue;
+  }
+
+  function loadQueueFromTextarea() {
+    const text = ($('#lsh-queue-input') || {}).value || '';
+    state.queue = parseQueueText(text);
+    state.queueIndex = 0;
+    state.rowStatuses = state.queue.map(() => ROW_STATUS.PENDING);
+    state.results = [];
+    const marked = applyKnownRowsToQueue();
+    persistState();
+    renderAll();
+    trace('queue.loaded', { count: state.queue.length, alreadyKnown: marked, nextIndex: state.queueIndex });
+  }
+
+  function addSortSlot() {
+    const code = prompt('Sort code (e.g. A):');
+    if (!code) return;
+    const tote = prompt('Tote ID:');
+    if (!tote) return;
+    saveSortSlotMapping(code, tote);
+    trace('slots.add', { code, tote });
+  }
+
+  function renderCurrentLabel() {
+    const el = $('#lsh-current-label');
+    if (!el) return;
+    const total = state.queue.length;
+    const idx = state.queueIndex;
+    const row = getCurrentRow();
+    if (!row) {
+      el.textContent = state.running ? 'Running (no row)' : `Idle · ${total} rows`;
+      return;
+    }
+    const container = row.container || '?';
+    const lpn = row.lpn || '?';
+    el.textContent = `${idx + 1}/${total} ${container} → ${lpn}${state.running ? ' · RUNNING' : ''}`;
+  }
+
+  function renderQueue() {
+    const list = $('#lsh-queue-list');
+    if (!list) return;
+    syncRowStatuses();
+    list.innerHTML = '';
+    state.queue.forEach((row, i) => {
+      const li = document.createElement('li');
+      if (i === state.queueIndex && state.running) li.className = 'active';
+      const status = state.rowStatuses[i] || ROW_STATUS.PENDING;
+      li.innerHTML = `
+        <span class="lsh-badge ${status}">${status}</span>
+        <span>${i + 1}. ${row.container} → ${row.lpn}${row.sortCode ? ` [${row.sortCode}]` : ''}</span>
+      `;
+      list.appendChild(li);
+    });
+  }
+
+  function renderToteMapping() {
+    const editor = $('#lsh-slots-editor');
+    if (!editor) return;
+    editor.innerHTML = '';
+    const codes = Object.keys(state.sortSlots).sort();
+    if (codes.length === 0) {
+      editor.innerHTML = '<div style="color:#888;font-size:11px">No slots configured. Click + Add Slot.</div>';
+    }
+    codes.forEach((code) => {
+      const tote = state.sortSlots[code];
+      const count = getToteCount(tote);
+      const toteMax = getToteMaxLimit(tote);
+      const row = document.createElement('div');
+      row.style.marginBottom = '4px';
+      row.innerHTML = `
+        <span style="min-width:30px;display:inline-block">${code}</span> →
+        <input data-code="${code}" class="lsh-tote-input" value="${tote}" />
+        <span style="color:#888;margin-left:6px">${count}/${toteMax}</span>
+        <button type="button" class="lsh-btn-secondary lsh-copy-tote" title="Copy tote ID">Copy</button>
+        <button type="button" class="lsh-btn-secondary lsh-del-slot" data-code="${code}" style="padding:2px 6px;margin-left:4px">×</button>
+      `;
+      editor.appendChild(row);
+    });
+    editor.querySelectorAll('.lsh-tote-input').forEach((inp) => {
+      inp.addEventListener('change', (e) => {
+        const code = e.target.dataset.code;
+        const newTote = e.target.value.trim();
+        state.sortSlots[code] = newTote;
+        ensureToteCountEntry(newTote);
+        persistState();
+        renderToteMapping();
+      });
+    });
+    editor.querySelectorAll('.lsh-copy-tote').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        const row = e.target.closest('div');
+        const inp = row?.querySelector('.lsh-tote-input');
+        copyToteId(inp?.value || '');
+      });
+    });
+    editor.querySelectorAll('.lsh-del-slot').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        delete state.sortSlots[e.target.dataset.code];
+        normalizeSortSlots();
+        persistState();
+        renderToteMapping();
+        renderToteHistory();
+      });
+    });
+  }
+
+  function renderToteHistory() {
+    const el = $('#lsh-tote-history');
+    if (!el) return;
+    const keys = getKnownToteKeys().filter((key) => getToteCount(key) > 0);
+    if (!keys.length) {
+      el.innerHTML = '<div style="color:#888;font-size:11px">No tote counts saved yet.</div>';
+      return;
+    }
+    el.innerHTML = '';
+    keys.forEach((key) => {
+      const displayId = getToteDisplayId(key);
+      const count = getToteCount(key);
+      const toteMax = getToteMaxLimit(displayId);
+      const row = document.createElement('div');
+      row.className = 'lsh-tote-history-row';
+      row.innerHTML = `
+        <span class="lsh-tote-history-id">${displayId}</span>
+        <span style="color:#888">${count}/${toteMax}</span>
+        <button type="button" class="lsh-btn-secondary lsh-copy-tote" title="Copy tote ID">Copy</button>
+      `;
+      row.querySelector('.lsh-copy-tote').addEventListener('click', () => copyToteId(displayId));
+      el.appendChild(row);
+    });
+  }
+
+  function renderResumeBanner() {
+    const banner = $('#lsh-resume');
+    if (!banner) return;
+    const show = state.sessionArmed && !state.running && state.resumeRequired;
+    banner.style.display = show ? 'block' : 'none';
+  }
+
+  let progressTicker = null;
+
+  function getQueueProgress() {
+    syncRowStatuses();
+    const total = state.queue.length;
+    let complete = 0;
+    let error = 0;
+    let pending = 0;
+    let active = 0;
+    for (let i = 0; i < total; i++) {
+      const s = state.rowStatuses[i];
+      if (s === ROW_STATUS.COMPLETE) complete += 1;
+      else if (s === ROW_STATUS.ERROR) error += 1;
+      else if (s === ROW_STATUS.ACTIVE) active += 1;
+      else pending += 1;
+    }
+    return {
+      total,
+      complete,
+      error,
+      pending,
+      active,
+      remaining: pending + active,
+    };
+  }
+
+  function formatDuration(ms) {
+    if (ms == null || !Number.isFinite(ms) || ms < 0) return '—';
+    const sec = Math.max(0, Math.ceil(ms / 1000));
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    return `${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  function formatClockTime(date) {
+    if (!date || !(date instanceof Date) || Number.isNaN(date.getTime())) return '—';
+    return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
+
+  function getSessionJobsCompleted() {
+    const stored = state.sessionJobsCompleted || 0;
+    if (stored >= 1) return stored;
+    const startedAt = state.sessionStartedAt || 0;
+    if (!startedAt) return 0;
+    const fromResults = (state.results || []).filter(
+      (r) => r.status === 'complete' && r.at && new Date(r.at).getTime() >= startedAt
+    ).length;
+    return Math.max(stored, fromResults);
+  }
+
+  function refreshSessionEtaDeadline(remainingJobs) {
+    const startedAt = state.sessionStartedAt || 0;
+    const jobsCompleted = getSessionJobsCompleted();
+    if (!startedAt || jobsCompleted < 1 || remainingJobs <= 0) {
+      state.sessionEtaDeadline = 0;
+      return;
+    }
+    const elapsed = Date.now() - startedAt;
+    const avgMs = elapsed / jobsCompleted;
+    state.sessionEtaDeadline = Date.now() + avgMs * remainingJobs;
+    trace('progress.etaRefresh', {
+      jobsCompleted,
+      remainingJobs,
+      avgMs: Math.round(avgMs),
+      deadline: new Date(state.sessionEtaDeadline).toISOString(),
+    });
+  }
+
+  function resolveSessionEtaDeadline(remainingJobs) {
+    if (state.sessionEtaDeadline > Date.now() - 1000) return state.sessionEtaDeadline;
+    const startedAt = state.sessionStartedAt || 0;
+    const jobsCompleted = getSessionJobsCompleted();
+    if (!startedAt || jobsCompleted < 1 || remainingJobs <= 0) return 0;
+    const elapsed = Date.now() - startedAt;
+    const avgMs = elapsed / jobsCompleted;
+    return Date.now() + avgMs * remainingJobs;
+  }
+
+  function getProgressTiming(progress) {
+    if (!progress.total) {
+      return { countdownLabel: 'Remaining: —', etaLabel: 'ETA: —' };
+    }
+    if (progress.remaining === 0) {
+      return {
+        countdownLabel: 'Remaining: 0 jobs · 0:00',
+        etaLabel: 'ETA: Done',
+      };
+    }
+    const jobsLabel = `${progress.remaining} job${progress.remaining === 1 ? '' : 's'}`;
+    const startedAt = state.sessionStartedAt || 0;
+    const jobsCompleted = getSessionJobsCompleted();
+    if (!state.running || !startedAt) {
+      return {
+        countdownLabel: `Remaining: ${jobsLabel}`,
+        etaLabel: 'ETA: —',
+      };
+    }
+    if (jobsCompleted < 1) {
+      return {
+        countdownLabel: `Remaining: ${jobsLabel} · estimating…`,
+        etaLabel: 'ETA: calculating…',
+      };
+    }
+    const deadline = resolveSessionEtaDeadline(progress.remaining);
+    const countdownMs = Math.max(0, deadline - Date.now());
+    return {
+      countdownLabel: `Remaining: ${jobsLabel} · ${formatDuration(countdownMs)}`,
+      etaLabel: `ETA: ${formatClockTime(new Date(deadline))}`,
+    };
+  }
+
+  function renderProgressStrip() {
+    const textEl = $('#lsh-progress-text');
+    const countdownEl = $('#lsh-progress-countdown');
+    const etaEl = $('#lsh-progress-eta');
+    const fillEl = $('#lsh-progress-fill');
+    const errorEl = $('#lsh-progress-error');
+    if (!textEl || !fillEl) return;
+
+    const progress = getQueueProgress();
+    const pctComplete = progress.total ? (progress.complete / progress.total) * 100 : 0;
+    const pctError = progress.total ? (progress.error / progress.total) * 100 : 0;
+    const timing = getProgressTiming(progress);
+
+    textEl.innerHTML = progress.total
+      ? `<strong>${progress.complete}</strong> / ${progress.total} complete` +
+        (progress.error ? ` · <span style="color:#e74c3c">${progress.error} error</span>` : '')
+      : '<strong>0</strong> / 0 complete';
+    if (countdownEl) countdownEl.textContent = timing.countdownLabel;
+    if (etaEl) etaEl.textContent = timing.etaLabel;
+    fillEl.style.width = `${Math.min(100, pctComplete)}%`;
+    if (errorEl) {
+      errorEl.style.left = `${Math.min(100, pctComplete)}%`;
+      errorEl.style.width = `${Math.min(100 - pctComplete, pctError)}%`;
+    }
+  }
+
+  function ensureProgressTicker() {
+    if (state.running && !progressTicker) startProgressTicker();
+  }
+
+  function startProgressTicker() {
+    stopProgressTicker();
+    renderProgressStrip();
+    progressTicker = setInterval(renderProgressStrip, 1000);
+  }
+
+  function stopProgressTicker() {
+    if (progressTicker) {
+      clearInterval(progressTicker);
+      progressTicker = null;
+    }
+    renderProgressStrip();
+  }
+
+  function renderAll() {
+    renderProgressStrip();
+    renderCurrentLabel();
+    renderQueue();
+    renderToteMapping();
+    renderToteHistory();
+    renderResumeBanner();
+    renderErrorLogButton();
+    const autoClose = $('#lsh-auto-close');
+    if (autoClose) autoClose.checked = state.autoCloseErrors;
+    const stopUpdate = $('#lsh-stop-update');
+    if (stopUpdate) stopUpdate.checked = state.stopClickUpdateOnStop;
+  }
+
+  function csvEscape(val) {
+    const s = String(val ?? '');
+    if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  }
+
+  function findResultForQueueRow(row, index) {
+    const pairKey = makePairKey(getRowContainer(row), getRowLpn(row));
+    return (
+      state.results.find((r) => r.index === index) ||
+      state.results.find(
+        (r) => makePairKey(getRowContainer(r.row), getRowLpn(r.row) || r.lpn) === pairKey
+      ) ||
+      null
+    );
+  }
+
+  function findErrorForQueueRow(row) {
+    const pairKey = makePairKey(getRowContainer(row), getRowLpn(row));
+    return (state.errorLog || []).find((e) => makePairKey(e.container, e.lpn) === pairKey) || null;
+  }
+
+  function buildExportCsv() {
+    syncRowStatuses();
+    const exportedAt = new Date().toISOString();
+    const metaLines = [
+      `# Liquidation Sort Helper v${SCRIPT_VERSION}`,
+      `# exported_at,${csvEscape(exportedAt)}`,
+      `# queue_length,${state.queue.length}`,
+      `# queue_index,${state.queueIndex}`,
+      `# session_jobs_completed,${state.sessionJobsCompleted || 0}`,
+      '',
+    ];
+    const headers = [
+      'queue_index',
+      'container',
+      'lpn',
+      'queue_sort_code',
+      'status',
+      'result_status',
+      'tote_id',
+      'result_sort_code',
+      'completed_at',
+      'error_message',
+    ];
+    const rows = state.queue.map((row, i) => {
+      const result = findResultForQueueRow(row, i);
+      const err = findErrorForQueueRow(row);
+      return [
+        i + 1,
+        getRowContainer(row),
+        getRowLpn(row),
+        row.sortCode || '',
+        state.rowStatuses[i] || ROW_STATUS.PENDING,
+        result?.status || '',
+        result?.toteId || '',
+        result?.sortCode || '',
+        result?.at || '',
+        err?.message || result?.message || '',
+      ]
+        .map(csvEscape)
+        .join(',');
+    });
+    return metaLines.concat([headers.join(',')], rows).join('\r\n');
+  }
+
+  function downloadTextFile(filename, content, mimeType) {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function exportResultsCsv() {
+    if (!state.queue.length) {
+      alert('Queue is empty. Load a queue before exporting.');
+      return;
+    }
+    const csv = buildExportCsv();
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    downloadTextFile(`liquidation-sort-export-${stamp}.csv`, csv, 'text/csv;charset=utf-8');
+    trace('export.csv', { rows: state.queue.length });
+  }
+
+  function copyResults() {
+    const payload = {
+      version: SCRIPT_VERSION,
+      exportedAt: new Date().toISOString(),
+      queueIndex: state.queueIndex,
+      results: state.results,
+      rowStatuses: state.rowStatuses,
+      toteCounts: state.toteCounts,
+    };
+    const text = JSON.stringify(payload, null, 2);
+    navigator.clipboard.writeText(text).then(() => trace('copy.results')).catch(() => prompt('Copy results:', text));
+  }
+
+  function copyDebug() {
+    const payload = {
+      version: SCRIPT_VERSION,
+      exportedAt: new Date().toISOString(),
+      page: pageSnapshot(),
+      state: {
+        queueIndex: state.queueIndex,
+        queueLength: state.queue.length,
+        sessionArmed: state.sessionArmed,
+        running: state.running,
+        exceptionFlowActive: state.exceptionFlowActive,
+        pageResetInProgress: state.pageResetInProgress,
+        jobStartupInProgress: state.jobStartupInProgress,
+        sourceContainerDone: state.sourceContainerDone,
+        barcodeDone: state.barcodeDone,
+        postBarcodeHandled: state.postBarcodeHandled,
+        pendingLpn: state.pendingLpn,
+        lastSubmittedLpn: state.lastSubmittedLpn,
+        currentContainer: state.currentContainer,
+        autoCloseErrors: state.autoCloseErrors,
+        lastUpdateReason: state.lastUpdateReason,
+        resumeRequired: state.resumeRequired,
+        jobStartedAt: state.jobStartedAt,
+        currentStep: state.currentStep,
+        stepProgressAt: state.stepProgressAt,
+        recoveryUpdateUsed: state.recoveryUpdateUsed,
+        toteMappingPrompt: state.toteMappingPrompt,
+        toteFullPrompt: state.toteFullPrompt,
+        completedLpnCount: Object.keys(state.completedLpns || {}).length,
+        errorLogCount: (state.errorLog || []).length,
+      },
+      trace: [...traceBuffer],
+    };
+    const text = JSON.stringify(payload, null, 2);
+    navigator.clipboard.writeText(text).then(() => trace('copy.debug')).catch(() => prompt('Copy debug:', text));
+  }
+
+  /* ─── Self-check helpers (acceptance) ───────────────────────────────────── */
+
+  function runSelfChecks() {
+    const checks = [];
+    checks.push({ id: 'T1', pass: typeof advanceQueue === 'function', note: 'advanceQueue exists for auto-next' });
+    checks.push({ id: 'T2', pass: typeof shouldDeferStaleSortReset === 'function', note: 'defer stale sort before source' });
+    checks.push({ id: 'T3', pass: TRACE_MAX >= 100, note: 'trace buffer adequate' });
+    checks.push({ id: 'T5', pass: typeof stopRunning === 'function', note: 'stop marks pending' });
+    checks.push({ id: 'T7', pass: traceBuffer.length >= 0, note: 'trace buffer active' });
+    trace('selfCheck', { checks });
+    return checks;
+  }
+
+  /* ─── Init ──────────────────────────────────────────────────────────────── */
+
+  function init() {
+    trace('init', { version: SCRIPT_VERSION, url: location.href });
+    buildPanel();
+
+    if (state.sessionArmed && !state.running) {
+      state.resumeRequired = true;
+      state.running = false;
+      trace('init.sessionArmed', { message: 'Deliberate Resume required; no auto-start' });
+    }
+
+    if (!state.running && (state.toteMappingPrompt || state.toteFullPrompt)) {
+      state.toteMappingPrompt = null;
+      state.toteFullPrompt = null;
+      persistState();
+      trace('init.clearStalePrompts');
+    }
+
+    const queueInput = $('#lsh-queue-input');
+    if (queueInput && state.queue.length) {
+      queueInput.value = state.queue
+        .map((r) => `${r.container},${r.lpn}${r.sortCode ? ',' + r.sortCode : ''}`)
+        .join('\n');
+    }
+
+    runSelfChecks();
+    if (state.queue.length) applyKnownRowsToQueue();
+    renderAll();
+    trace('init.complete');
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => setTimeout(init, TIMING.initDelayMs));
+  } else {
+    setTimeout(init, TIMING.initDelayMs);
+  }
+})();

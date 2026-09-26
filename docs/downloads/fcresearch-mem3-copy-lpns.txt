@@ -1,0 +1,171 @@
+// ==UserScript==
+// @name         FCResearch MEM3 – Copy LPNs
+// @namespace    gravis-tools
+// @version      1.0.0
+// @description  Adds a Copy button next to the LPN column header on MEM3 results; copies all LPNs (one per line).
+// @author       abelrigm
+// @match        https://qi-fcresearch-na.corp.amazon.com/MEM3/results*
+// @match        https://qifcr.na.aftx.amazonoperations.app/MEM3/results*
+// @match        https://qifcr.eu.aftx.amazonoperations.app/MEM3/results*
+// @match        https://qifcr.fe.aftx.amazonoperations.app/MEM3/results*
+// @grant        GM_setClipboard
+// @grant        GM_addStyle
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const LOG_PREFIX = '[FcrMem3CopyLpns]';
+  const INVENTORY_TABLE_ID = 'table-inventory';
+  const LPN_COLUMN_INDEX = 4;
+  const COPY_BTN_ID = 'fcr-mem3-copy-lpns-btn';
+  const LPN_PATTERN = /^LPN[A-Z0-9]+$/i;
+
+  function normalizeText(text) {
+    return (text || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function isDataInventoryRow(row) {
+    if (row.querySelector('td.dataTables_empty')) return false;
+    return row.querySelectorAll('td').length > 1;
+  }
+
+  function extractLpnsFromInventoryTable(doc = document) {
+    const table = doc.getElementById(INVENTORY_TABLE_ID);
+    if (!table) return [];
+
+    const tbody = table.querySelector('tbody');
+    if (!tbody) return [];
+
+    const lpns = [];
+    for (const row of tbody.querySelectorAll('tr')) {
+      if (!isDataInventoryRow(row)) continue;
+      const cells = row.querySelectorAll('td');
+      const cell = cells[LPN_COLUMN_INDEX];
+      const value = normalizeText(cell ? cell.textContent : '').toUpperCase();
+      if (LPN_PATTERN.test(value)) lpns.push(value);
+    }
+    return [...new Set(lpns)];
+  }
+
+  async function copyText(text) {
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(text, 'text');
+      return;
+    }
+    await navigator.clipboard.writeText(text);
+  }
+
+  function flashButton(btn, message) {
+    if (!btn) return;
+    const prev = btn.textContent;
+    btn.textContent = message;
+    btn.disabled = true;
+    setTimeout(() => {
+      btn.textContent = prev;
+      btn.disabled = false;
+    }, 1400);
+  }
+
+  async function copyInventoryLpns(btn) {
+    const lpns = extractLpnsFromInventoryTable();
+    if (!lpns.length) {
+      flashButton(btn, 'No LPNs');
+      return;
+    }
+    try {
+      await copyText(lpns.join('\n'));
+      flashButton(btn, `Copied ${lpns.length}`);
+    } catch (e) {
+      console.warn(LOG_PREFIX, 'copy failed', e);
+      flashButton(btn, 'Copy failed');
+    }
+  }
+
+  function injectCopyButton() {
+    const headerCell = document.getElementById('inventory-lpn');
+    if (!headerCell || headerCell.querySelector(`#${COPY_BTN_ID}`)) return;
+
+    const labelDiv = headerCell.querySelector(':scope > div');
+    if (!labelDiv) return;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = COPY_BTN_ID;
+    btn.className = 'fcr-mem3-lpn-copy-btn';
+    btn.textContent = 'Copy';
+    btn.title = 'Copy all LPNs from this table (one per line)';
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      copyInventoryLpns(btn);
+    });
+
+    headerCell.classList.add('fcr-mem3-lpn-header-cell');
+    headerCell.appendChild(btn);
+  }
+
+  function setupCopyButton() {
+    const tryInject = () => injectCopyButton();
+
+    tryInject();
+    let attempts = 0;
+    const pollId = setInterval(() => {
+      attempts += 1;
+      tryInject();
+      if (document.getElementById(COPY_BTN_ID) || attempts > 80) {
+        clearInterval(pollId);
+      }
+    }, 250);
+
+    const root =
+      document.getElementById('table-inventory_wrapper') ||
+      document.getElementById('results-content') ||
+      document.body;
+
+    const observer = new MutationObserver(() => tryInject());
+    observer.observe(root, { childList: true, subtree: true });
+  }
+
+  function injectStyles() {
+    const css = `
+      th.fcr-mem3-lpn-header-cell { white-space: nowrap; }
+      th.fcr-mem3-lpn-header-cell > div { display: inline; }
+      #${COPY_BTN_ID} {
+        margin-left: 6px;
+        padding: 1px 7px;
+        font-size: 11px;
+        line-height: 1.3;
+        vertical-align: middle;
+        border: 1px solid #888c8c;
+        border-radius: 4px;
+        background: #fff;
+        cursor: pointer;
+        font-weight: 600;
+        color: #1d4ed8;
+      }
+      #${COPY_BTN_ID}:hover {
+        background: #eff6ff;
+        border-color: #1d4ed8;
+      }
+      #${COPY_BTN_ID}:disabled {
+        opacity: 0.7;
+        cursor: default;
+      }
+    `;
+    if (typeof GM_addStyle === 'function') {
+      GM_addStyle(css);
+    } else {
+      const style = document.createElement('style');
+      style.textContent = css;
+      document.head.appendChild(style);
+    }
+  }
+
+  if (!/\/MEM3\/results/i.test(location.pathname)) return;
+
+  injectStyles();
+  setupCopyButton();
+  console.log(LOG_PREFIX, 'ready on', location.href);
+})();

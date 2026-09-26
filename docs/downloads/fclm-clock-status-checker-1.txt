@@ -1,0 +1,1279 @@
+// ==UserScript==
+// @name         FCLM Clock Status Checker
+// @namespace    http://tampermonkey.net/
+// @version      1.3.0
+// @description  Bulk-check login clock status from FCLM time details and copy debug output.
+// @author       Cursor
+// @match        https://fclm-portal.amazon.com/*
+// @grant        GM_xmlhttpRequest
+// @connect      fclm-portal.amazon.com
+// @connect      phonetool.amazon.com
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    const SCRIPT_ID = 'fclm-clock-status-checker';
+    const DEFAULT_DEBUG = {
+        script: SCRIPT_ID,
+        version: '1.3.0',
+        generatedAt: null,
+        pageUrl: window.location.href,
+        warehouseId: null,
+        queryDate: null,
+        logins: [],
+        steps: [],
+        results: [],
+        errors: []
+    };
+
+    const DEFAULT_WAREHOUSE_ID = 'MEM3';
+    let lastDebugPayload = { ...DEFAULT_DEBUG };
+
+    const styles = `
+        #${SCRIPT_ID}-toggle {
+            position: fixed;
+            right: 100px;
+            bottom: 20px;
+            width: 52px;
+            height: 52px;
+            border: 0;
+            border-radius: 999px;
+            background: #146eb4;
+            color: #ffffff;
+            font-size: 22px;
+            font-weight: 700;
+            cursor: pointer;
+            z-index: 1000000;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+            user-select: none;
+        }
+
+        #${SCRIPT_ID}-panel {
+            position: fixed;
+            right: 20px;
+            bottom: 84px;
+            width: 340px;
+            max-height: calc(100vh - 120px);
+            overflow: auto;
+            z-index: 999999;
+            background: #ffffff;
+            border: 1px solid #cfd7df;
+            border-radius: 10px;
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+            font-family: Arial, sans-serif;
+            color: #1f2933;
+        }
+
+        #${SCRIPT_ID}-panel.is-hidden {
+            display: none;
+        }
+
+        #${SCRIPT_ID}-panel * {
+            box-sizing: border-box;
+            font-family: inherit;
+        }
+
+        #${SCRIPT_ID}-panel .fclm-header {
+            padding: 10px 12px;
+            border-bottom: 1px solid #e4e7eb;
+            font-weight: 700;
+            font-size: 14px;
+            background: #f7f9fb;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        #${SCRIPT_ID}-panel .fclm-body {
+            padding: 12px;
+        }
+
+        #${SCRIPT_ID}-panel label {
+            display: block;
+            font-size: 12px;
+            font-weight: 700;
+            margin-bottom: 6px;
+        }
+
+        #${SCRIPT_ID}-panel textarea,
+        #${SCRIPT_ID}-panel button {
+            width: 100%;
+            font-size: 13px;
+        }
+
+        #${SCRIPT_ID}-panel textarea {
+            border: 1px solid #bcccdc;
+            border-radius: 6px;
+            padding: 8px 10px;
+            background: #fff;
+            margin-bottom: 10px;
+            min-height: 96px;
+            resize: vertical;
+        }
+
+        #${SCRIPT_ID}-panel .fclm-actions {
+            display: flex;
+            gap: 8px;
+            margin: 0 0 10px;
+        }
+
+        #${SCRIPT_ID}-panel .fclm-actions button {
+            border: 0;
+            border-radius: 6px;
+            padding: 9px 10px;
+            cursor: pointer;
+            font-weight: 700;
+        }
+
+        #${SCRIPT_ID}-run {
+            background: #146eb4;
+            color: #fff;
+            flex: 1;
+        }
+
+        #${SCRIPT_ID}-copy {
+            background: #edf2f7;
+            color: #243b53;
+            width: 112px;
+        }
+
+        #${SCRIPT_ID}-copy-in {
+            background: #e3f2fd;
+            color: #0b5394;
+            width: 112px;
+        }
+
+        #${SCRIPT_ID}-close {
+            width: auto !important;
+            border: 0;
+            background: transparent;
+            color: #52606d;
+            cursor: pointer;
+            font-size: 18px !important;
+            line-height: 1;
+            padding: 0;
+        }
+
+        #${SCRIPT_ID}-summary {
+            font-size: 11px;
+            color: #52606d;
+            margin-bottom: 10px;
+        }
+
+        #${SCRIPT_ID}-status {
+            padding: 8px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            margin-bottom: 10px;
+            background: #f7f9fb;
+        }
+
+        #${SCRIPT_ID}-status.status-error {
+            background: #fdecea;
+            color: #8a1f17;
+        }
+
+        #${SCRIPT_ID}-status.status-success {
+            background: #edf7ed;
+            color: #1e4620;
+        }
+
+        #${SCRIPT_ID}-results {
+            border: 1px solid #e4e7eb;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        #${SCRIPT_ID}-results table {
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+        }
+
+        #${SCRIPT_ID}-results th,
+        #${SCRIPT_ID}-results td {
+            padding: 8px 10px;
+            border-bottom: 1px solid #e4e7eb;
+            font-size: 11px;
+            text-align: left;
+            vertical-align: top;
+            word-break: break-word;
+        }
+
+        #${SCRIPT_ID}-results tr:last-child td {
+            border-bottom: 0;
+        }
+
+        #${SCRIPT_ID}-results th {
+            background: #f7f9fb;
+            font-weight: 700;
+        }
+
+        .fclm-pill {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 700;
+        }
+
+        .fclm-pill.in {
+            background: #e3f9e5;
+            color: #207227;
+        }
+
+        .fclm-pill.out {
+            background: #fdecea;
+            color: #8a1f17;
+        }
+
+        .fclm-pill.unknown {
+            background: #fff7d6;
+            color: #8d6b00;
+        }
+    `;
+
+    function injectStyles() {
+        if (document.getElementById(`${SCRIPT_ID}-style`)) {
+            return;
+        }
+
+        const style = document.createElement('style');
+        style.id = `${SCRIPT_ID}-style`;
+        style.textContent = styles;
+        document.head.appendChild(style);
+    }
+
+    function createToggleButton() {
+        if (document.getElementById(`${SCRIPT_ID}-toggle`)) {
+            return;
+        }
+
+        const toggle = document.createElement('button');
+        toggle.id = `${SCRIPT_ID}-toggle`;
+        toggle.type = 'button';
+        toggle.textContent = 'C';
+        document.body.appendChild(toggle);
+        initializeToggleDragging(toggle);
+        toggle.addEventListener('click', function() {
+            if (toggle.dataset.dragging === 'true') {
+                toggle.dataset.dragging = 'false';
+                return;
+            }
+            togglePanel();
+        });
+    }
+
+    function createPanel() {
+        if (document.getElementById(`${SCRIPT_ID}-panel`)) {
+            return;
+        }
+
+        const panel = document.createElement('div');
+        panel.id = `${SCRIPT_ID}-panel`;
+        panel.className = 'is-hidden';
+        panel.innerHTML = `
+            <div class="fclm-header">
+                <span>Clock Checker</span>
+                <button id="${SCRIPT_ID}-close" type="button" aria-label="Close panel">x</button>
+            </div>
+            <div class="fclm-body">
+                <label for="${SCRIPT_ID}-logins">Logins</label>
+                <textarea id="${SCRIPT_ID}-logins" placeholder="Paste one login per line or comma-separated"></textarea>
+
+                <div class="fclm-actions">
+                    <button id="${SCRIPT_ID}-run" type="button">Check Status</button>
+                    <button id="${SCRIPT_ID}-copy-in" type="button">Copy In</button>
+                    <button id="${SCRIPT_ID}-copy" type="button">Copy Debug</button>
+                </div>
+
+                <div id="${SCRIPT_ID}-summary">Warehouse: MEM3 | Date: Today</div>
+                <div id="${SCRIPT_ID}-status">Ready.</div>
+
+                <div id="${SCRIPT_ID}-results">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Login</th>
+                                <th>Status</th>
+                                <th>Last Punch</th>
+                            </tr>
+                        </thead>
+                        <tbody id="${SCRIPT_ID}-results-body">
+                            <tr>
+                                <td colspan="3">No results yet.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(panel);
+        document.getElementById(`${SCRIPT_ID}-run`).addEventListener('click', runLookup);
+        document.getElementById(`${SCRIPT_ID}-copy-in`).addEventListener('click', copyClockedInLogins);
+        document.getElementById(`${SCRIPT_ID}-copy`).addEventListener('click', copyDebugToClipboard);
+        document.getElementById(`${SCRIPT_ID}-close`).addEventListener('click', togglePanel);
+    }
+
+    function togglePanel() {
+        const panel = document.getElementById(`${SCRIPT_ID}-panel`);
+        if (!panel) {
+            return;
+        }
+
+        panel.classList.toggle('is-hidden');
+    }
+
+    function initializeToggleDragging(toggle) {
+        let pointerId = null;
+        let startX = 0;
+        let startY = 0;
+        let originLeft = 0;
+        let originTop = 0;
+        let moved = false;
+
+        toggle.addEventListener('pointerdown', function(event) {
+            pointerId = event.pointerId;
+            startX = event.clientX;
+            startY = event.clientY;
+            const rect = toggle.getBoundingClientRect();
+            originLeft = rect.left;
+            originTop = rect.top;
+            moved = false;
+            toggle.dataset.dragging = 'false';
+            toggle.style.left = `${originLeft}px`;
+            toggle.style.top = `${originTop}px`;
+            toggle.style.right = 'auto';
+            toggle.style.bottom = 'auto';
+            toggle.setPointerCapture(pointerId);
+        });
+
+        toggle.addEventListener('pointermove', function(event) {
+            if (pointerId !== event.pointerId) {
+                return;
+            }
+
+            const deltaX = event.clientX - startX;
+            const deltaY = event.clientY - startY;
+            if (Math.abs(deltaX) > 4 || Math.abs(deltaY) > 4) {
+                moved = true;
+                toggle.dataset.dragging = 'true';
+            }
+
+            if (!moved) {
+                return;
+            }
+
+            toggle.style.left = `${originLeft + deltaX}px`;
+            toggle.style.top = `${originTop + deltaY}px`;
+        });
+
+        function stopDragging(event) {
+            if (pointerId !== event.pointerId) {
+                return;
+            }
+            pointerId = null;
+            toggle.releasePointerCapture(event.pointerId);
+            window.setTimeout(function() {
+                toggle.dataset.dragging = 'false';
+            }, 0);
+        }
+
+        toggle.addEventListener('pointerup', stopDragging);
+        toggle.addEventListener('pointercancel', stopDragging);
+    }
+
+    function getTodayString() {
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const day = String(now.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    }
+
+    function parseLogins(rawValue) {
+        return Array.from(new Set(
+            rawValue
+                .split(/[\s,;]+/)
+                .map((value) => value.trim())
+                .filter(Boolean)
+        ));
+    }
+
+    function updateStatus(message, kind) {
+        const node = document.getElementById(`${SCRIPT_ID}-status`);
+        if (!node) {
+            return;
+        }
+
+        node.className = '';
+        node.id = `${SCRIPT_ID}-status`;
+        if (kind) {
+            node.classList.add(`status-${kind}`);
+        }
+        node.textContent = message;
+    }
+
+    function resetDebug(warehouseId, queryDate, logins) {
+        lastDebugPayload = {
+            ...DEFAULT_DEBUG,
+            generatedAt: new Date().toISOString(),
+            pageUrl: window.location.href,
+            warehouseId,
+            queryDate,
+            logins: [...logins],
+            steps: [],
+            results: [],
+            errors: []
+        };
+    }
+
+    function addDebugStep(step, data) {
+        lastDebugPayload.steps.push({
+            at: new Date().toISOString(),
+            step,
+            data: data || null
+        });
+    }
+
+    function addDebugError(step, error) {
+        lastDebugPayload.errors.push({
+            at: new Date().toISOString(),
+            step,
+            error: formatError(error)
+        });
+    }
+
+    async function runLookup() {
+        const warehouseId = DEFAULT_WAREHOUSE_ID;
+        const queryDate = getTodayString();
+        const logins = parseLogins(document.getElementById(`${SCRIPT_ID}-logins`).value);
+
+        resetDebug(warehouseId, queryDate, logins);
+
+        if (logins.length === 0) {
+            updateStatus('Paste at least one login.', 'error');
+            addDebugError('validate', 'No logins provided');
+            return;
+        }
+
+        updateStatus('Fetching attendance report...');
+        renderResults([]);
+
+        try {
+            const attendanceRows = await fetchAttendanceRows(warehouseId, queryDate);
+            const attendanceIndex = buildAttendanceIndex(attendanceRows);
+            addDebugStep('attendanceIndexSummary', {
+                rows: attendanceRows.length,
+                keys: Object.keys(attendanceIndex.byKey).length,
+                uniqueNames: Object.keys(attendanceIndex.byName).length
+            });
+
+            updateStatus(`Checking ${logins.length} login(s)...`);
+
+            const resolvedUsers = await mapWithConcurrency(logins, 8, async (login) => {
+                try {
+                    const user = await lookupUser(login, warehouseId, queryDate);
+                    return {
+                        login,
+                        ok: true,
+                        user
+                    };
+                } catch (error) {
+                    addDebugError(`lookupUser:${login}`, error);
+                    return {
+                        login,
+                        ok: false,
+                        error: formatError(error)
+                    };
+                }
+            });
+
+            addDebugStep('resolvedUsers', resolvedUsers);
+
+            const results = resolvedUsers.map((entry) => {
+                if (!entry.ok) {
+                    return {
+                        login: entry.login,
+                        status: 'Lookup Failed',
+                        statusClass: 'unknown',
+                        lastPunch: '-',
+                        details: entry.error,
+                        raw: null
+                    };
+                }
+
+                const clockResult = determineClockStatus(entry.login, entry.user, attendanceRows, attendanceIndex);
+                return {
+                    login: entry.login,
+                    status: clockResult.statusLabel,
+                    statusClass: clockResult.statusClass,
+                    lastPunch: clockResult.lastPunchTime || '-',
+                    details: clockResult.details,
+                    raw: {
+                        user: entry.user,
+                        matchedRow: clockResult.matchedRow
+                    }
+                };
+            });
+
+            lastDebugPayload.results = results;
+            renderResults(results);
+
+            const failures = results.filter((item) => item.statusClass === 'unknown').length;
+            updateStatus(
+                failures > 0
+                    ? `Completed with ${failures} item(s) needing review.`
+                    : `Completed for ${results.length} login(s).`,
+                failures > 0 ? 'error' : 'success'
+            );
+        } catch (error) {
+            addDebugError('runLookup', error);
+            updateStatus(`Lookup failed: ${formatError(error)}`, 'error');
+        }
+    }
+
+    async function lookupUser(login, warehouseId, queryDate) {
+        addDebugStep(`lookupUser:start:${login}`, null);
+        const pageHtml = await fetchTimeDetailsPage(login, warehouseId, queryDate);
+        const parsedPage = parseTimeDetailsPage(pageHtml, login);
+        const employeeId = parsedPage.employeeId || inferEmployeeIdFromCurrentPage(login);
+        const displayName = parsedPage.displayName || '';
+        const nameVariants = buildNameVariants(displayName);
+        const identifiers = buildIdentifierCandidates(login, employeeId, parsedPage.identifiers);
+
+        addDebugStep(`lookupUser:summary:${login}`, {
+            login,
+            employeeId: employeeId || null,
+            displayName: displayName || null,
+            identifiers: identifiers.slice(0, 10),
+            pageStatus: parsedPage.pageStatus || null,
+            lastPunchTime: parsedPage.lastPunchTime || null
+        });
+
+        if (!parsedPage.pageFound && !employeeId && nameVariants.length === 0) {
+            throw new Error(`FCLM time details page was not found for login ${login}.`);
+        }
+
+        return {
+            login,
+            employeeId,
+            displayName,
+            nameVariants,
+            identifiers,
+            pageFound: parsedPage.pageFound,
+            pageStatus: parsedPage.pageStatus,
+            lastPunchTime: parsedPage.lastPunchTime,
+            raw: parsedPage
+        };
+    }
+
+    async function fetchTimeDetailsPage(login, warehouseId, queryDate) {
+        const url = buildTimeDetailsUrl(login, warehouseId, queryDate);
+        addDebugStep(`lookupUser:url:${login}`, url);
+        return gmRequest(url);
+    }
+
+    function buildTimeDetailsUrl(login, warehouseId, queryDate) {
+        const url = new URL('/employee/timeDetails', window.location.origin);
+        const params = url.searchParams;
+        params.set('warehouseId', warehouseId);
+        params.set('employeeId', login);
+
+        if (queryDate) {
+            const range = buildQueryDateRange(queryDate);
+            params.set('startTime', range.startTime);
+            params.set('endTime', range.endTime);
+        }
+
+        return url.toString();
+    }
+
+    function inferEmployeeIdFromCurrentPage(login) {
+        const params = new URLSearchParams(window.location.search);
+        const pageEmployeeId = (params.get('employeeId') || '').trim();
+        if (!pageEmployeeId) {
+            return '';
+        }
+
+        const bodyText = document.body ? document.body.innerText : '';
+        const normalizedLogin = normalizeKey(login);
+        if (!normalizedLogin || !normalizeKey(bodyText).includes(normalizedLogin)) {
+            return '';
+        }
+
+        return pageEmployeeId;
+    }
+
+    function buildQueryDateRange(queryDate) {
+        const start = new Date(`${queryDate}T00:00:00`);
+        const end = new Date(start.getTime());
+        end.setDate(end.getDate() + 1);
+
+        return {
+            startTime: formatPortalDateTime(start),
+            endTime: formatPortalDateTime(end)
+        };
+    }
+
+    function formatPortalDateTime(date) {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+        const seconds = String(date.getSeconds()).padStart(2, '0');
+        const offsetMinutes = -date.getTimezoneOffset();
+        const sign = offsetMinutes >= 0 ? '+' : '-';
+        const offsetHours = String(Math.floor(Math.abs(offsetMinutes) / 60)).padStart(2, '0');
+        const offsetRemainder = String(Math.abs(offsetMinutes) % 60).padStart(2, '0');
+        return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}${sign}${offsetHours}${offsetRemainder}`;
+    }
+
+    function parseTimeDetailsPage(html, login) {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const bodyText = normalizeKey(doc.body ? doc.body.textContent : '');
+        const pageFound = !bodyText.includes('http status 404') && !bodyText.includes('not found');
+        const pageStatus = extractClockStatusFromDocument(doc);
+        const displayName = extractDisplayNameFromDocument(doc);
+        const identifiers = extractIdentifiersFromDocument(doc, login);
+        const employeeId = identifiers.find((value) => /^\d{6,12}$/.test(value)) || '';
+
+        return {
+            pageFound,
+            employeeId,
+            displayName,
+            identifiers,
+            pageStatus,
+            lastPunchTime: pageStatus.lastPunchTime || '',
+            title: doc.title || ''
+        };
+    }
+
+    function extractDisplayNameFromDocument(doc) {
+        const dtNodes = Array.from(doc.querySelectorAll('dt'));
+        for (const dtNode of dtNodes) {
+            const label = normalizeKey(dtNode.textContent);
+            if (!label.includes('name') && !label.includes('associate')) {
+                continue;
+            }
+
+            const ddNode = dtNode.nextElementSibling;
+            const text = ddNode ? ddNode.textContent.trim() : '';
+            if (text) {
+                return text;
+            }
+        }
+
+        const selectors = [
+            '.employeeInfo h1',
+            '.employee-name',
+            '.empName',
+            '.employeeInfo dd',
+            'h1'
+        ];
+
+        for (const selector of selectors) {
+            const element = doc.querySelector(selector);
+            const text = element ? element.textContent.trim() : '';
+            if (text) {
+                return text;
+            }
+        }
+
+        return '';
+    }
+
+    function extractIdentifiersFromDocument(doc, login) {
+        const candidates = new Set();
+
+        const dtNodes = Array.from(doc.querySelectorAll('dt'));
+        for (const dtNode of dtNodes) {
+            const label = normalizeKey(dtNode.textContent);
+            if (!label.includes('employee id') && !label.includes('badge') && !label.includes('login')) {
+                continue;
+            }
+
+            const ddNode = dtNode.nextElementSibling;
+            const text = ddNode ? ddNode.textContent.trim() : '';
+            if (text) {
+                candidates.add(text);
+            }
+        }
+
+        const links = Array.from(doc.querySelectorAll('a[href*="employeeId="]'));
+        for (const link of links) {
+            try {
+                const href = new URL(link.href, window.location.origin);
+                const employeeId = (href.searchParams.get('employeeId') || '').trim();
+                if (employeeId && employeeId !== login) {
+                    candidates.add(employeeId);
+                }
+            } catch (error) {
+                // Ignore malformed URLs in the returned HTML.
+            }
+        }
+
+        const bodyText = doc.body ? doc.body.textContent : '';
+        const numericMatches = bodyText.match(/\b\d{6,12}\b/g) || [];
+        numericMatches.slice(0, 100).forEach((value) => candidates.add(value.trim()));
+
+        return Array.from(candidates).filter(Boolean);
+    }
+
+    function buildIdentifierCandidates(login, employeeId, extractedIdentifiers) {
+        const candidates = new Set();
+        [login, employeeId].forEach((value) => {
+            const normalized = String(value || '').trim();
+            if (normalized) {
+                candidates.add(normalized);
+            }
+        });
+
+        if (Array.isArray(extractedIdentifiers)) {
+            extractedIdentifiers.forEach((value) => {
+                const normalized = String(value || '').trim();
+                if (normalized) {
+                    candidates.add(normalized);
+                }
+            });
+        }
+
+        return Array.from(candidates);
+    }
+
+    function extractClockStatusFromDocument(doc) {
+        const rows = Array.from(doc.querySelectorAll('tr.clock-seg, tr[class*="clock"]'));
+        const lastRow = rows.length > 0 ? rows[rows.length - 1] : null;
+        if (!lastRow) {
+            return {
+                statusLabel: '',
+                statusClass: 'unknown',
+                lastPunchTime: '',
+                details: 'No clock segments found on time details page.'
+            };
+        }
+
+        const className = (lastRow.className || '').toLowerCase();
+        const text = normalizeKey(lastRow.textContent);
+        const rightAlignCells = Array.from(lastRow.querySelectorAll('td.rightAlign'));
+        const lastPunchTime = rightAlignCells.length > 0
+            ? rightAlignCells[rightAlignCells.length - 1].textContent.trim()
+            : '';
+
+        if (className.includes('on-clock') || className.includes('clockpaid') || className.includes('paid')) {
+            return {
+                statusLabel: 'Clocked In',
+                statusClass: 'in',
+                lastPunchTime,
+                details: 'Resolved from FCLM time details page.'
+            };
+        }
+
+        if (className.includes('off-clock') || className.includes('un-paid') || className.includes('clockunpaid')) {
+            return {
+                statusLabel: 'Clocked Out',
+                statusClass: 'out',
+                lastPunchTime,
+                details: 'Resolved from FCLM time details page.'
+            };
+        }
+
+        if (text.includes('clocked in') || text.includes(' in ')) {
+            return {
+                statusLabel: 'Clocked In',
+                statusClass: 'in',
+                lastPunchTime,
+                details: 'Resolved from FCLM time details page text.'
+            };
+        }
+
+        if (text.includes('clocked out') || text.includes(' out ')) {
+            return {
+                statusLabel: 'Clocked Out',
+                statusClass: 'out',
+                lastPunchTime,
+                details: 'Resolved from FCLM time details page text.'
+            };
+        }
+
+        return {
+            statusLabel: '',
+            statusClass: 'unknown',
+            lastPunchTime,
+            details: 'Clock segments found, but status could not be inferred.'
+        };
+    }
+
+    function buildNameVariants(displayName) {
+        if (!displayName) {
+            return [];
+        }
+
+        const variants = new Set();
+        const base = normalizeName(displayName);
+        const swapped = normalizeName(swapNameOrder(displayName));
+
+        if (base) {
+            variants.add(base);
+        }
+
+        if (swapped) {
+            variants.add(swapped);
+        }
+
+        return Array.from(variants);
+    }
+
+    function normalizeName(value) {
+        return String(value || '')
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, ' ')
+            .trim()
+            .replace(/\s+/g, ' ');
+    }
+
+    function swapNameOrder(value) {
+        const trimmed = String(value || '').trim();
+        if (!trimmed) {
+            return '';
+        }
+
+        if (trimmed.includes(',')) {
+            const parts = trimmed.split(',').map((part) => part.trim()).filter(Boolean);
+            if (parts.length >= 2) {
+                return `${parts.slice(1).join(' ')} ${parts[0]}`.trim();
+            }
+        }
+
+        const words = trimmed.split(/\s+/).filter(Boolean);
+        if (words.length >= 2) {
+            const first = words.shift();
+            return `${words.join(' ')} ${first}`.trim();
+        }
+
+        return trimmed;
+    }
+
+    async function fetchAttendanceRows(warehouseId, queryDate) {
+        const datesToFetch = buildAttendanceDates(queryDate);
+        const csvPayloads = await Promise.all(datesToFetch.map(async (dateValue) => {
+            const csvText = await fetchAttendanceCsv(warehouseId, dateValue);
+            addDebugStep(`attendanceCsvPreview:${dateValue}`, csvText.slice(0, 500));
+            return csvToArray(csvText, ',');
+        }));
+
+        return csvPayloads.flat();
+    }
+
+    function buildAttendanceDates(queryDate) {
+        const selectedDate = new Date(`${queryDate}T00:00:00`);
+        const previousDate = new Date(selectedDate.getTime());
+        previousDate.setDate(previousDate.getDate() - 1);
+        return [formatDateOnly(previousDate), queryDate];
+    }
+
+    function formatDateOnly(date) {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    }
+
+    async function fetchAttendanceCsv(warehouseId, queryDate) {
+        const url = `https://fclm-portal.amazon.com/reports/employeeAttendance?reportFormat=CSV&warehouseId=${encodeURIComponent(warehouseId)}&spanType=Day&startDateDay=${encodeURIComponent(queryDate)}`;
+        addDebugStep(`fetchAttendanceCsv:url:${queryDate}`, url);
+        return gmRequest(url);
+    }
+
+    function determineClockStatus(login, user, attendanceRows, attendanceIndex) {
+        const identifierCandidates = Array.isArray(user.identifiers) && user.identifiers.length > 0
+            ? user.identifiers
+            : [user.employeeId, login];
+        const candidateKeys = identifierCandidates.map(normalizeKey).filter(Boolean);
+        const candidateNames = Array.isArray(user.nameVariants) ? user.nameVariants : [];
+
+        let matchedPunch = null;
+
+        candidateKeys.forEach((key) => {
+            const indexed = attendanceIndex.byKey[key];
+            if (indexed && (!matchedPunch || indexed.timestamp > matchedPunch.timestamp)) {
+                matchedPunch = indexed;
+            }
+        });
+
+        candidateNames.forEach((nameKey) => {
+            const indexed = attendanceIndex.byName[nameKey];
+            if (indexed && (!matchedPunch || indexed.timestamp > matchedPunch.timestamp)) {
+                matchedPunch = indexed;
+            }
+        });
+
+        if (!matchedPunch) {
+            matchedPunch = scanRowsForMatch(attendanceRows, login, user.employeeId, candidateNames);
+        }
+
+        if (!matchedPunch) {
+            return {
+                statusLabel: user.pageFound === false ? 'Lookup Failed' : 'Clocked Out',
+                statusClass: user.pageFound === false ? 'unknown' : 'out',
+                lastPunchTime: '',
+                details: user.pageFound === false
+                    ? `Could not load time details for ${login}.`
+                    : `No recent attendance punch matched login ${login}${user.employeeId ? ` / employee ${user.employeeId}` : ''}${user.displayName ? ` / name ${user.displayName}` : ''}.`,
+                matchedRow: null
+            };
+        }
+
+        const normalizedPunchType = normalizePunchType(matchedPunch.type);
+        const recentPunch = isWithinLastHours(matchedPunch.timestamp, 24);
+        const details = recentPunch && normalizedPunchType.className === 'out'
+            ? `${matchedPunch.type || 'Unknown punch'} via ${matchedPunch.sourceKey} (recent punch, not actively clocked in)`
+            : `${matchedPunch.type || 'Unknown punch'}${matchedPunch.sourceKey ? ` via ${matchedPunch.sourceKey}` : ''}`;
+
+        return {
+            statusLabel: normalizedPunchType.label,
+            statusClass: normalizedPunchType.className,
+            lastPunchTime: matchedPunch.displayTime,
+            details,
+            matchedRow: matchedPunch.row
+        };
+    }
+
+    function buildAttendanceIndex(rows) {
+        const byKey = {};
+        const byName = {};
+
+        rows.forEach((row) => {
+            if (!Array.isArray(row) || row.length < 6) {
+                return;
+            }
+
+            const employeeId = String(row[0] || '').trim();
+            const employeeName = String(row[1] || '').trim();
+            const punchType = String(row[4] || '').trim();
+            const punchTime = String(row[5] || '').trim();
+
+            if (!employeeId || !punchTime) {
+                return;
+            }
+
+            const timestamp = new Date(punchTime).getTime();
+            if (Number.isNaN(timestamp)) {
+                return;
+            }
+
+            const normalizedEmployeeId = normalizeKey(employeeId);
+            const record = {
+                type: punchType,
+                timestamp,
+                displayTime: punchTime,
+                row,
+                sourceKey: employeeId
+            };
+
+            if (!byKey[normalizedEmployeeId] || timestamp > byKey[normalizedEmployeeId].timestamp) {
+                byKey[normalizedEmployeeId] = record;
+            }
+
+            const normalizedName = normalizeName(employeeName);
+            if (normalizedName && (!byName[normalizedName] || timestamp > byName[normalizedName].timestamp)) {
+                byName[normalizedName] = {
+                    ...record,
+                    sourceKey: employeeName
+                };
+            }
+
+            const swappedName = normalizeName(swapNameOrder(employeeName));
+            if (swappedName && (!byName[swappedName] || timestamp > byName[swappedName].timestamp)) {
+                byName[swappedName] = {
+                    ...record,
+                    sourceKey: employeeName
+                };
+            }
+
+            row.forEach((cell) => {
+                const normalizedCell = normalizeKey(cell);
+                if (!normalizedCell) {
+                    return;
+                }
+
+                if (!byKey[normalizedCell] || timestamp > byKey[normalizedCell].timestamp) {
+                    byKey[normalizedCell] = {
+                        ...record,
+                        sourceKey: String(cell).trim()
+                    };
+                }
+            });
+        });
+
+        return { byKey, byName };
+    }
+
+    function scanRowsForMatch(rows, login, employeeId, candidateNames) {
+        const normalizedLogin = normalizeKey(login);
+        const normalizedEmployeeId = normalizeKey(employeeId);
+        const normalizedNames = Array.isArray(candidateNames) ? candidateNames : [];
+        let matchedPunch = null;
+
+        rows.forEach((row) => {
+            if (!Array.isArray(row) || row.length < 6) {
+                return;
+            }
+
+            const normalizedCells = row.map(normalizeKey);
+            const normalizedRowName = normalizeName(row[1] || '');
+            const isNameMatch = normalizedNames.includes(normalizedRowName);
+            const isMatch = normalizedCells.includes(normalizedLogin) || normalizedCells.includes(normalizedEmployeeId) || isNameMatch;
+            if (!isMatch) {
+                return;
+            }
+
+            const punchType = String(row[4] || '').trim();
+            const punchTime = String(row[5] || '').trim();
+            const timestamp = new Date(punchTime).getTime();
+
+            if (Number.isNaN(timestamp)) {
+                return;
+            }
+
+            if (!matchedPunch || timestamp > matchedPunch.timestamp) {
+                matchedPunch = {
+                    type: punchType,
+                    timestamp,
+                    displayTime: punchTime,
+                    row,
+                    sourceKey: normalizedCells.includes(normalizedEmployeeId)
+                        ? employeeId
+                        : (isNameMatch ? row[1] : login)
+                };
+            }
+        });
+
+        return matchedPunch;
+    }
+
+    function normalizePunchType(punchType) {
+        const raw = String(punchType || '').toLowerCase();
+
+        if (raw.includes('out') || raw.includes('meal start')) {
+            return {
+                label: 'Clocked Out',
+                className: 'out'
+            };
+        }
+
+        if (raw.includes('in') || raw.includes('meal end') || raw.includes('return')) {
+            return {
+                label: 'Clocked In',
+                className: 'in'
+            };
+        }
+
+        return {
+            label: punchType ? `Unknown (${punchType})` : 'Unknown',
+            className: 'unknown'
+        };
+    }
+
+    function isWithinLastHours(timestamp, hours) {
+        const now = Date.now();
+        const diffMs = now - timestamp;
+        return diffMs >= 0 && diffMs <= hours * 60 * 60 * 1000;
+    }
+
+    function normalizeKey(value) {
+        return String(value || '').trim().toLowerCase();
+    }
+
+    function renderResults(results) {
+        const body = document.getElementById(`${SCRIPT_ID}-results-body`);
+        if (!body) {
+            return;
+        }
+
+        if (!results || results.length === 0) {
+            body.innerHTML = '<tr><td colspan="3">No results yet.</td></tr>';
+            return;
+        }
+
+        body.innerHTML = results.map((result) => `
+            <tr>
+                <td>${escapeHtml(result.login)}</td>
+                <td><span class="fclm-pill ${escapeHtml(result.statusClass)}">${escapeHtml(result.status)}</span></td>
+                <td>${escapeHtml(result.lastPunch || '-')}</td>
+            </tr>
+        `).join('');
+    }
+
+    async function copyDebugToClipboard() {
+        lastDebugPayload.generatedAt = new Date().toISOString();
+        const text = JSON.stringify(lastDebugPayload, null, 2);
+
+        try {
+            await writeClipboard(text);
+            updateStatus('Debug copied to clipboard.', 'success');
+        } catch (error) {
+            addDebugError('copyDebugToClipboard', error);
+            updateStatus(`Copy failed: ${formatError(error)}`, 'error');
+        }
+    }
+
+    async function copyClockedInLogins() {
+        const clockedInLogins = (lastDebugPayload.results || [])
+            .filter((result) => result && result.statusClass === 'in')
+            .map((result) => result.login)
+            .filter(Boolean);
+
+        if (clockedInLogins.length === 0) {
+            updateStatus('No Clocked In logins to copy.', 'error');
+            return;
+        }
+
+        try {
+            await writeClipboard(clockedInLogins.join('\n'));
+            updateStatus(`Copied ${clockedInLogins.length} Clocked In login(s).`, 'success');
+        } catch (error) {
+            addDebugError('copyClockedInLogins', error);
+            updateStatus(`Copy failed: ${formatError(error)}`, 'error');
+        }
+    }
+
+    function writeClipboard(text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            return navigator.clipboard.writeText(text);
+        }
+
+        return new Promise((resolve, reject) => {
+            try {
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.setAttribute('readonly', 'readonly');
+                textarea.style.position = 'fixed';
+                textarea.style.top = '-9999px';
+                document.body.appendChild(textarea);
+                textarea.select();
+                const ok = document.execCommand('copy');
+                document.body.removeChild(textarea);
+
+                if (!ok) {
+                    reject(new Error('document.execCommand("copy") returned false.'));
+                    return;
+                }
+
+                resolve();
+            } catch (error) {
+                reject(error);
+            }
+        });
+    }
+
+    function gmRequest(url) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                onload: function(response) {
+                    if (response.status >= 200 && response.status < 300) {
+                        resolve(response.responseText);
+                        return;
+                    }
+
+                    reject(new Error(`Request failed (${response.status}) for ${url}`));
+                },
+                onerror: function(error) {
+                    reject(new Error(`Network error for ${url}: ${JSON.stringify(error)}`));
+                }
+            });
+        });
+    }
+
+    async function mapWithConcurrency(items, concurrency, mapper) {
+        const results = new Array(items.length);
+        let nextIndex = 0;
+
+        async function worker() {
+            while (nextIndex < items.length) {
+                const currentIndex = nextIndex;
+                nextIndex += 1;
+                results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+            }
+        }
+
+        const workerCount = Math.min(concurrency, items.length);
+        await Promise.all(Array.from({ length: workerCount }, worker));
+        return results;
+    }
+
+    function csvToArray(strData, strDelimiter) {
+        const delimiter = strDelimiter || ',';
+        const objPattern = new RegExp(
+            (
+                '(\\' + delimiter + '|\\r?\\n|\\r|^)' +
+                '(?:"([^"]*(?:""[^"]*)*)"|' +
+                '([^"\\' + delimiter + '\\r\\n]*))'
+            ),
+            'gi'
+        );
+        const arrData = [[]];
+        let arrMatches;
+
+        while ((arrMatches = objPattern.exec(strData))) {
+            const strMatchedDelimiter = arrMatches[1];
+            if (strMatchedDelimiter.length && strMatchedDelimiter !== delimiter) {
+                arrData.push([]);
+            }
+
+            const strMatchedValue = arrMatches[2]
+                ? arrMatches[2].replace(/""/g, '"')
+                : arrMatches[3];
+
+            arrData[arrData.length - 1].push(strMatchedValue);
+        }
+
+        return arrData;
+    }
+
+    function escapeHtml(value) {
+        return String(value || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function formatError(error) {
+        if (error instanceof Error) {
+            return error.message;
+        }
+
+        if (typeof error === 'string') {
+            return error;
+        }
+
+        try {
+            return JSON.stringify(error);
+        } catch (jsonError) {
+            return String(error);
+        }
+    }
+
+    function initialize() {
+        if (!window.location.hostname.includes('fclm-portal.amazon.com')) {
+            return;
+        }
+        injectStyles();
+        createToggleButton();
+        createPanel();
+        addDebugStep('initialized', { pageUrl: window.location.href });
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initialize);
+    } else {
+        initialize();
+    }
+})();

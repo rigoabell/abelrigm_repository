@@ -1,0 +1,447 @@
+// ==UserScript==
+// @name         QuickSight Pending Engagements D/F Shift Logins
+// @namespace    ultimate-tampermonkey
+// @version      0.1.2
+// @description  Copy Pending Engagements logins whose shift starts with D or F
+// @author       Cursor
+// @match        https://us-east-1.quicksight.aws.amazon.com/sn/account/quetzal/dashboards/ed0061b1-143a-4b06-adf5-8bbe28d30023/*
+// @grant        GM_setClipboard
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const installationKey = '__qsPendingEngagementsDFShiftLoginsInstalled';
+  const dashboardPath = '/sn/account/quetzal/dashboards/ed0061b1-143a-4b06-adf5-8bbe28d30023/';
+  const visualTitle = 'Pending Engagements (Click Me To Load Content)';
+  // 0-based column indices (sorted data-col-path order). Pending Engagements layout:
+  // 0 date, 1 region, 2 site (e.g. MEM3), 3 login, 4 name, 5 shift code (DA/FL/NB…), …
+  const loginColumnIndex = 3;
+  const shiftColumnIndex = 5;
+  const SCRIPT_VERSION = '0.1.2';
+
+  /** Typical FC login: lowercase letter + alnum (avoids matching region e.g. East or site MEM3). */
+  const LOGIN_REGEX = /^[a-z][a-z0-9_-]{2,}$/;
+  const SHIFT_DF_REGEX = /^[df]/i;
+
+  function onDocumentReady(callback) {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', callback, { once: true });
+      return;
+    }
+
+    callback();
+  }
+
+  function normalizeText(value) {
+    return (value ?? '').replace(/\s+/g, ' ').trim();
+  }
+
+  function getVisualTitleLabel(titleText) {
+    return (
+      Array.from(
+        document.querySelectorAll('[data-automation-id="analysis_visual_title_label"]')
+      ).find((element) => {
+        const contextText = normalizeText(element.dataset.automationContext);
+        const renderedText = normalizeText(element.textContent);
+        const normalizedTitle = normalizeText(titleText);
+        return contextText === normalizedTitle || renderedText === normalizedTitle;
+      }) ?? null
+    );
+  }
+
+  function getVisualBlock(titleText) {
+    return getVisualTitleLabel(titleText)?.closest('[id^="block-"]') ?? null;
+  }
+
+  function getTitleContainer(titleText) {
+    return getVisualTitleLabel(titleText)?.closest('.visual-title-container') ?? null;
+  }
+
+  function getPrintableCellText(element) {
+    return (
+      element?.querySelector('.printable-cell')?.textContent?.trim() ??
+      element?.getAttribute('title')?.trim() ??
+      ''
+    );
+  }
+
+  function buildRowMap(block) {
+    const allCells = Array.from(
+      block.querySelectorAll('[data-automation-id^="sn-table-cell-"][data-row-path]')
+    );
+
+    const rowMap = new Map();
+    for (const cell of allCells) {
+      const rp = cell.dataset.rowPath ?? '';
+      if (!rp) {
+        continue;
+      }
+      if (!rowMap.has(rp)) {
+        rowMap.set(rp, []);
+      }
+      rowMap.get(rp).push(cell);
+    }
+
+    for (const cells of rowMap.values()) {
+      cells.sort((a, b) => {
+        const aVal = a.dataset.colPath ?? '';
+        const bVal = b.dataset.colPath ?? '';
+        const aNum = Number(aVal);
+        const bNum = Number(bVal);
+        if (!isNaN(aNum) && !isNaN(bNum)) {
+          return aNum - bNum;
+        }
+        return aVal.localeCompare(bVal);
+      });
+    }
+
+    return rowMap;
+  }
+
+  function getDFShiftLogins() {
+    const block = getVisualBlock(visualTitle);
+    if (!block) {
+      console.debug('[PendingEngDF] Visual block not found');
+      return [];
+    }
+
+    const rowMap = buildRowMap(block);
+    console.debug(`[PendingEngDF] Found ${rowMap.size} rows`);
+
+    if (rowMap.size > 0) {
+      const firstCells = [...rowMap.values()][0];
+      console.debug(
+        `[PendingEngDF] First row (${firstCells.length} cells) col-paths:`,
+        firstCells.map((c) => c.dataset.colPath)
+      );
+      console.debug(
+        '[PendingEngDF] First row cell texts:',
+        firstCells.map((c) => getPrintableCellText(c))
+      );
+    }
+
+    const logins = [];
+    const seen = new Set();
+
+    for (const cells of rowMap.values()) {
+      if (cells.length <= Math.max(loginColumnIndex, shiftColumnIndex)) {
+        continue;
+      }
+
+      const login = getPrintableCellText(cells[loginColumnIndex]);
+      if (!LOGIN_REGEX.test(login)) {
+        continue;
+      }
+
+      const shiftCode = getPrintableCellText(cells[shiftColumnIndex]);
+      if (!SHIFT_DF_REGEX.test(shiftCode) || seen.has(login)) {
+        continue;
+      }
+
+      seen.add(login);
+      logins.push(login);
+    }
+
+    return logins;
+  }
+
+  /** Paste-friendly diagnostics for troubleshooting column / row detection. */
+  function collectDebugReport() {
+    const maxRowsSample = 25;
+    const block = getVisualBlock(visualTitle);
+    const titleLabel = getVisualTitleLabel(visualTitle);
+
+    let rowMap = null;
+    let rowMapError = null;
+    try {
+      rowMap = block ? buildRowMap(block) : null;
+    } catch (err) {
+      rowMapError = err instanceof Error ? err.message : String(err);
+    }
+
+    const rowsSample = [];
+    if (rowMap) {
+      let count = 0;
+      for (const [rowPath, cells] of rowMap.entries()) {
+        if (count >= maxRowsSample) {
+          break;
+        }
+        rowsSample.push({
+          rowPath,
+          cellCount: cells.length,
+          colPaths: cells.map((c) => c.dataset.colPath ?? ''),
+          texts: cells.map((c) => getPrintableCellText(c)),
+          loginAtIndex:
+            cells.length > loginColumnIndex ? getPrintableCellText(cells[loginColumnIndex]) : null,
+          shiftAtIndex:
+            cells.length > shiftColumnIndex ? getPrintableCellText(cells[shiftColumnIndex]) : null
+        });
+        count += 1;
+      }
+    }
+
+    let cellCounts = { min: null, max: null };
+    if (rowMap && rowMap.size > 0) {
+      const counts = Array.from(rowMap.values()).map((c) => c.length);
+      cellCounts = { min: Math.min(...counts), max: Math.max(...counts) };
+    }
+
+    const loginsMatched = (() => {
+      try {
+        return getDFShiftLogins();
+      } catch (err) {
+        return { __error: err instanceof Error ? err.message : String(err) };
+      }
+    })();
+
+    const payload = {
+      script: {
+        version: SCRIPT_VERSION,
+        constants: {
+          visualTitle,
+          loginColumnIndex,
+          shiftColumnIndex
+        }
+      },
+      page: {
+        href: window.location.href,
+        generatedAtUtc: new Date().toISOString(),
+        userAgent: navigator.userAgent
+      },
+      dom: {
+        titleLabelFound: Boolean(titleLabel),
+        titleAutomationContext: titleLabel?.dataset?.automationContext ?? null,
+        visualBlockFound: Boolean(block),
+        visualBlockId: block?.id ?? null,
+        snTableCellsInBlock: block
+          ? block.querySelectorAll('[data-automation-id^="sn-table-cell-"]').length
+          : 0,
+        snTableCellsWithRowPathInBlock: block
+          ? block.querySelectorAll('[data-automation-id^="sn-table-cell-"][data-row-path]').length
+          : 0
+      },
+      rowMap: {
+        error: rowMapError,
+        rowCount: rowMap?.size ?? 0,
+        cellCountMinMax: cellCounts,
+        rowsSample,
+        truncated: rowMap ? rowMap.size > maxRowsSample : false
+      },
+      heuristicScan: rowMap
+        ? Array.from(rowMap.values())
+            .slice(0, maxRowsSample)
+            .map((cells) => {
+              const texts = cells.map((c) => getPrintableCellText(c));
+              const loginIdx = texts.findIndex((t) => LOGIN_REGEX.test(t));
+              const shiftIdx = texts.findIndex((t) => SHIFT_DF_REGEX.test(t));
+              return { loginGuessCol: loginIdx, shiftGuessCol: shiftIdx, texts };
+            })
+        : [],
+      matchedLogins: loginsMatched
+    };
+
+    const header = [
+      '=== QuickSight Pending Engagements — Tampermonkey debug dump ===',
+      `Paste everything below into your ticket/chat.`,
+      ''
+    ].join('\n');
+
+    let jsonBody = '';
+    try {
+      jsonBody = JSON.stringify(payload, null, 2);
+    } catch (err) {
+      jsonBody = JSON.stringify(
+        { stringifyError: err instanceof Error ? err.message : String(err), partial: payload },
+        null,
+        2
+      );
+    }
+
+    return `${header}${jsonBody}\n`;
+  }
+
+  async function copyText(text) {
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(text, 'text');
+      return;
+    }
+
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+  }
+
+  function createStyles() {
+    const style = document.createElement('style');
+    style.textContent = `
+      .qs-pending-df-title-host {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .qs-pending-df-title-host > [data-automation-id="analysis_visual_title_label"] {
+        flex: 1;
+        min-width: 0;
+      }
+      .qs-pending-df-button {
+        border: none;
+        min-height: 30px;
+        padding: 0 10px;
+        border-radius: 10px;
+        background: #0f172a;
+        color: #f8fafc;
+        font: 600 12px/1.2 Inter, "Segoe UI", Arial, sans-serif;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .qs-pending-df-button[disabled] {
+        opacity: 0.65;
+        cursor: wait;
+      }
+      .qs-pending-df-button--secondary {
+        background: #334155;
+      }
+      .qs-pending-df-status {
+        margin-top: 6px;
+        color: #64748b;
+        font: 500 11px/1.35 Inter, "Segoe UI", Arial, sans-serif;
+      }
+    `;
+    return style;
+  }
+
+  function install() {
+    if (!window.location.href.includes(dashboardPath)) {
+      return;
+    }
+
+    const appWindow = window;
+    if (appWindow[installationKey]) {
+      return;
+    }
+    appWindow[installationKey] = true;
+
+    document.documentElement.appendChild(createStyles());
+
+    let copyButton = null;
+    let debugButton = null;
+    let status = null;
+    let queued = false;
+
+    function renderStatus(message) {
+      if (status) {
+        status.textContent = message;
+      }
+    }
+
+    function mount() {
+      const titleContainer = getTitleContainer(visualTitle);
+      if (!titleContainer) {
+        return;
+      }
+
+      if (!copyButton || !copyButton.isConnected) {
+        titleContainer.classList.add('qs-pending-df-title-host');
+
+        const setBusy = (busy) => {
+          if (copyButton) {
+            copyButton.disabled = busy;
+          }
+          if (debugButton) {
+            debugButton.disabled = busy;
+          }
+        };
+
+        copyButton = document.createElement('button');
+        copyButton.type = 'button';
+        copyButton.className = 'qs-pending-df-button';
+        copyButton.textContent = 'Copy D/F Logins';
+        copyButton.addEventListener('click', async () => {
+          setBusy(true);
+          try {
+            const logins = getDFShiftLogins();
+            if (logins.length === 0) {
+              renderStatus('No visible D/F-shift logins found.');
+              return;
+            }
+
+            await copyText(logins.join('\n'));
+            renderStatus(`Copied ${logins.length} D/F-shift login${logins.length === 1 ? '' : 's'}.`);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            renderStatus(`Copy failed: ${message}`);
+          } finally {
+            setBusy(false);
+          }
+        });
+
+        debugButton = document.createElement('button');
+        debugButton.type = 'button';
+        debugButton.className = 'qs-pending-df-button qs-pending-df-button--secondary';
+        debugButton.textContent = 'Copy Debug';
+        debugButton.title = 'Copy diagnostics to paste in a bug report';
+        debugButton.addEventListener('click', async () => {
+          setBusy(true);
+          try {
+            const report = collectDebugReport();
+            await copyText(report);
+            const lines = (report.match(/\n/g) ?? []).length + 1;
+            renderStatus(`Debug copied (${lines} lines). Paste it in your chat.`);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            renderStatus(`Debug copy failed: ${message}`);
+          } finally {
+            setBusy(false);
+          }
+        });
+
+        status = document.createElement('div');
+        status.className = 'qs-pending-df-status';
+        status.textContent = 'Ready';
+
+        titleContainer.appendChild(copyButton);
+        titleContainer.appendChild(debugButton);
+        titleContainer.parentElement?.appendChild(status);
+      }
+    }
+
+    function scheduleMount() {
+      if (queued) {
+        return;
+      }
+
+      queued = true;
+      window.setTimeout(() => {
+        queued = false;
+        mount();
+      }, 150);
+    }
+
+    scheduleMount();
+
+    const observer = new MutationObserver(() => {
+      scheduleMount();
+    });
+
+    if (document.body) {
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true
+      });
+    }
+  }
+
+  onDocumentReady(install);
+})();

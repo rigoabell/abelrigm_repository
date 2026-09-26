@@ -1,0 +1,2292 @@
+// ==UserScript==
+// @name         FCResearch Site Finder
+// @namespace    ultimate-tampermonkey
+// @version      0.16.2
+// @description  Side-panel tool. Multi-site existence checkmarks plus optional MEM3 inventory detail (LPN, Disposition, Consumer). Persists to localStorage.
+// @author       Cursor
+// @match        https://qi-fcresearch-na.corp.amazon.com/*
+// @match        https://qi-fcresearch-eu.corp.amazon.com/*
+// @match        https://qi-fcresearch-fe.corp.amazon.com/*
+// @grant        GM_setClipboard
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const installationKey = '__fcresearchSiteFinderInstalled';
+  const scriptVersion = '0.16.2';
+
+  // Hard-coded site for the optional MEM3 inventory-detail pass.
+  const mem3DetailSite = 'MEM3';
+
+  // Inventory table columns for the MEM3 detail pass.
+  const lpnIdFragment = 'lpn';
+  const lpnAriaFragment = 'lpn';
+  const lpnHeaderName = 'LPN';
+  const lpnFallbackIndex = 4;
+
+  const dispositionIdFragment = 'disposition';
+  const dispositionAriaFragment = 'disposition';
+  const dispositionHeaderName = 'Disposition';
+  const dispositionFallbackIndex = 6;
+
+  const consumerIdFragment = 'consumer';
+  const consumerAriaFragment = 'consumer';
+  const consumerHeaderName = 'Consumer';
+  const consumerFallbackIndex = 7;
+
+  // localStorage key for persisted panel state. Bump the suffix if the
+  // schema changes incompatibly.
+  const storageKey = '__fcresearchSiteFinderStateV1';
+
+  // Tables FCResearch renders on the results page. The two history tables
+  // are always present (one or both will show "No matching records found"
+  // when there is nothing to display).
+  const inventoryTableId = 'table-inventory';
+  const inventoryHistoryTableId = 'table-inventory-history';
+  const containerHistoryTableId = 'table-container-history';
+  const allResultTableIds = [
+    inventoryTableId,
+    inventoryHistoryTableId,
+    containerHistoryTableId
+  ];
+
+  // Section title texts that indicate the container/LPN exists at this site
+  // even when there is no current inventory row. Matched case-insensitively
+  // against the trimmed text of span.section-title elements.
+  const detailsSectionTitles = ['container details', 'lpn details'];
+
+  // How many ancestor levels to climb from a section-title span when
+  // searching for the section root that also contains the value list.
+  const detailsClimbLimit = 8;
+
+  // Iframe loader tuning.
+  const iframeWidthPx = 3600;
+  const iframeHeightPx = 900;
+  const iframeTimeoutMs = 8000;
+  const iframePollMs = 200;
+  const iframeStabilityMs = 700;
+
+  // Fast path when a container clearly does not exist at a site (e.g. ICT2):
+  // inventory/history tables never render or are empty, no details section.
+  const notFoundMinWaitMs = 600;
+  const notFoundStableMs = 350;
+  const notFoundMinBodyLen = 80;
+
+  // When inventory history is empty on the default date window, open the
+  // section calendar and re-search with the start date this many days ago.
+  const inventoryHistoryLookbackDays = 180;
+  const inventoryHistoryExpandTimeoutMs = 10000;
+
+  // Snippet length captured in debug output.
+  const debugSnippetLength = 1200;
+
+  // Default site list seed. Edit freely from the UI — these are just a hint.
+  // (Only MEM3 is known-good per the original script; user can paste more.)
+  const defaultSitesText = 'MEM3';
+
+  function normalizeText(value) {
+    return (value ?? '').replace(/\s+/g, ' ').trim();
+  }
+
+  function splitTokens(value) {
+    return Array.from(
+      new Set(
+        (value ?? '')
+          .split(/[\s,;]+/)
+          .map((item) => item.trim())
+          .filter(Boolean)
+      )
+    );
+  }
+
+  function buildResultsUrl(site, query) {
+    const safeSite = encodeURIComponent(site);
+    const safeQuery = encodeURIComponent(query);
+    return new URL(`/${safeSite}/results?s=${safeQuery}`, window.location.origin).toString();
+  }
+
+  function regionFromHost() {
+    const h = window.location.hostname;
+    const m = h.match(/qi-fcresearch-(na|eu|fe)\./i);
+    return m ? m[1].toUpperCase() : '?';
+  }
+
+  function createStyles() {
+    const style = document.createElement('style');
+    style.textContent = `
+      .tm-fcsf-panel {
+        position: fixed;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        width: min(560px, 100vw);
+        background: #ffffff;
+        box-shadow: -8px 0 24px rgba(15, 23, 42, 0.18);
+        transform: translateX(100%);
+        transition: transform 0.22s ease;
+        z-index: 2147483646;
+        display: flex;
+        flex-direction: column;
+        font-family: Arial, sans-serif;
+        color: #111827;
+      }
+      .tm-fcsf-panel.tm-fcsf-open {
+        transform: translateX(0);
+      }
+      .tm-fcsf-toggle {
+        position: absolute;
+        top: 50%;
+        left: -34px;
+        transform: translateY(-50%);
+        width: 34px;
+        min-height: 84px;
+        padding: 8px 0;
+        border: none;
+        border-radius: 10px 0 0 10px;
+        background: #111827;
+        color: #f9fafb;
+        cursor: pointer;
+        writing-mode: vertical-rl;
+        text-orientation: mixed;
+        font: 700 12px/1.2 Arial, sans-serif;
+        letter-spacing: 0.06em;
+        box-shadow: -3px 0 10px rgba(15, 23, 42, 0.18);
+      }
+      .tm-fcsf-toggle .tm-fcsf-toggle-sub {
+        font-weight: 500;
+        font-size: 10px;
+        opacity: 0.75;
+        margin-top: 4px;
+      }
+      .tm-fcsf-header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 12px 14px;
+        border-bottom: 1px solid #e5e7eb;
+        background: #f8fafc;
+      }
+      .tm-fcsf-title {
+        margin: 0;
+        font: 700 14px/1.2 Arial, sans-serif;
+      }
+      .tm-fcsf-sub {
+        color: #6b7280;
+        font: 500 11px/1 Arial, sans-serif;
+        margin-left: 6px;
+      }
+      .tm-fcsf-close {
+        border: none;
+        background: transparent;
+        color: #6b7280;
+        font: 700 20px/1 Arial, sans-serif;
+        cursor: pointer;
+      }
+      .tm-fcsf-body {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding: 12px 14px 16px;
+        overflow: auto;
+        flex: 1 1 auto;
+      }
+      .tm-fcsf-label {
+        font: 600 11px/1.2 Arial, sans-serif;
+        color: #374151;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 4px;
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+      }
+      .tm-fcsf-label .tm-fcsf-hint {
+        font-weight: 500;
+        text-transform: none;
+        letter-spacing: 0;
+        color: #6b7280;
+        font-size: 11px;
+      }
+      .tm-fcsf-textarea {
+        width: 100%;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        padding: 7px 9px;
+        box-sizing: border-box;
+        color: #111827;
+        resize: vertical;
+        font: 500 12.5px/1.45 Consolas, "Courier New", monospace;
+        background: #ffffff;
+      }
+      .tm-fcsf-textarea.tm-fcsf-containers { min-height: 80px; }
+      .tm-fcsf-textarea.tm-fcsf-sites { min-height: 50px; }
+      .tm-fcsf-toggle-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 0 2px;
+        font: 500 12.5px/1.3 Arial, sans-serif;
+        color: #374151;
+        cursor: pointer;
+        user-select: none;
+      }
+      .tm-fcsf-toggle-row input {
+        width: 15px;
+        height: 15px;
+        margin: 0;
+        cursor: pointer;
+      }
+      .tm-fcsf-container-block {
+        display: flex;
+        flex-direction: column;
+        border: 1px solid #d1d5db;
+        border-radius: 12px;
+        background: #ffffff;
+        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+        overflow: hidden;
+      }
+      .tm-fcsf-container-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 9px 12px;
+        background: #111827;
+        color: #f9fafb;
+      }
+      .tm-fcsf-container-head-label {
+        font: 600 10px/1 Arial, sans-serif;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: #9ca3af;
+      }
+      .tm-fcsf-container-head-id {
+        font: 700 13px/1.2 Consolas, "Courier New", monospace;
+        word-break: break-all;
+      }
+      .tm-fcsf-container-body {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding: 12px;
+        background: #f8fafc;
+      }
+      .tm-fcsf-subsection {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .tm-fcsf-subsection + .tm-fcsf-subsection {
+        padding-top: 12px;
+        border-top: 1px dashed #d1d5db;
+      }
+      .tm-fcsf-subsection-label {
+        font: 700 10px/1.2 Arial, sans-serif;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      .tm-fcsf-table td.tm-fcsf-td-left {
+        text-align: left;
+        font-family: Consolas, "Courier New", monospace;
+        font-size: 12px;
+        word-break: break-all;
+      }
+      .tm-fcsf-muted-row td {
+        color: #6b7280;
+        font-style: italic;
+      }
+      .tm-fcsf-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        align-items: center;
+      }
+      .tm-fcsf-button {
+        border: none;
+        border-radius: 8px;
+        padding: 7px 12px;
+        background: #111827;
+        color: #f9fafb;
+        font: 600 12px/1.2 Arial, sans-serif;
+        cursor: pointer;
+      }
+      .tm-fcsf-button[disabled] { opacity: 0.6; cursor: wait; }
+      .tm-fcsf-button.tm-fcsf-secondary { background: #e5e7eb; color: #111827; }
+      .tm-fcsf-button.tm-fcsf-stop { background: #b91c1c; color: #fff; }
+      .tm-fcsf-button.tm-fcsf-stop[disabled] { background: #fca5a5; }
+      .tm-fcsf-status {
+        min-height: 18px;
+        color: #6b7280;
+        font: 500 12px/1.4 Arial, sans-serif;
+      }
+      .tm-fcsf-progress {
+        height: 6px;
+        background: #e5e7eb;
+        border-radius: 3px;
+        overflow: hidden;
+      }
+      .tm-fcsf-progress-fill {
+        height: 100%;
+        width: 0;
+        background: #1d4ed8;
+        transition: width 0.2s linear;
+      }
+      .tm-fcsf-results {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      .tm-fcsf-query-block {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .tm-fcsf-query-label {
+        font: 700 13px/1.2 Consolas, "Courier New", monospace;
+        color: #111827;
+        word-break: break-all;
+      }
+      .tm-fcsf-table-wrap {
+        overflow: auto;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+      }
+      .tm-fcsf-table {
+        width: 100%;
+        border-collapse: collapse;
+        font: 500 12.5px/1.3 Arial, sans-serif;
+      }
+      .tm-fcsf-table th,
+      .tm-fcsf-table td {
+        padding: 7px 10px;
+        border-bottom: 1px solid #f1f5f9;
+        text-align: center;
+        vertical-align: middle;
+      }
+      .tm-fcsf-table th {
+        background: #f8fafc;
+        color: #374151;
+        font: 600 11px/1.2 Arial, sans-serif;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+      .tm-fcsf-table th.tm-fcsf-th-site,
+      .tm-fcsf-table td.tm-fcsf-td-site {
+        text-align: left;
+        font-family: Consolas, "Courier New", monospace;
+        font-weight: 700;
+      }
+      .tm-fcsf-table tr:last-child td { border-bottom: none; }
+      .tm-fcsf-check-yes {
+        color: #15803d;
+        font: 700 15px/1 Arial, sans-serif;
+      }
+      .tm-fcsf-check-no {
+        color: #d1d5db;
+        font: 500 14px/1 Arial, sans-serif;
+      }
+      .tm-fcsf-check-err {
+        color: #b91c1c;
+        font: 700 11px/1 Arial, sans-serif;
+        text-transform: uppercase;
+      }
+      .tm-fcsf-table a {
+        color: #1d4ed8;
+        text-decoration: none;
+        font: 600 11px/1 Arial, sans-serif;
+      }
+      .tm-fcsf-table a:hover { text-decoration: underline; }
+      .tm-fcsf-empty-state {
+        color: #6b7280;
+        font: 500 12px/1.4 Arial, sans-serif;
+        padding: 6px 0;
+      }
+      .tm-fcsf-loader-frame {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: ${iframeWidthPx}px;
+        height: ${iframeHeightPx}px;
+        border: 0;
+        opacity: 0;
+        pointer-events: none;
+        z-index: -1;
+      }
+      .tm-fcsf-loader-frame.tm-fcsf-loader-frame--interactive {
+        opacity: 0.01;
+        pointer-events: auto;
+        z-index: 2147483646;
+      }
+    `;
+    return style;
+  }
+
+  const dataTablesEmptyText = 'no matching records found';
+
+  function isDataTablesEmptyRow(row) {
+    if (row.classList.contains('dataTables_empty')) return true;
+
+    const cells = row.querySelectorAll('td');
+    for (const cell of cells) {
+      if (cell.classList.contains('dataTables_empty')) return true;
+    }
+
+    const text = normalizeText(row.textContent).toLowerCase();
+    if (text.includes(dataTablesEmptyText)) return true;
+
+    return false;
+  }
+
+  function tableShowsNoRecords(table) {
+    const emptyCell = table.querySelector('tbody td.dataTables_empty');
+    if (emptyCell) {
+      const text = normalizeText(emptyCell.textContent).toLowerCase();
+      if (!text || text.includes(dataTablesEmptyText)) return true;
+    }
+    const rows = table.querySelectorAll('tbody tr');
+    if (rows.length === 0) return false;
+    return Array.from(rows).every(isDataTablesEmptyRow);
+  }
+
+  function isResponsiveChildRow(row) {
+    return row.classList.contains('child');
+  }
+
+  function getDataRows(table) {
+    const all = Array.from(table.querySelectorAll('tbody tr'));
+    return all.filter((row) => !isDataTablesEmptyRow(row) && !isResponsiveChildRow(row));
+  }
+
+  function getHeaderInfo(table) {
+    const headerCells = Array.from(table.querySelectorAll('thead th'));
+    return headerCells.map((cell, index) => ({
+      index,
+      id: cell.id || '',
+      ariaLabel: cell.getAttribute('aria-label') ?? '',
+      text: normalizeText(cell.textContent)
+    }));
+  }
+
+  function resolveColumn(headerInfo, idFrag, ariaFrag, headerName, fallbackIndex) {
+    const idLower = idFrag.toLowerCase();
+    const ariaLower = ariaFrag.toLowerCase();
+    const textLower = headerName.toLowerCase();
+
+    const byId = headerInfo.find((h) => h.id.toLowerCase().includes(idLower));
+    if (byId) return byId.index;
+
+    const byAria = headerInfo.find((h) => h.ariaLabel.toLowerCase().includes(ariaLower));
+    if (byAria) return byAria.index;
+
+    const byText = headerInfo.find((h) => h.text.toLowerCase() === textLower);
+    if (byText) return byText.index;
+
+    return fallbackIndex;
+  }
+
+  function getRowCells(row) {
+    return Array.from(row.children);
+  }
+
+  function cellText(row, colIndex) {
+    const cells = getRowCells(row);
+    return normalizeText(cells[colIndex]?.textContent ?? '');
+  }
+
+  function extractInventoryLineItems(idoc) {
+    const table = idoc.getElementById(inventoryTableId);
+    if (!table || tableShowsNoRecords(table)) return [];
+
+    const headerInfo = getHeaderInfo(table);
+    const lpnCol = resolveColumn(headerInfo, lpnIdFragment, lpnAriaFragment, lpnHeaderName, lpnFallbackIndex);
+    const dispositionCol = resolveColumn(
+      headerInfo,
+      dispositionIdFragment,
+      dispositionAriaFragment,
+      dispositionHeaderName,
+      dispositionFallbackIndex
+    );
+    const consumerCol = resolveColumn(
+      headerInfo,
+      consumerIdFragment,
+      consumerAriaFragment,
+      consumerHeaderName,
+      consumerFallbackIndex
+    );
+
+    return getDataRows(table).map((row) => ({
+      lpn: cellText(row, lpnCol) || '(empty)',
+      disposition: cellText(row, dispositionCol) || '(empty)',
+      consumer: cellText(row, consumerCol) || '(empty)'
+    }));
+  }
+
+  function inventorySignature(table) {
+    const rows = table.querySelectorAll('tbody tr');
+    const bodyCells = table.querySelectorAll('tbody td');
+    let bodyTextLen = 0;
+    for (const cell of bodyCells) bodyTextLen += normalizeText(cell.textContent).length;
+    return { rowCount: rows.length, bodyTextLen };
+  }
+
+  function isTableEmptyState(table) {
+    return tableShowsNoRecords(table);
+  }
+
+  function isTableSettled(table) {
+    const rows = table.querySelectorAll('tbody tr');
+    if (rows.length === 0) return false;
+    if (tableShowsNoRecords(table)) return true;
+    return getDataRows(table).length > 0;
+  }
+
+  function getTableDataRowCount(idoc, id) {
+    const t = idoc.getElementById(id);
+    if (!t) return null;
+    if (tableShowsNoRecords(t)) return 0;
+    return getDataRows(t).length;
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function clickElement(el) {
+    if (!el) return;
+    const view = el.ownerDocument?.defaultView;
+    try {
+      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view }));
+      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view }));
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view }));
+    } catch {
+      // ignore
+    }
+    if (typeof el.click === 'function') el.click();
+  }
+
+  function scrollIntoViewForClick(el) {
+    if (!el) return;
+    try {
+      el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    } catch {
+      // ignore
+    }
+    try {
+      const doc = el.ownerDocument;
+      const section = el.closest('.section-placeholder') || el.closest(`#${inventoryHistoryTableId}_wrapper`)?.parentElement;
+      if (section) section.scrollIntoView({ block: 'nearest' });
+      doc.defaultView?.scrollTo(0, el.offsetTop - 120);
+    } catch {
+      // ignore
+    }
+  }
+
+  function calendarSearchDocuments(idoc) {
+    const docs = [idoc];
+    try {
+      if (window.document && window.document !== idoc) docs.push(window.document);
+    } catch {
+      // ignore
+    }
+    try {
+      const parentDoc = idoc.defaultView?.parent?.document;
+      if (parentDoc && !docs.includes(parentDoc)) docs.push(parentDoc);
+    } catch {
+      // ignore
+    }
+    return docs;
+  }
+
+  function isDomVisible(el) {
+    if (!el || !el.isConnected) return false;
+    const win = el.ownerDocument?.defaultView;
+    if (!win) return false;
+    if (el.getAttribute('aria-hidden') === 'true') return false;
+    const style = win.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function findOpenCalendarPopover(docs) {
+    for (const doc of docs) {
+      for (const header of doc.querySelectorAll('h4.a-cal-month-header')) {
+        if (!isDomVisible(header)) continue;
+        return {
+          root: header.closest('[id^="a-popover-"]') ||
+            header.closest('.a-popover') ||
+            header.closest('#a-popover-content-1')?.parentElement ||
+            doc.body,
+          doc
+        };
+      }
+      for (const pop of doc.querySelectorAll('[id^="a-popover-"]')) {
+        if (!pop.querySelector('h4.a-cal-month-header, .a-cal-date-anchor')) continue;
+        if (isDomVisible(pop)) return { root: pop, doc };
+      }
+    }
+    return null;
+  }
+
+  async function waitForOpenCalendarPopover(docs, timeoutMs = 4500) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const found = findOpenCalendarPopover(docs);
+      if (found) return found;
+      await sleep(100);
+    }
+    return null;
+  }
+
+  function findInventoryHistoryCalendarTriggers(section) {
+    if (!section) return [];
+    const seen = new Set();
+    const triggers = [];
+
+    function add(el) {
+      if (!el || seen.has(el)) return;
+      seen.add(el);
+      triggers.push(el);
+    }
+
+    const calendarContainer = section.querySelector('.a-cal-calendar-container') || section;
+    const groups = calendarContainer.querySelectorAll(
+      '.a-cal-date-range-group-vertical, .a-cal-date-range-group'
+    );
+
+    const orderedGroups = groups.length > 0 ? Array.from(groups) : [calendarContainer];
+    for (const group of orderedGroups) {
+      add(group.querySelector('span.a-input-text-addon.a-cal-icon'));
+      add(group.querySelector('.a-cal-icon'));
+      add(group.querySelector('i.a-icon-calendar')?.closest('span.a-input-text-addon'));
+      add(group.querySelector('i.a-icon-calendar')?.parentElement);
+      add(group.querySelector('[data-action*="popover"]'));
+      add(group.querySelector('[data-action*="cal"]'));
+      add(group.querySelector('input'));
+      add(group.querySelector('.a-input-text-addon-group'));
+    }
+
+    add(section.querySelector('span.a-input-text-addon.a-cal-icon'));
+    add(section.querySelector('i.a-icon-calendar')?.closest('span.a-input-text-addon'));
+
+    return triggers;
+  }
+
+  function activateCalendarTrigger(trigger) {
+    scrollIntoViewForClick(trigger);
+    const group =
+      trigger.closest('.a-input-text-addon-group') ||
+      trigger.closest('.a-cal-date-range-group') ||
+      trigger.parentElement;
+    const input = group?.querySelector('input');
+    if (input) {
+      try {
+        input.focus();
+      } catch {
+        // ignore
+      }
+      clickElement(input);
+    }
+    clickElement(trigger);
+    const icon = trigger.querySelector?.('i.a-icon-calendar');
+    if (icon && icon !== trigger) clickElement(icon);
+    const declarative = trigger.closest('.a-declarative') || trigger.closest('[data-action]');
+    if (declarative && declarative !== trigger) clickElement(declarative);
+  }
+
+  async function openInventoryHistoryCalendar(idoc, section) {
+    const docs = calendarSearchDocuments(idoc);
+    const triggers = findInventoryHistoryCalendarTriggers(section);
+    if (triggers.length === 0) return { ok: false, reason: 'no-triggers', triggersTried: 0 };
+
+    scrollIntoViewForClick(section);
+
+    for (let i = 0; i < triggers.length; i++) {
+      activateCalendarTrigger(triggers[i]);
+      let found = await waitForOpenCalendarPopover(docs, 1200);
+      if (found) {
+        return { ok: true, popover: found.root, popoverDoc: found.doc, triggersTried: i + 1 };
+      }
+      await sleep(150);
+    }
+
+    return { ok: false, reason: 'calendar-popover-missing', triggersTried: triggers.length };
+  }
+
+  function parseMonthHeader(text) {
+    const m = normalizeText(text).match(/^([A-Za-z]+)\s+(\d{4})$/);
+    if (!m) return null;
+    const monthIdx = new Date(`${m[1]} 1, ${m[2]}`).getMonth();
+    if (!Number.isFinite(monthIdx)) return null;
+    return { year: parseInt(m[2], 10), month: monthIdx };
+  }
+
+  function monthCompare(a, b) {
+    return a.year !== b.year ? a.year - b.year : a.month - b.month;
+  }
+
+  function formatIsoDate(d) {
+    const y = d.getFullYear();
+    const mo = String(d.getMonth() + 1).padStart(2, '0');
+    const da = String(d.getDate()).padStart(2, '0');
+    return `${y}-${mo}-${da}`;
+  }
+
+  function lookbackStartDate(days) {
+    const d = new Date();
+    d.setHours(12, 0, 0, 0);
+    d.setDate(d.getDate() - days);
+    return d;
+  }
+
+  function findInventoryHistorySectionRoot(idoc) {
+    const table = idoc.getElementById(inventoryHistoryTableId);
+    if (!table) return null;
+    let node = table.parentElement;
+    for (let i = 0; i < 20 && node; i++) {
+      for (const t of node.querySelectorAll('span.section-title')) {
+        if (normalizeText(t.textContent).toLowerCase() === 'inventory history') {
+          return node;
+        }
+      }
+      node = node.parentElement;
+    }
+    return table.closest('.section-placeholder') || table.parentElement?.parentElement?.parentElement || null;
+  }
+
+  function findInventoryHistorySearchButton(section) {
+    if (!section) return null;
+    return (
+      Array.from(section.querySelectorAll('button')).find(
+        (b) => normalizeText(b.textContent).toLowerCase() === 'search'
+      ) || null
+    );
+  }
+
+  function getVisibleCalendarMonths(root) {
+    return Array.from(root.querySelectorAll('h4.a-cal-month-header'))
+      .map((h) => parseMonthHeader(h.textContent))
+      .filter(Boolean);
+  }
+
+  async function navigateCalendarToMonth(popoverRoot, targetDate) {
+    const target = { year: targetDate.getFullYear(), month: targetDate.getMonth() };
+    const root = popoverRoot;
+
+    for (let i = 0; i < 14; i++) {
+      const visible = getVisibleCalendarMonths(root);
+      if (visible.length === 0) return false;
+
+      const earliest = visible.reduce((min, m) => (monthCompare(m, min) < 0 ? m : min));
+      const latest = visible.reduce((max, m) => (monthCompare(m, max) > 0 ? m : max));
+      if (monthCompare(earliest, target) <= 0 && monthCompare(target, latest) <= 0) {
+        return true;
+      }
+      if (monthCompare(latest, target) < 0) return false;
+
+      const prevIcon = root.querySelector('i.a-icon-previous');
+      const prevBtn = prevIcon?.closest('a') || root.querySelector('a.a-cal-prior-month');
+      if (!prevBtn) return false;
+      clickElement(prevBtn);
+      await sleep(200);
+    }
+    return false;
+  }
+
+  function selectCalendarDay(root, targetDate) {
+    const headers = Array.from(root.querySelectorAll('h4.a-cal-month-header'));
+    let scope = root;
+
+    for (const h of headers) {
+      const parsed = parseMonthHeader(h.textContent);
+      if (parsed && parsed.year === targetDate.getFullYear() && parsed.month === targetDate.getMonth()) {
+        scope =
+          h.closest('div.a-cal-month-container') ||
+          h.parentElement?.querySelector('table')?.closest('div') ||
+          h.parentElement ||
+          root;
+        break;
+      }
+    }
+
+    const day = targetDate.getDate();
+    const anchors = Array.from(scope.querySelectorAll('a.a-cal-date-anchor'));
+    for (const a of anchors) {
+      if (a.getAttribute('aria-disabled') === 'true') continue;
+      if (parseInt(normalizeText(a.textContent), 10) === day) {
+        clickElement(a);
+        return true;
+      }
+    }
+
+    for (const a of root.querySelectorAll('a.a-cal-date-anchor')) {
+      if (a.getAttribute('aria-disabled') === 'true') continue;
+      if (parseInt(normalizeText(a.textContent), 10) === day) {
+        clickElement(a);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async function waitForInventoryHistorySettled(idoc, options = {}) {
+    const { isAborted, timeoutMs = inventoryHistoryExpandTimeoutMs } = options;
+    const start = Date.now();
+    let lastKey = null;
+    let stableSince = 0;
+
+    while (Date.now() - start < timeoutMs) {
+      if (typeof isAborted === 'function' && isAborted()) {
+        throw new Error('Aborted');
+      }
+      const table = idoc.getElementById(inventoryHistoryTableId);
+      if (table && isTableSettled(table)) {
+        const key = tableShowsNoRecords(table) ? 'empty' : String(getDataRows(table).length);
+        const now = Date.now();
+        if (key === lastKey) {
+          if (now - stableSince >= iframeStabilityMs) return true;
+        } else {
+          lastKey = key;
+          stableSince = now;
+        }
+      }
+      await sleep(iframePollMs);
+    }
+    return false;
+  }
+
+  async function tryExpandInventoryHistoryRange(idoc, debug, options = {}) {
+    const { isAborted, lookbackDays = inventoryHistoryLookbackDays } = options;
+    const expandDebug = {
+      attempted: false,
+      expanded: false,
+      reason: '',
+      targetDate: '',
+      rowCountBefore: null,
+      rowCountAfter: null,
+      triggersTried: 0,
+      popoverDoc: ''
+    };
+
+    const table = idoc.getElementById(inventoryHistoryTableId);
+    if (!table) {
+      expandDebug.reason = 'no-table';
+      return expandDebug;
+    }
+
+    expandDebug.rowCountBefore = getTableDataRowCount(idoc, inventoryHistoryTableId);
+    if ((expandDebug.rowCountBefore ?? 0) > 0) {
+      expandDebug.reason = 'already-has-rows';
+      return expandDebug;
+    }
+
+    const section = findInventoryHistorySectionRoot(idoc);
+    const searchBtn = findInventoryHistorySearchButton(section);
+    const triggers = findInventoryHistoryCalendarTriggers(section);
+    if (!section || triggers.length === 0 || !searchBtn) {
+      expandDebug.reason = 'no-calendar-controls';
+      expandDebug.triggersTried = triggers.length;
+      return expandDebug;
+    }
+
+    const targetDate = lookbackStartDate(lookbackDays);
+    expandDebug.attempted = true;
+    expandDebug.targetDate = formatIsoDate(targetDate);
+
+    const opened = await openInventoryHistoryCalendar(idoc, section);
+    expandDebug.triggersTried = opened.triggersTried ?? 0;
+    if (!opened.ok) {
+      expandDebug.reason = opened.reason || 'calendar-popover-missing';
+      return expandDebug;
+    }
+    expandDebug.popoverDoc = opened.popoverDoc === idoc ? 'iframe' : 'parent';
+
+    const popover = opened.popover;
+    const navigated = await navigateCalendarToMonth(popover, targetDate);
+    if (!navigated) {
+      expandDebug.reason = 'calendar-nav-failed';
+      return expandDebug;
+    }
+
+    if (!selectCalendarDay(popover, targetDate)) {
+      expandDebug.reason = 'calendar-day-failed';
+      return expandDebug;
+    }
+
+    await sleep(200);
+    clickElement(searchBtn);
+
+    try {
+      await waitForInventoryHistorySettled(idoc, { isAborted });
+    } catch (err) {
+      expandDebug.reason = err instanceof Error ? err.message : String(err);
+      return expandDebug;
+    }
+
+    expandDebug.rowCountAfter = getTableDataRowCount(idoc, inventoryHistoryTableId);
+    expandDebug.expanded = true;
+    expandDebug.reason = 'searched-extended-range';
+    return expandDebug;
+  }
+
+  // Composite per-page signature used by the iframe loader to detect when
+  // every result table (inventory + the two history tables) has finished
+  // loading. Without this we'd return as soon as #table-inventory was
+  // stable and miss container/inventory-history data.
+  function buildPageSignature(idoc) {
+    const parts = [];
+    let allSettled = true;
+    for (const id of allResultTableIds) {
+      const t = idoc.getElementById(id);
+      if (!t) {
+        parts.push(`${id}:missing`);
+        allSettled = false;
+        continue;
+      }
+      if (!isTableSettled(t)) {
+        parts.push(`${id}:loading`);
+        allSettled = false;
+        continue;
+      }
+      if (isTableEmptyState(t)) {
+        parts.push(`${id}:empty`);
+      } else {
+        const sig = inventorySignature(t);
+        parts.push(`${id}:${sig.rowCount}:${sig.bodyTextLen}`);
+      }
+    }
+    const dsig = detailsSignature(idoc);
+    if (dsig && dsig.textLen > 0) {
+      parts.push(`details:${dsig.titleText}:${dsig.textLen}`);
+    }
+    return { key: parts.join('|'), allSettled };
+  }
+
+  // Detect pages where the container does not exist at this site so we can
+  // resolve in ~1s instead of waiting for tables that never render (ICT2 etc.).
+  // `stalledOk` — after min wait, treat tables with zero tbody rows as empty.
+  function assessPageState(idoc, stalledOk) {
+    const details = findDetailsSection(idoc);
+    const inv = idoc.getElementById(inventoryTableId);
+    const invHist = idoc.getElementById(inventoryHistoryTableId);
+    const contHist = idoc.getElementById(containerHistoryTableId);
+
+    function tableGone(table) {
+      if (!table) return true;
+      if (tableShowsNoRecords(table)) return true;
+      if (stalledOk && table.querySelectorAll('tbody tr').length === 0) return true;
+      return false;
+    }
+
+    if (details) return { kind: 'found' };
+
+    if (inv && !tableShowsNoRecords(inv) && getDataRows(inv).length > 0) {
+      return { kind: 'found' };
+    }
+
+    if (!stalledOk) {
+      if (inv && !isTableSettled(inv)) return { kind: 'loading' };
+      if (invHist && !isTableSettled(invHist)) return { kind: 'loading' };
+      if (contHist && !isTableSettled(contHist)) return { kind: 'loading' };
+    }
+
+    const bodyLen = normalizeText(idoc.body?.textContent || '').length;
+    if (bodyLen < notFoundMinBodyLen) return { kind: 'loading' };
+
+    const invGone = tableGone(inv);
+    const histGone = tableGone(invHist) && tableGone(contHist);
+
+    if (invGone && histGone) {
+      return {
+        kind: 'not-found',
+        key: `nf:inv=${inv ? 'empty' : 'miss'}:ih=${invHist ? 'e' : 'm'}:ch=${contHist ? 'e' : 'm'}:bl=${bodyLen}`
+      };
+    }
+
+    return { kind: 'loading' };
+  }
+
+  function findDetailsSection(doc) {
+    const titles = doc.querySelectorAll('span.section-title');
+    for (const title of titles) {
+      const text = normalizeText(title.textContent).toLowerCase();
+      if (!detailsSectionTitles.includes(text)) continue;
+
+      // Climb up looking for the smallest ancestor that also wraps the
+      // list of detail values (ul with at least one li). That ancestor is
+      // the section block; below it sit two columns — the title column and
+      // the content column.
+      let node = title.parentElement;
+      let steps = detailsClimbLimit;
+      while (node && steps-- > 0) {
+        const ul = node.querySelector('ul');
+        if (ul && ul.querySelector('li')) {
+          return { titleText: normalizeText(title.textContent), root: node, list: ul };
+        }
+        node = node.parentElement;
+      }
+      // Title found but no list nearby — still useful as an existence hint.
+      return { titleText: normalizeText(title.textContent), root: title.parentElement, list: null };
+    }
+    return null;
+  }
+
+  function extractDetailItems(list) {
+    if (!list) return [];
+    const items = [];
+    for (const li of list.querySelectorAll(':scope > li')) {
+      const text = normalizeText(li.textContent);
+      if (text) items.push(text);
+    }
+    return items;
+  }
+
+  function detailsSignature(doc) {
+    const found = findDetailsSection(doc);
+    if (!found) return null;
+    const text = normalizeText(found.root?.textContent || '');
+    return { titleText: found.titleText, textLen: text.length, hasList: !!found.list };
+  }
+
+  function loadRenderedDoc(url, debug, options = {}) {
+    const { isAborted, retainForInteraction = false } = options;
+    return new Promise((resolve, reject) => {
+      const iframe = document.createElement('iframe');
+      iframe.className = 'tm-fcsf-loader-frame';
+      iframe.setAttribute('aria-hidden', 'true');
+      iframe.setAttribute('tabindex', '-1');
+      iframe.src = url;
+
+      let done = false;
+      let pollTimer = null;
+      let timeoutTimer = null;
+      let loadFiredAt = null;
+      let lastSignatureKey = null;
+      let stableSince = 0;
+      let lastNotFoundKey = null;
+      let notFoundStableSince = 0;
+
+      function stopTimers() {
+        done = true;
+        if (pollTimer) clearTimeout(pollTimer);
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+      }
+
+      function cleanup(removeFrame = true) {
+        stopTimers();
+        if (removeFrame) iframe.remove();
+      }
+
+      function finish(idoc) {
+        if (retainForInteraction) {
+          stopTimers();
+          resolve({
+            idoc,
+            iframe,
+            release() {
+              iframe.remove();
+            }
+          });
+          return;
+        }
+        cleanup();
+        resolve(idoc);
+      }
+
+      function checkAborted() {
+        if (typeof isAborted === 'function' && isAborted()) {
+          debug.errors.push('aborted by user');
+          cleanup();
+          reject(new Error('Aborted'));
+          return true;
+        }
+        return false;
+      }
+
+      function tick() {
+        if (done) return;
+        if (checkAborted()) return;
+
+        let idoc = null;
+        try {
+          idoc = iframe.contentDocument;
+        } catch (err) {
+          debug.errors.push(`iframe access blocked: ${err instanceof Error ? err.message : String(err)}`);
+          cleanup();
+          reject(err);
+          return;
+        }
+        if (!idoc) {
+          pollTimer = setTimeout(tick, iframePollMs);
+          return;
+        }
+
+        try {
+          idoc.defaultView?.scrollTo(0, idoc.documentElement?.scrollHeight ?? 99999);
+        } catch { /* ignore */ }
+
+        const now = Date.now();
+        const elapsed = loadFiredAt ? now - loadFiredAt : 0;
+        const stalledOk = elapsed >= notFoundMinWaitMs;
+        const pageState = assessPageState(idoc, stalledOk);
+
+        if (pageState.kind === 'not-found' && loadFiredAt && stalledOk) {
+            if (pageState.key === lastNotFoundKey) {
+              if (now - notFoundStableSince >= notFoundStableMs) {
+                debug.iframeReadyMs = elapsed;
+                debug.iframeReadySource = 'not-found-fast';
+                debug.iframeFinalKey = pageState.key;
+                finish(idoc);
+                return;
+              }
+            } else {
+              lastNotFoundKey = pageState.key;
+              notFoundStableSince = now;
+            }
+        } else {
+          lastNotFoundKey = null;
+        }
+
+        const { key, allSettled } = buildPageSignature(idoc);
+
+        if (allSettled) {
+          if (key === lastSignatureKey) {
+            if (now - stableSince >= iframeStabilityMs) {
+              debug.iframeReadyMs = loadFiredAt ? now - loadFiredAt : null;
+              debug.iframeReadySource = 'page-settled';
+              debug.iframeFinalKey = key;
+              finish(idoc);
+              return;
+            }
+          } else {
+            lastSignatureKey = key;
+            stableSince = now;
+          }
+        } else {
+          // Track key changes during loading so the stability timer
+          // resets correctly when tables flip from loading → settled.
+          if (key !== lastSignatureKey) {
+            lastSignatureKey = key;
+            stableSince = now;
+          }
+        }
+
+        // Fallback: even if some tables never settle, accept once a
+        // Container/LPN Details section has stabilized — the container
+        // clearly exists at this site and we shouldn't burn the timeout.
+        const dsig = detailsSignature(idoc);
+        if (dsig && dsig.textLen > 0) {
+          const detKey = `det-only:${dsig.titleText}:${dsig.textLen}`;
+          if (detKey === debug.__lastDetKey) {
+            if (now - (debug.__detStableSince || now) >= iframeStabilityMs * 1.5) {
+              debug.iframeReadyMs = loadFiredAt ? now - loadFiredAt : null;
+              debug.iframeReadySource = 'details-fallback';
+              debug.detailsSeenAtReady = dsig.titleText;
+              finish(idoc);
+              return;
+            }
+          } else {
+            debug.__lastDetKey = detKey;
+            debug.__detStableSince = now;
+          }
+        }
+
+        pollTimer = setTimeout(tick, iframePollMs);
+      }
+
+      iframe.addEventListener('load', () => {
+        loadFiredAt = Date.now();
+        debug.iframeLoadedAt = new Date(loadFiredAt).toISOString();
+        pollTimer = setTimeout(tick, iframePollMs);
+      });
+      iframe.addEventListener('error', () => {
+        debug.errors.push('iframe load error');
+        cleanup();
+        reject(new Error('iframe failed to load'));
+      });
+
+      timeoutTimer = setTimeout(() => {
+        if (done) return;
+        debug.iframeTimedOut = true;
+        let idoc = null;
+        try {
+          idoc = iframe.contentDocument;
+          if (idoc) {
+            const table = idoc.getElementById(inventoryTableId);
+            if (table) {
+              const sig = inventorySignature(table);
+              debug.iframeRowsAtTimeout = sig.rowCount;
+              debug.iframeBodyTextLenAtTimeout = sig.bodyTextLen;
+            } else {
+              debug.iframeRowsAtTimeout = 0;
+            }
+          }
+        } catch { /* ignore */ }
+        if (idoc) finish(idoc);
+        else {
+          cleanup();
+          reject(new Error(`iframe timeout after ${iframeTimeoutMs}ms`));
+        }
+      }, iframeTimeoutMs);
+
+      document.body.appendChild(iframe);
+    });
+  }
+
+  function setLoaderIframeInteractive(loaderIframe, interactive) {
+    if (!loaderIframe) return;
+    loaderIframe.classList.toggle('tm-fcsf-loader-frame--interactive', !!interactive);
+    if (interactive) {
+      loaderIframe.removeAttribute('aria-hidden');
+    } else {
+      loaderIframe.setAttribute('aria-hidden', 'true');
+    }
+  }
+
+  function buildChecks(inventoryRows, inventoryHistoryRows, hasDetails) {
+    return {
+      inventory: Number(inventoryRows) > 0,
+      inventoryHistory: inventoryHistoryRows != null && Number(inventoryHistoryRows) > 0,
+      containerDetails: !!hasDetails
+    };
+  }
+
+  function deriveChecks(result) {
+    const invRows = result.inventoryRows ?? result.total ?? 0;
+    const histRows = result.inventoryHistoryRows;
+    const hasDetails = result.hasContainerDetails ?? !!result.details;
+    return buildChecks(invRows, histRows, hasDetails);
+  }
+
+  async function lookupAt(site, query, options = {}) {
+    const { isAborted } = options;
+    const url = buildResultsUrl(site, query);
+    const debug = {
+      site,
+      query,
+      url,
+      iframeLoadedAt: null,
+      iframeReadyMs: null,
+      iframeIsEmptyState: null,
+      iframeReadySource: null,
+      iframeTimedOut: false,
+      iframeRowsAtTimeout: null,
+      iframeBodyTextLenAtTimeout: null,
+      tableFound: false,
+      inventoryRowCount: 0,
+      inventoryHistoryRowCount: null,
+      containerHistoryRowCount: null,
+      inventoryHistoryExpand: null,
+      detailsTitle: null,
+      detailsItemCount: 0,
+      errors: []
+    };
+
+    let idoc;
+    let releaseLoader = null;
+    let loaderIframe = null;
+    try {
+      const loaded = await loadRenderedDoc(url, debug, { isAborted, retainForInteraction: true });
+      idoc = loaded.idoc;
+      releaseLoader = loaded.release;
+      loaderIframe = loaded.iframe;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!debug.errors.includes(message)) debug.errors.push(message);
+      return {
+        site,
+        query,
+        url,
+        errorMessage: message,
+        inventoryRows: 0,
+        inventoryHistoryRows: null,
+        hasContainerDetails: false,
+        checks: null,
+        debug
+      };
+    }
+
+    try {
+      const detailsSection = findDetailsSection(idoc);
+      const hasContainerDetails = !!detailsSection;
+      if (detailsSection) {
+        debug.detailsTitle = detailsSection.titleText;
+        debug.detailsItemCount = extractDetailItems(detailsSection.list).length;
+      }
+
+      let inventoryHistoryRows = getTableDataRowCount(idoc, inventoryHistoryTableId);
+      const containerHistoryRows = getTableDataRowCount(idoc, containerHistoryTableId);
+
+      if ((inventoryHistoryRows ?? 0) === 0 && idoc.getElementById(inventoryHistoryTableId)) {
+        const readyStart = Date.now();
+        while (Date.now() - readyStart < 2500) {
+          const section = findInventoryHistorySectionRoot(idoc);
+          if (
+            section &&
+            findInventoryHistoryCalendarTriggers(section).length > 0 &&
+            findInventoryHistorySearchButton(section)
+          ) {
+            break;
+          }
+          if (typeof isAborted === 'function' && isAborted()) break;
+          await sleep(200);
+        }
+
+        setLoaderIframeInteractive(loaderIframe, true);
+        try {
+          const expand = await tryExpandInventoryHistoryRange(idoc, debug, { isAborted });
+          debug.inventoryHistoryExpand = expand;
+          if (expand.expanded && expand.rowCountAfter != null) {
+            inventoryHistoryRows = expand.rowCountAfter;
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          debug.inventoryHistoryExpand = { attempted: true, expanded: false, reason: message };
+          if (message === 'Aborted') throw error;
+        } finally {
+          setLoaderIframeInteractive(loaderIframe, false);
+        }
+      }
+
+      debug.inventoryHistoryRowCount = inventoryHistoryRows;
+      debug.containerHistoryRowCount = containerHistoryRows;
+
+      const inventoryTable = idoc.getElementById(inventoryTableId);
+      let inventoryRows = 0;
+      if (inventoryTable) {
+        debug.tableFound = true;
+        inventoryRows = tableShowsNoRecords(inventoryTable)
+          ? 0
+          : getDataRows(inventoryTable).length;
+        debug.inventoryRowCount = inventoryRows;
+      }
+
+      const checks = buildChecks(inventoryRows, inventoryHistoryRows, hasContainerDetails);
+
+      return {
+        site,
+        query,
+        url,
+        errorMessage: '',
+        inventoryRows,
+        inventoryHistoryRows,
+        hasContainerDetails,
+        checks,
+        debug
+      };
+    } finally {
+      if (typeof releaseLoader === 'function') releaseLoader();
+    }
+  }
+
+  async function lookupMem3Inventory(query, options = {}) {
+    const { isAborted } = options;
+    const site = mem3DetailSite;
+    const url = buildResultsUrl(site, query);
+    const debug = { site, query, url, errors: [] };
+
+    try {
+      const idoc = await loadRenderedDoc(url, debug, { isAborted });
+      const rows = extractInventoryLineItems(idoc);
+      return {
+        query,
+        site,
+        url,
+        errorMessage: '',
+        rows,
+        debug
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!debug.errors.includes(message)) debug.errors.push(message);
+      return {
+        query,
+        site,
+        url,
+        errorMessage: message,
+        rows: [],
+        debug
+      };
+    }
+  }
+
+  async function copyText(text) {
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(text, 'text');
+      return;
+    }
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+  }
+
+  function buildExportFilename() {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
+    return `fcresearch-export-${stamp}.csv`;
+  }
+
+  function downloadTextFile(filename, content, mimeType) {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
+  function exportCsvFile(allResults) {
+    const filename = buildExportFilename();
+    // UTF-8 BOM helps Excel open special characters correctly on Windows.
+    const body = '\uFEFF' + buildCsv(allResults);
+    downloadTextFile(filename, body, 'text/csv;charset=utf-8');
+    return filename;
+  }
+
+  // Persisted state (v3): panelOpen, containersText, sitesText, allResults
+  // (each item may include optional mem3), mem3DetailEnabled, savedAt
+  // Stored under `storageKey` in localStorage. We strip internal "__"
+  // scratch fields from debug before saving so they don't leak.
+  function sanitizeResultForStorage(r) {
+    const debug = r.debug ? { ...r.debug } : null;
+    if (debug) {
+      for (const k of Object.keys(debug)) {
+        if (k.startsWith('__')) delete debug[k];
+      }
+    }
+    return { ...r, debug };
+  }
+
+  function loadPersistedState() {
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3)) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  function savePersistedState(state) {
+    try {
+      const payload = {
+        version: 3,
+        panelOpen: !!state.panelOpen,
+        containersText: state.containersText || '',
+        sitesText: state.sitesText || '',
+        allResults: (state.allResults || []).map((item) => ({
+          query: item.query,
+          results: (item.results || []).map(sanitizeResultForStorage),
+          mem3: item.mem3
+            ? {
+                site: item.mem3.site || mem3DetailSite,
+                url: item.mem3.url || '',
+                errorMessage: item.mem3.errorMessage || '',
+                rows: item.mem3.rows || []
+              }
+            : null
+        })),
+        mem3DetailEnabled: !!state.mem3DetailEnabled,
+        savedAt: new Date().toISOString()
+      };
+      localStorage.setItem(storageKey, JSON.stringify(payload));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function clearPersistedState() {
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {
+      // ignore
+    }
+  }
+
+  function checkToSymbol(on) {
+    return on ? '✓' : '—';
+  }
+
+  function collectExportData(allResults) {
+    const siteHeader = [
+      'Query',
+      'Site',
+      'Inventory',
+      'Inventory History',
+      'Container Details',
+      'URL',
+      'Error'
+    ];
+    const siteRows = [];
+    for (const item of allResults) {
+      for (const r of item.results) {
+        const c = deriveChecks(r);
+        const isErr = !!r.errorMessage;
+        siteRows.push([
+          item.query,
+          r.site,
+          isErr ? '' : checkToSymbol(c.inventory),
+          isErr ? '' : checkToSymbol(c.inventoryHistory),
+          isErr ? '' : checkToSymbol(c.containerDetails),
+          r.url,
+          r.errorMessage || ''
+        ]);
+      }
+    }
+
+    const mem3Header = ['Container', 'Site', 'LPN', 'Disposition', 'Consumer', 'URL', 'Error'];
+    const mem3Rows = [];
+    for (const item of allResults) {
+      if (!item.mem3) continue;
+      const m = item.mem3;
+      if (m.errorMessage) {
+        mem3Rows.push([item.query, m.site || mem3DetailSite, '', '', '', m.url, m.errorMessage]);
+        continue;
+      }
+      if (!m.rows || m.rows.length === 0) {
+        mem3Rows.push([item.query, m.site || mem3DetailSite, '', '', '', m.url, 'No inventory']);
+        continue;
+      }
+      for (const row of m.rows) {
+        mem3Rows.push([
+          item.query,
+          m.site || mem3DetailSite,
+          row.lpn,
+          row.disposition,
+          row.consumer,
+          m.url,
+          ''
+        ]);
+      }
+    }
+
+    return { siteHeader, siteRows, mem3Header, mem3Rows };
+  }
+
+  function countExportRows(allResults) {
+    const { siteRows, mem3Rows } = collectExportData(allResults);
+    return siteRows.length + mem3Rows.length;
+  }
+
+  function csvEscapeCell(value) {
+    const s = (value ?? '').toString().replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  }
+
+  function tableToCsv(header, rows) {
+    const lines = [header.map(csvEscapeCell).join(',')];
+    for (const row of rows) {
+      lines.push(row.map(csvEscapeCell).join(','));
+    }
+    return lines.join('\r\n');
+  }
+
+  function buildTsv(allResults) {
+    const { siteHeader, siteRows, mem3Header, mem3Rows } = collectExportData(allResults);
+    const lines = [
+      [siteHeader, ...siteRows]
+        .map((cells) =>
+          cells
+            .map((c) => (c ?? '').toString().replace(/\t/g, ' ').replace(/\r?\n/g, ' '))
+            .join('\t')
+        )
+        .join('\n')
+    ];
+    if (mem3Rows.length > 0) {
+      lines.push('');
+      lines.push(
+        [mem3Header, ...mem3Rows]
+          .map((cells) =>
+            cells
+              .map((c) => (c ?? '').toString().replace(/\t/g, ' ').replace(/\r?\n/g, ' '))
+              .join('\t')
+          )
+          .join('\n')
+      );
+    }
+    return lines.join('\n');
+  }
+
+  function buildCsv(allResults) {
+    const { siteHeader, siteRows, mem3Header, mem3Rows } = collectExportData(allResults);
+    const parts = [tableToCsv(siteHeader, siteRows)];
+    if (mem3Rows.length > 0) {
+      parts.push('');
+      parts.push(tableToCsv(mem3Header, mem3Rows));
+    }
+    return parts.join('\r\n');
+  }
+
+  function buildDebugBundle(allResults, runStatus) {
+    const lines = [];
+    lines.push('== FCResearch Site Finder — Debug Bundle ==');
+    lines.push(`Generated: ${new Date().toISOString()}`);
+    lines.push(`Script: fcresearch-site-finder v${scriptVersion}`);
+    lines.push(`Page: ${window.location.href}`);
+    lines.push(`Region (from host): ${regionFromHost()}`);
+    lines.push(`Loader: iframe ${iframeWidthPx}x${iframeHeightPx} (timeout ${iframeTimeoutMs}ms, stability ${iframeStabilityMs}ms, not-found fast ${notFoundMinWaitMs}+${notFoundStableMs}ms, inv-history lookback ${inventoryHistoryLookbackDays}d)`);
+    if (runStatus?.active) {
+      const note = runStatus.aborted ? ' (STOP requested)' : '';
+      lines.push(`Run state: IN PROGRESS${note} — ${runStatus.doneCount}/${runStatus.total} steps`);
+    } else {
+      lines.push('Run state: idle');
+    }
+    lines.push(`Queries: ${allResults.length}`);
+    lines.push('');
+
+    for (const item of allResults) {
+      lines.push(`=== Query: ${item.query} ===`);
+      for (const r of item.results) {
+        const c = deriveChecks(r);
+        lines.push(`--- ${r.site} ---`);
+        lines.push(`URL: ${r.url}`);
+        lines.push(`Inventory: ${c.inventory ? 'yes' : 'no'} (${r.inventoryRows ?? r.total ?? 0} rows)`);
+        lines.push(`Inventory history: ${c.inventoryHistory ? 'yes' : 'no'} (${r.inventoryHistoryRows ?? 'n/a'} rows)`);
+        const ex = r.debug?.inventoryHistoryExpand;
+        if (ex?.attempted) {
+          lines.push(
+            `Inventory history expand: ${ex.expanded ? 'yes' : 'no'} (${ex.reason}${ex.targetDate ? ` · from ${ex.targetDate}` : ''}${ex.triggersTried ? ` · ${ex.triggersTried} trigger(s)` : ''}${ex.popoverDoc ? ` · popover ${ex.popoverDoc}` : ''}${ex.rowCountBefore != null ? ` · before ${ex.rowCountBefore}` : ''}${ex.rowCountAfter != null ? ` · after ${ex.rowCountAfter}` : ''})`
+          );
+        }
+        lines.push(`Container details: ${c.containerDetails ? 'yes' : 'no'}`);
+        const d = r.debug || {};
+        lines.push(`Iframe ready ms: ${d.iframeReadyMs ?? '(n/a)'}`);
+        lines.push(`Iframe ready source: ${d.iframeReadySource ?? '(n/a)'}`);
+        lines.push(`Iframe timed out: ${d.iframeTimedOut}`);
+        if (r.errorMessage) lines.push(`Error: ${r.errorMessage}`);
+        if (Array.isArray(d.errors) && d.errors.length) lines.push(`Debug errors: ${d.errors.join('; ')}`);
+        lines.push('');
+      }
+
+      if (item.mem3) {
+        const m = item.mem3;
+        lines.push(`--- ${mem3DetailSite} inventory detail ---`);
+        lines.push(`URL: ${m.url}`);
+        if (m.errorMessage) {
+          lines.push(`Error: ${m.errorMessage}`);
+        } else if (!m.rows || m.rows.length === 0) {
+          lines.push('No inventory rows');
+        } else {
+          for (const row of m.rows) {
+            lines.push(`  ${row.lpn} | ${row.disposition} | ${row.consumer}`);
+          }
+        }
+        lines.push('');
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  function install() {
+    if (window[installationKey]) return;
+    window[installationKey] = true;
+
+    document.documentElement.appendChild(createStyles());
+
+    const panel = document.createElement('div');
+    panel.className = 'tm-fcsf-panel';
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'tm-fcsf-toggle';
+    toggle.title = `Toggle FCResearch Site Finder v${scriptVersion}`;
+    toggle.innerHTML = `Site Finder<span class="tm-fcsf-toggle-sub">${regionFromHost()} · v${scriptVersion}</span>`;
+    panel.appendChild(toggle);
+
+    const header = document.createElement('div');
+    header.className = 'tm-fcsf-header';
+    const title = document.createElement('h2');
+    title.className = 'tm-fcsf-title';
+    title.textContent = 'FCResearch Site Finder';
+    const sub = document.createElement('span');
+    sub.className = 'tm-fcsf-sub';
+    sub.textContent = `region ${regionFromHost()} · v${scriptVersion}`;
+    title.appendChild(sub);
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'tm-fcsf-close';
+    closeBtn.textContent = '×';
+    closeBtn.title = 'Close panel';
+    header.appendChild(title);
+    header.appendChild(closeBtn);
+
+    const body = document.createElement('div');
+    body.className = 'tm-fcsf-body';
+
+    const containersLabel = document.createElement('div');
+    containersLabel.className = 'tm-fcsf-label';
+    containersLabel.innerHTML = `Containers / LPNs <span class="tm-fcsf-hint">one per line · Ctrl+Enter to run</span>`;
+    const containersInput = document.createElement('textarea');
+    containersInput.className = 'tm-fcsf-textarea tm-fcsf-containers';
+    containersInput.placeholder = 'Paste container IDs or LPNs (one per line, or comma/space separated)';
+
+    const sitesLabel = document.createElement('div');
+    sitesLabel.className = 'tm-fcsf-label';
+    sitesLabel.innerHTML = `Sites to scan <span class="tm-fcsf-hint">FC codes, comma/space/line separated</span>`;
+    const sitesInput = document.createElement('textarea');
+    sitesInput.className = 'tm-fcsf-textarea tm-fcsf-sites';
+    sitesInput.placeholder = 'e.g. MEM3, BFL2, ONT8';
+    sitesInput.value = defaultSitesText;
+
+    const mem3ToggleRow = document.createElement('label');
+    mem3ToggleRow.className = 'tm-fcsf-toggle-row';
+    const mem3Toggle = document.createElement('input');
+    mem3Toggle.type = 'checkbox';
+    mem3Toggle.title = `Also fetch ${mem3DetailSite} inventory rows (LPN, Disposition, Consumer)`;
+    const mem3ToggleText = document.createElement('span');
+    mem3ToggleText.textContent = `Also fetch ${mem3DetailSite} inventory (LPN · Disposition · Consumer)`;
+    mem3ToggleRow.appendChild(mem3Toggle);
+    mem3ToggleRow.appendChild(mem3ToggleText);
+
+    const actions = document.createElement('div');
+    actions.className = 'tm-fcsf-actions';
+
+    const runBtn = document.createElement('button');
+    runBtn.type = 'button';
+    runBtn.className = 'tm-fcsf-button';
+    runBtn.textContent = 'Scan';
+
+    const stopBtn = document.createElement('button');
+    stopBtn.type = 'button';
+    stopBtn.className = 'tm-fcsf-button tm-fcsf-stop';
+    stopBtn.textContent = 'Stop';
+    stopBtn.disabled = true;
+
+    const copyTsvBtn = document.createElement('button');
+    copyTsvBtn.type = 'button';
+    copyTsvBtn.className = 'tm-fcsf-button tm-fcsf-secondary';
+    copyTsvBtn.textContent = 'Copy TSV';
+
+    const exportCsvBtn = document.createElement('button');
+    exportCsvBtn.type = 'button';
+    exportCsvBtn.className = 'tm-fcsf-button tm-fcsf-secondary';
+    exportCsvBtn.textContent = 'Export CSV';
+    exportCsvBtn.title = 'Download results as a .csv file';
+
+    const copyDebugBtn = document.createElement('button');
+    copyDebugBtn.type = 'button';
+    copyDebugBtn.className = 'tm-fcsf-button tm-fcsf-secondary';
+    copyDebugBtn.textContent = 'Copy Debug';
+
+    const clearBtn = document.createElement('button');
+    clearBtn.type = 'button';
+    clearBtn.className = 'tm-fcsf-button tm-fcsf-secondary';
+    clearBtn.textContent = 'Clear';
+
+    actions.appendChild(runBtn);
+    actions.appendChild(stopBtn);
+    actions.appendChild(copyTsvBtn);
+    actions.appendChild(exportCsvBtn);
+    actions.appendChild(copyDebugBtn);
+    actions.appendChild(clearBtn);
+
+    const status = document.createElement('div');
+    status.className = 'tm-fcsf-status';
+
+    const progress = document.createElement('div');
+    progress.className = 'tm-fcsf-progress';
+    const progressFill = document.createElement('div');
+    progressFill.className = 'tm-fcsf-progress-fill';
+    progress.appendChild(progressFill);
+
+    const results = document.createElement('div');
+    results.className = 'tm-fcsf-results';
+
+    body.appendChild(containersLabel);
+    body.appendChild(containersInput);
+    body.appendChild(sitesLabel);
+    body.appendChild(sitesInput);
+    body.appendChild(mem3ToggleRow);
+    body.appendChild(actions);
+    body.appendChild(status);
+    body.appendChild(progress);
+    body.appendChild(results);
+
+    panel.appendChild(header);
+    panel.appendChild(body);
+    document.body.appendChild(panel);
+
+    function openPanel() {
+      panel.classList.add('tm-fcsf-open');
+      containersInput.focus();
+      persist();
+    }
+    function closePanel() {
+      panel.classList.remove('tm-fcsf-open');
+      persist();
+    }
+    function togglePanel() {
+      if (panel.classList.contains('tm-fcsf-open')) closePanel();
+      else openPanel();
+    }
+
+    toggle.addEventListener('click', togglePanel);
+    closeBtn.addEventListener('click', closePanel);
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && panel.classList.contains('tm-fcsf-open')) closePanel();
+    });
+
+    let allResults = []; // [{ query, results: [perSite...], mem3?: {...} }]
+    let runState = null;
+    let persistTimer = null;
+
+    function persist() {
+      savePersistedState({
+        panelOpen: panel.classList.contains('tm-fcsf-open'),
+        containersText: containersInput.value,
+        sitesText: sitesInput.value,
+        allResults,
+        mem3DetailEnabled: mem3Toggle.checked
+      });
+    }
+
+    function persistDebounced() {
+      if (persistTimer) clearTimeout(persistTimer);
+      persistTimer = setTimeout(persist, 400);
+    }
+
+    function setProgress(done, total) {
+      const pct = total > 0 ? (done / total) * 100 : 0;
+      progressFill.style.width = `${pct.toFixed(1)}%`;
+    }
+
+    function renderCheckCell(on, isError) {
+      const td = document.createElement('td');
+      if (isError) {
+        td.className = 'tm-fcsf-check-err';
+        td.textContent = 'err';
+        td.title = 'Lookup failed';
+      } else if (on) {
+        td.className = 'tm-fcsf-check-yes';
+        td.textContent = '✓';
+        td.title = 'Yes';
+      } else {
+        td.className = 'tm-fcsf-check-no';
+        td.textContent = '—';
+        td.title = 'No';
+      }
+      return td;
+    }
+
+    function renderQueryTable(item) {
+      const wrap = document.createElement('div');
+      wrap.className = 'tm-fcsf-table-wrap';
+
+      const table = document.createElement('table');
+      table.className = 'tm-fcsf-table';
+      table.innerHTML =
+        '<thead><tr>' +
+        '<th class="tm-fcsf-th-site">Site</th>' +
+        '<th>Inventory</th>' +
+        '<th>Inv History</th>' +
+        '<th>Details</th>' +
+        '<th></th>' +
+        '</tr></thead>';
+      const tbody = document.createElement('tbody');
+
+      const sorted = [...item.results].sort((a, b) => a.site.localeCompare(b.site));
+      for (const r of sorted) {
+        const tr = document.createElement('tr');
+        const isError = !!r.errorMessage;
+        const c = isError ? null : deriveChecks(r);
+
+        const siteTd = document.createElement('td');
+        siteTd.className = 'tm-fcsf-td-site';
+        siteTd.textContent = r.site;
+
+        tr.appendChild(siteTd);
+        tr.appendChild(renderCheckCell(c?.inventory, isError));
+        tr.appendChild(renderCheckCell(c?.inventoryHistory, isError));
+        tr.appendChild(renderCheckCell(c?.containerDetails, isError));
+
+        const linkTd = document.createElement('td');
+        const link = document.createElement('a');
+        link.href = r.url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = 'open';
+        linkTd.appendChild(link);
+        tr.appendChild(linkTd);
+
+        tbody.appendChild(tr);
+      }
+
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+      return wrap;
+    }
+
+    function renderMem3Table(mem3) {
+      const block = document.createElement('div');
+      block.className = 'tm-fcsf-query-block';
+
+      const sub = document.createElement('div');
+      sub.className = 'tm-fcsf-subsection-label';
+      sub.textContent = `${mem3DetailSite} inventory`;
+      block.appendChild(sub);
+
+      const wrap = document.createElement('div');
+      wrap.className = 'tm-fcsf-table-wrap';
+
+      const table = document.createElement('table');
+      table.className = 'tm-fcsf-table';
+      table.innerHTML =
+        '<thead><tr>' +
+        '<th class="tm-fcsf-th-site">LPN</th>' +
+        '<th>Disposition</th>' +
+        '<th>Consumer</th>' +
+        '<th></th>' +
+        '</tr></thead>';
+      const tbody = document.createElement('tbody');
+
+      if (mem3.errorMessage) {
+        const tr = document.createElement('tr');
+        tr.className = 'tm-fcsf-muted-row';
+        const td = document.createElement('td');
+        td.colSpan = 4;
+        td.className = 'tm-fcsf-td-left';
+        td.textContent = mem3.errorMessage;
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+      } else if (!mem3.rows || mem3.rows.length === 0) {
+        const tr = document.createElement('tr');
+        tr.className = 'tm-fcsf-muted-row';
+        const td = document.createElement('td');
+        td.colSpan = 4;
+        td.className = 'tm-fcsf-td-left';
+        td.textContent = `No inventory at ${mem3.site || mem3DetailSite}`;
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+      } else {
+        for (const row of mem3.rows) {
+          const tr = document.createElement('tr');
+
+          const lpnTd = document.createElement('td');
+          lpnTd.className = 'tm-fcsf-td-left';
+          lpnTd.textContent = row.lpn;
+
+          const dispTd = document.createElement('td');
+          dispTd.className = 'tm-fcsf-td-left';
+          dispTd.textContent = row.disposition;
+
+          const consTd = document.createElement('td');
+          consTd.className = 'tm-fcsf-td-left';
+          consTd.textContent = row.consumer;
+
+          const linkTd = document.createElement('td');
+          if (mem3.url) {
+            const link = document.createElement('a');
+            link.href = mem3.url;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            link.textContent = 'open';
+            linkTd.appendChild(link);
+          }
+
+          tr.appendChild(lpnTd);
+          tr.appendChild(dispTd);
+          tr.appendChild(consTd);
+          tr.appendChild(linkTd);
+          tbody.appendChild(tr);
+        }
+      }
+
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+      block.appendChild(wrap);
+      return block;
+    }
+
+    function renderContainerBlock(item) {
+      const block = document.createElement('div');
+      block.className = 'tm-fcsf-container-block';
+
+      const head = document.createElement('div');
+      head.className = 'tm-fcsf-container-head';
+      const headLabel = document.createElement('span');
+      headLabel.className = 'tm-fcsf-container-head-label';
+      headLabel.textContent = 'Container';
+      const headId = document.createElement('span');
+      headId.className = 'tm-fcsf-container-head-id';
+      headId.textContent = item.query;
+      head.appendChild(headLabel);
+      head.appendChild(headId);
+      block.appendChild(head);
+
+      const body = document.createElement('div');
+      body.className = 'tm-fcsf-container-body';
+
+      const siteSection = document.createElement('div');
+      siteSection.className = 'tm-fcsf-subsection';
+      const siteSub = document.createElement('div');
+      siteSub.className = 'tm-fcsf-subsection-label';
+      siteSub.textContent = 'Site scan';
+      siteSection.appendChild(siteSub);
+      siteSection.appendChild(renderQueryTable(item));
+      body.appendChild(siteSection);
+
+      if (item.mem3) {
+        const mem3Section = document.createElement('div');
+        mem3Section.className = 'tm-fcsf-subsection';
+        mem3Section.appendChild(renderMem3Table(item.mem3));
+        body.appendChild(mem3Section);
+      }
+
+      block.appendChild(body);
+      return block;
+    }
+
+    function renderResults() {
+      results.replaceChildren();
+
+      if (allResults.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'tm-fcsf-empty-state';
+        empty.textContent = 'No results yet. Paste containers/LPNs above and click Scan.';
+        results.appendChild(empty);
+        return;
+      }
+
+      for (const item of allResults) {
+        results.appendChild(renderContainerBlock(item));
+      }
+    }
+
+    async function runScan() {
+      const queries = splitTokens(containersInput.value);
+      const sites = splitTokens(sitesInput.value);
+      const mem3Enabled = mem3Toggle.checked;
+
+      if (queries.length === 0) {
+        status.textContent = 'No containers/LPNs entered.';
+        return;
+      }
+      if (sites.length === 0) {
+        status.textContent = 'No sites entered.';
+        return;
+      }
+
+      allResults = [];
+      renderResults();
+      persist();
+
+      runBtn.disabled = true;
+      stopBtn.disabled = false;
+      const startedAt = Date.now();
+      const siteSteps = queries.length * sites.length;
+      const mem3Steps = mem3Enabled ? queries.length : 0;
+      const totalSteps = siteSteps + mem3Steps;
+      runState = { active: true, total: totalSteps, doneCount: 0, aborted: false };
+      setProgress(0, totalSteps);
+      const isAborted = () => runState?.aborted === true;
+
+      try {
+        for (let qi = 0; qi < queries.length; qi++) {
+          if (isAborted()) break;
+          const query = queries[qi];
+          const item = { query, results: [], mem3: null };
+          allResults.push(item);
+
+          for (let si = 0; si < sites.length; si++) {
+            if (isAborted()) break;
+            const site = sites[si];
+            status.textContent = `[${qi + 1}/${queries.length}] ${query} @ ${site} · step ${runState.doneCount + 1}/${totalSteps}`;
+
+            let result;
+            try {
+              result = await lookupAt(site, query, { isAborted });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              result = {
+                site,
+                query,
+                url: buildResultsUrl(site, query),
+                errorMessage: message,
+                inventoryRows: 0,
+                inventoryHistoryRows: null,
+                hasContainerDetails: false,
+                checks: null,
+                debug: { errors: [message] }
+              };
+            }
+            item.results.push(result);
+            runState.doneCount += 1;
+            setProgress(runState.doneCount, totalSteps);
+            renderResults();
+            persist();
+          }
+
+          if (mem3Enabled && !isAborted()) {
+            status.textContent = `[${qi + 1}/${queries.length}] ${query} @ ${mem3DetailSite} inventory · step ${runState.doneCount + 1}/${totalSteps}`;
+            try {
+              item.mem3 = await lookupMem3Inventory(query, { isAborted });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              item.mem3 = {
+                query,
+                site: mem3DetailSite,
+                url: buildResultsUrl(mem3DetailSite, query),
+                errorMessage: message,
+                rows: [],
+                debug: { errors: [message] }
+              };
+            }
+            runState.doneCount += 1;
+            setProgress(runState.doneCount, totalSteps);
+            renderResults();
+            persist();
+          }
+        }
+
+        const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+        const aborted = isAborted();
+        const mem3Note = mem3Enabled ? ` (+ ${mem3DetailSite} detail per container)` : '';
+        status.textContent = aborted
+          ? `Stopped after ${runState.doneCount}/${totalSteps} steps in ${elapsed}s.`
+          : `Finished ${queries.length} container${queries.length === 1 ? '' : 's'} in ${elapsed}s${mem3Note}.`;
+      } finally {
+        runState.active = false;
+        runBtn.disabled = false;
+        stopBtn.disabled = true;
+        persist();
+      }
+    }
+
+    runBtn.addEventListener('click', runScan);
+
+    stopBtn.addEventListener('click', () => {
+      if (!runState?.active) return;
+      runState.aborted = true;
+      status.textContent = 'Stopping…';
+    });
+
+    copyTsvBtn.addEventListener('click', async () => {
+      if (allResults.length === 0) {
+        status.textContent = 'Nothing to copy yet.';
+        return;
+      }
+      copyTsvBtn.disabled = true;
+      try {
+        await copyText(buildTsv(allResults));
+        const rowCount = countExportRows(allResults);
+        status.textContent = `Copied TSV (${rowCount} row${rowCount === 1 ? '' : 's'}).`;
+      } catch (error) {
+        status.textContent = `Copy failed: ${error instanceof Error ? error.message : String(error)}`;
+      } finally {
+        copyTsvBtn.disabled = false;
+      }
+    });
+
+    exportCsvBtn.addEventListener('click', () => {
+      if (allResults.length === 0) {
+        status.textContent = 'Nothing to export yet.';
+        return;
+      }
+      exportCsvBtn.disabled = true;
+      try {
+        const filename = exportCsvFile(allResults);
+        const rowCount = countExportRows(allResults);
+        status.textContent = `Exported ${filename} (${rowCount} row${rowCount === 1 ? '' : 's'}).`;
+      } catch (error) {
+        status.textContent = `Export failed: ${error instanceof Error ? error.message : String(error)}`;
+      } finally {
+        exportCsvBtn.disabled = false;
+      }
+    });
+
+    copyDebugBtn.addEventListener('click', async () => {
+      if (allResults.length === 0) {
+        status.textContent = 'Run a scan first.';
+        return;
+      }
+      copyDebugBtn.disabled = true;
+      try {
+        await copyText(buildDebugBundle(allResults, runState));
+        status.textContent = 'Copied debug bundle.';
+      } catch (error) {
+        status.textContent = `Copy failed: ${error instanceof Error ? error.message : String(error)}`;
+      } finally {
+        copyDebugBtn.disabled = false;
+      }
+    });
+
+    clearBtn.addEventListener('click', () => {
+      containersInput.value = '';
+      allResults = [];
+      renderResults();
+      setProgress(0, 1);
+      status.textContent = '';
+      containersInput.focus();
+      clearPersistedState();
+      persist();
+    });
+
+    containersInput.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        runScan();
+      }
+    });
+
+    containersInput.addEventListener('input', persistDebounced);
+    sitesInput.addEventListener('input', persistDebounced);
+    mem3Toggle.addEventListener('change', persist);
+
+    // Restore from localStorage if present.
+    const saved = loadPersistedState();
+    if (saved) {
+      if (typeof saved.containersText === 'string') containersInput.value = saved.containersText;
+      if (typeof saved.sitesText === 'string' && saved.sitesText.trim()) {
+        sitesInput.value = saved.sitesText;
+      }
+      if (Array.isArray(saved.allResults)) {
+        allResults = saved.allResults;
+        // Migrate older saves that kept MEM3 results in a separate array.
+        if (Array.isArray(saved.mem3Results)) {
+          for (const m of saved.mem3Results) {
+            const item = allResults.find((i) => i.query === m.query);
+            if (item && !item.mem3) item.mem3 = m;
+          }
+        }
+      }
+      if (typeof saved.mem3DetailEnabled === 'boolean') mem3Toggle.checked = saved.mem3DetailEnabled;
+      if (saved.panelOpen) panel.classList.add('tm-fcsf-open');
+      if (saved.savedAt && allResults.length > 0) {
+        const mem3Count = allResults.filter((i) => i.mem3).length;
+        status.textContent = `Restored ${allResults.length} container${allResults.length === 1 ? '' : 's'}${mem3Count ? ` (${mem3Count} with ${mem3DetailSite} detail)` : ''} from ${new Date(saved.savedAt).toLocaleString()}.`;
+      }
+    }
+
+    renderResults();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', install, { once: true });
+  } else {
+    install();
+  }
+})();

@@ -1,0 +1,250 @@
+// ==UserScript==
+// @name         QuickSight D/F Shift Logins
+// @namespace    ultimate-tampermonkey
+// @version      0.1.0
+// @description  Copy QuickSight logins whose shift starts with D or F
+// @author       Cursor
+// @match        https://us-east-1.quicksight.aws.amazon.com/sn/account/quetzal/dashboards/ed0061b1-143a-4b06-adf5-8bbe28d30023/*
+// @grant        GM_setClipboard
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const installationKey = '__qsDFShiftLoginsInstalled';
+  const dashboardPath = '/sn/account/quetzal/dashboards/ed0061b1-143a-4b06-adf5-8bbe28d30023/';
+  const loginVisualTitle = 'Pending APEX Engagements (Click Me To Filter)';
+
+  function onDocumentReady(callback) {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', callback, { once: true });
+      return;
+    }
+
+    callback();
+  }
+
+  function normalizeText(value) {
+    return (value ?? '').replace(/\s+/g, ' ').trim();
+  }
+
+  function getVisualTitleLabel(titleText) {
+    return (
+      Array.from(
+        document.querySelectorAll('[data-automation-id="analysis_visual_title_label"]')
+      ).find((element) => {
+        const contextText = normalizeText(element.dataset.automationContext);
+        const renderedText = normalizeText(element.textContent);
+        const normalizedTitle = normalizeText(titleText);
+        return contextText === normalizedTitle || renderedText === normalizedTitle;
+      }) ?? null
+    );
+  }
+
+  function getVisualBlock(titleText) {
+    return getVisualTitleLabel(titleText)?.closest('[id^="block-"]') ?? null;
+  }
+
+  function getTitleContainer(titleText) {
+    return getVisualTitleLabel(titleText)?.closest('.visual-title-container') ?? null;
+  }
+
+  function getPrintableCellText(element) {
+    return (
+      element?.querySelector('.printable-cell')?.textContent?.trim() ??
+      element?.getAttribute('title')?.trim() ??
+      ''
+    );
+  }
+
+  function getRowCellText(loginBlock, rowPath, colPath) {
+    return getPrintableCellText(
+      loginBlock.querySelector(
+        `[data-automation-id^="sn-table-cell-"][data-col-path="${colPath}"][data-row-path="${rowPath}"]`
+      )
+    );
+  }
+
+  function getDFShiftLogins() {
+    const loginBlock = getVisualBlock(loginVisualTitle);
+    if (!loginBlock) {
+      return [];
+    }
+
+    const loginCells = Array.from(
+      loginBlock.querySelectorAll(
+        '[data-automation-id^="sn-table-cell-"][data-col-path="1"][data-row-path]'
+      )
+    );
+    const logins = [];
+    const seen = new Set();
+
+    for (const cell of loginCells) {
+      const login = getPrintableCellText(cell);
+      if (!/^[a-z][a-z0-9_-]{2,}$/i.test(login)) {
+        continue;
+      }
+
+      const rowPath = cell.dataset.rowPath ?? '';
+      const shiftCode = getRowCellText(loginBlock, rowPath, '2');
+      if (!/^[df]/i.test(shiftCode) || seen.has(login)) {
+        continue;
+      }
+
+      seen.add(login);
+      logins.push(login);
+    }
+
+    return logins;
+  }
+
+  async function copyText(text) {
+    if (typeof GM_setClipboard === 'function') {
+      GM_setClipboard(text, 'text');
+      return;
+    }
+
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+  }
+
+  function createStyles() {
+    const style = document.createElement('style');
+    style.textContent = `
+      .qs-d-shift-title-host {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .qs-d-shift-title-host > [data-automation-id="analysis_visual_title_label"] {
+        flex: 1;
+        min-width: 0;
+      }
+      .qs-d-shift-button {
+        border: none;
+        min-height: 30px;
+        padding: 0 10px;
+        border-radius: 10px;
+        background: #0f172a;
+        color: #f8fafc;
+        font: 600 12px/1.2 Inter, "Segoe UI", Arial, sans-serif;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .qs-d-shift-button[disabled] {
+        opacity: 0.65;
+        cursor: wait;
+      }
+      .qs-d-shift-status {
+        margin-top: 6px;
+        color: #64748b;
+        font: 500 11px/1.35 Inter, "Segoe UI", Arial, sans-serif;
+      }
+    `;
+    return style;
+  }
+
+  function install() {
+    if (!window.location.href.includes(dashboardPath)) {
+      return;
+    }
+
+    const appWindow = window;
+    if (appWindow[installationKey]) {
+      return;
+    }
+    appWindow[installationKey] = true;
+
+    document.documentElement.appendChild(createStyles());
+
+    let button = null;
+    let status = null;
+    let queued = false;
+
+    function renderStatus(message) {
+      if (status) {
+        status.textContent = message;
+      }
+    }
+
+    function mount() {
+      const titleContainer = getTitleContainer(loginVisualTitle);
+      if (!titleContainer) {
+        return;
+      }
+
+      if (!button || !button.isConnected) {
+        titleContainer.classList.add('qs-d-shift-title-host');
+
+        button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'qs-d-shift-button';
+        button.textContent = 'Copy D/F Logins';
+        button.addEventListener('click', async () => {
+          button.disabled = true;
+          try {
+            const logins = getDFShiftLogins();
+            if (logins.length === 0) {
+              renderStatus('No visible D/F-shift logins found.');
+              return;
+            }
+
+            await copyText(logins.join('\n'));
+            renderStatus(`Copied ${logins.length} D/F-shift login${logins.length === 1 ? '' : 's'}.`);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            renderStatus(`Copy failed: ${message}`);
+          } finally {
+            button.disabled = false;
+          }
+        });
+
+        status = document.createElement('div');
+        status.className = 'qs-d-shift-status';
+        status.textContent = 'Ready';
+
+        titleContainer.appendChild(button);
+        titleContainer.parentElement?.appendChild(status);
+      }
+    }
+
+    function scheduleMount() {
+      if (queued) {
+        return;
+      }
+
+      queued = true;
+      window.setTimeout(() => {
+        queued = false;
+        mount();
+      }, 150);
+    }
+
+    scheduleMount();
+
+    const observer = new MutationObserver(() => {
+      scheduleMount();
+    });
+
+    if (document.body) {
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true
+      });
+    }
+  }
+
+  onDocumentReady(install);
+})();

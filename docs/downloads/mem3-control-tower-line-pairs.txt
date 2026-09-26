@@ -1,0 +1,321 @@
+// ==UserScript==
+// @name         MEM3 Control Tower - Line Pairs
+// @namespace    https://mem3.amazon.local/
+// @version      1.4.1
+// @description  Inside each Department, Groups whose names are at least 95% similar sit side by side; the rest stack on their own row. All group cards share equal height and width. Layout is applied only when it changes so the page does not jump while scrolling.
+// @author       mameenk
+// @match        https://beta.control-tower.meta.amazon.dev/MEM3/assignments*
+// @match        https://control-tower.meta.amazon.dev/MEM3/assignments*
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const SIM_THRESHOLD = 0.95;
+
+    function groupNameFromHeading(text) {
+        return (text || '')
+            .replace(/\d+(\.\d+)?\s*UPH\s*avg.*/i, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function groupName(card) {
+        const h = card.querySelector && card.querySelector('h5');
+        if (!h) return '';
+        const clone = h.cloneNode(true);
+        const junk = clone.querySelectorAll('.mem3-line-avg-badge, .mem3-uph-badge');
+        for (let i = 0; i < junk.length; i++) junk[i].remove();
+        return groupNameFromHeading(clone.textContent);
+    }
+
+    function normalizeGroupName(text) {
+        return groupNameFromHeading(text)
+            .replace(/priority\s+\d+/gi, '')
+            .replace(/\(\s*[oOeE]\s*\)/g, '')
+            .replace(/[^a-z0-9]+/gi, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+    }
+
+    function tokens(text) {
+        const n = normalizeGroupName(text);
+        if (!n) return [];
+        return n.split(' ').filter(Boolean);
+    }
+
+    function unique(list) {
+        const seen = Object.create(null);
+        const out = [];
+        for (let i = 0; i < list.length; i++) {
+            if (seen[list[i]]) continue;
+            seen[list[i]] = true;
+            out.push(list[i]);
+        }
+        return out;
+    }
+
+    function nameSimilarity(a, b) {
+        const ta = unique(tokens(a));
+        const tb = unique(tokens(b));
+        if (!ta.length && !tb.length) return 1;
+        if (!ta.length || !tb.length) return 0;
+        const setB = Object.create(null);
+        for (let i = 0; i < tb.length; i++) setB[tb[i]] = true;
+        let inter = 0;
+        for (let j = 0; j < ta.length; j++) {
+            if (setB[ta[j]]) inter++;
+        }
+        return (2 * inter) / (ta.length + tb.length);
+    }
+
+    function clusterBySimilarity(items) {
+        const n = items.length;
+        const parent = [];
+        for (let i = 0; i < n; i++) parent[i] = i;
+        function find(x) {
+            while (parent[x] !== x) {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            return x;
+        }
+        function union(a, b) {
+            const pa = find(a);
+            const pb = find(b);
+            if (pa !== pb) parent[pb] = pa;
+        }
+        for (let i = 0; i < n; i++) {
+            for (let j = i + 1; j < n; j++) {
+                if (nameSimilarity(items[i].name, items[j].name) >= SIM_THRESHOLD) {
+                    union(i, j);
+                }
+            }
+        }
+        const buckets = Object.create(null);
+        const order = [];
+        for (let i = 0; i < n; i++) {
+            const root = find(i);
+            if (!buckets[root]) {
+                buckets[root] = [];
+                order.push(root);
+            }
+            buckets[root].push(items[i]);
+        }
+        return order.map(function (root) { return buckets[root]; });
+    }
+
+    function isGroupCard(el) {
+        return !!(el && el.querySelector && el.querySelector('h5') && el.querySelector('table'));
+    }
+
+    function findCardRoot(h) {
+        let el = h;
+        for (let i = 0; i < 12 && el; i++) {
+            const parent = el.parentElement;
+            if (!parent) break;
+            let cardCount = 0;
+            const kids = parent.children;
+            for (let k = 0; k < kids.length; k++) {
+                if (isGroupCard(kids[k])) cardCount++;
+            }
+            if (cardCount >= 2 && isGroupCard(el)) {
+                return { card: el, grid: parent };
+            }
+            el = parent;
+        }
+        return null;
+    }
+
+    function collectDepartments() {
+        const byGrid = [];
+        const seen = [];
+        const h5s = document.querySelectorAll('h5');
+        for (let i = 0; i < h5s.length; i++) {
+            const found = findCardRoot(h5s[i]);
+            if (!found) continue;
+            if (seen.indexOf(found.grid) !== -1) {
+                for (let g = 0; g < byGrid.length; g++) {
+                    if (byGrid[g].grid !== found.grid) continue;
+                    if (byGrid[g].cards.indexOf(found.card) === -1) byGrid[g].cards.push(found.card);
+                    break;
+                }
+                continue;
+            }
+            seen.push(found.grid);
+            byGrid.push({
+                grid: found.grid,
+                cards: [found.card]
+            });
+        }
+        return byGrid;
+    }
+
+    function setImp(el, prop, value) {
+        if (el.style.getPropertyValue(prop) === value) return false;
+        el.style.setProperty(prop, value, 'important');
+        return true;
+    }
+
+    function groupCardsInGrid(grid) {
+        const cards = [];
+        const kids = grid.children;
+        for (let i = 0; i < kids.length; i++) {
+            if (isGroupCard(kids[i])) cards.push(kids[i]);
+        }
+        return cards;
+    }
+
+    function sameCardOrder(grid, ordered) {
+        const current = groupCardsInGrid(grid);
+        if (current.length !== ordered.length) return false;
+        for (let i = 0; i < ordered.length; i++) {
+            if (current[i] !== ordered[i]) return false;
+        }
+        return true;
+    }
+
+    function captureScroll(fromEl) {
+        const out = [{ win: true, top: window.scrollY, left: window.scrollX }];
+        let n = fromEl;
+        while (n && n !== document.documentElement) {
+            if (n.scrollHeight > n.clientHeight + 4) {
+                out.push({ el: n, top: n.scrollTop, left: n.scrollLeft });
+            }
+            n = n.parentElement;
+        }
+        return out;
+    }
+
+    function restoreScroll(saved) {
+        for (let i = 0; i < saved.length; i++) {
+            const s = saved[i];
+            if (s.win) window.scrollTo(s.left, s.top);
+            else {
+                s.el.scrollTop = s.top;
+                s.el.scrollLeft = s.left;
+            }
+        }
+    }
+
+    function styleCardCell(card) {
+        setImp(card, 'width', '100%');
+        setImp(card, 'max-width', 'none');
+        setImp(card, 'min-width', '0');
+        setImp(card, 'box-sizing', 'border-box');
+        setImp(card, 'align-self', 'stretch');
+        setImp(card, 'justify-self', 'stretch');
+        setImp(card, 'display', 'flex');
+        setImp(card, 'flex-direction', 'column');
+    }
+
+    function equalizeCardSizes(cards) {
+        let maxH = 0;
+        let currentMin = 0;
+        for (let i = 0; i < cards.length; i++) {
+            const h = cards[i].offsetHeight;
+            if (h > maxH) maxH = h;
+            const minH = parseFloat(cards[i].style.getPropertyValue('min-height')) || 0;
+            if (minH > currentMin) currentMin = minH;
+        }
+        if (maxH < 1) return;
+        if (currentMin && Math.abs(maxH - currentMin) < 3) return;
+        const px = maxH + 'px';
+        for (let i = 0; i < cards.length; i++) {
+            setImp(cards[i], 'min-height', px);
+            setImp(cards[i], 'width', '100%');
+        }
+    }
+
+    function layoutDepartment(grid, clusters) {
+        setImp(grid, 'display', 'grid');
+        setImp(grid, 'grid-template-columns', '1fr 1fr');
+        setImp(grid, 'grid-auto-flow', 'row');
+        setImp(grid, 'align-items', 'stretch');
+        setImp(grid, 'justify-items', 'stretch');
+        const ordered = [];
+        const slots = [];
+        let row = 1;
+        for (let c = 0; c < clusters.length; c++) {
+            const cluster = clusters[c];
+            for (let i = 0; i < cluster.length; i++) {
+                if (i > 0 && i % 2 === 0) row++;
+                ordered.push(cluster[i].card);
+                slots.push({
+                    card: cluster[i].card,
+                    row: String(row),
+                    col: cluster.length < 2 ? '1' : String((i % 2) + 1)
+                });
+            }
+            row++;
+        }
+        if (!sameCardOrder(grid, ordered)) {
+            const saved = captureScroll(grid);
+            for (let i = 0; i < ordered.length; i++) grid.appendChild(ordered[i]);
+            restoreScroll(saved);
+        }
+        for (let i = 0; i < slots.length; i++) {
+            styleCardCell(slots[i].card);
+            setImp(slots[i].card, 'grid-row', slots[i].row);
+            setImp(slots[i].card, 'grid-column', slots[i].col);
+        }
+        equalizeCardSizes(ordered);
+    }
+
+    function pairDepartments() {
+        const deps = collectDepartments();
+        for (let d = 0; d < deps.length; d++) {
+            const items = [];
+            for (let i = 0; i < deps[d].cards.length; i++) {
+                items.push({
+                    card: deps[d].cards[i],
+                    name: groupName(deps[d].cards[i]),
+                    index: i
+                });
+            }
+            items.sort(function (a, b) { return a.name.localeCompare(b.name); });
+            layoutDepartment(deps[d].grid, clusterBySimilarity(items));
+        }
+    }
+
+    let applying = false;
+    let timer = null;
+    let obs = null;
+
+    function tick() {
+        if (applying) return;
+        applying = true;
+        if (obs && typeof obs.disconnect === 'function') obs.disconnect();
+        try {
+            pairDepartments();
+        } catch (e) {
+            /* ignore layout errors */
+        } finally {
+            if (obs && document.body) {
+                obs.observe(document.body, { childList: true, subtree: true });
+            }
+            setTimeout(function () { applying = false; }, 50);
+        }
+    }
+
+    function schedule() {
+        if (applying || timer) return;
+        timer = setTimeout(function () {
+            timer = null;
+            tick();
+        }, 400);
+    }
+
+    function init() {
+        obs = new MutationObserver(function () {
+            if (applying) return;
+            schedule();
+        });
+        tick();
+        if (document.body) obs.observe(document.body, { childList: true, subtree: true });
+    }
+
+    init();
+})();

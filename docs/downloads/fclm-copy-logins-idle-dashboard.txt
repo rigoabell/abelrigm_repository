@@ -1,0 +1,729 @@
+// ==UserScript==
+// @name         FCLM Copy Logins + Idle + Dashboard
+// @namespace    https://rigo-fclm-login-idle
+// @version      4.3
+// @description  Copies login + idle time and adds an embedded dashboard with selectable associates and sortable Idle Time %.
+// @match        https://fclm-portal.amazon.com/reports/functionRollup*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setClipboard
+// @connect      fclm-portal.amazon.com
+// ==/UserScript==
+
+(() => {
+  "use strict";
+
+  const TARGET_CAPTION_MATCHERS = [
+    "C-Return Audit [4300018934]",
+    "WD Grading [4300006862]",
+  ];
+
+  const ROSTER_LINK_SELECTORS = [
+    'tbody tr td:nth-child(3) a[title="View Time Details"]',
+    'tbody tr td:nth-child(3) a[href*="/employee/timeDetails"]',
+    'tbody tr td a[title="View Time Details"]',
+    'tbody tr td a[href*="/employee/timeDetails"]'
+  ];
+
+  const LOGIN_DD_SEL = "table.empDetailCard dd";
+  const MAX_CONCURRENT = 6;
+  const REQUEST_TIMEOUT_MS = 30000;
+  const CACHE_TTL_MS = 2 * 60 * 1000;
+
+  const state = {
+    cache: new Map(),
+    lastRows: [],
+    selectedKeys: new Set(),
+    idlePctSortMode: "none", // none -> desc -> asc -> none
+  };
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function cleanText(s) {
+    return (s || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+  }
+
+  function absUrl(href) {
+    if (!href) return null;
+    try {
+      return href.startsWith("http") ? href : new URL(href, location.origin).toString();
+    } catch {
+      return null;
+    }
+  }
+
+  function gmGet(url) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: "GET",
+        url,
+        timeout: REQUEST_TIMEOUT_MS,
+        onload: (res) => {
+          if (res.status >= 200 && res.status < 300) resolve(res.responseText);
+          else reject(new Error(`HTTP ${res.status} for ${url}`));
+        },
+        onerror: () => reject(new Error(`Request error for ${url}`)),
+        ontimeout: () => reject(new Error(`Timeout for ${url}`)),
+      });
+    });
+  }
+
+  async function copyToClipboard(text) {
+    try {
+      GM_setClipboard(text, "text");
+      return true;
+    } catch {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  }
+
+  function parseDurationToSeconds(durationStr) {
+    const t = cleanText(durationStr);
+    if (!t) return 0;
+
+    const parts = t.split(":").map((n) => Number(n));
+    if (parts.some(Number.isNaN)) return 0;
+
+    if (parts.length === 2) {
+      const [m, s] = parts;
+      return (m * 60) + s;
+    }
+
+    if (parts.length === 3) {
+      const [h, m, s] = parts;
+      return (h * 3600) + (m * 60) + s;
+    }
+
+    return 0;
+  }
+
+  function formatSeconds(totalSeconds) {
+    totalSeconds = Math.max(0, Math.round(totalSeconds || 0));
+
+    const h = Math.floor(totalSeconds / 3600);
+    const m = Math.floor((totalSeconds % 3600) / 60);
+    const s = totalSeconds % 60;
+
+    if (h > 0) {
+      return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+    }
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }
+
+  function formatPct(numerator, denominator) {
+    if (!denominator) return "0.0%";
+    return `${((numerator / denominator) * 100).toFixed(1)}%`;
+  }
+
+  function getIdlePctNumber(row) {
+    if (!row || !row.clockedInSeconds) return 0;
+    return row.idleSeconds / row.clockedInSeconds;
+  }
+
+  function getRowKey(row) {
+    return `${row.rosterName || ""}__${row.login || ""}__${row.originalIndex ?? ""}`;
+  }
+
+  function extractLoginFromDoc(doc) {
+    const dds = [...doc.querySelectorAll(LOGIN_DD_SEL)];
+    for (const dd of dds) {
+      const t = cleanText(dd.textContent);
+      if (!t) continue;
+      if (/^[a-z0-9._-]{2,32}$/i.test(t)) return t;
+    }
+    return dds.length ? cleanText(dds[0].textContent) : "";
+  }
+
+  function extractIdleSecondsFromDoc(doc) {
+    let idleSeconds = 0;
+    const functionSegments = [...doc.querySelectorAll("tr.function-seg")];
+
+    for (const row of functionSegments) {
+      const cls = row.className || "";
+      const text = cleanText(row.textContent);
+
+      const isIndirect =
+        row.classList.contains("indirect") ||
+        /\bindirect\b/i.test(cls) ||
+        /\bindirect\b/i.test(text);
+
+      const isTimeOffTask =
+        row.classList.contains("timeOffTask") ||
+        /\btimeofftask\b/i.test(cls) ||
+        /\btime off task\b/i.test(text);
+
+      if (!isIndirect || isTimeOffTask) continue;
+
+      const durationCell =
+        row.querySelector("td.rightAlign") ||
+        row.querySelector("td:last-child");
+
+      const durationText = cleanText(durationCell?.textContent || "");
+      idleSeconds += parseDurationToSeconds(durationText);
+    }
+
+    return idleSeconds;
+  }
+
+  function extractClockedInSecondsFromDoc(doc) {
+    let clockedInSeconds = 0;
+    const clockRows = [...doc.querySelectorAll("tr.clock-seg")];
+
+    for (const row of clockRows) {
+      const cls = row.className || "";
+      const text = cleanText(row.textContent);
+
+      const isOnClock =
+        row.classList.contains("on-clock") ||
+        /\bon-clock\b/i.test(cls) ||
+        /\bonclock\b/i.test(text) ||
+        /\bonclock\/paid\b/i.test(text) ||
+        /\bonclock\/unpaid\b/i.test(text);
+
+      if (!isOnClock) continue;
+
+      const durationCell =
+        row.querySelector("td.rightAlign") ||
+        row.querySelector("td:last-child");
+
+      const durationText = cleanText(durationCell?.textContent || "");
+      clockedInSeconds += parseDurationToSeconds(durationText);
+    }
+
+    return clockedInSeconds;
+  }
+
+  async function getAssociateMetrics(url, rosterName = "") {
+    const cached = state.cache.get(url);
+    if (cached && (Date.now() - cached.ts) < CACHE_TTL_MS) {
+      return cached.data;
+    }
+
+    const html = await gmGet(url);
+    const doc = new DOMParser().parseFromString(html, "text/html");
+
+    const login = extractLoginFromDoc(doc);
+    const idleSeconds = extractIdleSecondsFromDoc(doc);
+    const clockedInSeconds = extractClockedInSecondsFromDoc(doc);
+
+    const data = {
+      rosterName,
+      login,
+      idleSeconds,
+      clockedInSeconds,
+      idleTime: formatSeconds(idleSeconds),
+      clockedInTime: formatSeconds(clockedInSeconds),
+      idlePct: formatPct(idleSeconds, clockedInSeconds),
+    };
+
+    state.cache.set(url, { ts: Date.now(), data });
+    return data;
+  }
+
+  function captionMatches(text) {
+    const t = cleanText(text);
+    return TARGET_CAPTION_MATCHERS.some((m) => t.includes(m));
+  }
+
+  function findTargetCaption() {
+    const caps = [...document.querySelectorAll("caption")];
+    return caps.find((c) => captionMatches(c.textContent || "")) || null;
+  }
+
+  function getTargetTable() {
+    const caption = findTargetCaption();
+    return caption?.closest("table") || null;
+  }
+
+  function getRosterLinks() {
+    const table = getTargetTable();
+    if (!table) return [];
+
+    let anchors = [];
+    for (const sel of ROSTER_LINK_SELECTORS) {
+      anchors = [...table.querySelectorAll(sel)];
+      if (anchors.length) break;
+    }
+
+    return anchors
+      .map((a, index) => ({
+        rosterName: cleanText(a.textContent),
+        url: absUrl(a.getAttribute("href")),
+        originalIndex: index,
+      }))
+      .filter((x) => x.url);
+  }
+
+  function makeButton(text) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = text;
+    btn.style.padding = "6px 12px";
+    btn.style.fontSize = "12px";
+    btn.style.borderRadius = "8px";
+    btn.style.border = "1px solid #8d8d8d";
+    btn.style.cursor = "pointer";
+    btn.style.background = "#f7f7f7";
+    btn.style.boxShadow = "0 1px 2px rgba(0,0,0,0.08)";
+    btn.style.whiteSpace = "nowrap";
+    return btn;
+  }
+
+  function ensureDashboardShell() {
+    const table = getTargetTable();
+    if (!table) return null;
+
+    let shell = document.querySelector("[data-rigo-idle-dashboard-shell='1']");
+    if (shell) return shell;
+
+    shell = document.createElement("div");
+    shell.setAttribute("data-rigo-idle-dashboard-shell", "1");
+
+    shell.style.marginTop = "10px";
+    shell.style.marginBottom = "12px";
+    shell.style.marginLeft = "0.7in";
+    shell.style.marginRight = "0";
+    shell.style.padding = "12px";
+    shell.style.border = "1px solid #cfcfcf";
+    shell.style.borderRadius = "12px";
+    shell.style.background = "#ffffff";
+    shell.style.boxShadow = "0 2px 8px rgba(0,0,0,0.06)";
+    shell.style.fontFamily = "Arial, sans-serif";
+    shell.style.display = "inline-block";
+    shell.style.width = "fit-content";
+    shell.style.maxWidth = "calc(100vw - 1.5in)";
+    shell.style.verticalAlign = "top";
+    shell.style.boxSizing = "border-box";
+
+    const toolbar = document.createElement("div");
+    toolbar.style.display = "flex";
+    toolbar.style.alignItems = "center";
+    toolbar.style.gap = "8px";
+    toolbar.style.flexWrap = "wrap";
+    toolbar.style.marginBottom = "12px";
+
+    const title = document.createElement("div");
+    title.textContent = "Idle Time Dashboard";
+    title.style.fontWeight = "700";
+    title.style.fontSize = "15px";
+    title.style.marginRight = "8px";
+    title.style.whiteSpace = "nowrap";
+
+    const copyBtn = makeButton("Copy logins + idle");
+    copyBtn.setAttribute("data-rigo-copy-btn", "1");
+
+    const analyzeBtn = makeButton("Analyze dashboard");
+    analyzeBtn.setAttribute("data-rigo-analyze-btn", "1");
+
+    const selectAllBtn = makeButton("Select all");
+    selectAllBtn.setAttribute("data-rigo-select-all-btn", "1");
+
+    const status = document.createElement("span");
+    status.setAttribute("data-rigo-status", "1");
+    status.style.fontSize = "12px";
+    status.style.opacity = "0.8";
+    status.style.marginLeft = "6px";
+    status.style.whiteSpace = "nowrap";
+
+    toolbar.appendChild(title);
+    toolbar.appendChild(copyBtn);
+    toolbar.appendChild(analyzeBtn);
+    toolbar.appendChild(selectAllBtn);
+    toolbar.appendChild(status);
+
+    const overall = document.createElement("div");
+    overall.setAttribute("data-rigo-overall", "1");
+    overall.style.marginBottom = "14px";
+
+    const details = document.createElement("div");
+    details.setAttribute("data-rigo-details", "1");
+
+    shell.appendChild(toolbar);
+    shell.appendChild(overall);
+    shell.appendChild(details);
+
+    table.parentNode.insertBefore(shell, table);
+    return shell;
+  }
+
+  function metricCard(label, value) {
+    const box = document.createElement("div");
+    box.style.border = "1px solid #d8d8d8";
+    box.style.borderRadius = "10px";
+    box.style.padding = "10px 12px";
+    box.style.background = "#fafafa";
+    box.style.minWidth = "150px";
+    box.style.flex = "0 0 auto";
+
+    const k = document.createElement("div");
+    k.textContent = label;
+    k.style.fontSize = "11px";
+    k.style.opacity = "0.75";
+    k.style.marginBottom = "4px";
+    k.style.textTransform = "uppercase";
+    k.style.letterSpacing = "0.4px";
+    k.style.whiteSpace = "nowrap";
+
+    const v = document.createElement("div");
+    v.textContent = value;
+    v.style.fontWeight = "700";
+    v.style.fontSize = "18px";
+    v.style.whiteSpace = "nowrap";
+
+    box.appendChild(k);
+    box.appendChild(v);
+    return box;
+  }
+
+  function getDisplayedRows() {
+    const base = [...state.lastRows];
+
+    if (state.idlePctSortMode === "desc") {
+      base.sort((a, b) => {
+        const diff = getIdlePctNumber(b) - getIdlePctNumber(a);
+        if (diff !== 0) return diff;
+        return (a.originalIndex ?? 0) - (b.originalIndex ?? 0);
+      });
+    } else if (state.idlePctSortMode === "asc") {
+      base.sort((a, b) => {
+        const diff = getIdlePctNumber(a) - getIdlePctNumber(b);
+        if (diff !== 0) return diff;
+        return (a.originalIndex ?? 0) - (b.originalIndex ?? 0);
+      });
+    } else {
+      base.sort((a, b) => (a.originalIndex ?? 0) - (b.originalIndex ?? 0));
+    }
+
+    return base;
+  }
+
+  function getSelectedRows() {
+    return state.lastRows.filter((row) => state.selectedKeys.has(getRowKey(row)));
+  }
+
+  function renderOverall(overallEl) {
+    overallEl.innerHTML = "";
+
+    const selectedRows = getSelectedRows();
+
+    const totalClockedIn = selectedRows.reduce((sum, r) => sum + r.clockedInSeconds, 0);
+    const totalIdle = selectedRows.reduce((sum, r) => sum + r.idleSeconds, 0);
+    const totalPct = formatPct(totalIdle, totalClockedIn);
+
+    const wrap = document.createElement("div");
+    wrap.style.display = "flex";
+    wrap.style.flexWrap = "wrap";
+    wrap.style.gap = "10px";
+    wrap.style.alignItems = "stretch";
+    wrap.style.width = "fit-content";
+    wrap.style.maxWidth = "100%";
+
+    wrap.appendChild(metricCard("Selected Associates", String(selectedRows.length)));
+    wrap.appendChild(metricCard("Total Clocked In", formatSeconds(totalClockedIn)));
+    wrap.appendChild(metricCard("Total Idle Time", formatSeconds(totalIdle)));
+    wrap.appendChild(metricCard("Idle Time %", totalPct));
+
+    overallEl.appendChild(wrap);
+  }
+
+  function renderDetails(detailsEl, overallEl, statusEl = null) {
+    detailsEl.innerHTML = "";
+
+    const displayedRows = getDisplayedRows();
+
+    const table = document.createElement("table");
+    table.style.width = "auto";
+    table.style.minWidth = "820px";
+    table.style.maxWidth = "none";
+    table.style.borderCollapse = "collapse";
+    table.style.fontSize = "12px";
+    table.style.tableLayout = "auto";
+
+    const colgroup = document.createElement("colgroup");
+    ["70px", "220px", "120px", "150px", "150px", "110px"].forEach((w) => {
+      const col = document.createElement("col");
+      col.style.width = w;
+      colgroup.appendChild(col);
+    });
+    table.appendChild(colgroup);
+
+    const thead = document.createElement("thead");
+    const hr = document.createElement("tr");
+
+    const headers = [
+      { text: "Select", sortable: false },
+      { text: "Associate", sortable: false },
+      { text: "Login", sortable: false },
+      { text: "Total Clocked In", sortable: false },
+      { text: "Total Idle Time", sortable: false },
+      { text: "Idle Time %", sortable: true },
+    ];
+
+    headers.forEach((h) => {
+      const th = document.createElement("th");
+      th.textContent = h.text;
+      th.style.textAlign = "left";
+      th.style.padding = "8px 10px";
+      th.style.borderBottom = "1px solid #d9d9d9";
+      th.style.background = "#f5f5f5";
+      th.style.position = "sticky";
+      th.style.top = "0";
+      th.style.whiteSpace = "nowrap";
+
+      if (h.sortable) {
+        let suffix = "";
+        if (state.idlePctSortMode === "desc") suffix = " ▼";
+        if (state.idlePctSortMode === "asc") suffix = " ▲";
+        th.textContent = h.text + suffix;
+        th.style.cursor = "pointer";
+        th.style.userSelect = "none";
+        th.title = "Click to sort: descending, ascending, original";
+
+        th.addEventListener("click", () => {
+          if (state.idlePctSortMode === "none") state.idlePctSortMode = "desc";
+          else if (state.idlePctSortMode === "desc") state.idlePctSortMode = "asc";
+          else state.idlePctSortMode = "none";
+
+          renderDetails(detailsEl, overallEl, statusEl);
+        });
+      }
+
+      hr.appendChild(th);
+    });
+
+    thead.appendChild(hr);
+    table.appendChild(thead);
+
+    const tbody = document.createElement("tbody");
+
+    displayedRows.forEach((r, idx) => {
+      const tr = document.createElement("tr");
+      tr.style.background = idx % 2 === 0 ? "#fff" : "#fcfcfc";
+
+      const rowKey = getRowKey(r);
+      const isSelected = state.selectedKeys.has(rowKey);
+
+      const tdSelect = document.createElement("td");
+      tdSelect.style.padding = "8px 10px";
+      tdSelect.style.borderBottom = "1px solid #efefef";
+      tdSelect.style.whiteSpace = "nowrap";
+
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = isSelected;
+      checkbox.style.cursor = "pointer";
+
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) state.selectedKeys.add(rowKey);
+        else state.selectedKeys.delete(rowKey);
+
+        renderOverall(overallEl);
+        if (statusEl) {
+          statusEl.textContent = `${state.selectedKeys.size} selected.`;
+        }
+      });
+
+      tdSelect.appendChild(checkbox);
+      tr.appendChild(tdSelect);
+
+      const vals = [
+        r.rosterName || "",
+        r.login || "",
+        r.clockedInTime || "00:00",
+        r.idleTime || "00:00",
+        r.idlePct || "0.0%"
+      ];
+
+      vals.forEach((val, i) => {
+        const td = document.createElement("td");
+        td.textContent = val;
+        td.style.padding = "8px 10px";
+        td.style.borderBottom = "1px solid #efefef";
+        td.style.whiteSpace = "nowrap";
+        td.style.overflow = "hidden";
+        td.style.textOverflow = "ellipsis";
+
+        if (i === 0) td.style.maxWidth = "220px";
+        if (i === 1) td.style.maxWidth = "120px";
+
+        tr.appendChild(td);
+      });
+
+      tbody.appendChild(tr);
+    });
+
+    table.appendChild(tbody);
+
+    const scroller = document.createElement("div");
+    scroller.style.display = "inline-block";
+    scroller.style.width = "fit-content";
+    scroller.style.maxWidth = "100%";
+    scroller.style.maxHeight = "360px";
+    scroller.style.overflow = "auto";
+    scroller.style.border = "1px solid #e6e6e6";
+    scroller.style.borderRadius = "10px";
+    scroller.appendChild(table);
+
+    detailsEl.appendChild(scroller);
+  }
+
+  async function fetchAllMetrics(setStatus) {
+    const roster = getRosterLinks();
+    if (!roster.length) {
+      throw new Error("No employee links found in the target table.");
+    }
+
+    let idx = 0;
+    let done = 0;
+    const results = new Array(roster.length);
+    const errors = [];
+
+    setStatus(`Fetching ${roster.length} associates...`);
+
+    async function worker() {
+      while (idx < roster.length) {
+        const my = idx++;
+        const row = roster[my];
+
+        try {
+          const metrics = await getAssociateMetrics(row.url, row.rosterName);
+          results[my] = {
+            ...metrics,
+            originalIndex: row.originalIndex,
+          };
+        } catch (e) {
+          results[my] = {
+            rosterName: row.rosterName,
+            login: "",
+            idleSeconds: 0,
+            clockedInSeconds: 0,
+            idleTime: "00:00",
+            clockedInTime: "00:00",
+            idlePct: "0.0%",
+            originalIndex: row.originalIndex,
+          };
+          errors.push({
+            rosterName: row.rosterName,
+            url: row.url,
+            error: String(e?.message || e),
+          });
+        } finally {
+          done++;
+          setStatus(`Fetching... ${done}/${roster.length}`);
+          await sleep(0);
+        }
+      }
+    }
+
+    await Promise.all(
+      Array.from({ length: Math.min(MAX_CONCURRENT, roster.length) }, () => worker())
+    );
+
+    if (errors.length) {
+      console.warn("[Idle Dashboard] Some lookups failed:", errors);
+    }
+
+    return results.filter(Boolean);
+  }
+
+  async function runCopy(setStatus, btn) {
+    btn.disabled = true;
+    try {
+      const rows = state.lastRows.length ? getSelectedRows() : [];
+      const sourceRows = rows.length ? rows : [];
+
+      const output = sourceRows
+        .filter((r) => r.login)
+        .map((r) => `${r.login}\t${r.idleTime}`)
+        .join("\n");
+
+      if (!output) {
+        setStatus("No selected rows to copy. Run Analyze dashboard first.");
+        return;
+      }
+
+      const ok = await copyToClipboard(output);
+      setStatus(ok ? `Copied ${sourceRows.length} selected rows.` : "Clipboard failed.");
+      console.log("[Idle Dashboard] Copied output:\n" + output);
+    } catch (e) {
+      console.error(e);
+      setStatus(String(e?.message || e));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function runAnalyze(setStatus, btn) {
+    btn.disabled = true;
+    try {
+      const shell = ensureDashboardShell();
+      const overall = shell.querySelector("[data-rigo-overall='1']");
+      const details = shell.querySelector("[data-rigo-details='1']");
+      const statusEl = shell.querySelector("[data-rigo-status='1']");
+
+      const rows = await fetchAllMetrics(setStatus);
+
+      state.lastRows = rows.map((r) => ({ ...r }));
+      state.idlePctSortMode = "none";
+
+      // default all selected every analysis/reload
+      state.selectedKeys = new Set(state.lastRows.map(getRowKey));
+
+      renderOverall(overall);
+      renderDetails(details, overall, statusEl);
+
+      setStatus(`Dashboard updated for ${rows.length} associates.`);
+    } catch (e) {
+      console.error(e);
+      setStatus(String(e?.message || e));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function install() {
+    const shell = ensureDashboardShell();
+    if (!shell) return false;
+    if (shell.getAttribute("data-rigo-wired") === "1") return true;
+
+    const copyBtn = shell.querySelector("[data-rigo-copy-btn='1']");
+    const analyzeBtn = shell.querySelector("[data-rigo-analyze-btn='1']");
+    const selectAllBtn = shell.querySelector("[data-rigo-select-all-btn='1']");
+    const statusEl = shell.querySelector("[data-rigo-status='1']");
+    const overall = shell.querySelector("[data-rigo-overall='1']");
+    const details = shell.querySelector("[data-rigo-details='1']");
+
+    const setStatus = (msg) => {
+      statusEl.textContent = msg || "";
+    };
+
+    copyBtn.addEventListener("click", () => runCopy(setStatus, copyBtn));
+    analyzeBtn.addEventListener("click", () => runAnalyze(setStatus, analyzeBtn));
+
+    selectAllBtn.addEventListener("click", () => {
+      if (!state.lastRows.length) {
+        setStatus("Run Analyze dashboard first.");
+        return;
+      }
+      state.selectedKeys = new Set(state.lastRows.map(getRowKey));
+      renderOverall(overall);
+      renderDetails(details, overall, statusEl);
+      setStatus(`All ${state.selectedKeys.size} associates selected.`);
+    });
+
+    shell.setAttribute("data-rigo-wired", "1");
+    return true;
+  }
+
+  (async () => {
+    for (let i = 0; i < 40; i++) {
+      if (install()) return;
+      await sleep(250);
+    }
+    console.warn("[Idle Dashboard] No matching target caption found.", TARGET_CAPTION_MATCHERS);
+  })();
+})();
