@@ -4,17 +4,19 @@
 
 [![Deploy Dev Hub to GitHub Pages](https://github.com/rigoabell/abelrigm_repository/actions/workflows/pages.yml/badge.svg)](https://github.com/rigoabell/abelrigm_repository/actions/workflows/pages.yml)
 
-Central hub for my developments, plus tooling to set up a fresh machine.
-👉 **[Open the Dev Hub website](https://rigoabell.github.io/abelrigm_repository/)** to browse projects and download a machine-setup script.
+Central hub for the work: portfolio, tools built, and notes.
+👉 **[Open the Dev Hub website](https://rigoabell.github.io/abelrigm_repository/)**
 
 ## Contents
 
-- **`docs/` — Dev Hub website** (static, GitHub Pages ready). A landing page for
-  my projects. The full **Rig Setup** download lives on the Portfolio page,
-  under the Rig Setup tab (`bash ~/Downloads/rig-setup.sh` on Mac/Linux,
-  double-click `rig-setup.bat` on Windows). The Toolkit page can still build
-  a smaller script.
-  Everything runs in your browser; nothing is uploaded.
+- **`docs/` — Dev Hub website** (static, GitHub Pages ready).
+  - **Portfolio** is the work: Amazon, tools developed, and other projects.
+  - **Toolkit** lists tools built and ready to download.
+  - **Rig Setup** (`docs/rig-setup.html`) is one of those tools. It installs
+    Python, Node, and the other machine dependencies, and it shows how to run
+    the downloaded file (`bash ~/Downloads/rig-setup.sh` on Mac/Linux,
+    double-click `rig-setup.bat` on Windows).
+  Everything in the browser stays on your machine; nothing is uploaded.
 - **`dev-setup/` — Rig Setup app.** A dependency-free (Python standard library)
   local web app that detects your OS and installs the developer tools you need,
   with a live UI and install log. It never assumes you're an administrator. See
