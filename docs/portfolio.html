@@ -35,8 +35,9 @@
   </section>
 
   <main>
-    <section class="section">
+    <section class="section portfolio-section">
       <div class="container">
+        <div class="project-sheet">
         <div class="project-tabs" role="tablist" aria-label="Open projects">
           <button type="button" class="project-tab active" data-tab="projects" role="tab" aria-selected="true">Projects</button>
           <button type="button" class="project-tab hidden" data-tab="rig-setup" id="tab-rig-setup" role="tab" aria-selected="false">Rig Setup</button>
@@ -57,19 +58,15 @@
         </div>
 
         <div id="rig-setup" class="project-detail hidden" role="tabpanel">
-          <article class="project-card featured">
-            <div class="project-head">
-              <span class="project-icon">&#128295;</span>
-              <span class="status status-live">Live</span>
+          <header class="project-doc-head">
+            <div>
+              <h2>Rig Setup</h2>
+              <p>Installs Python, Node, Git, and the other dependencies listed below. Download the file, then run the step beside the button.</p>
             </div>
-            <h3>Rig Setup</h3>
-            <p class="project-desc">
-              Installs Python, Node, Git, and the other dependencies listed below.
-              Download the file, then run the step beside the button.
-            </p>
-          </article>
+            <span class="status status-live">Live</span>
+          </header>
 
-          <section class="rig-panel card">
+          <section class="rig-panel">
             <div>
               <p class="eyebrow">How to use it</p>
               <h2>Get the dependencies</h2>
@@ -88,7 +85,7 @@
             </div>
           </section>
 
-          <div class="setup card">
+          <div class="setup project-deps">
             <p class="install-optional">Need fewer dependencies? Pick them here and download only those.</p>
             <div class="setup-controls">
               <div class="os-toggle" role="tablist" aria-label="Target operating system">
@@ -124,6 +121,7 @@
               <pre id="script-preview" class="script-preview">// Choose a platform and dependencies above.</pre>
             </div>
           </div>
+        </div>
         </div>
       </div>
     </section>
