@@ -29,8 +29,7 @@
       <p class="eyebrow">Portfolio</p>
       <h1>Work</h1>
       <p class="page-hero-sub">
-        What <span data-text="name"></span> (<span data-text="login"></span>) does at Amazon,
-        the tools built along the way, and other work worth keeping in one place.
+        Select a project. The write-up, downloads, and anything else for that project open here.
       </p>
     </div>
   </section>
@@ -38,25 +37,21 @@
   <main>
     <section class="section">
       <div class="container">
-        <div class="work-block">
-          <h2>At Amazon</h2>
-          <p class="work-lead"><span data-text="role"></span>. This is the record of that role: process and quality work, not a software catalog.</p>
-          <article class="project-card featured">
-            <div class="project-head">
-              <span class="project-icon">&#127970;</span>
-              <span class="status status-live">Current</span>
-            </div>
-            <h3 data-text="role"></h3>
-            <p class="project-desc">
-              Quality process work at Amazon. Programs, reviews, and results from
-              the role belong in this section as they are ready to share.
-            </p>
-          </article>
+        <div class="project-rows" role="list">
+          <button type="button" class="project-row" data-project="rig-setup" role="listitem" aria-expanded="false">
+            <span class="project-icon" aria-hidden="true">&#128295;</span>
+            <span class="project-row-body">
+              <span class="project-row-name">Rig Setup</span>
+              <span class="project-row-desc">Install Python, Node, Git, and the other dependencies, then follow the steps.</span>
+            </span>
+            <span class="status status-live">Live</span>
+            <span class="project-row-go" aria-hidden="true">&rarr;</span>
+          </button>
         </div>
 
-        <div class="work-block" id="rig-setup">
-          <h2>Tools developed</h2>
-          <p class="work-lead">Software built to support the work. Rig Setup is a project here, on this page.</p>
+        <p id="project-empty" class="project-empty">Select a project to read it and download what it includes.</p>
+
+        <div id="rig-setup" class="project-detail hidden">
           <article class="project-card featured">
             <div class="project-head">
               <span class="project-icon">&#128295;</span>
@@ -125,22 +120,6 @@
             </div>
           </div>
         </div>
-
-        <div class="work-block">
-          <h2>Other work</h2>
-          <p class="work-lead">Projects that are not Amazon process work and not a downloadable tool.</p>
-          <article class="project-card">
-            <div class="project-head">
-              <span class="project-icon">&#127760;</span>
-              <span class="status status-live">Live</span>
-            </div>
-            <h3>Dev Hub</h3>
-            <p class="project-desc">
-              This site. A public home for the portfolio, the tools, and notes that
-              should sit next to the Amazon work.
-            </p>
-          </article>
-        </div>
       </div>
     </section>
   </main>
@@ -155,5 +134,29 @@
   <script src="assets/config.js"></script>
   <script src="assets/site.js"></script>
   <script src="assets/app.js"></script>
+  <script>
+    (function () {
+      var empty = document.getElementById("project-empty");
+      function openProject(id) {
+        document.querySelectorAll(".project-detail").forEach(function (panel) {
+          panel.classList.toggle("hidden", panel.id !== id);
+        });
+        document.querySelectorAll(".project-row").forEach(function (row) {
+          var on = row.getAttribute("data-project") === id;
+          row.classList.toggle("selected", on);
+          row.setAttribute("aria-expanded", on ? "true" : "false");
+        });
+        if (empty) empty.classList.toggle("hidden", !!id);
+        if (id && location.hash !== "#" + id) history.replaceState(null, "", "#" + id);
+      }
+      document.querySelectorAll(".project-row").forEach(function (row) {
+        row.addEventListener("click", function () {
+          openProject(row.getAttribute("data-project"));
+        });
+      });
+      var hash = location.hash.replace("#", "");
+      if (hash && document.getElementById(hash)) openProject(hash);
+    })();
+  </script>
 </body>
 </html>
