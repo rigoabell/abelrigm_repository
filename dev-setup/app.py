@@ -55,7 +55,7 @@ CATALOG = [
             "apt": f"{APT} git", "dnf": "{{SUDO}} dnf install -y git",
             "pacman": "{{SUDO}} pacman -Sy --noconfirm git", "zypper": "{{SUDO}} zypper install -y git",
             "brew": "brew install git",
-            "winget": "winget install --id Git.Git -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id Git.Git -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install git -y",
         },
     },
@@ -67,7 +67,7 @@ CATALOG = [
             "apt": f"{APT} curl", "dnf": "{{SUDO}} dnf install -y curl",
             "pacman": "{{SUDO}} pacman -Sy --noconfirm curl", "zypper": "{{SUDO}} zypper install -y curl",
             "brew": "brew install curl",
-            "winget": "winget install --id cURL.cURL -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id cURL.cURL -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install curl -y",
         },
     },
@@ -89,7 +89,7 @@ CATALOG = [
             "apt": f"{APT} jq", "dnf": "{{SUDO}} dnf install -y jq",
             "pacman": "{{SUDO}} pacman -Sy --noconfirm jq", "zypper": "{{SUDO}} zypper install -y jq",
             "brew": "brew install jq",
-            "winget": "winget install --id jqlang.jq -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id jqlang.jq -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install jq -y",
         },
     },
@@ -109,7 +109,7 @@ CATALOG = [
                     "&& {{SUDO}} apt-get update && {{SUDO}} apt-get install -y gh"),
             "dnf": "{{SUDO}} dnf install -y gh", "pacman": "{{SUDO}} pacman -Sy --noconfirm github-cli",
             "brew": "brew install gh",
-            "winget": "winget install --id GitHub.cli -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id GitHub.cli -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install gh -y",
         },
     },
@@ -134,7 +134,7 @@ CATALOG = [
             "apt": f"{APT} ripgrep", "dnf": "{{SUDO}} dnf install -y ripgrep",
             "pacman": "{{SUDO}} pacman -Sy --noconfirm ripgrep", "zypper": "{{SUDO}} zypper install -y ripgrep",
             "brew": "brew install ripgrep",
-            "winget": "winget install --id BurntSushi.ripgrep.MSVC -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id BurntSushi.ripgrep.MSVC -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install ripgrep -y",
         },
     },
@@ -146,7 +146,7 @@ CATALOG = [
             "apt": f"{APT} cmake", "dnf": "{{SUDO}} dnf install -y cmake",
             "pacman": "{{SUDO}} pacman -Sy --noconfirm cmake", "zypper": "{{SUDO}} zypper install -y cmake",
             "brew": "brew install cmake",
-            "winget": "winget install --id Kitware.CMake -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id Kitware.CMake -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install cmake -y",
         },
     },
@@ -162,7 +162,7 @@ CATALOG = [
             "pacman": "{{SUDO}} pacman -Sy --noconfirm python python-pip",
             "zypper": "{{SUDO}} zypper install -y python3 python3-pip",
             "brew": "brew install python",
-            "winget": "winget install --id Python.Python.3.12 -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id Python.Python.3.12 -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install python -y",
         },
     },
@@ -175,7 +175,7 @@ CATALOG = [
             "dnf": "curl -fsSL https://rpm.nodesource.com/setup_lts.x | {{SUDO}} -E bash - && {{SUDO}} dnf install -y nodejs",
             "pacman": "{{SUDO}} pacman -Sy --noconfirm nodejs npm",
             "brew": "brew install node",
-            "winget": "winget install --id OpenJS.NodeJS.LTS -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id OpenJS.NodeJS.LTS -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install nodejs-lts -y",
         },
     },
@@ -187,7 +187,7 @@ CATALOG = [
             "apt": f"{APT} golang-go", "dnf": "{{SUDO}} dnf install -y golang",
             "pacman": "{{SUDO}} pacman -Sy --noconfirm go", "zypper": "{{SUDO}} zypper install -y go",
             "brew": "brew install go",
-            "winget": "winget install --id GoLang.Go -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id GoLang.Go -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install golang -y",
         },
     },
@@ -198,7 +198,7 @@ CATALOG = [
         "install": {
             "unix_script": "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
             "brew": "brew install rustup-init && rustup-init -y",
-            "winget": "winget install --id Rustlang.Rustup -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id Rustlang.Rustup -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install rustup.install -y",
         },
     },
@@ -210,7 +210,7 @@ CATALOG = [
             "apt": f"{APT} default-jdk", "dnf": "{{SUDO}} dnf install -y java-latest-openjdk-devel",
             "pacman": "{{SUDO}} pacman -Sy --noconfirm jdk-openjdk", "zypper": "{{SUDO}} zypper install -y java-openjdk-devel",
             "brew": "brew install openjdk",
-            "winget": "winget install --id EclipseAdoptium.Temurin.21.JDK -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id EclipseAdoptium.Temurin.21.JDK -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install temurin -y",
         },
     },
@@ -222,7 +222,7 @@ CATALOG = [
             "apt": f"{APT} ruby-full", "dnf": "{{SUDO}} dnf install -y ruby",
             "pacman": "{{SUDO}} pacman -Sy --noconfirm ruby", "zypper": "{{SUDO}} zypper install -y ruby",
             "brew": "brew install ruby",
-            "winget": "winget install --id RubyInstallerTeam.Ruby.3.3 -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id RubyInstallerTeam.Ruby.3.3 -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install ruby -y",
         },
     },
@@ -243,7 +243,7 @@ CATALOG = [
         "install": {
             "apt": f"{APT} dotnet-sdk-8.0", "dnf": "{{SUDO}} dnf install -y dotnet-sdk-8.0",
             "brew": "brew install --cask dotnet-sdk",
-            "winget": "winget install --id Microsoft.DotNet.SDK.8 -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id Microsoft.DotNet.SDK.8 -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install dotnet-sdk -y",
         },
     },
@@ -254,7 +254,7 @@ CATALOG = [
         "install": {
             "unix_script": "curl -fsSL https://deno.land/install.sh | sh",
             "brew": "brew install deno",
-            "winget": "winget install --id DenoLand.Deno -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id DenoLand.Deno -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install deno -y",
         },
     },
@@ -265,7 +265,7 @@ CATALOG = [
         "install": {
             "unix_script": "curl -fsSL https://bun.sh/install | bash",
             "npm": "npm install -g bun",
-            "winget": "winget install --id Oven-sh.Bun -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id Oven-sh.Bun -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
         },
     },
 
@@ -276,7 +276,7 @@ CATALOG = [
         "check": "yarn", "version": ["yarn", "--version"],
         "install": {
             "npm": "npm install -g yarn", "brew": "brew install yarn",
-            "winget": "winget install --id Yarn.Yarn -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id Yarn.Yarn -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install yarn -y",
         },
     },
@@ -288,7 +288,7 @@ CATALOG = [
             "npm": "npm install -g pnpm",
             "unix_script": "curl -fsSL https://get.pnpm.io/install.sh | sh -",
             "brew": "brew install pnpm",
-            "winget": "winget install --id pnpm.pnpm -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id pnpm.pnpm -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
         },
     },
     {
@@ -313,7 +313,7 @@ CATALOG = [
             "apt": "curl -fsSL https://get.docker.com | {{SUDO}} sh",
             "dnf": "curl -fsSL https://get.docker.com | {{SUDO}} sh",
             "brew": "brew install --cask docker",
-            "winget": "winget install --id Docker.DockerDesktop -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id Docker.DockerDesktop -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install docker-desktop -y",
         },
     },
@@ -327,7 +327,7 @@ CATALOG = [
             "dnf": ('curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" '
                     "&& {{SUDO}} install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && rm -f kubectl"),
             "brew": "brew install kubectl",
-            "winget": "winget install --id Kubernetes.kubectl -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id Kubernetes.kubectl -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install kubernetes-cli -y",
         },
     },
@@ -343,7 +343,7 @@ CATALOG = [
                     "| {{SUDO}} tee /etc/apt/sources.list.d/hashicorp.list "
                     "&& {{SUDO}} apt-get update && {{SUDO}} apt-get install -y terraform"),
             "brew": "brew tap hashicorp/tap && brew install hashicorp/tap/terraform",
-            "winget": "winget install --id Hashicorp.Terraform -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id Hashicorp.Terraform -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install terraform -y",
         },
     },
@@ -357,7 +357,7 @@ CATALOG = [
                             "&& unzip -q -o /tmp/awscliv2.zip -d /tmp && {{SUDO}} /tmp/aws/install --update "
                             "&& rm -rf /tmp/aws /tmp/awscliv2.zip"),
             "brew": "brew install awscli",
-            "winget": "winget install --id Amazon.AWSCLI -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id Amazon.AWSCLI -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install awscli -y",
         },
     },
@@ -368,7 +368,7 @@ CATALOG = [
         "install": {
             "unix_script": "curl -fsSL https://sdk.cloud.google.com | bash -s -- --disable-prompts",
             "brew": "brew install --cask google-cloud-sdk",
-            "winget": "winget install --id Google.CloudSDK -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id Google.CloudSDK -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install gcloudsdk -y",
         },
     },
@@ -382,7 +382,7 @@ CATALOG = [
             "apt": f"{APT} postgresql-client", "dnf": "{{SUDO}} dnf install -y postgresql",
             "pacman": "{{SUDO}} pacman -Sy --noconfirm postgresql-libs", "zypper": "{{SUDO}} zypper install -y postgresql",
             "brew": "brew install libpq",
-            "winget": "winget install --id PostgreSQL.PostgreSQL -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id PostgreSQL.PostgreSQL -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install postgresql -y",
         },
     },
@@ -394,7 +394,7 @@ CATALOG = [
             "apt": f"{APT} sqlite3", "dnf": "{{SUDO}} dnf install -y sqlite",
             "pacman": "{{SUDO}} pacman -Sy --noconfirm sqlite", "zypper": "{{SUDO}} zypper install -y sqlite3",
             "brew": "brew install sqlite",
-            "winget": "winget install --id SQLite.SQLite -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id SQLite.SQLite -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install sqlite -y",
         },
     },
@@ -412,7 +412,7 @@ CATALOG = [
                     "| {{SUDO}} tee /etc/apt/sources.list.d/vscode.list > /dev/null "
                     "&& rm -f /tmp/packages.microsoft.gpg && {{SUDO}} apt-get update && {{SUDO}} apt-get install -y code"),
             "brew": "brew install --cask visual-studio-code",
-            "winget": "winget install --id Microsoft.VisualStudioCode -e --accept-source-agreements --accept-package-agreements",
+            "winget": "winget install --id Microsoft.VisualStudioCode -e --scope user --disable-interactivity --accept-source-agreements --accept-package-agreements",
             "choco": "choco install vscode -y",
         },
     },
@@ -477,9 +477,9 @@ def primary_package_manager():
 
 
 # Package managers that always require administrator/root privileges to install
-# into system locations. brew, winget, npm and per-user install scripts operate
-# in user space (or prompt for their own elevation) and are preferred for
-# non-admin accounts.
+# into system locations. brew, npm, and per-user install scripts stay in the
+# home directory. winget is only invoked with --scope user so it does not ask
+# for an administrator password.
 SYSTEM_PACKAGE_MANAGERS = {"apt", "dnf", "pacman", "zypper", "choco"}
 
 # Placeholder embedded in every command that would need elevation. It is

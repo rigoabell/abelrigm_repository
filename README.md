@@ -13,7 +13,8 @@ Central hub for the work: portfolio, tools built, and notes.
   - **Portfolio** is the work: Amazon, tools developed, and other projects.
   - **Toolkit** lists tools built and ready to download.
   - **Rig Setup** is a project on the Portfolio page, not its own site page.
-    That project installs Python, Node, and the other machine dependencies, and
+    That project installs Python, Node, and the other machine dependencies into
+    the current user account (it does not ask for an administrator password), and
     it shows how to run the downloaded file (`bash ~/Downloads/rig-setup.sh` on
     Mac/Linux, double-click `rig-setup.bat` on Windows).
   Everything in the browser stays on your machine; nothing is uploaded.
