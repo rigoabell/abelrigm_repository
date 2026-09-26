@@ -17,7 +17,6 @@
         <a data-nav="toolkit" href="toolkit.html">Toolkit</a>
         <a data-nav="admin" href="admin.html">Admin</a>
       </nav>
-      <button type="button" class="btn btn-primary btn-sm nav-download" data-download="all" disabled>Download Rig Setup</button>
       <div class="identity">
         <img class="id-avatar" data-avatar alt="" />
         <span class="id-meta"><span id="id-name" class="id-name"></span><a id="id-login" class="id-login" href="#" target="_blank" rel="noopener"></a></span>
@@ -38,6 +37,12 @@
   <main>
     <section class="section">
       <div class="container">
+        <div class="port-tabs" role="tablist" aria-label="Portfolio sections">
+          <button type="button" class="port-tab active" data-port-tab="projects" role="tab" aria-selected="true">Projects</button>
+          <button type="button" class="port-tab" data-port-tab="rig" role="tab" aria-selected="false">Rig Setup</button>
+        </div>
+
+        <div id="port-projects">
         <div class="project-grid">
           <article class="project-card featured">
             <div class="project-head">
@@ -55,7 +60,7 @@
               <li><strong>Zero-prereq</strong>: runs on a bare machine</li>
             </ul>
             <div class="project-actions">
-              <a class="btn btn-primary btn-sm" href="toolkit.html">Use it now</a>
+              <button type="button" class="btn btn-primary btn-sm" data-open-tab="rig">Open Rig Setup</button>
               <a class="btn btn-outline btn-sm" data-href="repo" target="_blank" rel="noopener">Source</a>
             </div>
           </article>
@@ -73,6 +78,16 @@
             <p class="project-desc">Add a card in <code>docs/portfolio.html</code> and it appears here.</p>
             <ul class="impact"><li>Backlog</li></ul>
           </article>
+        </div>
+        </div>
+
+        <div id="port-rig" class="hidden">
+          <div class="rig-download card">
+            <h2>Download Rig Setup</h2>
+            <p>One file. It installs every developer tool.</p>
+            <button type="button" class="btn btn-primary btn-lg" data-download="all" disabled>Download Rig Setup</button>
+            <p class="run-step">Loading the one-step command&hellip;</p>
+          </div>
         </div>
 
         <div class="milestones">
@@ -97,5 +112,31 @@
   <script src="assets/config.js"></script>
   <script src="assets/site.js"></script>
   <script src="assets/app.js"></script>
+  <script>
+    (function () {
+      function show(name) {
+        var projects = document.getElementById("port-projects");
+        var rig = document.getElementById("port-rig");
+        if (!projects || !rig) return;
+        projects.classList.toggle("hidden", name !== "projects");
+        rig.classList.toggle("hidden", name !== "rig");
+        document.querySelectorAll("[data-port-tab]").forEach(function (btn) {
+          var on = btn.getAttribute("data-port-tab") === name;
+          btn.classList.toggle("active", on);
+          btn.setAttribute("aria-selected", on ? "true" : "false");
+        });
+        var next = name === "rig" ? "#rig-setup" : location.pathname + location.search;
+        if (location.hash !== next && !(name === "projects" && !location.hash)) {
+          history.replaceState(null, "", next);
+        }
+      }
+      document.querySelectorAll("[data-port-tab], [data-open-tab]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          show(btn.getAttribute("data-port-tab") || btn.getAttribute("data-open-tab"));
+        });
+      });
+      if (location.hash === "#rig-setup") show("rig");
+    })();
+  </script>
 </body>
 </html>
