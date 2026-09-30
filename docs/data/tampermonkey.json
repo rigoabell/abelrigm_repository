@@ -444,9 +444,9 @@
     "name": "Peculiar Line Flush",
     "category": "Peculiar",
     "summary": "Scan a line of containers, look each up, and save the operator file.",
-    "detail": "Scanning stays in the userscript. Each Peculiar Inventory lookup is saved to the SOS Report Upload folder for that operator.",
-    "version": "2.7.1",
-    "runsOn": "peculiar-inventory-na.aka.corp.amazon.com",
+    "detail": "Scanning stays in the userscript. Each lookup on AFT Aging Inventory or Peculiar Inventory is saved to the SOS Report Upload folder for that operator. Copy Debug is on the panel and in the Tampermonkey menu.",
+    "version": "2.8.0",
+    "runsOn": "aft-aging-inventory.na.aftx.amazonoperations.app, peculiar-inventory-na.aka.corp.amazon.com",
     "file": "downloads/peculiar-line-flush.txt",
     "downloadName": "Peculiar Line Flush.txt"
   },

@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.7.1
-// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the SOS Report Upload Folder.
+// @version      2.8.0
+// @description  Scan containers in Tampermonkey. Looks up AFT Aging Inventory or Peculiar Inventory and saves each operator’s file to the SOS Report Upload Folder.
 // @author       abelrigm
+// @match        https://aft-aging-inventory.na.aftx.amazonoperations.app/*
 // @match        https://peculiar-inventory-na.aka.corp.amazon.com/*
 // @connect      amazon-my.sharepoint.com
 // @run-at       document-idle
@@ -26,7 +27,7 @@
   Example: LineFlush_2026-08-28_abelrigm.csv
 
   1. Install this script (replace any older Peculiar Line Flush copy).
-  2. Open Peculiar MEM3, finish Midway, leave that tab open.
+  2. Open AFT Aging Inventory MEM3 (or Peculiar MEM3), finish Midway, leave that tab open.
   3. Open the SOS folder once in Firefox so Microsoft 365 cookies work.
   4. Scan into the panel box and press Enter.
   5. Do not open today’s file in Excel while you are still scanning (it locks).
@@ -36,8 +37,10 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.7.1";
-  const PECULIAR_URL = "https://peculiar-inventory-na.aka.corp.amazon.com/MEM3/overview";
+  const VERSION = "2.8.0";
+  const AFT_URL = "https://aft-aging-inventory.na.aftx.amazonoperations.app/MEM3/overview";
+  const PECULIAR_LEGACY_URL = "https://peculiar-inventory-na.aka.corp.amazon.com/MEM3/overview";
+  const PECULIAR_URL = AFT_URL;
   const SP_SITE = "https://amazon-my.sharepoint.com/personal/abelrigm_amazon_com";
   const SOS_FOLDER =
     "/personal/abelrigm_amazon_com/Documents/IOL Assignments/SOS Report Upload Folder";
@@ -73,7 +76,7 @@
   ];
 
   const host = location.hostname;
-  const isPeculiar = /peculiar-inventory/i.test(host);
+  const isPeculiar = /peculiar-inventory|aft-aging-inventory/i.test(host);
   const isTop = window.top === window.self;
 
   let lastError = "";
@@ -320,6 +323,47 @@
     };
   }
 
+  function reachableDocs() {
+    const docs = [];
+    const seen = new Set();
+    const add = (doc) => {
+      if (!doc || seen.has(doc)) return;
+      seen.add(doc);
+      docs.push(doc);
+      let frames;
+      try {
+        frames = doc.querySelectorAll("iframe, frame");
+      } catch {
+        return;
+      }
+      frames.forEach((frame) => {
+        try {
+          add(frame.contentDocument);
+        } catch {
+          /* cross-origin */
+        }
+      });
+    };
+    add(document);
+    return docs;
+  }
+
+  function findSearchInput() {
+    for (const doc of reachableDocs()) {
+      const input = doc.querySelector("#searchContainerInput");
+      if (input) return input;
+    }
+    return null;
+  }
+
+  function parentIsInventory() {
+    try {
+      return window.parent !== window && /peculiar-inventory|aft-aging-inventory/i.test(window.parent.location.hostname);
+    } catch {
+      return false;
+    }
+  }
+
   function popoverRoots() {
     const seen = new Set();
     const out = [];
@@ -328,13 +372,17 @@
       seen.add(n);
       out.push(n);
     };
-    document.querySelectorAll(".a-popover-inner, .a-popover-content, [id^='a-popover-content']").forEach(add);
-    document.querySelectorAll(".a-popover:not(.a-hidden), [id^='a-popover']:not(.a-hidden)").forEach(add);
+    for (const doc of reachableDocs()) {
+      doc.querySelectorAll(".a-popover-inner, .a-popover-content, [id^='a-popover-content']").forEach(add);
+      doc.querySelectorAll(".a-popover:not(.a-hidden), [id^='a-popover']:not(.a-hidden)").forEach(add);
+      const details = doc.querySelector("#find-container-content");
+      if (details) add(details);
+    }
     return out;
   }
 
   function isShown(el) {
-    if (!(el instanceof Element)) return false;
+    if (!el || el.nodeType !== 1) return false;
     if (el.closest(".a-hidden")) return false;
     const r = el.getBoundingClientRect();
     return r.width > 8 && r.height > 8;
@@ -372,22 +420,27 @@
   }
 
   function setInputValue(el, value) {
-    const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
+    const view = el.ownerDocument.defaultView || window;
+    const desc = Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, "value");
     desc.set.call(el, value);
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
+    el.dispatchEvent(new view.Event("input", { bubbles: true }));
+    el.dispatchEvent(new view.Event("change", { bubbles: true }));
   }
 
   function submitPeculiarSearch(containerId) {
-    const pecInput = document.querySelector("#searchContainerInput");
-    if (!pecInput) throw new Error("Peculiar search box not found. Open MEM3 overview or Reverse Logistics.");
+    const pecInput = findSearchInput();
+    if (!pecInput) {
+      throw new Error("Search box not found. Open AFT Aging Inventory or Peculiar MEM3 overview and leave that tab open.");
+    }
     setInputValue(pecInput, containerId);
+    const doc = pecInput.ownerDocument;
+    const view = doc.defaultView || window;
     const submit =
-      document.querySelector("#searchContainerButton input.a-button-input") ||
-      document.querySelector("#searchContainerButton .a-button-input") ||
-      document.querySelector("#searchContainerButton");
+      doc.querySelector("#searchContainerButton input.a-button-input") ||
+      doc.querySelector("#searchContainerButton .a-button-input") ||
+      doc.querySelector("#searchContainerButton");
     if (submit) submit.click();
-    else pecInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 13, bubbles: true }));
+    else pecInput.dispatchEvent(new view.KeyboardEvent("keydown", { key: "Enter", keyCode: 13, bubbles: true }));
   }
 
   function waitForPopover(containerId, ms) {
@@ -416,7 +469,11 @@
         notFoundSince = 0;
       };
       const obs = new MutationObserver(check);
-      obs.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+      for (const doc of reachableDocs()) {
+        if (doc.documentElement) {
+          obs.observe(doc.documentElement, { childList: true, subtree: true, characterData: true });
+        }
+      }
       const poll = setInterval(check, 40);
       const timer = setTimeout(() => {
         const last = scrapePopoverFor(containerId);
@@ -448,7 +505,7 @@
   }
 
   function peculiarFresh() {
-    if (isPeculiar && document.querySelector("#searchContainerInput")) return true;
+    if (findSearchInput()) return true;
     const t = Number(GM_getValue(KEYS.heartbeat, 0)) || 0;
     return Date.now() - t < HEARTBEAT_STALE_MS;
   }
@@ -460,7 +517,7 @@
       const timer = setTimeout(() => {
         if (done) return;
         done = true;
-        reject(new Error("Peculiar tab is not listening. Open Peculiar, finish Midway, leave it open."));
+        reject(new Error("Inventory tab is not listening. Open AFT Aging Inventory or Peculiar, finish Midway, leave it open."));
       }, LOOKUP_TIMEOUT_MS);
       const listenId = GM_addValueChangeListener(KEYS.response, (_n, _o, res) => {
         if (!res || res.nonce !== id || done) return;
@@ -477,8 +534,21 @@
     });
   }
 
+  async function waitForSearchInput(ms) {
+    const start = Date.now();
+    let input = findSearchInput();
+    while (!input && ms > 0 && Date.now() - start < ms) {
+      await sleep(200);
+      input = findSearchInput();
+    }
+    return input;
+  }
+
   async function lookup(containerId) {
-    if (isPeculiar) return searchPeculiar(containerId);
+    if (await waitForSearchInput(isPeculiar ? 4000 : 0)) return searchPeculiar(containerId);
+    if (isPeculiar && !peculiarFresh()) {
+      throw new Error("Search box #searchContainerInput was not found on this page. Open MEM3 overview, then use Copy Debug.");
+    }
     return requestLookup(containerId);
   }
 
@@ -807,6 +877,8 @@
       href: location.href,
       userAgent: navigator.userAgent,
       host,
+      inventoryHost: isPeculiar,
+      searchBox: Boolean(findSearchInput()),
       lastError,
       lastDebug,
       peculiarConnected: peculiarFresh(),
@@ -1273,12 +1345,18 @@
       queueBanner(id);
       await new Promise((r) => requestAnimationFrame(() => r()));
       try {
-        if (!isPeculiar && !peculiarFresh()) {
+        if (!isPeculiar && !findSearchInput() && !peculiarFresh()) {
           GM_openInTab(PECULIAR_URL, false);
           const waitStart = Date.now();
-          while (!peculiarFresh() && Date.now() - waitStart < 5000) await sleep(200);
+          while (!findSearchInput() && !peculiarFresh() && Date.now() - waitStart < 8000) await sleep(200);
         }
-        if (!peculiarFresh()) throw new Error("Open Peculiar, finish Midway, leave that tab open.");
+        if (!findSearchInput() && !peculiarFresh()) {
+          throw new Error(
+            isPeculiar
+              ? "Search box #searchContainerInput was not found on this page. Open MEM3 overview, then use Copy Debug."
+              : "Open AFT Aging Inventory MEM3, finish Midway, and leave that tab open."
+          );
+        }
         const result = await lookup(id);
         if (result.ok) result.containerId = result.containerId || id;
         lastDebug = {
@@ -1429,7 +1507,8 @@
 
     try {
       GM_registerMenuCommand("Open SOS folder", () => GM_openInTab(SOS_FOLDER_URL, true));
-      GM_registerMenuCommand("Open Peculiar", () => GM_openInTab(PECULIAR_URL, true));
+      GM_registerMenuCommand("Open Aging Inventory", () => GM_openInTab(AFT_URL, true));
+      GM_registerMenuCommand("Open Peculiar", () => GM_openInTab(PECULIAR_LEGACY_URL, true));
       GM_registerMenuCommand("Copy Debug", () => copyDebugText().catch(() => {}));
     } catch {
       /* optional */
@@ -1439,5 +1518,7 @@
   if (isPeculiar && isTop) {
     startPeculiarWorker();
     startScanner();
+  } else if (isPeculiar && !parentIsInventory() && document.querySelector("#searchContainerInput")) {
+    startPeculiarWorker();
   }
 })();
