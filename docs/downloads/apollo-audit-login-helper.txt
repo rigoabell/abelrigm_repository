@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Apollo Audit Login Helper
+// @name         Apollo Audit Login Helper (abelrigm)
 // @namespace    https://apollo-audit.corp.amazon.com/
 // @version      1.3.0
 // @description  Adds a lightweight runner panel to Apollo audits.
@@ -581,7 +581,7 @@
     panel.id = PANEL_ID;
     panel.innerHTML = `
       <div class="apollo-helper-header">
-        <h2 class="apollo-helper-title">Saved Logins</h2>
+        <h2 class="apollo-helper-title">Saved Logins (abelrigm)</h2>
         <p class="apollo-helper-subtitle">Press Enter to save one or many logins.</p>
         <div class="apollo-helper-progress"></div>
       </div>

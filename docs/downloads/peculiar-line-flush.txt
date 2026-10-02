@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Peculiar Line Flush
+// @name         Peculiar Line Flush (abelrigm)
 // @namespace    peculiar-line-flush
 // @version      2.7.1
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s file to the SOS Report Upload Folder.
@@ -986,7 +986,7 @@
         <div class="modal" id="modal">
           <div class="top">
             <div>
-              <div class="brand">LINE FLUSH WORKSTATION · v${VERSION}</div>
+              <div class="brand">LINE FLUSH WORKSTATION (abelrigm) · v${VERSION}</div>
               <div class="title" id="opTitle">Operator</div>
             </div>
             <div class="top-right">

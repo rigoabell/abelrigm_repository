@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         MEM3 LPN Batch Extractor
+// @name         MEM3 LPN Batch Extractor (abelrigm)
 // @namespace    https://tampermonkey.net/
 // @version      0.1.0
 // @description  Batch lookup LPNs in MEM3 and extract Product table values.
@@ -803,7 +803,7 @@
     panel.id = PANEL_ID;
 
     const title = document.createElement('h2');
-    title.textContent = 'MEM3 Batch LPN Extractor';
+    title.textContent = 'MEM3 Batch LPN Extractor (abelrigm)';
 
     const help = document.createElement('div');
     help.className = 'mem3-meta';

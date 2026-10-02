@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         MEM3 Control Tower - UPH Overlay
+// @name         MEM3 Control Tower - UPH Overlay (abelrigm)
 // @namespace    https://mem3.amazon.local/
 // @version      2.0.11
 // @description  Shows each associate's FCLM UPH next to their login on Control Tower /MEM3/assignments, inside the associate popup, as a per-line average badge, and as a floor summary in the Section/CSV/search bar.
@@ -1015,7 +1015,7 @@
         while (node.firstChild) node.removeChild(node.firstChild);
 
         node.appendChild(makeSummaryCell({
-            kicker: 'Floor',
+            kicker: 'Floor (abelrigm)',
             value: data.floorAvg > 0 ? data.floorAvg.toFixed(1) : '\u2014',
             sub: data.floorUnits.toLocaleString() + ' units  \u00b7  ' +
                 data.floorRated + '/' + data.floorStaffed + ' rated',

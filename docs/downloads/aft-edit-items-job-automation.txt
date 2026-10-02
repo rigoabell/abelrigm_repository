@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         AFT Edit Items — Job Automation
+// @name         AFT Edit Items — Job Automation (abelrigm)
 // @namespace    aft-edit-items
 // @version      0.5.3
 // @description  Automate Edit Items workflow; FCResearch golden-format input; auto-confirm; live progress; copy/export results; detects restricted / transshipment / not-in-container (incl. "another container"); keeps history across reloads; marks LPN done pre-submit so reloads can't lose it; clicks Change Container at end. Collapsible panel.
@@ -2146,7 +2146,7 @@
 
     const title = document.createElement('div');
     title.className = 'aft-edit-title';
-    title.textContent = 'Edit Items Automation v0.5.3 (turbo)';
+    title.textContent = 'Edit Items Automation v0.5.3 (turbo) (abelrigm)';
 
     const closeBtn = document.createElement('button');
     closeBtn.type = 'button';

@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         FCLM Hide Regional Banner
+// @name         FCLM Hide Regional Banner (abelrigm)
 // @namespace    https://github.com/local/fclm-down
 // @version      1.1.1
 // @description  Hide the "FCLM Regional Portals are now live" is-it-down announcement stripe
@@ -247,7 +247,7 @@
     const panel = document.createElement('div');
     panel.id = PANEL_ID;
     panel.innerHTML = `
-      <strong>FCLM Banner Hider (DEBUG)</strong>
+      <strong>FCLM Banner Hider (DEBUG) (abelrigm)</strong>
       <div id="${PANEL_ID}-status"></div>
       <button type="button" id="${PANEL_ID}-copy">Copy debug report</button>
       <button type="button" id="${PANEL_ID}-hide">Hide panel</button>

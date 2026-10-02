@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         FCLM Process Path Review
+// @name         FCLM Process Path Review (abelrigm)
 // @namespace    http://tampermonkey.net/
 // @version      2.2
 // @description  UI for FCLM Portal Time Details with Path Analysis
@@ -267,6 +267,7 @@
         return `
             <div class="custom-time-details">
                 <div class="custom-controls">
+                    <strong>Process Path Review (abelrigm)</strong>
                     <button class="custom-button" id="prevDay">Previous Day</button>
                     <button class="custom-button" id="nextDay">Next Day</button>
                     <button class="custom-button" id="today">Today</button>

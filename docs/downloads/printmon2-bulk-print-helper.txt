@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Printmon2 Bulk Print Helper
+// @name         Printmon2 Bulk Print Helper (abelrigm)
 // @namespace    rigo.printmon.bulk
 // @version      3.0
 // @match        https://drive.corp.amazon.com/documents/*/Printmon2v1_0.html*
@@ -92,7 +92,7 @@
         const btn = document.createElement('button');
 
         btn.id = 'tm-bulk-print';
-        btn.textContent = 'Bulk Print Labels';
+        btn.textContent = 'Bulk Print Labels (abelrigm)';
 
         btn.style.cssText = `
             position: fixed;

@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         IT Ticket Autofill
+// @name         IT Ticket Autofill (abelrigm)
 // @namespace    it-ticket-autofill
 // @version      1.1.9
 // @description  Auto-fill Create Incident: Other equipment, location, issue description, One Person Cannot Work.
@@ -1123,7 +1123,7 @@
         .confirm-bar.open { display: flex; flex-direction: column; }
         .confirm-msg { font-weight: 700; color: #d8ffe6; }
       </style>
-      <button class="fab" id="fab" title="IT Ticket Autofill" aria-label="Open IT Ticket Autofill">
+      <button class="fab" id="fab" title="IT Ticket Autofill (abelrigm)" aria-label="Open IT Ticket Autofill (abelrigm)">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M4 9a2 2 0 0 0 2-2h12a2 2 0 0 0 2 2v6a2 2 0 0 0-2 2H6a2 2 0 0 0-2-2V9z"></path>
           <path d="M9 8v8M15 8v8"></path>
@@ -1131,7 +1131,7 @@
       </button>
       <div class="panel" id="panel">
         <div class="body">
-          <div class="heading">IT Ticket Autofill</div>
+          <div class="heading">IT Ticket Autofill (abelrigm)</div>
           <label class="field">Location
             <input id="location" placeholder="e.g. waARE1_01_01, Column L9" />
           </label>

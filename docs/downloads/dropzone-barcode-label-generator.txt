@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Dropzone Barcode Label Generator
+// @name         Dropzone Barcode Label Generator (abelrigm)
 // @namespace    https://github.com/barcode-generator
 // @version      1.6.1
 // @description  Generate warehouse dropzone labels (Code 128, Aztec) with adjustable ratio, colored borders, and saved settings.
@@ -229,7 +229,7 @@
     <div id="dz-bg-overlay">
       <div id="dz-bg-panel">
         <header>
-          <h1>Dropzone Barcode Label Generator</h1>
+          <h1>Dropzone Barcode Label Generator (abelrigm)</h1>
           <button type="button" id="dz-bg-close" aria-label="Close">×</button>
         </header>
         <div id="dz-bg-body">

@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         FCLM Login Shift + Name Lookup
+// @name         FCLM Login Shift + Name Lookup (abelrigm)
 // @namespace    ultimate-tampermonkey
 // @version      0.1.1
 // @description  Paste logins and look up full name and shift from FCLM employee details
@@ -308,7 +308,7 @@
 
       const title = document.createElement('h2');
       title.className = 'tm-fclm-title';
-      title.textContent = 'FCLM Login Shift + Name Lookup';
+      title.textContent = 'FCLM Login Shift + Name Lookup (abelrigm)';
 
       const closeButton = document.createElement('button');
       closeButton.type = 'button';

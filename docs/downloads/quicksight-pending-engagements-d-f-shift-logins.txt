@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         QuickSight Pending Engagements D/F Shift Logins
+// @name         QuickSight Pending Engagements D/F Shift Logins (abelrigm)
 // @namespace    ultimate-tampermonkey
 // @version      0.1.2
 // @description  Copy Pending Engagements logins whose shift starts with D or F
@@ -367,7 +367,7 @@
         copyButton = document.createElement('button');
         copyButton.type = 'button';
         copyButton.className = 'qs-pending-df-button';
-        copyButton.textContent = 'Copy D/F Logins';
+        copyButton.textContent = 'Copy D/F Logins (abelrigm)';
         copyButton.addEventListener('click', async () => {
           setBusy(true);
           try {

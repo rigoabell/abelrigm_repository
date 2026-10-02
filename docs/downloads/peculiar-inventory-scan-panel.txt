@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Peculiar Inventory Scan Panel
+// @name         Peculiar Inventory Scan Panel (abelrigm)
 // @namespace    cursor.local
 // @version      0.3.0
 // @description  Centered scan panel for Peculiar Inventory container lookups
@@ -1799,7 +1799,7 @@
     panel.innerHTML = `
       <div class="tm-header">
         <div>
-          <div class="tm-title">Container Scan Panel</div>
+          <div class="tm-title">Container Scan Panel (abelrigm)</div>
           <div class="tm-subtitle">This rebuild uses only the native page search and native Next button.</div>
         </div>
         <button class="tm-btn" data-role="close-btn" type="button">Close</button>

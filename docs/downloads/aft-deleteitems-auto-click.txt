@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name        AFT DeleteItems Auto Click
+// @name        AFT DeleteItems Auto Click (abelrigm)
 // @namespace   http://tampermonkey.net/
 // @version     3.6.0
 // @description Queue containers, type them into the form, and click Continue.
@@ -875,7 +875,7 @@
 
         const title = document.createElement('div');
         title.innerHTML = `
-            <div class="tm-title">Delete Items</div>
+            <div class="tm-title">Delete Items (abelrigm)</div>
         `;
 
         toggleEl = document.createElement('button');

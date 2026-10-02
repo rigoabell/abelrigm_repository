@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         FCLM Audit Idle — Copy Debug
+// @name         FCLM Audit Idle — Copy Debug (abelrigm)
 // @namespace    https://github.com/audit-idle-time-kiosk
 // @version      1.0.0
 // @description  Collects FCLM page structure, audit table, badge lookup, and idle-time probes. Click "Copy Debug" and paste to your developer.
@@ -530,7 +530,7 @@
 
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.textContent = "Copy Debug";
+    btn.textContent = "Copy Debug (abelrigm)";
     btn.setAttribute("data-fclm-copy-debug-btn", "1");
     btn.title = "Copy FCLM debug JSON for developer analysis";
     Object.assign(btn.style, {

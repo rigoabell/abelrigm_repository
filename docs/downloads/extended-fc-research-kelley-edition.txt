@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Extended FC Research - Kelley Edition
+// @name         Extended FC Research - Kelley Edition (abelrigm)
 // @version      1.4.36
 // @author       joergri
 // @include      http*://fcresearch-*.aka.amazon.com/*/results*
@@ -240,7 +240,7 @@
                 //Komunikaty
                 const locale = ['', //0
                                 '', //1
-                                'FastSolve', //2
+                                'FastSolve (abelrigm)', //2
                                 'Extension created by ', //3
                                 '', //4
                                 'Barcode Generator', //5

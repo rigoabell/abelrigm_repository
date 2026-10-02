@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         QuickSight Pending Engagements
+// @name         QuickSight Pending Engagements (abelrigm)
 // @namespace    https://github.com/ap3x/quicksight-pending-engagements
 // @version      2.5.2
 // @description  Collect AP3X and IDNM Pending Engagements; panel for clocked-in / copy logins / copy table
@@ -1755,7 +1755,7 @@
     panel.id = 'qs-pe-attr-panel';
     panel.innerHTML = `
       <div class="qs-pe-attr-head">
-        <strong>Recorded Attributes</strong>
+        <strong>Recorded Attributes (abelrigm)</strong>
         <div class="qs-pe-attr-actions">
           <button type="button" class="qstd-title-btn" data-qstd-panel="clocked-in">Keep clocked in</button>
           <button type="button" class="qstd-title-btn" data-qstd-panel="copy-logins">Copy visible logins</button>
@@ -1826,7 +1826,7 @@
     const foot = panel.querySelector('.qs-pe-attr-foot');
     if (!tbody || !foot) return;
     const title = panel.querySelector('.qs-pe-attr-head strong');
-    if (title) title.textContent = STATE.mode === 'idnm' ? 'IDNM Engagements' : 'Recorded Attributes';
+    if (title) title.textContent = STATE.mode === 'idnm' ? 'IDNM Engagements (abelrigm)' : 'Recorded Attributes (abelrigm)';
     const headCells = panel.querySelectorAll('thead th');
     currentMode().panelHeaders.forEach((label, i) => {
       if (headCells[i]) headCells[i].textContent = label;

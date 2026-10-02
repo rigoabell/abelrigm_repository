@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         FCResearch Container Rows / LPNs / Consumers
+// @name         FCResearch Container Rows / LPNs / Consumers (abelrigm)
 // @namespace    ultimate-tampermonkey
 // @version      1.6.3
 // @description  Paste container IDs (MEM3), see rows/LPNs/consumers with pie charts, dashboard, export, persistence, and per-consumer copy actions
@@ -1428,7 +1428,7 @@
       header.className = 'tm-fcs-header';
       const title = document.createElement('h2');
       title.className = 'tm-fcs-title';
-      title.textContent = 'Container rows & consumers';
+      title.textContent = 'Container rows & consumers (abelrigm)';
       const sub = document.createElement('span');
       sub.className = 'tm-fcs-sub';
       sub.textContent = `${defaultSite} · v${scriptVersion}`;

@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Liquidation Sort Helper
+// @name         Liquidation Sort Helper (abelrigm)
 // @namespace    https://github.com/liquidation-sort
 // @version      2.2.7
 // @description  Automates Amazon Sort Tool liquidation sorting with strong state guards and debug tooling
@@ -2615,7 +2615,7 @@
         <button class="lsh-btn-start" id="lsh-resume-btn">Resume</button>
       </div>
       <div class="lsh-header">
-        <h3>Liquidation Sort Helper v${SCRIPT_VERSION}</h3>
+        <h3>Liquidation Sort Helper (abelrigm) v${SCRIPT_VERSION}</h3>
         <span class="lsh-status" id="lsh-current-label">—</span>
         <button class="lsh-btn-start" id="lsh-start">Start</button>
         <button class="lsh-btn-stop" id="lsh-stop">Stop</button>

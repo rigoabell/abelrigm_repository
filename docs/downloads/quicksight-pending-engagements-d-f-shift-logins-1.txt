@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         QuickSight Pending Engagements D/F Shift Logins
+// @name         QuickSight Pending Engagements D/F Shift Logins (abelrigm)
 // @namespace    https://github.com/ap3x/quicksight-pending-engagements
 // @version      1.3.1
 // @description  Pending Engagements (Click Me To Load Content) — auto-collect, copy logins, copy debug
@@ -1178,6 +1178,7 @@
       wrap = document.createElement('span');
       wrap.className = 'qstd-click-title-btns';
       wrap.innerHTML = `
+        <span style="font-weight:700">AP3X (abelrigm)</span>
         <button type="button" class="qstd-click-title-btn" data-qstd-click-copy="all" title="AP3X Click v${SCRIPT.version}">Copy All Logins</button>
         <button type="button" class="qstd-click-title-btn" data-qstd-click-copy="df" title="AP3X Click v${SCRIPT.version} — DL, DN, FL shifts">Copy D/F Logins</button>
         <button type="button" class="qstd-click-title-btn qstd-click-title-btn--debug" data-qstd-click-copy="debug" title="AP3X Click v${SCRIPT.version}">Copy Debug</button>

@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Gravis – LPN Activity Batch Lookup
+// @name         Gravis – LPN Activity Batch Lookup (abelrigm)
 // @namespace    gravis-tools
 // @version      1.8.2
 // @description  Gravis: batch by LPN or container (MEM3→LPN→grading). FCResearch: copy LPN column header.
@@ -1965,7 +1965,7 @@
     launcher = document.createElement('button');
     launcher.type = 'button';
     launcher.id = LAUNCHER_ID;
-    launcher.textContent = 'Gravis batch';
+    launcher.textContent = 'Gravis batch (abelrigm)';
     launcher.title = 'Open Gravis LPN batch panel';
     launcher.addEventListener('click', onOpen);
     document.body.appendChild(launcher);
@@ -2005,7 +2005,7 @@
     panel.id = PANEL_ID;
     panel.innerHTML = `
       <header class="gravis-batch-header">
-        <strong>Gravis LPN batch</strong>
+        <strong>Gravis LPN batch (abelrigm)</strong>
         <span class="gravis-batch-sub">side-nav-${MIN_SIDE_NAV}+ · MEM3 ${MEM3_PARALLEL}× · Gravis ${GRAVIS_PARALLEL}×</span>
         <button type="button" class="gravis-batch-min" title="Minimize">−</button>
         <button type="button" class="gravis-batch-close" title="Close panel">×</button>
