@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Amazon Login Photo Lookup
+// @name         Amazon Login Photo Lookup (abelrigm)
 // @namespace    ultimate-tampermonkey
 // @version      0.9.3
 // @description  Look up Amazon employees in FCLM and view badge photos, names, badge numbers, and shifts in cards or a table
@@ -1324,7 +1324,7 @@
 
       const title = document.createElement('h2');
       title.className = 'tm-photo-title';
-      title.textContent = 'FCLM Employee Photo Lookup — v0.9.3';
+      title.textContent = 'FCLM Employee Photo Lookup — v0.9.3 (abelrigm)';
 
       const closeButton = document.createElement('button');
       closeButton.type = 'button';

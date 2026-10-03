@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         List Tote - Batch Scanner
+// @name         List Tote - Batch Scanner (abelrigm)
 // @namespace    https://wd-repair-portal-na.aka.amazon.com/
 // @version      0.7.1
 // @description  Paste tote IDs, run a batch scan, capture each #destination and #units-count, export TSV. Auto-resume across page refreshes.
@@ -397,7 +397,7 @@
     wrap.innerHTML = `
       <header>
         <span class="dot"></span>
-        <span class="title">List Tote Batch</span>
+        <span class="title">List Tote Batch (abelrigm)</span>
         <span class="ver">v0.7.1</span>
         <span class="spacer"></span>
         <span class="min" id="lta-min" title="Toggle">–</span>

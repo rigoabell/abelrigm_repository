@@ -71,6 +71,12 @@
       font-family: inherit;
     }
 
+    #${SCRIPT_ID} .ct-title {
+      font-weight: 700;
+      font-size: 14px;
+      margin: 0 0 8px;
+    }
+
     #${SCRIPT_ID} .ct-row {
       display: flex;
       align-items: stretch;
@@ -1100,6 +1106,7 @@
     const panel = document.createElement('div');
     panel.id = SCRIPT_ID;
     panel.innerHTML = `
+      <div class="ct-title">Login Finder (abelrigm)</div>
       <div class="ct-row">
         <textarea id="${SCRIPT_ID}-logins" placeholder="Paste logins (one per line or comma-separated)">${escapeHtml(
           saved.logins || ''

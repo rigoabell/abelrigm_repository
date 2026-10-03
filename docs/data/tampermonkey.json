@@ -1,69 +1,69 @@
 [
   {
     "id": "aft-deleteitems-auto-click",
-    "name": "AFT DeleteItems Auto Click",
+    "name": "AFT DeleteItems Auto Click (abelrigm)",
     "category": "AFT",
     "summary": "Queue container IDs and click through AFT Delete Items.",
     "detail": "Paste a queue of containers on the AFT Delete Items page. The script types each one into the form and clicks Continue, and it remembers the queue across reloads.",
     "version": "3.6.0",
     "runsOn": "aft-qt-na.aka.amazon.com, qt.na.aftx.amazonoperations.app",
     "file": "downloads/aft-deleteitems-auto-click.txt",
-    "downloadName": "AFT DeleteItems Auto Click.txt"
+    "downloadName": "AFT DeleteItems Auto Click (abelrigm).txt"
   },
   {
     "id": "aft-edit-items-job-automation",
-    "name": "AFT Edit Items — Job Automation",
+    "name": "AFT Edit Items — Job Automation (abelrigm)",
     "category": "AFT",
     "summary": "Walk an Edit Items job from a golden-format LPN list.",
     "detail": "Takes the FC Research golden-format list and runs the AFT Edit Items workflow, including confirmations, Change Container, and a live progress log. It records restricted, transshipment, and not-in-container results, and marks an LPN done before submit so a reload does not lose it.",
     "version": "0.5.3",
     "runsOn": "aft-qt-na.aka.amazon.com, qt.na.aftx.amazonoperations.app, qt.eu.aftx.amazonoperations.app, qt.fe.aftx.amazonoperations.app",
     "file": "downloads/aft-edit-items-job-automation.txt",
-    "downloadName": "AFT Edit Items — Job Automation.txt"
+    "downloadName": "AFT Edit Items — Job Automation (abelrigm).txt"
   },
   {
     "id": "lpn-deleter",
-    "name": "LPN Deleter",
+    "name": "LPN Deleter (abelrigm)",
     "category": "AFT",
     "summary": "A collapsible panel for deleting LPNs on AFT Delete Items.",
     "detail": "Adds a panel on the Delete Items page and remembers whether it was open or closed. The LPN list you are working through can be copied from the panel.",
     "version": "2.6",
     "runsOn": "aft-qt-na.aka.amazon.com, qt.na.aftx.amazonoperations.app",
     "file": "downloads/lpn-deleter.txt",
-    "downloadName": "LPN Deleter.txt"
+    "downloadName": "LPN Deleter (abelrigm).txt"
   },
   {
     "id": "apollo-audit-login-helper",
-    "name": "Apollo Audit Login Helper",
+    "name": "Apollo Audit Login Helper (abelrigm)",
     "category": "Apollo",
     "summary": "Add a runner panel on a new Apollo audit.",
     "detail": "On Apollo's new-audit page, adds a panel for stepping through the audit instead of filling the form by hand.",
     "version": "1.3.0",
     "runsOn": "apollo-audit.corp.amazon.com",
     "file": "downloads/apollo-audit-login-helper.txt",
-    "downloadName": "Apollo Audit Login Helper.txt"
+    "downloadName": "Apollo Audit Login Helper (abelrigm).txt"
   },
   {
     "id": "apollo-audit-login-helper-28796",
-    "name": "Apollo Audit Login Helper 28796",
+    "name": "Apollo Audit Login Helper 28796 (abelrigm)",
     "category": "Apollo",
     "summary": "Runner panel aimed at Apollo audit 28796.",
     "detail": "Same kind of panel as the general Apollo helper, set up for audit 28796 on the new-audit page.",
     "version": "1.0.1",
     "runsOn": "apollo-audit.corp.amazon.com",
     "file": "downloads/apollo-audit-login-helper-28796.txt",
-    "downloadName": "Apollo Audit Login Helper 28796.txt"
+    "downloadName": "Apollo Audit Login Helper 28796 (abelrigm).txt"
   },
   {
     "id": "apollo-audit-login-helper-29836",
-    "name": "Apollo Audit Login Helper 29836",
+    "name": "Apollo Audit Login Helper 29836 (abelrigm)",
     "category": "Apollo",
     "summary": "Fill Apollo audit 29836 from a pasted QuickSight table.",
     "detail": "Paste a QuickSight table of login, attribute, and percent. The panel fills audit 29836, completes the remaining fields, and can submit the audit.",
     "version": "1.2.1",
     "runsOn": "apollo-audit.corp.amazon.com",
     "file": "downloads/apollo-audit-login-helper-29836.txt",
-    "downloadName": "Apollo Audit Login Helper 29836.txt"
+    "downloadName": "Apollo Audit Login Helper 29836 (abelrigm).txt"
   },
   {
     "id": "control-tower-login-finder-abelrigm",
@@ -78,212 +78,212 @@
   },
   {
     "id": "mem3-control-tower-line-pairs",
-    "name": "MEM3 Control Tower - Line Pairs",
+    "name": "MEM3 Control Tower - Line Pairs (abelrigm)",
     "category": "Control Tower",
     "summary": "Place similarly named groups side by side inside each department.",
     "detail": "On MEM3 assignments, groups whose names are at least 95% similar sit on one row. The rest stack alone. Cards share the same height and width, and the layout updates only when the grouping changes.",
     "version": "1.4.1",
     "runsOn": "beta.control-tower.meta.amazon.dev, control-tower.meta.amazon.dev",
     "file": "downloads/mem3-control-tower-line-pairs.txt",
-    "downloadName": "MEM3 Control Tower - Line Pairs.txt"
+    "downloadName": "MEM3 Control Tower - Line Pairs (abelrigm).txt"
   },
   {
     "id": "mem3-control-tower-uph-overlay",
-    "name": "MEM3 Control Tower - UPH Overlay",
+    "name": "MEM3 Control Tower - UPH Overlay (abelrigm)",
     "category": "Control Tower",
     "summary": "Show each associate's FCLM units per hour next to their login.",
     "detail": "On MEM3 assignments, units per hour appear beside the login, inside the associate popup, as a per-line average, and as a floor summary in the section bar.",
     "version": "2.0.11",
     "runsOn": "beta.control-tower.meta.amazon.dev, control-tower.meta.amazon.dev",
     "file": "downloads/mem3-control-tower-uph-overlay.txt",
-    "downloadName": "MEM3 Control Tower - UPH Overlay.txt"
+    "downloadName": "MEM3 Control Tower - UPH Overlay (abelrigm).txt"
   },
   {
     "id": "fc-menu-secure-login-helper",
-    "name": "FC Menu secure login helper",
+    "name": "FC Menu secure login helper (abelrigm)",
     "category": "FC Menu",
     "summary": "Send FC Menu from the basic login to the secure login and fill the form.",
     "detail": "On FC Menu, redirects the openid/basic login to secure/login, then fills badge, password, and location and answers the survey. The badge and password were removed from this download.",
     "version": "1.3.1",
     "runsOn": "fcmenu-*.corp.amazon.com",
     "file": "downloads/fc-menu-secure-login-helper.txt",
-    "downloadName": "FC Menu secure login helper.txt"
+    "downloadName": "FC Menu secure login helper (abelrigm).txt"
   },
   {
     "id": "fc-quality-inventory-adjustments-week-filter-mem3",
-    "name": "FC Quality — inventory adjustments week filter (MEM3)",
+    "name": "FC Quality — inventory adjustments week filter (MEM3) (abelrigm)",
     "category": "FC Quality",
     "summary": "Set the inventory-adjustments filter to the current Sunday–Saturday week.",
     "detail": "On FC Quality inventory adjustments, one button sets the start and end dates to the current week and selects MEM3 when that site control is present, then applies the filter.",
     "version": "1.1.0",
     "runsOn": "fcquality.amazon.com",
     "file": "downloads/fc-quality-inventory-adjustments-week-filter-mem3.txt",
-    "downloadName": "FC Quality — inventory adjustments week filter (MEM3).txt"
+    "downloadName": "FC Quality — inventory adjustments week filter (MEM3) (abelrigm).txt"
   },
   {
     "id": "extended-fc-research-kelley-edition",
-    "name": "Extended FC Research - Kelley Edition",
+    "name": "Extended FC Research - Kelley Edition (abelrigm)",
     "category": "FC Research",
     "summary": "Add process path, condition, and dwell time to FC Research shipment results.",
     "detail": "Extends FC Research result pages with process path, condition, and dwell time by customer shipment. This is the Kelley Edition of that research layout.",
     "version": "1.4.36",
     "runsOn": "fcresearch-*.aka.amazon.com, qi-fcresearch-na.corp.amazon.com, qifcr.na.aftx.amazonoperations.app",
     "file": "downloads/extended-fc-research-kelley-edition.txt",
-    "downloadName": "Extended FC Research - Kelley Edition.txt"
+    "downloadName": "Extended FC Research - Kelley Edition (abelrigm).txt"
   },
   {
     "id": "fcresearch-container-rows-lpns-consumers",
-    "name": "FCResearch Container Rows / LPNs / Consumers",
+    "name": "FCResearch Container Rows / LPNs / Consumers (abelrigm)",
     "category": "FC Research",
     "summary": "Paste container IDs and see rows, LPNs, and consumers.",
     "detail": "Shows container rows, LPNs, and consumers with pie charts, a dashboard, export, and a copy action per consumer. The panel keeps its state.",
     "version": "1.6.3",
     "runsOn": "qi-fcresearch-na.corp.amazon.com, qi-fcresearch-eu.corp.amazon.com, qi-fcresearch-fe.corp.amazon.com",
     "file": "downloads/fcresearch-container-rows-lpns-consumers.txt",
-    "downloadName": "FCResearch Container Rows / LPNs / Consumers.txt"
+    "downloadName": "FCResearch Container Rows / LPNs / Consumers (abelrigm).txt"
   },
   {
     "id": "fcresearch-lpn-extractor",
-    "name": "FCResearch LPN Extractor",
+    "name": "FCResearch LPN Extractor (abelrigm)",
     "category": "FC Research",
     "summary": "Collect LPNs from containers into the format AFT Edit Items expects.",
     "detail": "Search containers on FC Research and copy a golden-format LPN list ready to paste into AFT Edit Items. The panel collapses.",
     "version": "0.7.3",
     "runsOn": "qi-fcresearch-na.corp.amazon.com, qifcr.na.aftx.amazonoperations.app, qifcr.eu.aftx.amazonoperations.app, qifcr.fe.aftx.amazonoperations.app",
     "file": "downloads/fcresearch-lpn-extractor.txt",
-    "downloadName": "FCResearch LPN Extractor.txt"
+    "downloadName": "FCResearch LPN Extractor (abelrigm).txt"
   },
   {
     "id": "fcresearch-mem3-copy-lpns",
-    "name": "FCResearch MEM3 – Copy LPNs",
+    "name": "FCResearch MEM3 – Copy LPNs (abelrigm)",
     "category": "FC Research",
     "summary": "Copy every LPN in the MEM3 results table.",
     "detail": "Adds a Copy button on the LPN column header. One click copies all LPNs, one per line.",
     "version": "1.0.0",
     "runsOn": "qi-fcresearch-na.corp.amazon.com, qifcr.na.aftx.amazonoperations.app, qifcr.eu.aftx.amazonoperations.app, qifcr.fe.aftx.amazonoperations.app",
     "file": "downloads/fcresearch-mem3-copy-lpns.txt",
-    "downloadName": "FCResearch MEM3 – Copy LPNs.txt"
+    "downloadName": "FCResearch MEM3 – Copy LPNs (abelrigm).txt"
   },
   {
     "id": "fcresearch-site-finder",
-    "name": "FCResearch Site Finder",
+    "name": "FCResearch Site Finder (abelrigm)",
     "category": "FC Research",
     "summary": "Check which sites a container or LPN exists in, with optional MEM3 detail.",
     "detail": "A side panel runs a multi-site existence check and can add MEM3 inventory detail: LPN, disposition, and consumer. Results stay in local storage.",
     "version": "0.16.2",
     "runsOn": "qi-fcresearch-na.corp.amazon.com, qi-fcresearch-eu.corp.amazon.com, qi-fcresearch-fe.corp.amazon.com",
     "file": "downloads/fcresearch-site-finder.txt",
-    "downloadName": "FCResearch Site Finder.txt"
+    "downloadName": "FCResearch Site Finder (abelrigm).txt"
   },
   {
     "id": "gravis-lpn-activity-batch-lookup",
-    "name": "Gravis – LPN Activity Batch Lookup",
+    "name": "Gravis – LPN Activity Batch Lookup (abelrigm)",
     "category": "FC Research",
     "summary": "Batch-lookup LPN activity in Gravis, or copy the LPN column from FC Research.",
     "detail": "In Gravis, run a batch by LPN or by container, from MEM3 through LPN to grading. On FC Research, copy the LPN column from the header.",
     "version": "1.8.2",
     "runsOn": "na-cretfc-tools-iad.iad.proxy.amazon.com, qi-fcresearch-na.corp.amazon.com, qifcr.na.aftx.amazonoperations.app, qifcr.eu.aftx.amazonoperations.app, qifcr.fe.aftx.amazonoperations.app",
     "file": "downloads/gravis-lpn-activity-batch-lookup.txt",
-    "downloadName": "Gravis – LPN Activity Batch Lookup.txt"
+    "downloadName": "Gravis – LPN Activity Batch Lookup (abelrigm).txt"
   },
   {
     "id": "mem3-lpn-batch-extractor",
-    "name": "MEM3 LPN Batch Extractor",
+    "name": "MEM3 LPN Batch Extractor (abelrigm)",
     "category": "FC Research",
     "summary": "Look up a batch of LPNs in MEM3 and copy the product table.",
     "detail": "Paste LPNs, run them through MEM3 results, and extract the Product table values.",
     "version": "0.1.0",
     "runsOn": "qi-fcresearch-na.corp.amazon.com",
     "file": "downloads/mem3-lpn-batch-extractor.txt",
-    "downloadName": "MEM3 LPN Batch Extractor.txt"
+    "downloadName": "MEM3 LPN Batch Extractor (abelrigm).txt"
   },
   {
     "id": "amazon-login-photo-lookup",
-    "name": "Amazon Login Photo Lookup",
+    "name": "Amazon Login Photo Lookup (abelrigm)",
     "category": "FCLM",
     "summary": "Look up an Amazon login and show the badge photo, name, and shift.",
     "detail": "Paste logins and the script asks FCLM for the matching employee. Results show as cards or a table with the badge photo, name, badge number, and shift.",
     "version": "0.9.3",
     "runsOn": "Amazon pages, using FCLM for the lookup",
     "file": "downloads/amazon-login-photo-lookup.txt",
-    "downloadName": "Amazon Login Photo Lookup.txt"
+    "downloadName": "Amazon Login Photo Lookup (abelrigm).txt"
   },
   {
     "id": "fclm-audit-idle-copy-debug",
-    "name": "FCLM Audit Idle — Copy Debug",
+    "name": "FCLM Audit Idle — Copy Debug (abelrigm)",
     "category": "FCLM",
     "summary": "Copy a debug dump of the audit table, badge lookup, and idle-time probes.",
     "detail": "On Function Rollup and time details, collects how the page, audit table, and idle-time lookup are structured. Copy Debug is there for when the idle-time parse needs a fix.",
     "version": "1.0.0",
     "runsOn": "fclm-portal.amazon.com",
     "file": "downloads/fclm-audit-idle-copy-debug.txt",
-    "downloadName": "FCLM Audit Idle — Copy Debug.txt"
+    "downloadName": "FCLM Audit Idle — Copy Debug (abelrigm).txt"
   },
   {
     "id": "fclm-clock-status-checker",
-    "name": "FCLM Clock Status Checker",
+    "name": "FCLM Clock Status Checker (abelrigm)",
     "category": "FCLM",
     "summary": "Check whether a list of logins is clocked in.",
     "detail": "Paste logins on FCLM. The script reads time details for each one and reports clock status, with a debug copy if a row does not parse.",
     "version": "1.3.0",
     "runsOn": "fclm-portal.amazon.com",
     "file": "downloads/fclm-clock-status-checker.txt",
-    "downloadName": "FCLM Clock Status Checker.txt"
+    "downloadName": "FCLM Clock Status Checker (abelrigm).txt"
   },
   {
     "id": "fclm-clock-status-checker-1",
-    "name": "FCLM Clock Status Checker (1)",
+    "name": "FCLM Clock Status Checker (1) (abelrigm)",
     "category": "FCLM",
     "summary": "Second export of FCLM Clock Status Checker. The script text is the same.",
     "detail": "Tampermonkey exported this under a duplicate name. The source matches FCLM Clock Status Checker.",
     "version": "1.3.0",
     "runsOn": "fclm-portal.amazon.com",
     "file": "downloads/fclm-clock-status-checker-1.txt",
-    "downloadName": "FCLM Clock Status Checker (1).txt"
+    "downloadName": "FCLM Clock Status Checker (1) (abelrigm).txt"
   },
   {
     "id": "fclm-copy-logins-idle-dashboard",
-    "name": "FCLM Copy Logins + Idle + Dashboard",
+    "name": "FCLM Copy Logins + Idle + Dashboard (abelrigm)",
     "category": "FCLM",
     "summary": "Copy login and idle time from Function Rollup and open a small dashboard.",
     "detail": "On Function Rollup, copies each login with idle time and embeds a dashboard where you can pick associates and sort by idle-time percent.",
     "version": "4.3",
     "runsOn": "fclm-portal.amazon.com",
     "file": "downloads/fclm-copy-logins-idle-dashboard.txt",
-    "downloadName": "FCLM Copy Logins + Idle + Dashboard.txt"
+    "downloadName": "FCLM Copy Logins + Idle + Dashboard (abelrigm).txt"
   },
   {
     "id": "fclm-function-rollup-shift-value-table",
-    "name": "FCLM Function Rollup Shift Value Table",
+    "name": "FCLM Function Rollup Shift Value Table (abelrigm)",
     "category": "FCLM",
     "summary": "Turn one Function Rollup value into day and night tables over a date range.",
     "detail": "Capture a value on Function Rollup, then the script builds day-shift and night-shift tables across the dates you choose.",
     "version": "0.1.5",
     "runsOn": "fclm-portal.amazon.com",
     "file": "downloads/fclm-function-rollup-shift-value-table.txt",
-    "downloadName": "FCLM Function Rollup Shift Value Table.txt"
+    "downloadName": "FCLM Function Rollup Shift Value Table (abelrigm).txt"
   },
   {
     "id": "fclm-hide-is-it-down-banners",
-    "name": "FCLM Hide Is-It-Down Banners",
+    "name": "FCLM Hide Is-It-Down Banners (abelrigm)",
     "category": "FCLM",
     "summary": "Hide FCLM announcement stripes for outages and regional portals.",
     "detail": "Removes the is-it-down, reduced-capacity, and regional-portal banners so the report underneath stays visible.",
     "version": "1.0.0",
     "runsOn": "fclm-portal.amazon.com and the FCLM proxy hosts",
     "file": "downloads/fclm-hide-is-it-down-banners.txt",
-    "downloadName": "FCLM Hide Is-It-Down Banners.txt"
+    "downloadName": "FCLM Hide Is-It-Down Banners (abelrigm).txt"
   },
   {
     "id": "fclm-hide-regional-banner",
-    "name": "FCLM Hide Regional Banner",
+    "name": "FCLM Hide Regional Banner (abelrigm)",
     "category": "FCLM",
     "summary": "Hide the regional-portals announcement stripe.",
     "detail": "A narrower banner hider. It only removes the stripe that says the FCLM regional portals are now live.",
     "version": "1.1.1",
     "runsOn": "Amazon pages, including FCLM",
     "file": "downloads/fclm-hide-regional-banner.txt",
-    "downloadName": "FCLM Hide Regional Banner.txt"
+    "downloadName": "FCLM Hide Regional Banner (abelrigm).txt"
   },
   {
     "id": "fclm-login-idle-time-abelrigm",
@@ -298,244 +298,244 @@
   },
   {
     "id": "fclm-login-shift-name-lookup",
-    "name": "FCLM Login Shift + Name Lookup",
+    "name": "FCLM Login Shift + Name Lookup (abelrigm)",
     "category": "FCLM",
     "summary": "Paste logins and get each person's full name and shift.",
     "detail": "Looks up FCLM employee details for a pasted login list and returns full name and shift, ready to copy.",
     "version": "0.1.1",
     "runsOn": "fclm-portal.amazon.com",
     "file": "downloads/fclm-login-shift-name-lookup.txt",
-    "downloadName": "FCLM Login Shift + Name Lookup.txt"
+    "downloadName": "FCLM Login Shift + Name Lookup (abelrigm).txt"
   },
   {
     "id": "fclm-portal-table-copy-nav",
-    "name": "FCLM Portal — Table Copy + Nav",
+    "name": "FCLM Portal — Table Copy + Nav (abelrigm)",
     "category": "FCLM",
     "summary": "Add side navigation on FCLM and copy tools on Function Rollup tables.",
     "detail": "A side nav is injected on FCLM pages. Function Rollup reports also get table-copy actions.",
     "version": "0.8.1",
     "runsOn": "fclm-portal.amazon.com",
     "file": "downloads/fclm-portal-table-copy-nav.txt",
-    "downloadName": "FCLM Portal — Table Copy + Nav.txt"
+    "downloadName": "FCLM Portal — Table Copy + Nav (abelrigm).txt"
   },
   {
     "id": "fclm-process-path-review",
-    "name": "FCLM Process Path Review",
+    "name": "FCLM Process Path Review (abelrigm)",
     "category": "FCLM",
     "summary": "Review process paths from FCLM time details.",
     "detail": "A panel on FCLM time details for path analysis, so a person's process path can be reviewed without rebuilding the report by hand.",
     "version": "2.2",
     "runsOn": "fclm-portal.amazon.com",
     "file": "downloads/fclm-process-path-review.txt",
-    "downloadName": "FCLM Process Path Review.txt"
+    "downloadName": "FCLM Process Path Review (abelrigm).txt"
   },
   {
     "id": "fclm-table-inspector-ruben-2-0",
-    "name": "FCLM Table Inspector (Ruben 2.0)",
+    "name": "FCLM Table Inspector (Ruben 2.0) (abelrigm)",
     "category": "FCLM",
     "summary": "Pin Function Rollup values per tab, including live and intraday windows.",
     "detail": "Keeps a pinned value for each tab on Function Rollup. You can watch the live number or fetch an intraday window.",
     "version": "1.7.8",
     "runsOn": "fclm-portal.amazon.com, fclm-portal.amazon.com.proxy.amazon.com",
     "file": "downloads/fclm-table-inspector-ruben-2-0.txt",
-    "downloadName": "FCLM Table Inspector (Ruben 2.0).txt"
+    "downloadName": "FCLM Table Inspector (Ruben 2.0) (abelrigm).txt"
   },
   {
     "id": "double-right-click-inspector",
-    "name": "Double Right Click Inspector",
+    "name": "Double Right Click Inspector (abelrigm)",
     "category": "General",
     "summary": "Double-right-click an element to copy its HTML and locators.",
     "detail": "Works on any page. A second right-click copies the element's HTML and a locator, and a green ripple shows the click landed.",
     "version": "0.1.0",
     "runsOn": "Any page",
     "file": "downloads/double-right-click-inspector.txt",
-    "downloadName": "Double Right Click Inspector.txt"
+    "downloadName": "Double Right Click Inspector (abelrigm).txt"
   },
   {
     "id": "excel-identity-lookup",
-    "name": "Excel Identity Lookup",
+    "name": "Excel Identity Lookup (abelrigm)",
     "category": "General",
     "summary": "Check a name, login, employee ID, or badge against the open SharePoint workbook.",
     "detail": "On the SharePoint Excel file, search Name, Login, Employee ID, or Badge and report whether that value is already in the sheet.",
     "version": "1.0.0",
     "runsOn": "amazon-my.sharepoint.com",
     "file": "downloads/excel-identity-lookup.txt",
-    "downloadName": "Excel Identity Lookup.txt"
+    "downloadName": "Excel Identity Lookup (abelrigm).txt"
   },
   {
     "id": "ultimate-tampermonkey",
-    "name": "Ultimate Tampermonkey",
+    "name": "Ultimate Tampermonkey (abelrigm)",
     "category": "General",
     "summary": "A shared foundation for the QuickSight and FCLM scripts.",
     "detail": "One userscript that loads as a modular base across those sites, with saved settings and clipboard helpers the smaller dashboard scripts grew out of.",
     "version": "0.1.0",
     "runsOn": "QuickSight, FCLM, and other pages",
     "file": "downloads/ultimate-tampermonkey.txt",
-    "downloadName": "Ultimate Tampermonkey.txt"
+    "downloadName": "Ultimate Tampermonkey (abelrigm).txt"
   },
   {
     "id": "dropzone-barcode-label-generator",
-    "name": "Dropzone Barcode Label Generator",
+    "name": "Dropzone Barcode Label Generator (abelrigm)",
     "category": "Labels",
     "summary": "Build dropzone labels with Code 128 and Aztec barcodes.",
     "detail": "A panel for warehouse dropzone labels. Adjust the barcode ratio and border color, then print. Settings are saved for the next run.",
     "version": "1.6.1",
     "runsOn": "Any page",
     "file": "downloads/dropzone-barcode-label-generator.txt",
-    "downloadName": "Dropzone Barcode Label Generator.txt"
+    "downloadName": "Dropzone Barcode Label Generator (abelrigm).txt"
   },
   {
     "id": "printmon2-bulk-print-helper",
-    "name": "Printmon2 Bulk Print Helper",
+    "name": "Printmon2 Bulk Print Helper (abelrigm)",
     "category": "Labels",
     "summary": "Paste a column from Excel and print those labels in one step.",
     "detail": "On Printmon2, prompts for values copied from Excel, fills the bulk text area, and clicks Print Multiple Labels.",
     "version": "3.0",
     "runsOn": "drive.corp.amazon.com, document-versions-production.s3.us-west-2.amazonaws.com",
     "file": "downloads/printmon2-bulk-print-helper.txt",
-    "downloadName": "Printmon2 Bulk Print Helper.txt"
+    "downloadName": "Printmon2 Bulk Print Helper (abelrigm).txt"
   },
   {
     "id": "labor-tracking-relo-crets-mem3",
-    "name": "Labor Tracking - RELO, CRETs - MEM3",
+    "name": "Labor Tracking - RELO, CRETs - MEM3 (abelrigm)",
     "category": "Labor",
     "summary": "Add calm-code buttons to the labor-tracking kiosk.",
     "detail": "On the FC Menu labor-tracking kiosk, adds buttons for the RELO and CRETs calm codes used at MEM3. DUB servers are included for an EU site that asked for the same buttons.",
     "version": "1.0",
     "runsOn": "fcmenu-iad-regionalized.corp.amazon.com, fcmenu-dub-regionalized.corp.amazon.com",
     "file": "downloads/labor-tracking-relo-crets-mem3.txt",
-    "downloadName": "Labor Tracking - RELO, CRETs - MEM3.txt"
+    "downloadName": "Labor Tracking - RELO, CRETs - MEM3 (abelrigm).txt"
   },
   {
     "id": "liquidation-sort-helper",
-    "name": "Liquidation Sort Helper",
+    "name": "Liquidation Sort Helper (abelrigm)",
     "category": "Liquidation",
     "summary": "Guide a liquidation sort and stop stale-label loops. Version 1.11.8.",
     "detail": "On the customer-returns sort tool, traces the workflow and copies a debug log. This version focuses on loops where a stale sort label disagrees with the source-container scan.",
     "version": "1.11.8",
     "runsOn": "us-creturns-web.aka.amazon.com",
     "file": "downloads/liquidation-sort-helper.txt",
-    "downloadName": "Liquidation Sort Helper.txt"
+    "downloadName": "Liquidation Sort Helper (abelrigm).txt"
   },
   {
     "id": "liquidation-sort-helper-1",
-    "name": "Liquidation Sort Helper (1)",
+    "name": "Liquidation Sort Helper (1) (abelrigm)",
     "category": "Liquidation",
     "summary": "Later liquidation sort script, version 2.2.7, with stricter start and end rules.",
     "detail": "A job starts when WDSorting is accepted and ends only after the tote move succeeds and Update is clicked. The queue advances per LPN, and every branch is written to a trace you can copy.",
     "version": "2.2.7",
     "runsOn": "us-creturns-web.aka.amazon.com",
     "file": "downloads/liquidation-sort-helper-1.txt",
-    "downloadName": "Liquidation Sort Helper (1).txt"
+    "downloadName": "Liquidation Sort Helper (1) (abelrigm).txt"
   },
   {
     "id": "peculiar-inventory-scan-panel",
-    "name": "Peculiar Inventory Scan Panel",
+    "name": "Peculiar Inventory Scan Panel (abelrigm)",
     "category": "Peculiar",
     "summary": "A centered panel for Peculiar Inventory container lookups.",
     "detail": "Scan or paste containers on Peculiar Inventory and review the lookup from one panel, with copy support.",
     "version": "0.3.0",
     "runsOn": "peculiar-inventory-na.aka.corp.amazon.com",
     "file": "downloads/peculiar-inventory-scan-panel.txt",
-    "downloadName": "Peculiar Inventory Scan Panel.txt"
+    "downloadName": "Peculiar Inventory Scan Panel (abelrigm).txt"
   },
   {
     "id": "peculiar-line-flush",
-    "name": "Peculiar Line Flush",
+    "name": "Peculiar Line Flush (abelrigm)",
     "category": "Peculiar",
     "summary": "Scan a line of containers, look each up, and save the operator file.",
     "detail": "Scanning stays in the userscript. Each lookup on AFT Aging Inventory or Peculiar Inventory is saved to the SOS Report Upload folder for that operator. Copy Debug is on the panel and in the Tampermonkey menu.",
     "version": "2.8.0",
     "runsOn": "aft-aging-inventory.na.aftx.amazonoperations.app, peculiar-inventory-na.aka.corp.amazon.com",
     "file": "downloads/peculiar-line-flush.txt",
-    "downloadName": "Peculiar Line Flush.txt"
+    "downloadName": "Peculiar Line Flush (abelrigm).txt"
   },
   {
     "id": "quicksight-d-f-shift-logins",
-    "name": "QuickSight D/F Shift Logins",
+    "name": "QuickSight D/F Shift Logins (abelrigm)",
     "category": "QuickSight",
     "summary": "Copy QuickSight logins whose shift code starts with D or F.",
     "detail": "On the APEX dashboard, copies logins from the shift column when the code starts with D or F.",
     "version": "0.1.0",
     "runsOn": "us-east-1.quicksight.aws.amazon.com",
     "file": "downloads/quicksight-d-f-shift-logins.txt",
-    "downloadName": "QuickSight D/F Shift Logins.txt"
+    "downloadName": "QuickSight D/F Shift Logins (abelrigm).txt"
   },
   {
     "id": "quicksight-pending-engagements",
-    "name": "QuickSight Pending Engagements",
+    "name": "QuickSight Pending Engagements (abelrigm)",
     "category": "QuickSight",
     "summary": "Collect pending engagements and copy the logins or the table.",
     "detail": "A panel for the AP3X and IDNM pending-engagements visuals. It can limit the list to people who are clocked in, copy just the logins, or copy the whole table.",
     "version": "2.5.2",
     "runsOn": "quicksight.aws.amazon.com",
     "file": "downloads/quicksight-pending-engagements.txt",
-    "downloadName": "QuickSight Pending Engagements.txt"
+    "downloadName": "QuickSight Pending Engagements (abelrigm).txt"
   },
   {
     "id": "quicksight-pending-engagements-d-f-shift-logins",
-    "name": "QuickSight Pending Engagements D/F Shift Logins",
+    "name": "QuickSight Pending Engagements D/F Shift Logins (abelrigm)",
     "category": "QuickSight",
     "summary": "Copy pending-engagement logins on D or F shifts. Version 0.1.2.",
     "detail": "Reads the Pending Engagements visual and copies logins whose shift starts with D or F. This is the earlier, smaller script.",
     "version": "0.1.2",
     "runsOn": "us-east-1.quicksight.aws.amazon.com",
     "file": "downloads/quicksight-pending-engagements-d-f-shift-logins.txt",
-    "downloadName": "QuickSight Pending Engagements D/F Shift Logins.txt"
+    "downloadName": "QuickSight Pending Engagements D/F Shift Logins (abelrigm).txt"
   },
   {
     "id": "quicksight-pending-engagements-d-f-shift-logins-1",
-    "name": "QuickSight Pending Engagements D/F Shift Logins (1)",
+    "name": "QuickSight Pending Engagements D/F Shift Logins (1) (abelrigm)",
     "category": "QuickSight",
     "summary": "Newer pending-engagements collector, version 1.3.1.",
     "detail": "Auto-collects the Pending Engagements visual, copies logins, and copies a debug dump. It also blocks the older 0.1.2 script from adding a second button.",
     "version": "1.3.1",
     "runsOn": "us-east-1.quicksight.aws.amazon.com, quicksight.aws.amazon.com",
     "file": "downloads/quicksight-pending-engagements-d-f-shift-logins-1.txt",
-    "downloadName": "QuickSight Pending Engagements D/F Shift Logins (1).txt"
+    "downloadName": "QuickSight Pending Engagements D/F Shift Logins (1) (abelrigm).txt"
   },
   {
     "id": "ultimate-tampermonkey-debug",
-    "name": "Ultimate Tampermonkey Debug",
+    "name": "Ultimate Tampermonkey Debug (abelrigm)",
     "category": "QuickSight",
     "summary": "Debug build that captures two visuals on the APEX dashboard.",
     "detail": "Watches Pending APEX Engagements and Disposition Level Accuracy Summary and copies what it parsed, so a capture problem can be traced from the dump.",
     "version": "0.1.0",
     "runsOn": "us-east-1.quicksight.aws.amazon.com",
     "file": "downloads/ultimate-tampermonkey-debug.txt",
-    "downloadName": "Ultimate Tampermonkey Debug.txt"
+    "downloadName": "Ultimate Tampermonkey Debug (abelrigm).txt"
   },
   {
     "id": "list-tote-batch-scanner",
-    "name": "List Tote - Batch Scanner",
+    "name": "List Tote - Batch Scanner (abelrigm)",
     "category": "ReCommerce",
     "summary": "Paste tote IDs and record destination and unit count for each.",
     "detail": "On the re-commerce list-tote page, runs a batch scan, captures destination and units, and exports a TSV. It resumes after a refresh.",
     "version": "0.7.1",
     "runsOn": "wd-repair-portal-na.aka.amazon.com",
     "file": "downloads/list-tote-batch-scanner.txt",
-    "downloadName": "List Tote - Batch Scanner.txt"
+    "downloadName": "List Tote - Batch Scanner (abelrigm).txt"
   },
   {
     "id": "it-ticket-autofill",
-    "name": "IT Ticket Autofill",
+    "name": "IT Ticket Autofill (abelrigm)",
     "category": "Tickets",
     "summary": "Fill a Create Incident ticket for other equipment.",
     "detail": "Opens the incident form and fills other equipment, location, the issue description, and One Person Cannot Work.",
     "version": "1.1.9",
     "runsOn": "Any page",
     "file": "downloads/it-ticket-autofill.txt",
-    "downloadName": "IT Ticket Autofill.txt"
+    "downloadName": "IT Ticket Autofill (abelrigm).txt"
   },
   {
     "id": "rme-ticket-autofill",
-    "name": "RME Ticket Autofill",
+    "name": "RME Ticket Autofill (abelrigm)",
     "category": "Tickets",
     "summary": "Fill an RME equipment-issue ticket.",
     "detail": "On the ticket site, opens Create Ticket and fills RME, Equipment Issue, and Material Handling Equipment.",
     "version": "1.0.6",
     "runsOn": "Any page",
     "file": "downloads/rme-ticket-autofill.txt",
-    "downloadName": "RME Ticket Autofill.txt"
+    "downloadName": "RME Ticket Autofill (abelrigm).txt"
   }
 ]

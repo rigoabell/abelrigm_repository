@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         FCLM Hide Is-It-Down Banners
+// @name         FCLM Hide Is-It-Down Banners (abelrigm)
 // @namespace    https://github.com/barcode-generator
 // @version      1.0.0
 // @description  Permanently hide FCLM is-it-down / reduced-capacity / regional-portal announcement stripes.

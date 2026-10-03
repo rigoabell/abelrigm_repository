@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         FCLM Function Rollup Shift Value Table
+// @name         FCLM Function Rollup Shift Value Table (abelrigm)
 // @namespace    ultimate-tampermonkey
 // @version      0.1.5
 // @description  Capture a function rollup value and build day/night tables across a date range
@@ -888,7 +888,7 @@
 
       const title = document.createElement('h2');
       title.className = 'tm-rollup-title';
-      title.textContent = 'FCLM Function Rollup Shift Value Table';
+      title.textContent = 'FCLM Function Rollup Shift Value Table (abelrigm)';
 
       const closeButton = document.createElement('button');
       closeButton.type = 'button';

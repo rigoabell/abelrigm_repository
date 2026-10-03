@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         FCResearch LPN Extractor
+// @name         FCResearch LPN Extractor (abelrigm)
 // @namespace    fcresearch-lpn
 // @version      0.7.3
 // @description  Search MEM3 containers for LPNs and copy a golden-format list ready to paste into AFT Edit Items. Collapsible panel.
@@ -1247,7 +1247,7 @@
 
     const title = document.createElement('div');
     title.className = 'fcresearch-lpn-title';
-    title.textContent = 'FCResearch LPN Search';
+    title.textContent = 'FCResearch LPN Search (abelrigm)';
 
     const closeBtn = document.createElement('button');
     closeBtn.type = 'button';

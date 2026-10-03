@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         FCResearch MEM3 – Copy LPNs
+// @name         FCResearch MEM3 – Copy LPNs (abelrigm)
 // @namespace    gravis-tools
 // @version      1.0.0
 // @description  Adds a Copy button next to the LPN column header on MEM3 results; copies all LPNs (one per line).
@@ -94,7 +94,7 @@
     btn.type = 'button';
     btn.id = COPY_BTN_ID;
     btn.className = 'fcr-mem3-lpn-copy-btn';
-    btn.textContent = 'Copy';
+    btn.textContent = 'Copy (abelrigm)';
     btn.title = 'Copy all LPNs from this table (one per line)';
     btn.addEventListener('click', (e) => {
       e.preventDefault();

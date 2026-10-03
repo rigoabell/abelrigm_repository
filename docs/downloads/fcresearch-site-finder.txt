@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         FCResearch Site Finder
+// @name         FCResearch Site Finder (abelrigm)
 // @namespace    ultimate-tampermonkey
 // @version      0.16.2
 // @description  Side-panel tool. Multi-site existence checkmarks plus optional MEM3 inventory detail (LPN, Disposition, Consumer). Persists to localStorage.
@@ -1719,7 +1719,7 @@
     header.className = 'tm-fcsf-header';
     const title = document.createElement('h2');
     title.className = 'tm-fcsf-title';
-    title.textContent = 'FCResearch Site Finder';
+    title.textContent = 'FCResearch Site Finder (abelrigm)';
     const sub = document.createElement('span');
     sub.className = 'tm-fcsf-sub';
     sub.textContent = `region ${regionFromHost()} · v${scriptVersion}`;

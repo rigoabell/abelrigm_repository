@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         FCLM Portal — Table Copy + Nav
+// @name         FCLM Portal — Table Copy + Nav (abelrigm)
 // @namespace    https://fclm-portal.amazon.com/
 // @version      0.8.1
 // @description  Side navigation on all FCLM pages; table copy tools on Function Rollup reports.
@@ -470,7 +470,7 @@
       nav.setAttribute('aria-label', 'Page section navigation');
       nav.innerHTML = `
         <div class="fclm-side-nav-header">
-          <span class="fclm-side-nav-title">Jump to</span>
+          <span class="fclm-side-nav-title">Jump to (abelrigm)</span>
           <button type="button" class="fclm-side-nav-toggle" title="Collapse panel">›</button>
         </div>
         <div class="fclm-side-nav-body">

@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Ultimate Tampermonkey Debug
+// @name         Ultimate Tampermonkey Debug (abelrigm)
 // @namespace    ultimate-tampermonkey
 // @version      0.1.0
 // @description  Debug build for investigating Ultimate Tampermonkey behavior
@@ -16,7 +16,7 @@
 	var summaryVisualTitle = "Disposition Level Accuracy Summary";
 	var debugTask = {
 		active: true,
-		title: "QuickSight auto-capture debug",
+		title: "QuickSight auto-capture debug (abelrigm)",
 		inactiveMessage: "No debugging required right now. You can turn off this debug userscript.",
 		instructions: [
 			"Debug steps:",

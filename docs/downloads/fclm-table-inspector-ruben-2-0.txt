@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         FCLM Table Inspector (Ruben 2.0)
+// @name         FCLM Table Inspector (Ruben 2.0) (abelrigm)
 // @namespace    https://fclm-portal.amazon.com/
 // @version      1.7.8
 // @description  Per-tab pinned Function Rollup values; Live plus fetchable Intraday windows.
@@ -1099,7 +1099,7 @@
     hudEl.className = 'r20-insp-hud';
     hudEl.setAttribute('data-r20-insp-hud', '1');
     hudEl.innerHTML = `
-      <h2 title="Each tab has its own pins. Live reads this page once; other tabs Fetch that Intraday window for today.">Pins · Live</h2>
+      <h2 title="Each tab has its own pins. Live reads this page once; other tabs Fetch that Intraday window for today.">Pins · Live (abelrigm)</h2>
       <div data-tabs></div>
       <div class="r20-insp-tab-meta" data-tab-meta></div>
       <div data-tab-form></div>
@@ -1357,7 +1357,7 @@
       })
       .join('');
     tabs.innerHTML = `<button type="button" class="r20-insp-tab${ui.tab === LIVE_TAB ? ' on' : ''}" data-tab="${LIVE_TAB}">Live</button>${presetBtns}<button type="button" class="r20-insp-tab-add" data-tab-add>+</button>`;
-    if (heading) heading.textContent = `Pins · ${tabTitle()}`;
+    if (heading) heading.textContent = `Pins · ${tabTitle()} (abelrigm)`;
     const n = loadPins().length;
     const pinWord = n === 1 ? '1 pin' : `${n} pins`;
     if (ui.tab === LIVE_TAB) {

@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Double Right Click Inspector
+// @name         Double Right Click Inspector (abelrigm)
 // @namespace    ultimate-tampermonkey
 // @version      0.1.0
 // @description  Copy element HTML and locators on double right click with a green ripple confirmation

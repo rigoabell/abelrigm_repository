@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Liquidation Sort Helper
+// @name         Liquidation Sort Helper (abelrigm)
 // @namespace    https://github.com/liquidation-sort
 // @version      1.11.8
 // @description  Workflow trace in Copy Debug; fix loops (stale sort label vs source scan).
@@ -4519,7 +4519,7 @@ tsLIQ943845\tLPNND6JXLH4FD`;
 
     const title = document.createElement('span');
     title.className = 'ls-title';
-    title.textContent = 'Liquidation Sort';
+    title.textContent = 'Liquidation Sort (abelrigm)';
 
     const startBtn = document.createElement('button');
     startBtn.type = 'button';

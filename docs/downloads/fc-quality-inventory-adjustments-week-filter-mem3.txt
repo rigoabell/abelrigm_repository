@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         FC Quality — inventory adjustments week filter (MEM3)
+// @name         FC Quality — inventory adjustments week filter (MEM3) (abelrigm)
 // @namespace    https://github.com/local/fcquality-week-filter
 // @version      1.1.0
 // @description  Button sets start/end dates to current Sun–Sat week, MEM3 when possible; Apply Filter + debug copy.
@@ -221,7 +221,7 @@
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.id = 'fcq-week-this-week-btn';
-    btn.textContent = 'This week (Sun–Sat)';
+    btn.textContent = 'This week (Sun–Sat) (abelrigm)';
     btn.title = 'Open filters, set dates to current week, MEM3 if listed, Apply Filter';
     btn.style.cssText =
       'cursor:pointer;font-size:13px;padding:6px 12px;border-radius:8px;border:1px solid #1a5f4a;background:#0f766e;color:#fff;font-weight:600;';

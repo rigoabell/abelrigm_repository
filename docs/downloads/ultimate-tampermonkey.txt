@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Ultimate Tampermonkey
+// @name         Ultimate Tampermonkey (abelrigm)
 // @namespace    ultimate-tampermonkey
 // @version      0.1.0
 // @description  Modular multi-site Tampermonkey foundation
@@ -689,7 +689,7 @@
 			panel.className = "ut-fclm-launcher-panel";
 			panel.dataset.open = "false";
 			header.className = "ut-fclm-launcher-header";
-			title.textContent = "Process Launcher";
+			title.textContent = "Process Launcher (abelrigm)";
 			title.className = "ut-fclm-launcher-title";
 			shiftText.className = "ut-fclm-launcher-shift";
 			closeButton.className = "ut-fclm-launcher-button";
@@ -1111,7 +1111,7 @@
 		panel.dataset.utFclmIdlePanel = "true";
 		header.className = "ut-fclm-idle-header";
 		title.className = "ut-fclm-idle-title";
-		title.textContent = "Idle time";
+		title.textContent = "Idle time (abelrigm)";
 		actionGroup.className = "ut-fclm-idle-actions";
 		refreshButton.className = "ut-fclm-action-button";
 		refreshButton.type = "button";
@@ -1784,7 +1784,7 @@
 		header.className = "ut-qs-panel-header";
 		const title = document.createElement("div");
 		title.className = "ut-qs-panel-title";
-		title.textContent = "APEX accuracy capture";
+		title.textContent = "APEX accuracy capture (abelrigm)";
 		const actions = document.createElement("div");
 		actions.className = "ut-qs-panel-actions";
 		const collapseButton = document.createElement("button");
@@ -2372,7 +2372,7 @@
 			header.className = "ut-launcher-header";
 			titleGroup.className = "ut-launcher-title-group";
 			title.className = "ut-launcher-title";
-			title.textContent = "URL Launcher";
+			title.textContent = "URL Launcher (abelrigm)";
 			subtitle.className = "ut-launcher-subtitle";
 			subtitle.textContent = "";
 			closeButton.className = "ut-launcher-button";

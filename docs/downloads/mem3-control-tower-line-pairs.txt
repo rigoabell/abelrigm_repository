@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         MEM3 Control Tower - Line Pairs
+// @name         MEM3 Control Tower - Line Pairs (abelrigm)
 // @namespace    https://mem3.amazon.local/
 // @version      1.4.1
 // @description  Inside each Department, Groups whose names are at least 95% similar sit side by side; the rest stack on their own row. All group cards share equal height and width. Layout is applied only when it changes so the page does not jump while scrolling.

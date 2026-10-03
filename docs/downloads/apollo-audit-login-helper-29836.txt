@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Apollo Audit Login Helper 29836
+// @name         Apollo Audit Login Helper 29836 (abelrigm)
 // @namespace    https://apollo-audit.corp.amazon.com/
 // @version      1.2.1
 // @description  Runner panel for Apollo audit 29836 — paste QuickSight table (login/attribute/%), random fill remaining fields, optional auto-submit.
@@ -1092,7 +1092,7 @@
     panel.id = PANEL_ID;
     panel.innerHTML = `
       <div class="apollo-helper-header">
-        <h2 class="apollo-helper-title">Saved Logins</h2>
+        <h2 class="apollo-helper-title">Saved Logins (abelrigm)</h2>
         <p class="apollo-helper-subtitle">Audit 29836 — paste the QuickSight table; it is added automatically.</p>
         <div class="apollo-helper-progress"></div>
         <div class="apollo-helper-mode">${AUTO_SUBMIT ? "Auto-submit ON" : "Manual submit (testing)"}</div>

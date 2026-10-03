@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         FCLM Copy Logins + Idle + Dashboard
+// @name         FCLM Copy Logins + Idle + Dashboard (abelrigm)
 // @namespace    https://rigo-fclm-login-idle
 // @version      4.3
 // @description  Copies login + idle time and adds an embedded dashboard with selectable associates and sortable Idle Time %.
@@ -307,7 +307,7 @@
     toolbar.style.marginBottom = "12px";
 
     const title = document.createElement("div");
-    title.textContent = "Idle Time Dashboard";
+    title.textContent = "Idle Time Dashboard (abelrigm)";
     title.style.fontWeight = "700";
     title.style.fontSize = "15px";
     title.style.marginRight = "8px";

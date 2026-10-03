@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Excel Identity Lookup
+// @name         Excel Identity Lookup (abelrigm)
 // @namespace    excel-identity-lookup
 // @version      1.0.0
 // @description  Search Name, Login, Employee ID, and Badge on the open SharePoint Excel workbook and report whether the value exists.
@@ -436,7 +436,7 @@
       <div class="panel" id="panel">
         <div class="bar">
           <div>
-            <div class="title">Identity lookup</div>
+            <div class="title">Identity lookup (abelrigm)</div>
             <div class="sub">Name · Login · Employee ID · Badge</div>
           </div>
           <button class="icon" id="toggle" title="Collapse">–</button>

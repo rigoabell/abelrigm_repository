@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name          Labor Tracking - RELO, CRETs - MEM3
+// @name          Labor Tracking - RELO, CRETs - MEM3 (abelrigm)
 // @version       1.0
 // @description   Adds Calm Code Buttons into the FCLM Labor Tracking Kiosk. Added DUB servers due to request from EU site.
 // @author        @studds edited by @evokevin
@@ -132,7 +132,7 @@ var codes = [
         ]
     },
 ];
-let toolbox = document.createElement('div'), toolboxHTML = '';
+let toolbox = document.createElement('div'), toolboxHTML = '<div class="row"><h1>Labor Tracking (abelrigm)</h1></div>';
 toolbox.id = "toolbox";
 for (let shift of codes) {
     console.log(shift);
