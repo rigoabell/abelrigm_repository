@@ -32,8 +32,9 @@
       <p class="eyebrow">Inventory</p>
       <h1>Warehouse inventory desk</h1>
       <p class="page-hero-sub">
-        Open a current-inventory CSV. The dashboard, filters, and downloads all run in this browser.
-        The file is never uploaded.
+        Open a current-inventory CSV. Average Age and Average Threshold are the ASIN’s age and threshold.
+        Approaching is 1–2 days before the threshold, At is less than 1 day before it, and DIOT is past it.
+        The file stays in this browser.
       </p>
     </div>
   </section>
@@ -79,6 +80,13 @@
                 <h2>Filters</h2>
                 <button type="button" class="btn btn-outline btn-sm hidden" id="clear-filters">Clear</button>
               </div>
+              <div class="inv-group" id="status-filter">
+                <h3>Threshold</h3>
+                <label class="inv-check"><input type="checkbox" data-status="approaching" checked /> <span><b>Approaching</b> · 1–2 days before</span></label>
+                <label class="inv-check"><input type="checkbox" data-status="at" checked /> <span><b>At</b> · less than 1 day before</span></label>
+                <label class="inv-check"><input type="checkbox" data-status="diot" checked /> <span><b>DIOT</b> · past the threshold</span></label>
+                <label class="inv-check"><input type="checkbox" data-status="early" /> <span><b>More than 2 days out</b></span></label>
+              </div>
               <label class="inv-field">ASIN contains
                 <input id="filter-asin" type="search" autocomplete="off" spellcheck="false" />
               </label>
@@ -102,16 +110,39 @@
             <div class="inv-main">
               <p id="bad-numbers" class="inv-warn hidden"></p>
               <div id="kpis" class="inv-kpis"></div>
+              <div class="card inv-table-card" id="location-card">
+                <div class="inv-table-head">
+                  <div>
+                    <h2>Outer locations</h2>
+                    <p id="location-count" class="inv-file-meta">Click a location to filter to it. Click a number to open that location and state.</p>
+                  </div>
+                </div>
+                <div class="inv-table-scroll">
+                  <table class="inv-table">
+                    <thead>
+                      <tr>
+                        <th>Outer location</th>
+                        <th class="num">Approaching</th>
+                        <th class="num">At</th>
+                        <th class="num">DIOT</th>
+                        <th class="num">More than 2 days</th>
+                      </tr>
+                    </thead>
+                    <tbody id="location-body"></tbody>
+                  </table>
+                </div>
+              </div>
               <div id="charts" class="inv-charts"></div>
 
               <div class="card inv-table-card">
                 <div class="inv-table-head">
                   <div>
-                    <h2>Lines</h2>
+                    <h2>Containers</h2>
                     <p id="table-count" class="inv-file-meta"></p>
                   </div>
                   <label class="inv-sort">Sort
                     <select id="sort-mode">
+                      <option value="before" selected>Days before threshold</option>
                       <option value="file">File order</option>
                       <option value="qty">Quantity, high to low</option>
                       <option value="age">Age, high to low</option>
@@ -123,15 +154,16 @@
                   <table class="inv-table">
                     <thead>
                       <tr>
-                        <th>ASIN</th>
+                        <th>Status</th>
+                        <th class="num">Days before</th>
                         <th>Outer location</th>
                         <th>Bin</th>
-                        <th>Owner</th>
-                        <th>Disposition</th>
-                        <th class="num">Qty</th>
+                        <th>ASIN</th>
                         <th class="num">Age</th>
                         <th class="num">Threshold</th>
-                        <th>Device</th>
+                        <th class="num">Qty</th>
+                        <th>Owner</th>
+                        <th>Disposition</th>
                       </tr>
                     </thead>
                     <tbody id="table-body"></tbody>
@@ -155,6 +187,7 @@
                   <button type="button" class="btn btn-primary" id="export-lines" data-export="lines">Filtered lines</button>
                   <button type="button" class="btn btn-outline" id="export-rollup" data-export="rollup">Location rollup</button>
                   <button type="button" class="btn btn-outline" id="export-asin" data-export="asin">ASIN rollup</button>
+                  <button type="button" class="btn btn-outline" id="export-locations" data-export="locations">Threshold by location</button>
                 </div>
                 <p id="export-status" class="inv-file-meta" aria-live="polite"></p>
               </div>
