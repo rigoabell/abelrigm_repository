@@ -52,6 +52,7 @@ code {
 .topnav-links { display: flex; gap: 22px; margin-left: 10px; }
 .topnav-links a { color: #d8dee6; font-size: 14px; font-weight: 600; padding: 6px 2px; border-bottom: 2px solid transparent; }
 .topnav-links a:hover { color: #fff; text-decoration: none; border-bottom-color: var(--orange); }
+.topnav-links a.active { color: #fff; border-bottom-color: var(--orange); }
 .topnav-actions { margin-left: auto; display: flex; align-items: center; gap: 16px; }
 .link-muted { color: #d8dee6; font-size: 14px; font-weight: 600; }
 .link-muted:hover { color: #fff; text-decoration: none; }
@@ -355,7 +356,8 @@ code {
 #admin-notes:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px rgba(35,47,62,0.08); outline: none; }
 
 @media (max-width: 780px) {
-  .topnav-links { display: none; }
+  .topnav-inner { height: auto; min-height: 60px; flex-wrap: wrap; padding-top: 8px; padding-bottom: 8px; }
+  .topnav-links { order: 3; flex: 1 0 100%; margin: 2px 0 0; overflow-x: auto; }
   .rig-panel { grid-template-columns: 1fr; padding: 22px; gap: 20px; }
   .rig-panel h2 { font-size: 26px; }
   .hero-metrics { grid-template-columns: repeat(2, 1fr); }
