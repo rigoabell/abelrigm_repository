@@ -12,6 +12,10 @@ Central hub for the work: portfolio, tools built, and notes.
 - **`docs/` — Dev Hub website** (static, GitHub Pages ready).
   - **Portfolio** lists Rig Setup (abelrigm) and 49 Tampermonkey scripts. Each script downloads as a `.txt` file.
   - **Toolkit** lists tools built and ready to download.
+  - **Inventory** opens a large inventory CSV in the browser, shows a filterable
+    dashboard, and downloads a filtered line file, a location rollup, or an ASIN
+    rollup. The file stays on the machine. Open it at
+    `https://rigoabell.github.io/abelrigm_repository/inventory/`.
   - **Rig Setup** is a project on the Portfolio page, not its own site page.
     That project installs Python, Node, and the other machine dependencies into
     the current user account (it does not ask for an administrator password), and
@@ -31,6 +35,7 @@ the app via `python3 dev-setup/build_catalog.py`.
 ```bash
 python3 -m http.server 8080 --directory docs
 # open http://127.0.0.1:8080
+# inventory desk: http://127.0.0.1:8080/inventory/
 ```
 
 ## Publish the site on GitHub Pages
