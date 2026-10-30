@@ -133,6 +133,25 @@ assert.equal(corey.diotUnits, 4);
 assert.equal(corey.approachingUnits, 1);
 assert.equal(corey.containers[0].bin, "bin-3");
 assert.equal(corey.types[0].name, "bin-");
+const dockA = summary.outer.find((row) => row.name === "Dock A");
+const scoped = assignmentPackage(whole, [{
+  kind: "type",
+  name: "bin-",
+  responder: "Corey",
+  scopeKey: "dock-a",
+  scope: {
+    allow: { "Outer Location": new Set([dockA.id]) },
+    statuses: new Set(["approaching", "at", "diot"]),
+    groupings: [],
+  },
+}], []);
+const scopedCorey = scoped.responders.find((person) => person.name === "Corey");
+assert.equal(scopedCorey.uniqueContainers, 1);
+assert.equal(scopedCorey.containers[0].outer, "Dock A");
+assert.equal(scopedCorey.containers[0].bin, "bin-1");
+assert.equal(scopedCorey.approachingUnits, 1);
+assert.equal(scopedCorey.diotUnits, 0);
+assert.equal(scopedCorey.containers.some((row) => row.outer === "Dock B"), false);
 const threshold = summary.units * INVENTORY_THRESHOLD_RATE;
 const book = new TextDecoder().decode(assignmentWorkbook(assigned, threshold));
 assert.equal(book.includes("Assignment Summaries"), false);

@@ -505,17 +505,18 @@ function renderPlace() {
   document.getElementById("mode-type").setAttribute("aria-pressed", typeMode ? "true" : "false");
   document.getElementById("group-editor").classList.toggle("hidden", !typeMode);
   const note = document.getElementById("location-count");
+  pruneSelection();
   renderAssignControls();
   renderResponderDashboard();
   if (typeMode) {
     note.textContent = containerType
-      ? "Filtered to " + containerType + ". Click it again to show every type. Check rows to assign them."
-      : "Grouped by the letters before the first number. tsX27482942 is tsX, and tsTDST34394839 is tsTDST. Check rows to assign them.";
+      ? "Filtered to " + containerType + ". Click it again to show every type. Checked rows assign only what this view includes."
+      : "Grouped by the letters before the first number. tsX27482942 is tsX, and tsTDST34394839 is tsTDST. Checked rows assign only what this view includes.";
     renderPlaceRows("type", view.containerTypes || [], "Container type", "No container types in this view.", (item) => toggleContainerType(item.name));
     renderGroupEditor();
     return;
   }
-  note.textContent = "Containers and units for the threshold states that are checked. Check rows to assign them. Click a name to filter to it.";
+  note.textContent = "Containers and units for the threshold states that are checked. Checked rows assign only what this view includes. Click a name to filter to it.";
   renderPlaceRows("location", view.locations, "Outer location", "No outer locations in this view.", (item) => isolate("Outer Location", item.id));
 }
 
@@ -599,7 +600,7 @@ function renderPlaceRows(kind, rows, nameHeader, emptyText, onOpen) {
     appendCount(row, formatQty(item.units), () => onOpen(item));
     const person = document.createElement("td");
     person.className = "inv-responder";
-    person.textContent = assignments.get(key) || "";
+    person.textContent = respondersForPlace(kind, item.name);
     row.appendChild(person);
     body.appendChild(row);
   }
@@ -839,11 +840,126 @@ function pageCount() {
   return Math.max(1, Math.ceil(total / PAGE_SIZE));
 }
 
+function assignmentRecord(value) {
+  if (value && typeof value === "object") return value;
+  return { responder: value || "", scope: null };
+}
+
+function placeStoreKey(kind, name, scope) {
+  const base = placeKey(kind, name);
+  return scope ? base + "\t" + JSON.stringify(scope) : base;
+}
+
+function scopeFromFilter(filter) {
+  if (!filter || !filtersActive(filter)) return null;
+  const allow = {};
+  for (const [column, ids] of Object.entries(filter.allow || {})) {
+    const col = dataset && dataset.byName[column];
+    if (!col || !ids) continue;
+    const names = [];
+    ids.forEach((id) => {
+      const label = col.dict[id];
+      if (label) names.push(label);
+    });
+    names.sort((a, b) => a.localeCompare(b));
+    if (names.length) allow[column] = names;
+  }
+  return {
+    asin: String(filter.asin || "").trim(),
+    bin: String(filter.bin || "").trim(),
+    ageMin: filter.ageMin == null ? "" : String(filter.ageMin),
+    ageMax: filter.ageMax == null ? "" : String(filter.ageMax),
+    qtyMin: filter.qtyMin == null ? "" : String(filter.qtyMin),
+    statuses: [...(filter.statuses || [])].sort(),
+    containerType: filter.containerType || "",
+    allow,
+  };
+}
+
+function filterForQuery(scope) {
+  const allow = {};
+  for (const [column, names] of Object.entries(scope.allow || {})) {
+    const col = dataset.byName[column];
+    const wanted = new Set(names);
+    const ids = new Set();
+    if (col) {
+      for (let id = 0; id < col.dict.length; id++) {
+        if (wanted.has(col.dict[id])) ids.add(id);
+      }
+    }
+    allow[column] = ids;
+  }
+  return {
+    asin: scope.asin || "",
+    bin: scope.bin || "",
+    ageMin: scope.ageMin || "",
+    ageMax: scope.ageMax || "",
+    qtyMin: scope.qtyMin || "",
+    statuses: new Set(scope.statuses || []),
+    containerType: scope.containerType || "",
+    groupings,
+    allow,
+  };
+}
+
+function scopeLabel(scope) {
+  if (!scope) return "";
+  const parts = [];
+  for (const names of Object.values(scope.allow || {})) {
+    if (names && names.length) parts.push(names.join(", "));
+  }
+  if (scope.containerType) parts.push(scope.containerType);
+  if (scope.asin) parts.push("ASIN " + scope.asin);
+  if (scope.bin) parts.push("Bin " + scope.bin);
+  if (scope.ageMin !== "" || scope.ageMax !== "") parts.push("age " + (scope.ageMin || "…") + "–" + (scope.ageMax || "…"));
+  if (scope.qtyMin !== "") parts.push("qty ≥ " + scope.qtyMin);
+  const statuses = scope.statuses || [];
+  const defaultHot = statuses.length === 3 && statuses.includes("approaching") && statuses.includes("at") && statuses.includes("diot");
+  if (!defaultHot && statuses.length) parts.push(statuses.map((status) => STATUS_LABEL[status] || status).join(", "));
+  return parts.join(" · ");
+}
+
+function visiblePlaceKeys() {
+  const keys = new Set();
+  if (!view) return keys;
+  for (const item of view.locations || []) keys.add(placeKey("location", item.name));
+  for (const item of view.containerTypes || []) keys.add(placeKey("type", item.name));
+  return keys;
+}
+
+function pruneSelection() {
+  if (!view) return;
+  const visible = visiblePlaceKeys();
+  for (const key of [...selectedPlaces]) {
+    if (!visible.has(key)) selectedPlaces.delete(key);
+  }
+}
+
+function respondersForPlace(kind, name) {
+  const found = new Set();
+  const prefix = placeKey(kind, name);
+  for (const [key, value] of assignments) {
+    if (key !== prefix && !key.startsWith(prefix + "\t")) continue;
+    const responder = assignmentRecord(value).responder;
+    if (responder) found.add(responder);
+  }
+  return [...found].sort((a, b) => a.localeCompare(b)).join(", ");
+}
+
 function assignmentPlaces() {
   const places = [];
-  for (const [key, responder] of assignments) {
-    const split = key.indexOf("\t");
-    places.push({ kind: key.slice(0, split), name: key.slice(split + 1), responder });
+  const filters = new Map();
+  for (const [, value] of assignments) {
+    const record = assignmentRecord(value);
+    if (!record.responder || !record.name) continue;
+    let scope = null;
+    let scopeKey = "";
+    if (record.scope) {
+      scopeKey = JSON.stringify(record.scope);
+      if (!filters.has(scopeKey)) filters.set(scopeKey, filterForQuery(record.scope));
+      scope = filters.get(scopeKey);
+    }
+    places.push({ kind: record.kind, name: record.name, responder: record.responder, scope, scopeKey });
   }
   return places;
 }
@@ -1225,13 +1341,13 @@ function responderPack() {
 function placesFor(responder) {
   const locations = [];
   const types = [];
-  for (const [key, person] of assignments) {
-    if (person !== responder) continue;
-    const split = key.indexOf("\t");
-    const kind = key.slice(0, split);
-    const name = key.slice(split + 1);
-    if (kind === "type") types.push(name);
-    else locations.push(name);
+  for (const [, value] of assignments) {
+    const record = assignmentRecord(value);
+    if (record.responder !== responder || !record.name) continue;
+    const label = scopeLabel(record.scope);
+    const text = label ? record.name + " (" + label + ")" : record.name;
+    if (record.kind === "type") types.push(text);
+    else locations.push(text);
   }
   locations.sort((a, b) => a.localeCompare(b));
   types.sort((a, b) => a.localeCompare(b));
@@ -1387,8 +1503,8 @@ function addResponder() {
 
 function removeResponder(name) {
   responders = responders.filter((item) => item !== name);
-  for (const [key, responder] of assignments) {
-    if (responder === name) assignments.delete(key);
+  for (const [key, value] of assignments) {
+    if (assignmentRecord(value).responder === name) assignments.delete(key);
   }
   storeResponders();
   storeAssignments();
@@ -1404,25 +1520,41 @@ function assignSelected() {
     note.textContent = "Add an IOL Responder, then choose them here.";
     return;
   }
+  pruneSelection();
   if (!selectedPlaces.size) {
     note.textContent = "Select one or more rows first.";
     return;
   }
+  const scope = scopeFromFilter(readFilter());
   const count = selectedPlaces.size;
-  for (const key of selectedPlaces) assignments.set(key, responder);
+  for (const key of selectedPlaces) {
+    const split = key.indexOf("\t");
+    assignments.set(placeStoreKey(key.slice(0, split), key.slice(split + 1), scope), {
+      kind: key.slice(0, split),
+      name: key.slice(split + 1),
+      responder,
+      scope,
+    });
+  }
   selectedPlaces.clear();
   storeAssignments();
-  note.textContent = "Assigned " + count + " to " + responder + ".";
+  note.textContent = "Assigned " + count + " to " + responder + (scope ? " from the rows in this view." : ".");
   if (view) renderPlace();
 }
 
 function clearSelectedAssignments() {
   const note = document.getElementById("responder-note");
+  pruneSelection();
   if (!selectedPlaces.size) {
     note.textContent = "Select the rows whose assignment you want to clear.";
     return;
   }
-  for (const key of selectedPlaces) assignments.delete(key);
+  for (const key of selectedPlaces) {
+    assignments.delete(key);
+    for (const stored of [...assignments.keys()]) {
+      if (stored.startsWith(key + "\t")) assignments.delete(stored);
+    }
+  }
   storeAssignments();
   note.textContent = "Cleared the assignment on the selected rows.";
   if (view) renderPlace();
@@ -1434,9 +1566,10 @@ function storeResponders() {
 
 function storeAssignments() {
   const rows = [];
-  for (const [key, responder] of assignments) {
-    const split = key.indexOf("\t");
-    rows.push({ kind: key.slice(0, split), name: key.slice(split + 1), responder });
+  for (const [, value] of assignments) {
+    const record = assignmentRecord(value);
+    if (!record.responder || !record.name) continue;
+    rows.push({ kind: record.kind, name: record.name, responder: record.responder, scope: record.scope || null });
   }
   localStorage.setItem(ASSIGNMENT_KEY, JSON.stringify(rows));
 }
@@ -1450,7 +1583,8 @@ function loadStoredAssignments() {
       const responder = String((row && row.responder) || "").trim();
       const kind = row && row.kind === "type" ? "type" : "location";
       if (!name || !responder) continue;
-      assignments.set(placeKey(kind, name), responder);
+      const scope = row && row.scope && typeof row.scope === "object" ? row.scope : null;
+      assignments.set(placeStoreKey(kind, name, scope), { kind, name, responder, scope });
     }
   } catch (error) {
     assignments.clear();
