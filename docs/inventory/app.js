@@ -45,7 +45,7 @@ let catalog = null;
 let view = null;
 let matchIndex = null;
 let page = 0;
-let sortMode = "before";
+let sortMode = "file";
 let worker = null;
 let filterTimer = 0;
 let textTimer = 0;
@@ -236,8 +236,8 @@ async function acceptDataset(next, file, kind, generation) {
   await new Promise((resolve) => setTimeout(resolve, 0));
   if (generation !== loadGeneration) return;
   catalog = query(dataset, {});
-  sortMode = "before";
-  document.getElementById("sort-mode").value = "before";
+  sortMode = "file";
+  document.getElementById("sort-mode").value = "file";
   clearFilters(false);
   loading.classList.add("hidden");
   errorBox.classList.add("hidden");
@@ -734,7 +734,7 @@ function renderTable() {
   if (!total) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 10;
+    cell.colSpan = 9;
     cell.className = "inv-empty";
     cell.textContent = "Nothing to show.";
     row.appendChild(cell);
@@ -758,7 +758,6 @@ function renderTable() {
     const threshold = columns["Average Threshold"].values[index];
     const row = document.createElement("tr");
     addCell(row, STATUS_LABEL[thresholdStatus(age, threshold)]);
-    addCell(row, formatDays(threshold - age), true);
     addCell(row, valueAt(columns["Outer Location"], index));
     addCell(row, valueAt(columns.Bin, index));
     addCell(row, valueAt(columns.ASIN, index));
@@ -890,11 +889,6 @@ function formatQty(value) {
 function formatAvg(value) {
   if (!Number.isFinite(value)) return "—";
   return value.toLocaleString("en-US", { maximumFractionDigits: 2 });
-}
-function formatDays(value) {
-  if (!Number.isFinite(value)) return "";
-  if (Math.abs(value - Math.round(value)) < 1e-6) return String(Math.round(value));
-  return String(Math.round(value * 100) / 100);
 }
 function formatBytes(bytes) {
   const size = Number(bytes) || 0;
