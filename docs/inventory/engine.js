@@ -709,10 +709,14 @@ function locationRows(outer, locationStatus, statuses) {
     const spot = locationStatus[id];
     const visible = !statuses || statuses.size === 4 || ["approaching", "at", "diot", "early"].some((name) => statuses.has(name) && spot[name] > 0);
     if (!visible) continue;
-    if (!(spot.approaching || spot.at || spot.diot || spot.early)) continue;
+    const containers = spot.approaching + spot.at + spot.diot + spot.early;
+    const units = spot.approachingUnits + spot.atUnits + spot.diotUnits + spot.earlyUnits;
+    if (!containers) continue;
     rows.push({
       id,
       name: outer.dict[id],
+      containers,
+      units,
       approaching: spot.approaching,
       at: spot.at,
       diot: spot.diot,
@@ -723,14 +727,7 @@ function locationRows(outer, locationStatus, statuses) {
       earlyUnits: spot.earlyUnits,
     });
   }
-  const order = ["diot", "at", "approaching", "early"].filter((name) => !statuses || statuses.size === 4 || statuses.has(name));
-  rows.sort((a, b) => {
-    for (const name of order) {
-      const diff = b[name] - a[name];
-      if (diff) return diff;
-    }
-    return a.name.localeCompare(b.name);
-  });
+  rows.sort((a, b) => b.containers - a.containers || b.units - a.units || a.name.localeCompare(b.name));
   return rows;
 }
 
@@ -819,22 +816,11 @@ export function detailCsv(dataset, matchIndex) {
   });
 }
 
-const LOCATION_EXPORT_COLUMNS = [
-  ["approaching", "Approaching", "approachingUnits", "Approaching units"],
-  ["at", "At", "atUnits", "At units"],
-  ["diot", "DIOT", "diotUnits", "DIOT units"],
-  ["early", "More than 2 days out", "earlyUnits", "More than 2 days out units"],
-];
-
-export function locationStatusCsv(locations, statuses) {
-  const columns = LOCATION_EXPORT_COLUMNS.filter((column) => !statuses || statuses.has(column[0]));
+export function locationStatusCsv(locations) {
   return yieldChunks((pushLine) => {
-    pushLine(["Outer Location"].concat(columns.map((column) => column[1]), columns.map((column) => column[3])).join(",") + "\n");
+    pushLine("Outer Location,Containers,Units\n");
     for (const row of locations) {
-      const cells = [csvEscape(row.name)];
-      for (const column of columns) cells.push(String(row[column[0]]));
-      for (const column of columns) cells.push(formatExportNumber(row[column[2]]));
-      pushLine(cells.join(",") + "\n");
+      pushLine([csvEscape(row.name), String(row.containers), formatExportNumber(row.units)].join(",") + "\n");
     }
   });
 }
