@@ -443,9 +443,9 @@
     "id": "peculiar-line-flush",
     "name": "Peculiar Line Flush (abelrigm)",
     "category": "Peculiar",
-    "summary": "Scan containers and save each operator’s daily dashboard, with the scan time on every row.",
-    "detail": "Scanning stays in the userscript. Each lookup is saved to the Line Flush Records folder for that operator. The workbook matches the dashboard: totals, each location, then each container with its parent, age, status, and the time it was scanned. The team install updates from the peculiar-line-flush repository.",
-    "version": "2.9.24",
+    "summary": "Scan containers and save each operator’s daily dashboard, with a sheet per location and the scan time on every row.",
+    "detail": "Scanning stays in the userscript. Each lookup is saved to the Line Flush Records folder for that operator. The Dashboard sheet has the totals and every container. Each location that was scanned also gets its own sheet. Every container row includes the time it was scanned. The team install updates from the peculiar-line-flush repository.",
+    "version": "2.9.25",
     "runsOn": "aft-aging-inventory.na.aftx.amazonoperations.app, peculiar-inventory-na.aka.corp.amazon.com",
     "file": "downloads/peculiar-line-flush.txt",
     "downloadName": "Peculiar Line Flush (abelrigm).txt"
