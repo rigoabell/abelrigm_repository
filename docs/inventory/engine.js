@@ -639,12 +639,12 @@ export function query(dataset, filter) {
     const deviceId = device.codes[i];
     const bucket = ageBucketIndex(ageValue);
     const status = thresholdStatus(ageValue, thresholdValue);
-    const spot = locationStatus[outerId];
     statusLines[status] += 1;
     statusUnits[status] += quantity;
+    if (statusLimited && !statuses.has(status)) continue;
+    const spot = locationStatus[outerId];
     spot[status] += 1;
     spot[status + "Units"] += quantity;
-    if (statusLimited && !statuses.has(status)) continue;
 
     lines += 1;
     units += quantity;
@@ -723,7 +723,14 @@ function locationRows(outer, locationStatus, statuses) {
       earlyUnits: spot.earlyUnits,
     });
   }
-  rows.sort((a, b) => b.diot - a.diot || b.at - a.at || b.approaching - a.approaching || a.name.localeCompare(b.name));
+  const order = ["diot", "at", "approaching", "early"].filter((name) => !statuses || statuses.size === 4 || statuses.has(name));
+  rows.sort((a, b) => {
+    for (const name of order) {
+      const diff = b[name] - a[name];
+      if (diff) return diff;
+    }
+    return a.name.localeCompare(b.name);
+  });
   return rows;
 }
 
@@ -812,23 +819,22 @@ export function detailCsv(dataset, matchIndex) {
   });
 }
 
-export function locationStatusCsv(locations) {
+const LOCATION_EXPORT_COLUMNS = [
+  ["approaching", "Approaching", "approachingUnits", "Approaching units"],
+  ["at", "At", "atUnits", "At units"],
+  ["diot", "DIOT", "diotUnits", "DIOT units"],
+  ["early", "More than 2 days out", "earlyUnits", "More than 2 days out units"],
+];
+
+export function locationStatusCsv(locations, statuses) {
+  const columns = LOCATION_EXPORT_COLUMNS.filter((column) => !statuses || statuses.has(column[0]));
   return yieldChunks((pushLine) => {
-    pushLine("Outer Location,Approaching,At,DIOT,More than 2 days out,Approaching units,At units,DIOT units,More than 2 days out units\n");
+    pushLine(["Outer Location"].concat(columns.map((column) => column[1]), columns.map((column) => column[3])).join(",") + "\n");
     for (const row of locations) {
-      pushLine(
-        [
-          csvEscape(row.name),
-          String(row.approaching),
-          String(row.at),
-          String(row.diot),
-          String(row.early),
-          formatExportNumber(row.approachingUnits),
-          formatExportNumber(row.atUnits),
-          formatExportNumber(row.diotUnits),
-          formatExportNumber(row.earlyUnits),
-        ].join(",") + "\n"
-      );
+      const cells = [csvEscape(row.name)];
+      for (const column of columns) cells.push(String(row[column[0]]));
+      for (const column of columns) cells.push(formatExportNumber(row[column[2]]));
+      pushLine(cells.join(",") + "\n");
     }
   });
 }
