@@ -159,6 +159,22 @@
 .inv-pick { width: 36px; text-align: center; }
 .inv-table tr.inv-picked { background: var(--orange-050); }
 .inv-responder { font-weight: 700; }
+.inv-dash { margin-top: 14px; }
+.inv-dash h3 { margin: 0 0 4px; font-size: 16px; }
+.inv-dash-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-top: 10px; }
+.inv-dash-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; background: #fff; }
+.inv-dash-card h3 { margin: 0 0 8px; font-size: 16px; }
+.inv-dash-assigned { margin: 0 0 4px; color: var(--muted); font-size: 13px; }
+.inv-dash-assigned b { color: var(--text); overflow-wrap: anywhere; }
+.inv-dash-total { margin: 8px 0 0; font-size: 13px; }
+.inv-dash-metrics { display: flex; gap: 14px; margin-top: 8px; }
+.inv-dash-metrics div { min-width: 0; }
+.inv-dash-metrics b { display: block; font-size: 18px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.inv-dash-metrics span { color: var(--muted); font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; }
+.inv-dash-metrics .approaching b { color: #8a6a00; }
+.inv-dash-metrics .at b { color: #b25e00; }
+.inv-dash-metrics .diot b { color: #b12704; }
+.inv-dash-metrics .empty b { color: var(--muted); font-weight: 600; }
 .inv-table td.num, .inv-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .inv-table tbody tr:hover { background: var(--band); }
 .inv-pager { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }

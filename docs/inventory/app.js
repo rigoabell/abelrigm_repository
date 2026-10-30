@@ -494,6 +494,7 @@ function renderPlace() {
   document.getElementById("group-editor").classList.toggle("hidden", !typeMode);
   const note = document.getElementById("location-count");
   renderAssignControls();
+  renderResponderDashboard();
   if (typeMode) {
     note.textContent = containerType
       ? "Filtered to " + containerType + ". Click it again to show every type. Check rows to assign them."
@@ -1184,6 +1185,117 @@ async function loadGroupings() {
   }
 }
 
+let assignmentPack = null;
+let assignmentPackKey = "";
+let assignmentPackDataset = null;
+
+function responderPack() {
+  if (!dataset) return null;
+  const places = assignmentPlaces();
+  const key = JSON.stringify(places) + "\n" + JSON.stringify(groupings);
+  if (dataset !== assignmentPackDataset || key !== assignmentPackKey) {
+    assignmentPack = places.length ? assignmentPackage(dataset, places, groupings) : { responders: [] };
+    assignmentPackKey = key;
+    assignmentPackDataset = dataset;
+  }
+  return assignmentPack;
+}
+
+function placesFor(responder) {
+  const locations = [];
+  const types = [];
+  for (const [key, person] of assignments) {
+    if (person !== responder) continue;
+    const split = key.indexOf("\t");
+    const kind = key.slice(0, split);
+    const name = key.slice(split + 1);
+    if (kind === "type") types.push(name);
+    else locations.push(name);
+  }
+  locations.sort((a, b) => a.localeCompare(b));
+  types.sort((a, b) => a.localeCompare(b));
+  return { locations, types };
+}
+
+function assignedLine(label, names) {
+  const line = document.createElement("p");
+  line.className = "inv-dash-assigned";
+  line.append(label + " ");
+  const strong = document.createElement("b");
+  strong.textContent = names.length ? names.join(", ") : "None";
+  line.appendChild(strong);
+  return line;
+}
+
+function dashMetric(className, value, label) {
+  const wrap = document.createElement("div");
+  wrap.className = className;
+  const strong = document.createElement("b");
+  strong.textContent = value;
+  const span = document.createElement("span");
+  span.textContent = label;
+  wrap.append(strong, span);
+  return wrap;
+}
+
+function renderResponderDashboard() {
+  const body = document.getElementById("responder-dashboard-body");
+  if (!body) return;
+  body.replaceChildren();
+  if (!responders.length) {
+    const empty = document.createElement("p");
+    empty.className = "inv-file-meta";
+    empty.textContent = "Add an IOL Responder, then assign rows.";
+    body.appendChild(empty);
+    return;
+  }
+  const pack = responderPack();
+  const byName = new Map();
+  if (pack) {
+    for (const person of pack.responders) byName.set(person.name, person);
+  }
+  const grid = document.createElement("div");
+  grid.className = "inv-dash-grid";
+  for (const name of responders) {
+    const places = placesFor(name);
+    const assigned = places.locations.length + places.types.length;
+    const stats = byName.get(name);
+    const card = document.createElement("article");
+    card.className = "inv-dash-card";
+    const title = document.createElement("h3");
+    title.textContent = name;
+    card.appendChild(title);
+    if (!assigned) {
+      const none = document.createElement("p");
+      none.className = "inv-dash-assigned";
+      none.textContent = "Nothing assigned yet.";
+      card.appendChild(none);
+    } else {
+      card.appendChild(assignedLine("Outer locations", places.locations));
+      card.appendChild(assignedLine("Container types", places.types));
+    }
+    const total = document.createElement("p");
+    total.className = "inv-dash-total";
+    if (!dataset) {
+      total.textContent = "Totals appear after the inventory file loads.";
+    } else {
+      const containers = stats ? stats.uniqueContainers : 0;
+      const quantity = stats ? stats.quantity : 0;
+      total.textContent = formatInt(containers) + (containers === 1 ? " container" : " containers") + " · " + formatQty(quantity) + " units";
+    }
+    card.appendChild(total);
+    const metrics = document.createElement("div");
+    metrics.className = "inv-dash-metrics";
+    const showCounts = Boolean(dataset && assigned);
+    metrics.appendChild(dashMetric(showCounts ? "approaching" : "empty", showCounts ? formatQty(stats ? stats.approachingUnits : 0) : "—", "Approaching"));
+    metrics.appendChild(dashMetric(showCounts ? "at" : "empty", showCounts ? formatQty(stats ? stats.atUnits : 0) : "—", "At"));
+    metrics.appendChild(dashMetric(showCounts ? "diot" : "empty", showCounts ? formatQty(stats ? stats.diotUnits : 0) : "—", "DIOT"));
+    card.appendChild(metrics);
+    grid.appendChild(card);
+  }
+  body.appendChild(grid);
+}
+
 function renderAssignControls() {
   const count = document.getElementById("assign-count");
   const selected = selectedPlaces.size;
@@ -1223,6 +1335,7 @@ function renderResponders() {
     list.appendChild(item);
   }
   renderAssignControls();
+  renderResponderDashboard();
 }
 
 function addResponder() {
