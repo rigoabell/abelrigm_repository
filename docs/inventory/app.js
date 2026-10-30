@@ -1,4 +1,4 @@
-import { asinCsv, containerTypeCsv, detailCsv, locationStatusCsv, placeStatusUnits, query, rollupCsv, sortMatch, STATUS_LABEL, thresholdStatus, valueAt, normalizeGroupings } from "./engine.js";
+import { asinCsv, assignmentPackage, containerTypeCsv, detailCsv, locationStatusCsv, query, rollupCsv, sortMatch, STATUS_LABEL, thresholdStatus, valueAt, normalizeGroupings } from "./engine.js";
 import { forgetToken, loadSavedFile, readToken, saveDataFile, saveInventoryFile, writeToken } from "./github-save.js";
 import { assignmentWorkbook } from "./xlsx.js";
 
@@ -817,25 +817,13 @@ function pageCount() {
   return Math.max(1, Math.ceil(total / PAGE_SIZE));
 }
 
-function assignmentExportRows() {
-  const counts = placeStatusUnits(dataset, groupings);
-  const rows = [];
+function assignmentPlaces() {
+  const places = [];
   for (const [key, responder] of assignments) {
     const split = key.indexOf("\t");
-    const kind = key.slice(0, split);
-    const name = key.slice(split + 1);
-    const source = kind === "type" ? counts.types : counts.locations;
-    const found = source.get(name) || { approachingUnits: 0, atUnits: 0, diotUnits: 0 };
-    rows.push({
-      responder,
-      kind: kind === "type" ? "Container type" : "Outer location",
-      name,
-      approachingUnits: found.approachingUnits,
-      atUnits: found.atUnits,
-      diotUnits: found.diotUnits,
-    });
+    places.push({ kind: key.slice(0, split), name: key.slice(split + 1), responder });
   }
-  return rows;
+  return places;
 }
 
 async function exportAssignments(button) {
@@ -844,13 +832,13 @@ async function exportAssignments(button) {
     document.getElementById("responder-note").textContent = "Assign at least one row to an IOL Responder first.";
     return;
   }
-  const filename = "assignments.xlsx";
+  const filename = "assignments.xlsm";
   let writable = null;
   if (typeof window.showSaveFilePicker === "function") {
     try {
       const handle = await window.showSaveFilePicker({
         suggestedName: filename,
-        types: [{ description: "Excel workbook", accept: { "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"] } }],
+        types: [{ description: "Excel workbook", accept: { "application/vnd.ms-excel.sheet.macroEnabled.12": [".xlsm"] } }],
       });
       writable = await handle.createWritable();
     } catch (error) {
@@ -864,14 +852,16 @@ async function exportAssignments(button) {
   exportStatus.textContent = "Building " + filename + "…";
   await new Promise((resolve) => setTimeout(resolve, 0));
   try {
-    const bytes = assignmentWorkbook(assignmentExportRows());
+    const pack = assignmentPackage(dataset, assignmentPlaces(), groupings);
+    const bytes = assignmentWorkbook(pack);
     if (writable) {
       await writable.write(bytes);
       await writable.close();
     } else {
-      downloadBytes(filename, bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      downloadBytes(filename, bytes, "application/vnd.ms-excel.sheet.macroEnabled.12");
     }
-    exportStatus.textContent = "Saved " + filename + " (" + formatInt(assignments.size) + " assigned rows). Unit counts are from the full inventory file.";
+    const people = pack.responders.length;
+    exportStatus.textContent = "Saved " + filename + " (" + formatInt(people) + (people === 1 ? " responder" : " responders") + "). Unit counts are from the full inventory file.";
     document.getElementById("responder-note").textContent = "Saved " + filename + ".";
   } catch (error) {
     if (writable) {
