@@ -101,7 +101,8 @@ assert.equal(soonFile.split("\n")[0], "Outer Location,Containers,Units");
 assert.ok(soonFile.includes("Dock A,1,1"));
 
 const detail = detailCsv(whole, filtered.matchIndex).join("");
-assert.ok(detail.includes("Status,Days before threshold"));
+assert.ok(detail.includes(",Status\n") || detail.endsWith(",Status"));
+assert.equal(detail.includes("Days before"), false);
 assert.ok(detail.startsWith("Region,Warehouse"));
 assert.equal(detail.trim().split("\n").length, 3);
 assert.ok(detail.includes('say ""hi""') || detail.includes('"say ""hi"""'));

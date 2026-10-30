@@ -803,12 +803,6 @@ export function sortMatch(dataset, matchIndex, mode) {
     copy.sort((a, b) => compareBytes(asin, a, b) || a - b);
     return copy;
   }
-  if (mode === "before") {
-    const age = column(dataset, "Average Age").values;
-    const threshold = column(dataset, "Average Threshold").values;
-    copy.sort((a, b) => threshold[a] - age[a] - (threshold[b] - age[b]) || a - b);
-    return copy;
-  }
   return copy;
 }
 
@@ -856,15 +850,13 @@ export function detailCsv(dataset, matchIndex) {
   const age = column(dataset, "Average Age");
   const threshold = column(dataset, "Average Threshold");
   return yieldChunks((pushLine) => {
-    pushLine(dataset.header.concat(["Status", "Days before threshold"]).map(csvEscape).join(",") + "\n");
+    pushLine(dataset.header.concat(["Status"]).map(csvEscape).join(",") + "\n");
     const columns = dataset.columns;
-    const cells = new Array(columns.length + 2);
+    const cells = new Array(columns.length + 1);
     for (let p = 0; p < matchIndex.length; p++) {
       const row = matchIndex[p];
       for (let c = 0; c < columns.length; c++) cells[c] = csvEscape(valueAt(columns[c], row));
-      const before = threshold.values[row] - age.values[row];
       cells[columns.length] = csvEscape(STATUS_LABEL[thresholdStatus(age.values[row], threshold.values[row])]);
-      cells[columns.length + 1] = formatExportNumber(before);
       pushLine(cells.join(",") + "\n");
     }
   });
