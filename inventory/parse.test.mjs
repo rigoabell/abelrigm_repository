@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { asinCsv, assignmentPackage, containerTypeCsv, containerTypeName, detailCsv, letterPrefix, locationStatusCsv, normalizeGroupings, parseCsvText, placeStatusUnits, query, rollupCsv, thresholdStatus, valueAt } from "../docs/inventory/engine.js";
+import { asinCsv, assignmentPackage, containerTypeCsv, containerTypeName, detailCsv, diotOverageText, INVENTORY_THRESHOLD_RATE, letterPrefix, locationStatusCsv, normalizeGroupings, parseCsvText, placeStatusUnits, query, rollupCsv, thresholdStatus, valueAt } from "../docs/inventory/engine.js";
 import { assignmentWorkbook } from "../docs/inventory/xlsx.js";
 
 const fixture = [
@@ -133,17 +133,24 @@ assert.equal(corey.diotUnits, 4);
 assert.equal(corey.approachingUnits, 1);
 assert.equal(corey.containers[0].bin, "bin-3");
 assert.equal(corey.types[0].name, "bin-");
-const book = new TextDecoder().decode(assignmentWorkbook(assigned));
-assert.ok(book.includes("Assignment Summaries"));
-assert.ok(book.includes("Import Scan-History Sheets"));
-assert.ok(book.includes("ImportScanHistorySheets"));
-assert.ok(book.includes("Approaching units"));
-assert.ok(book.includes("DIOT units"));
+const threshold = summary.units * INVENTORY_THRESHOLD_RATE;
+const book = new TextDecoder().decode(assignmentWorkbook(assigned, threshold));
+assert.equal(book.includes("Assignment Summaries"), false);
+assert.equal(book.includes("Import Scan-History Sheets"), false);
+assert.equal(book.includes("ImportScanHistorySheets"), false);
+assert.equal(book.includes("xl/vbaProject.bin"), false);
+assert.equal(book.includes("macroEnabled.main+xml"), false);
+assert.ok(book.includes("MEM3 DIOT Metrics"));
+assert.ok(book.includes(">DIOT<"));
+assert.ok(book.includes(">Approaching<"));
+assert.ok(book.includes(">AT<"));
+assert.ok(book.includes(diotOverageText(corey.diotUnits, threshold)));
+assert.ok(book.includes(diotOverageText(alex.diotUnits, threshold)));
 assert.ok(book.includes("Uncompleted"));
 assert.ok(book.includes("Alex &amp; Sam"));
 assert.ok(book.includes("Primary Disposition"));
-assert.ok(book.includes('macroEnabled.main+xml'));
-assert.ok(book.includes("xl/vbaProject.bin"));
+assert.ok(book.includes("spreadsheetml.sheet.main+xml"));
+assert.equal(book.split("<sheet ").length - 1, 2);
 
 const detail = detailCsv(whole, filtered.matchIndex).join("");
 assert.ok(detail.includes(",Status\n") || detail.endsWith(",Status"));
@@ -222,6 +229,12 @@ if (fs.existsSync(realPath)) {
   assert.equal(packed.responders[0].atUnits, sorted.atUnits);
   assert.equal(packed.responders[0].diotUnits, sorted.diotUnits);
   assert.equal(packed.responders[0].quantity, sorted.approachingUnits + sorted.atUnits + sorted.diotUnits);
+  const realBook = new TextDecoder().decode(assignmentWorkbook(packed, view.units * INVENTORY_THRESHOLD_RATE));
+  assert.equal(realBook.includes("Assignment Summaries"), false);
+  assert.equal(realBook.includes("Import Scan History"), false);
+  assert.ok(realBook.includes("MEM3 DIOT Metrics"));
+  assert.ok(realBook.includes(diotOverageText(sorted.diotUnits, view.units * INVENTORY_THRESHOLD_RATE)));
+  assert.equal(realBook.split("<sheet ").length - 1, 1);
   let typeDiot = 0;
   for (const row of fullCounts.types.values()) typeDiot += row.diotUnits;
   assert.equal(typeDiot, view.status.diot.units);
