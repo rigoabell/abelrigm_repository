@@ -132,7 +132,11 @@ assert.equal(corey.uniqueContainers, 2);
 assert.equal(corey.diotUnits, 4);
 assert.equal(corey.approachingUnits, 1);
 assert.equal(corey.containers[0].bin, "bin-3");
+assert.equal(corey.containers[0].typeName, "bin-");
 assert.equal(corey.types[0].name, "bin-");
+const binDash = corey.containers.filter((row) => row.typeName === "bin-");
+assert.equal(binDash.length, 2);
+assert.equal(binDash.reduce((sum, row) => sum + row.quantity, 0), 5);
 const dockA = summary.outer.find((row) => row.name === "Dock A");
 const scoped = assignmentPackage(whole, [{
   kind: "type",

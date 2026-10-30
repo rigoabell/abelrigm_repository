@@ -457,6 +457,13 @@ function inventoryThreshold() {
   return catalog ? catalog.units * INVENTORY_THRESHOLD_RATE : 0;
 }
 
+function diotTone(units) {
+  const delta = (Number(units) || 0) - inventoryThreshold();
+  if (delta > 1e-6) return "over";
+  if (delta < -1e-6) return "under";
+  return "even";
+}
+
 function renderSummary() {
   const selected = readStatuses();
   const cards = [
@@ -469,7 +476,7 @@ function renderSummary() {
   for (const [id, label, detail] of cards) {
     const card = document.createElement("button");
     card.type = "button";
-    card.className = "inv-kpi " + id;
+    card.className = "inv-kpi " + id + (id === "diot" ? " " + diotTone(view.status[id].units) : "");
     card.setAttribute("aria-pressed", selected.size === 1 && selected.has(id) ? "true" : "false");
     const strong = document.createElement("b");
     strong.textContent = formatQty(view.status[id].units);
@@ -1335,14 +1342,70 @@ function placesFor(responder) {
   for (const [, value] of assignments) {
     const record = assignmentRecord(value);
     if (record.responder !== responder || !record.name) continue;
-    const label = scopeLabel(record.scope);
-    const text = label ? record.name + " (" + label + ")" : record.name;
-    if (record.kind === "type") types.push(text);
-    else locations.push(text);
+    if (record.kind === "type") types.push({ name: record.name, scope: scopeLabel(record.scope) });
+    else {
+      const label = scopeLabel(record.scope);
+      locations.push(label ? record.name + " (" + label + ")" : record.name);
+    }
   }
   locations.sort((a, b) => a.localeCompare(b));
-  types.sort((a, b) => a.localeCompare(b));
+  types.sort((a, b) => a.name.localeCompare(b.name) || a.scope.localeCompare(b.scope));
   return { locations, types };
+}
+
+function typeCountRows(types, stats) {
+  const containers = stats && stats.containers ? stats.containers : [];
+  const seen = new Set();
+  const rows = [];
+  for (const type of types) {
+    if (seen.has(type.name)) continue;
+    seen.add(type.name);
+    let units = 0;
+    let count = 0;
+    for (const row of containers) {
+      if ((row.typeName || row.type) !== type.name) continue;
+      units += row.quantity;
+      count += 1;
+    }
+    rows.push({ name: type.name, scope: type.scope, units, containers: count });
+  }
+  return rows;
+}
+
+function assignedTypeTable(types, stats) {
+  const table = document.createElement("table");
+  table.className = "inv-dash-types";
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const [label, numeric] of [["Container type", false], ["Units", true], ["Containers", true]]) {
+    const cell = document.createElement("th");
+    if (numeric) cell.className = "num";
+    cell.textContent = label;
+    headRow.appendChild(cell);
+  }
+  head.appendChild(headRow);
+  table.appendChild(head);
+  const body = document.createElement("tbody");
+  for (const row of typeCountRows(types, stats)) {
+    const line = document.createElement("tr");
+    const name = document.createElement("td");
+    name.textContent = row.name;
+    if (row.scope) {
+      const scope = document.createElement("small");
+      scope.textContent = row.scope;
+      name.appendChild(scope);
+    }
+    const units = document.createElement("td");
+    units.className = "num";
+    units.textContent = formatQty(row.units);
+    const count = document.createElement("td");
+    count.className = "num";
+    count.textContent = formatInt(row.containers);
+    line.append(name, units, count);
+    body.appendChild(line);
+  }
+  table.appendChild(body);
+  return table;
 }
 
 function assignedLine(label, names) {
@@ -1405,7 +1468,8 @@ function renderResponderDashboard() {
       card.appendChild(none);
     } else {
       card.appendChild(assignedLine("Outer locations", places.locations));
-      card.appendChild(assignedLine("Container types", places.types));
+      if (places.types.length) card.appendChild(assignedTypeTable(places.types, stats));
+      else card.appendChild(assignedLine("Container types", []));
     }
     const total = document.createElement("p");
     total.className = "inv-dash-total";
@@ -1422,7 +1486,8 @@ function renderResponderDashboard() {
     const showCounts = Boolean(dataset && assigned);
     metrics.appendChild(dashMetric(showCounts ? "approaching" : "empty", showCounts ? formatQty(stats ? stats.approachingUnits : 0) : "—", "Approaching"));
     metrics.appendChild(dashMetric(showCounts ? "at" : "empty", showCounts ? formatQty(stats ? stats.atUnits : 0) : "—", "At"));
-    metrics.appendChild(dashMetric(showCounts ? "diot" : "empty", showCounts ? formatQty(stats ? stats.diotUnits : 0) : "—", "DIOT"));
+    const diotUnits = stats ? stats.diotUnits : 0;
+    metrics.appendChild(dashMetric(showCounts ? "diot " + diotTone(diotUnits) : "empty", showCounts ? formatQty(diotUnits) : "—", "DIOT"));
     card.appendChild(metrics);
     grid.appendChild(card);
   }
