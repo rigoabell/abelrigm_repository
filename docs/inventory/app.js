@@ -450,14 +450,36 @@ function setOnlyStatus(statusId) {
   applyFilters();
 }
 
+const STATUS_COLUMNS = [
+  ["approaching", "Approaching"],
+  ["at", "At"],
+  ["diot", "DIOT"],
+  ["early", "More than 2 days"],
+];
+
+function selectedStatusKeys() {
+  const selected = readStatuses();
+  return STATUS_COLUMNS.map(([key]) => key).filter((key) => selected.has(key));
+}
+
 function renderLocations() {
+  const keys = selectedStatusKeys();
+  const head = document.getElementById("location-head");
   const body = document.getElementById("location-body");
   const rows = view.locations;
+  head.replaceChildren();
+  const headRow = document.createElement("tr");
+  appendHeader(headRow, "Outer location", false);
+  for (const key of keys) {
+    const label = STATUS_COLUMNS.find((column) => column[0] === key)[1];
+    appendHeader(headRow, label, true);
+  }
+  head.appendChild(headRow);
   body.replaceChildren();
   if (!rows.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 5;
+    cell.colSpan = 1 + keys.length;
     cell.className = "inv-empty";
     cell.textContent = "No outer locations in this view.";
     row.appendChild(cell);
@@ -474,7 +496,7 @@ function renderLocations() {
     nameButton.addEventListener("click", () => isolate("Outer Location", item.id));
     nameCell.appendChild(nameButton);
     row.appendChild(nameCell);
-    for (const key of ["approaching", "at", "diot", "early"]) {
+    for (const key of keys) {
       const cell = document.createElement("td");
       cell.className = "num";
       const button = document.createElement("button");
@@ -487,6 +509,13 @@ function renderLocations() {
     }
     body.appendChild(row);
   }
+}
+
+function appendHeader(row, text, numeric) {
+  const cell = document.createElement("th");
+  if (numeric) cell.className = "num";
+  cell.textContent = text;
+  row.appendChild(cell);
 }
 
 function focusLocationStatus(outerId, statusId) {
@@ -734,7 +763,7 @@ async function exportFile(kind, button) {
     lines: () => detailCsv(dataset, view.matchIndex),
     rollup: () => rollupCsv(dataset, view.matchIndex),
     asin: () => asinCsv(dataset, view.matchIndex),
-    locations: () => locationStatusCsv(view.locations),
+    locations: () => locationStatusCsv(view.locations, readStatuses()),
   };
   button.disabled = true;
   exportStatus.textContent = "Building " + filename + "…";
