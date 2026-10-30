@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { asinCsv, containerTypeCsv, containerTypeName, detailCsv, letterPrefix, locationStatusCsv, normalizeGroupings, parseCsvText, query, rollupCsv, thresholdStatus, valueAt } from "../docs/inventory/engine.js";
+import { asinCsv, assignmentPackage, containerTypeCsv, containerTypeName, detailCsv, letterPrefix, locationStatusCsv, normalizeGroupings, parseCsvText, placeStatusUnits, query, rollupCsv, thresholdStatus, valueAt } from "../docs/inventory/engine.js";
+import { assignmentWorkbook } from "../docs/inventory/xlsx.js";
 
 const fixture = [
   "\uFEFF\"Region\",\"Warehouse\",\"Outer Location\",\"Bin\",\"ASIN\",\"Owner\",\"Disposition\",\"Amazon Device Flag\",\"Quantity\",\"Average Age\",\"Average Threshold\",\"Note\"",
@@ -100,6 +101,50 @@ const soonFile = locationStatusCsv(soonOnly.locations).join("");
 assert.equal(soonFile.split("\n")[0], "Outer Location,Containers,Units");
 assert.ok(soonFile.includes("Dock A,1,1"));
 
+const counts = placeStatusUnits(whole, []);
+assert.equal(counts.locations.get("Dock A").approachingUnits, 1);
+assert.equal(counts.locations.get("Dock A").atUnits, 0);
+assert.equal(counts.locations.get("Dock A").diotUnits, 0);
+assert.equal(counts.locations.get("dz-P-VR-Liquidate").diotUnits, 1);
+assert.equal(counts.locations.get("Dock B").diotUnits, 4);
+assert.equal(counts.types.get("bin-").approachingUnits, 1);
+assert.equal(counts.types.get("bin-").diotUnits, 4);
+assert.equal(counts.types.get("bin,").diotUnits, 1);
+const groupedCounts = placeStatusUnits(whole, [{ name: "Bin dash", prefix: "bin-" }]);
+assert.equal(groupedCounts.types.get("Bin dash").diotUnits, 4);
+assert.equal(groupedCounts.types.get("bin-"), undefined);
+const assigned = assignmentPackage(whole, [
+  { kind: "location", name: "Dock A", responder: "Alex & Sam" },
+  { kind: "type", name: "bin-", responder: "Corey" },
+], []);
+assert.equal(assigned.responders.length, 2);
+const alex = assigned.responders.find((person) => person.name === "Alex & Sam");
+assert.equal(alex.assignments, 1);
+assert.equal(alex.uniqueContainers, 1);
+assert.equal(alex.containers[0].bin, "bin-1");
+assert.equal(alex.containers[0].owner, "TRANSSHPMNT");
+assert.equal(alex.containers[0].disposition, "SELLABLE");
+assert.equal(alex.approachingUnits, 1);
+assert.equal(alex.atUnits, 0);
+assert.equal(alex.diotUnits, 0);
+const corey = assigned.responders.find((person) => person.name === "Corey");
+assert.equal(corey.uniqueContainers, 2);
+assert.equal(corey.diotUnits, 4);
+assert.equal(corey.approachingUnits, 1);
+assert.equal(corey.containers[0].bin, "bin-3");
+assert.equal(corey.types[0].name, "bin-");
+const book = new TextDecoder().decode(assignmentWorkbook(assigned));
+assert.ok(book.includes("Assignment Summaries"));
+assert.ok(book.includes("Import Scan-History Sheets"));
+assert.ok(book.includes("ImportScanHistorySheets"));
+assert.ok(book.includes("Approaching units"));
+assert.ok(book.includes("DIOT units"));
+assert.ok(book.includes("Uncompleted"));
+assert.ok(book.includes("Alex &amp; Sam"));
+assert.ok(book.includes("Primary Disposition"));
+assert.ok(book.includes('macroEnabled.main+xml'));
+assert.ok(book.includes("xl/vbaProject.bin"));
+
 const detail = detailCsv(whole, filtered.matchIndex).join("");
 assert.ok(detail.includes(",Status\n") || detail.endsWith(",Status"));
 assert.equal(detail.includes("Days before"), false);
@@ -158,6 +203,28 @@ if (fs.existsSync(realPath)) {
   assert.equal(busiest.approaching, 142);
   assert.equal(busiest.containers, 1104);
   assert.equal(busiest.units, busiest.approachingUnits + busiest.atUnits + busiest.diotUnits);
+  const fullCounts = placeStatusUnits(real, []);
+  let diotUnits = 0;
+  let approachingUnits = 0;
+  let atUnits = 0;
+  for (const row of fullCounts.locations.values()) {
+    diotUnits += row.diotUnits;
+    approachingUnits += row.approachingUnits;
+    atUnits += row.atUnits;
+  }
+  assert.equal(diotUnits, view.status.diot.units);
+  assert.equal(approachingUnits, view.status.approaching.units);
+  assert.equal(atUnits, view.status.at.units);
+  const sorted = fullCounts.locations.get("dz-P-SortedReloInv");
+  assert.equal(sorted.approachingUnits + sorted.atUnits + sorted.diotUnits, busiest.units);
+  const packed = assignmentPackage(real, [{ kind: "location", name: "dz-P-SortedReloInv", responder: "Alex" }], []);
+  assert.equal(packed.responders[0].approachingUnits, sorted.approachingUnits);
+  assert.equal(packed.responders[0].atUnits, sorted.atUnits);
+  assert.equal(packed.responders[0].diotUnits, sorted.diotUnits);
+  assert.equal(packed.responders[0].quantity, sorted.approachingUnits + sorted.atUnits + sorted.diotUnits);
+  let typeDiot = 0;
+  for (const row of fullCounts.types.values()) typeDiot += row.diotUnits;
+  assert.equal(typeDiot, view.status.diot.units);
   assert.equal(watched.locations[0].containers, Math.max(...watched.locations.map((row) => row.containers)));
   const locationFile = locationStatusCsv(watched.locations).join("");
   assert.ok(locationFile.startsWith("Outer Location,Containers,Units"));

@@ -150,6 +150,15 @@
 .inv-group-list li { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .inv-group-list b { font-size: 14px; }
 .inv-group-list span { color: var(--muted); font-size: 13px; }
+.inv-assign { border-top: 1px solid var(--line-2); margin-top: 14px; padding-top: 12px; }
+.inv-assign-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
+.inv-assign-actions .inv-file-meta { margin: 0 8px 8px 0; }
+.inv-responder-list { list-style: none; margin: 0 0 10px; padding: 0; display: flex; gap: 8px; flex-wrap: wrap; }
+.inv-responder-list li { display: flex; gap: 6px; align-items: center; background: var(--band); border-radius: 999px; padding: 4px 4px 4px 10px; }
+.inv-responder-list b { font-size: 13px; }
+.inv-pick { width: 36px; text-align: center; }
+.inv-table tr.inv-picked { background: var(--orange-050); }
+.inv-responder { font-weight: 700; }
 .inv-table td.num, .inv-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .inv-table tbody tr:hover { background: var(--band); }
 .inv-pager { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }

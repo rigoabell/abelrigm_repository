@@ -131,12 +131,30 @@
                 <div class="inv-table-head">
                   <div>
                     <h2 id="place-title">Outer locations</h2>
-                    <p id="location-count" class="inv-file-meta">Containers and units for the threshold states that are checked. Click a location to filter to it.</p>
+                    <p id="location-count" class="inv-file-meta">Containers and units for the threshold states that are checked. Check rows to assign them. Click a name to filter to it.</p>
                   </div>
                   <div class="inv-toggle" role="group" aria-label="Group by">
                     <button type="button" id="mode-location" aria-pressed="true">Outer locations</button>
                     <button type="button" id="mode-type" aria-pressed="false">Container type</button>
                   </div>
+                </div>
+                <div class="inv-assign" id="assign-panel">
+                  <form id="responder-form" class="inv-group-form">
+                    <input id="responder-name" type="text" placeholder="IOL Responder" autocomplete="off" />
+                    <button type="submit" class="btn btn-outline btn-sm">Add responder</button>
+                  </form>
+                  <ul id="responder-list" class="inv-responder-list"></ul>
+                  <div class="inv-assign-actions">
+                    <p id="assign-count" class="inv-file-meta">Select rows to assign them.</p>
+                    <label class="inv-sort">Assign to
+                      <select id="assign-responder"></select>
+                    </label>
+                    <button type="button" class="btn btn-primary btn-sm" id="assign-selected">Assign selected</button>
+                    <button type="button" class="btn btn-outline btn-sm" id="clear-assignment">Clear assignment</button>
+                    <button type="button" class="btn btn-outline btn-sm" id="export-assignments">Assignment workbook</button>
+                    <button type="button" class="btn btn-outline btn-sm" id="save-responders">Save responders to the site</button>
+                  </div>
+                  <p id="responder-note" class="inv-file-meta" aria-live="polite"></p>
                 </div>
                 <div class="inv-table-scroll">
                   <table class="inv-table">
@@ -214,6 +232,7 @@
                   <button type="button" class="btn btn-outline" id="export-asin" data-export="asin">ASIN rollup</button>
                   <button type="button" class="btn btn-outline" id="export-locations" data-export="locations">Containers by location</button>
                   <button type="button" class="btn btn-outline" id="export-types" data-export="types">Container types</button>
+                  <button type="button" class="btn btn-outline" id="export-assignments-files" data-export="assignments">Assignment workbook</button>
                 </div>
                 <p id="export-status" class="inv-file-meta" aria-live="polite"></p>
               </div>

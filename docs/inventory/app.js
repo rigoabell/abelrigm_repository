@@ -1,5 +1,6 @@
-import { asinCsv, containerTypeCsv, detailCsv, locationStatusCsv, query, rollupCsv, sortMatch, STATUS_LABEL, thresholdStatus, valueAt, normalizeGroupings } from "./engine.js";
+import { asinCsv, assignmentPackage, containerTypeCsv, detailCsv, locationStatusCsv, query, rollupCsv, sortMatch, STATUS_LABEL, thresholdStatus, valueAt, normalizeGroupings } from "./engine.js";
 import { forgetToken, loadSavedFile, readToken, saveDataFile, saveInventoryFile, writeToken } from "./github-save.js";
+import { assignmentWorkbook } from "./xlsx.js";
 
 const PAGE_SIZE = 50;
 const FILTER_COLUMNS = [
@@ -55,7 +56,12 @@ let placeMode = "location";
 let containerType = "";
 let groupings = [];
 let editingGroup = -1;
+let responders = [];
+const selectedPlaces = new Set();
+const assignments = new Map();
 const GROUP_KEY = "inventory.containerGroups";
+const RESPONDER_KEY = "inventory.iolResponders";
+const ASSIGNMENT_KEY = "inventory.assignments";
 
 fileInput.addEventListener("change", () => {
   const file = fileInput.files && fileInput.files[0];
@@ -111,7 +117,10 @@ for (const id of ["filter-asin", "filter-bin", "filter-age-min", "filter-age-max
 }
 
 for (const button of document.querySelectorAll("[data-export]")) {
-  button.addEventListener("click", () => exportFile(button.dataset.export, button));
+  button.addEventListener("click", () => {
+    if (button.dataset.export === "assignments") exportAssignments(button);
+    else exportFile(button.dataset.export, button);
+  });
 }
 
 saveButton.addEventListener("click", () => saveNow());
@@ -130,6 +139,14 @@ document.getElementById("group-form").addEventListener("submit", (event) => {
 document.getElementById("save-groupings").addEventListener("click", () => saveGroupingsToSite());
 document.getElementById("group-help").textContent =
   "Optional. A bin uses the longest grouping it starts with. Otherwise it is grouped by the letters before the first number. Saved groupings stay in this browser until you save them to the site.";
+document.getElementById("responder-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  addResponder();
+});
+document.getElementById("assign-selected").addEventListener("click", () => assignSelected());
+document.getElementById("clear-assignment").addEventListener("click", () => clearSelectedAssignments());
+document.getElementById("export-assignments").addEventListener("click", (event) => exportAssignments(event.currentTarget));
+document.getElementById("save-responders").addEventListener("click", () => saveRespondersToSite());
 
 function openFile(file, kind) {
   const generation = ++loadGeneration;
@@ -229,7 +246,7 @@ function fail(message) {
 }
 
 async function acceptDataset(next, file, kind, generation) {
-  await groupingsReady;
+  await Promise.all([groupingsReady, respondersReady]);
   if (generation !== loadGeneration) return;
   dataset = next;
   loadingTitle.textContent = "Summarizing " + formatInt(dataset.rowCount) + " lines";
@@ -476,89 +493,101 @@ function renderPlace() {
   document.getElementById("mode-type").setAttribute("aria-pressed", typeMode ? "true" : "false");
   document.getElementById("group-editor").classList.toggle("hidden", !typeMode);
   const note = document.getElementById("location-count");
+  renderAssignControls();
   if (typeMode) {
     note.textContent = containerType
-      ? "Filtered to " + containerType + ". Click it again to show every type. Grouped by the letters before the first number, unless a grouping matches."
-      : "Grouped by the letters before the first number. tsX27482942 is tsX, and tsTDST34394839 is tsTDST. Click a type to filter to it.";
-    renderContainerTypes();
+      ? "Filtered to " + containerType + ". Click it again to show every type. Check rows to assign them."
+      : "Grouped by the letters before the first number. tsX27482942 is tsX, and tsTDST34394839 is tsTDST. Check rows to assign them.";
+    renderPlaceRows("type", view.containerTypes || [], "Container type", "No container types in this view.", (item) => toggleContainerType(item.name));
     renderGroupEditor();
     return;
   }
-  note.textContent = "Containers and units for the threshold states that are checked. Click a location to filter to it.";
-  renderLocations();
+  note.textContent = "Containers and units for the threshold states that are checked. Check rows to assign them. Click a name to filter to it.";
+  renderPlaceRows("location", view.locations, "Outer location", "No outer locations in this view.", (item) => isolate("Outer Location", item.id));
 }
 
-function renderLocations() {
+function placeKey(kind, name) {
+  return kind + "\t" + (name || "(blank)");
+}
+
+function renderPlaceRows(kind, rows, nameHeader, emptyText, onOpen) {
+  rows = rows || [];
   const head = document.getElementById("location-head");
   const body = document.getElementById("location-body");
-  const rows = view.locations;
   head.replaceChildren();
   const headRow = document.createElement("tr");
-  appendHeader(headRow, "Outer location", false);
+  const selectHead = document.createElement("th");
+  selectHead.className = "inv-pick";
+  const selectAll = document.createElement("input");
+  selectAll.type = "checkbox";
+  selectAll.title = "Select visible rows";
+  const visibleKeys = rows.map((item) => placeKey(kind, item.name));
+  const selectedVisible = visibleKeys.filter((key) => selectedPlaces.has(key)).length;
+  selectAll.checked = rows.length > 0 && selectedVisible === rows.length;
+  selectAll.indeterminate = selectedVisible > 0 && selectedVisible < rows.length;
+  selectAll.addEventListener("change", () => {
+    for (const key of visibleKeys) {
+      if (selectAll.checked) selectedPlaces.add(key);
+      else selectedPlaces.delete(key);
+    }
+    renderPlace();
+  });
+  selectHead.appendChild(selectAll);
+  headRow.appendChild(selectHead);
+  appendHeader(headRow, nameHeader, false);
   appendHeader(headRow, "Containers", true);
   appendHeader(headRow, "Units", true);
+  appendHeader(headRow, "IOL Responder", false);
   head.appendChild(headRow);
   body.replaceChildren();
   if (!rows.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 3;
+    cell.colSpan = 5;
     cell.className = "inv-empty";
-    cell.textContent = "No outer locations in this view.";
+    cell.textContent = emptyText;
     row.appendChild(cell);
     body.appendChild(row);
     return;
   }
   for (const item of rows) {
+    const label = item.name || "(blank)";
+    const key = placeKey(kind, item.name);
     const row = document.createElement("tr");
+    if (selectedPlaces.has(key)) row.className = "inv-picked";
+    const pickCell = document.createElement("td");
+    pickCell.className = "inv-pick";
+    const pick = document.createElement("input");
+    pick.type = "checkbox";
+    pick.checked = selectedPlaces.has(key);
+    pick.setAttribute("aria-label", "Select " + label);
+    pick.addEventListener("change", () => {
+      if (pick.checked) selectedPlaces.add(key);
+      else selectedPlaces.delete(key);
+      row.classList.toggle("inv-picked", pick.checked);
+      renderAssignControls();
+      const boxes = body.querySelectorAll("input[type=checkbox]");
+      const checked = Array.from(boxes).filter((box) => box.checked).length;
+      selectAll.checked = checked === boxes.length;
+      selectAll.indeterminate = checked > 0 && checked < boxes.length;
+    });
+    pickCell.appendChild(pick);
+    row.appendChild(pickCell);
     const nameCell = document.createElement("td");
     const nameButton = document.createElement("button");
     nameButton.type = "button";
     nameButton.className = "inv-loc-name";
-    nameButton.textContent = item.name || "(blank)";
-    nameButton.addEventListener("click", () => isolate("Outer Location", item.id));
+    nameButton.textContent = label;
+    if (kind === "type") nameButton.setAttribute("aria-pressed", containerType === item.name ? "true" : "false");
+    nameButton.addEventListener("click", () => onOpen(item));
     nameCell.appendChild(nameButton);
     row.appendChild(nameCell);
-    appendCount(row, formatInt(item.containers), () => isolate("Outer Location", item.id));
-    appendCount(row, formatQty(item.units), () => isolate("Outer Location", item.id));
-    body.appendChild(row);
-  }
-}
-
-function renderContainerTypes() {
-  const head = document.getElementById("location-head");
-  const body = document.getElementById("location-body");
-  const rows = view.containerTypes || [];
-  head.replaceChildren();
-  const headRow = document.createElement("tr");
-  appendHeader(headRow, "Container type", false);
-  appendHeader(headRow, "Containers", true);
-  appendHeader(headRow, "Units", true);
-  head.appendChild(headRow);
-  body.replaceChildren();
-  if (!rows.length) {
-    const row = document.createElement("tr");
-    const cell = document.createElement("td");
-    cell.colSpan = 3;
-    cell.className = "inv-empty";
-    cell.textContent = "No container types in this view.";
-    row.appendChild(cell);
-    body.appendChild(row);
-    return;
-  }
-  for (const item of rows) {
-    const row = document.createElement("tr");
-    const nameCell = document.createElement("td");
-    const nameButton = document.createElement("button");
-    nameButton.type = "button";
-    nameButton.className = "inv-loc-name";
-    nameButton.textContent = item.name || "(blank)";
-    nameButton.setAttribute("aria-pressed", containerType === item.name ? "true" : "false");
-    nameButton.addEventListener("click", () => toggleContainerType(item.name));
-    nameCell.appendChild(nameButton);
-    row.appendChild(nameCell);
-    appendCount(row, formatInt(item.containers), () => toggleContainerType(item.name));
-    appendCount(row, formatQty(item.units), () => toggleContainerType(item.name));
+    appendCount(row, formatInt(item.containers), () => onOpen(item));
+    appendCount(row, formatQty(item.units), () => onOpen(item));
+    const person = document.createElement("td");
+    person.className = "inv-responder";
+    person.textContent = assignments.get(key) || "";
+    row.appendChild(person);
     body.appendChild(row);
   }
 }
@@ -786,6 +815,73 @@ function goPage(next) {
 function pageCount() {
   const total = matchIndex ? matchIndex.length : 0;
   return Math.max(1, Math.ceil(total / PAGE_SIZE));
+}
+
+function assignmentPlaces() {
+  const places = [];
+  for (const [key, responder] of assignments) {
+    const split = key.indexOf("\t");
+    places.push({ kind: key.slice(0, split), name: key.slice(split + 1), responder });
+  }
+  return places;
+}
+
+async function exportAssignments(button) {
+  if (!dataset || !assignments.size) {
+    exportStatus.textContent = "Assign at least one row to an IOL Responder first.";
+    document.getElementById("responder-note").textContent = "Assign at least one row to an IOL Responder first.";
+    return;
+  }
+  const filename = "assignments.xlsm";
+  let writable = null;
+  if (typeof window.showSaveFilePicker === "function") {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{ description: "Excel workbook", accept: { "application/vnd.ms-excel.sheet.macroEnabled.12": [".xlsm"] } }],
+      });
+      writable = await handle.createWritable();
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        exportStatus.textContent = "Download canceled.";
+        return;
+      }
+    }
+  }
+  if (button) button.disabled = true;
+  exportStatus.textContent = "Building " + filename + "…";
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  try {
+    const pack = assignmentPackage(dataset, assignmentPlaces(), groupings);
+    const bytes = assignmentWorkbook(pack);
+    if (writable) {
+      await writable.write(bytes);
+      await writable.close();
+    } else {
+      downloadBytes(filename, bytes, "application/vnd.ms-excel.sheet.macroEnabled.12");
+    }
+    const people = pack.responders.length;
+    exportStatus.textContent = "Saved " + filename + " (" + formatInt(people) + (people === 1 ? " responder" : " responders") + "). Unit counts are from the full inventory file.";
+    document.getElementById("responder-note").textContent = "Saved " + filename + ".";
+  } catch (error) {
+    if (writable) {
+      try { await writable.abort(); } catch (abortError) { /* already closed */ }
+    }
+    exportStatus.textContent = error && error.message ? error.message : String(error);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function downloadBytes(filename, bytes, type) {
+  const blob = new Blob([bytes], { type });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1500);
 }
 
 async function exportFile(kind, button) {
@@ -1088,7 +1184,193 @@ async function loadGroupings() {
   }
 }
 
+function renderAssignControls() {
+  const count = document.getElementById("assign-count");
+  const selected = selectedPlaces.size;
+  count.textContent = selected
+    ? selected + " selected"
+    : "Select rows to assign them.";
+  const select = document.getElementById("assign-responder");
+  const current = select.value;
+  select.replaceChildren();
+  const blank = document.createElement("option");
+  blank.value = "";
+  blank.textContent = responders.length ? "Choose a responder" : "Add a responder first";
+  select.appendChild(blank);
+  for (const name of responders) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name;
+    select.appendChild(option);
+  }
+  if (responders.includes(current)) select.value = current;
+}
+
+function renderResponders() {
+  const list = document.getElementById("responder-list");
+  list.replaceChildren();
+  for (const name of responders) {
+    const item = document.createElement("li");
+    const label = document.createElement("b");
+    label.textContent = name;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "btn btn-outline btn-sm";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", () => removeResponder(name));
+    item.appendChild(label);
+    item.appendChild(remove);
+    list.appendChild(item);
+  }
+  renderAssignControls();
+}
+
+function addResponder() {
+  const input = document.getElementById("responder-name");
+  const note = document.getElementById("responder-note");
+  const name = input.value.replace(/[\u0000-\u001f]/g, "").trim();
+  if (!name) {
+    note.textContent = "Enter the responder's name.";
+    return;
+  }
+  if (responders.some((item) => item.toLowerCase() === name.toLowerCase())) {
+    note.textContent = name + " is already an IOL Responder.";
+    return;
+  }
+  responders.push(name);
+  responders.sort((a, b) => a.localeCompare(b));
+  input.value = "";
+  storeResponders();
+  note.textContent = "Saved in this browser.";
+  renderResponders();
+  document.getElementById("assign-responder").value = name;
+}
+
+function removeResponder(name) {
+  responders = responders.filter((item) => item !== name);
+  for (const [key, responder] of assignments) {
+    if (responder === name) assignments.delete(key);
+  }
+  storeResponders();
+  storeAssignments();
+  document.getElementById("responder-note").textContent = "Saved in this browser.";
+  renderResponders();
+  if (view) renderPlace();
+}
+
+function assignSelected() {
+  const note = document.getElementById("responder-note");
+  const responder = document.getElementById("assign-responder").value;
+  if (!responder) {
+    note.textContent = "Add an IOL Responder, then choose them here.";
+    return;
+  }
+  if (!selectedPlaces.size) {
+    note.textContent = "Select one or more rows first.";
+    return;
+  }
+  const count = selectedPlaces.size;
+  for (const key of selectedPlaces) assignments.set(key, responder);
+  selectedPlaces.clear();
+  storeAssignments();
+  note.textContent = "Assigned " + count + " to " + responder + ".";
+  if (view) renderPlace();
+}
+
+function clearSelectedAssignments() {
+  const note = document.getElementById("responder-note");
+  if (!selectedPlaces.size) {
+    note.textContent = "Select the rows whose assignment you want to clear.";
+    return;
+  }
+  for (const key of selectedPlaces) assignments.delete(key);
+  storeAssignments();
+  note.textContent = "Cleared the assignment on the selected rows.";
+  if (view) renderPlace();
+}
+
+function storeResponders() {
+  localStorage.setItem(RESPONDER_KEY, JSON.stringify(responders));
+}
+
+function storeAssignments() {
+  const rows = [];
+  for (const [key, responder] of assignments) {
+    const split = key.indexOf("\t");
+    rows.push({ kind: key.slice(0, split), name: key.slice(split + 1), responder });
+  }
+  localStorage.setItem(ASSIGNMENT_KEY, JSON.stringify(rows));
+}
+
+function loadStoredAssignments() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(ASSIGNMENT_KEY) || "[]");
+    if (!Array.isArray(stored)) return;
+    for (const row of stored) {
+      const name = String((row && row.name) || "").trim();
+      const responder = String((row && row.responder) || "").trim();
+      const kind = row && row.kind === "type" ? "type" : "location";
+      if (!name || !responder) continue;
+      assignments.set(placeKey(kind, name), responder);
+    }
+  } catch (error) {
+    assignments.clear();
+  }
+}
+
+async function saveRespondersToSite() {
+  const note = document.getElementById("responder-note");
+  const token = (tokenInput.value || readToken()).trim();
+  if (!token) {
+    note.textContent = "Paste a GitHub token in Saved copy, then save. The responders are already kept in this browser.";
+    return;
+  }
+  writeToken(token);
+  note.textContent = "Saving responders…";
+  try {
+    const result = await saveDataFile(
+      "responders.json",
+      JSON.stringify(responders, null, 2) + "\n",
+      token,
+      "Save IOL responders"
+    );
+    note.textContent = result.direct
+      ? "Saved. Other machines see these responders after GitHub Pages deploys, usually within a few minutes."
+      : "Main is protected, so the responders are on branch inventory-saved." + (result.prUrl ? " Merge " + result.prUrl + "." : "");
+  } catch (error) {
+    note.textContent = error && error.message ? error.message : String(error);
+  }
+}
+
+async function loadResponders() {
+  loadStoredAssignments();
+  try {
+    const stored = localStorage.getItem(RESPONDER_KEY);
+    if (stored != null) {
+      const parsed = JSON.parse(stored);
+      responders = Array.isArray(parsed) ? parsed.map((name) => String(name || "").trim()).filter(Boolean) : [];
+      renderResponders();
+      return;
+    }
+  } catch (error) {
+    responders = [];
+  }
+  try {
+    const response = await fetch(new URL("data/responders.json", import.meta.url), { cache: "no-store" });
+    if (!response.ok) {
+      renderResponders();
+      return;
+    }
+    const parsed = await response.json();
+    responders = Array.isArray(parsed) ? parsed.map((name) => String(name || "").trim()).filter(Boolean) : [];
+  } catch (error) {
+    responders = [];
+  }
+  renderResponders();
+}
+
 const groupingsReady = loadGroupings();
+const respondersReady = loadResponders();
 
 async function loadSavedOnStart() {
   const generation = ++loadGeneration;

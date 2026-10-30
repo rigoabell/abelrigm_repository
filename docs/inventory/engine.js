@@ -785,6 +785,171 @@ function containerTypeRows(typeLines, typeUnits) {
   return rows;
 }
 
+function addStatusUnits(map, name, status, quantity) {
+  if (status !== "approaching" && status !== "at" && status !== "diot") return;
+  let row = map.get(name);
+  if (!row) {
+    row = { name, approachingUnits: 0, atUnits: 0, diotUnits: 0 };
+    map.set(name, row);
+  }
+  row[status + "Units"] += quantity;
+}
+
+export function placeStatusUnits(dataset, groupings) {
+  const outer = column(dataset, "Outer Location");
+  const bin = column(dataset, "Bin");
+  const qty = column(dataset, "Quantity");
+  const age = column(dataset, "Average Age");
+  const threshold = column(dataset, "Average Threshold");
+  const rules = normalizeGroupings(groupings);
+  const locations = new Map();
+  const types = new Map();
+  for (let i = 0; i < dataset.rowCount; i++) {
+    const status = thresholdStatus(age.values[i], threshold.values[i]);
+    const quantity = qty.values[i];
+    addStatusUnits(locations, outer.dict[outer.codes[i]] || "(blank)", status, quantity);
+    addStatusUnits(types, containerTypeName(bin.dict[bin.codes[i]], rules), status, quantity);
+  }
+  return { locations, types };
+}
+
+function primaryByQuantity(counts) {
+  let best = "";
+  let bestQty = -1;
+  for (const [name, quantity] of counts) {
+    if (quantity > bestQty || (quantity === bestQty && name.localeCompare(best) < 0)) {
+      best = name;
+      bestQty = quantity;
+    }
+  }
+  return best;
+}
+
+function rankedQuantity(counts) {
+  const rows = [];
+  for (const [name, quantity] of counts) rows.push({ name, quantity });
+  rows.sort((a, b) => b.quantity - a.quantity || a.name.localeCompare(b.name));
+  return rows;
+}
+
+export function assignmentPackage(dataset, places, groupings) {
+  const rules = normalizeGroupings(groupings);
+  const locationPeople = new Map();
+  const typePeople = new Map();
+  const peoplePlaces = new Map();
+  for (const place of Array.isArray(places) ? places : []) {
+    const responder = String((place && place.responder) || "").replace(/[\u0000-\u001f]/g, "").trim();
+    const name = String((place && place.name) || "").replace(/[\u0000-\u001f]/g, "").trim();
+    if (!responder || !name) continue;
+    const kind = place.kind === "type" ? "type" : "location";
+    const bucket = kind === "type" ? typePeople : locationPeople;
+    if (!bucket.has(name)) bucket.set(name, new Set());
+    bucket.get(name).add(responder);
+    if (!peoplePlaces.has(responder)) peoplePlaces.set(responder, new Set());
+    peoplePlaces.get(responder).add(kind + "\t" + name);
+  }
+
+  const outer = column(dataset, "Outer Location");
+  const bin = column(dataset, "Bin");
+  const owner = column(dataset, "Owner");
+  const disposition = column(dataset, "Disposition");
+  const qty = column(dataset, "Quantity");
+  const age = column(dataset, "Average Age");
+  const threshold = column(dataset, "Average Threshold");
+  const groups = new Map();
+
+  for (let i = 0; i < dataset.rowCount; i++) {
+    const status = thresholdStatus(age.values[i], threshold.values[i]);
+    if (status !== "approaching" && status !== "at" && status !== "diot") continue;
+    const location = outer.dict[outer.codes[i]] || "(blank)";
+    const binName = bin.dict[bin.codes[i]] || "(blank)";
+    const typeName = containerTypeName(binName, rules);
+    const people = new Set();
+    const fromLocation = locationPeople.get(location);
+    const fromType = typePeople.get(typeName);
+    if (fromLocation) fromLocation.forEach((person) => people.add(person));
+    if (fromType) fromType.forEach((person) => people.add(person));
+    if (!people.size) continue;
+    const quantity = qty.values[i];
+    const ageValue = age.values[i];
+    const thresholdValue = threshold.values[i];
+    const ownerName = owner.dict[owner.codes[i]] || "";
+    const dispositionName = disposition.dict[disposition.codes[i]] || "";
+    for (const person of people) {
+      const key = person + "\0" + location + "\0" + binName;
+      let group = groups.get(key);
+      if (!group) {
+        group = {
+          responder: person,
+          outer: location,
+          bin: binName,
+          type: letterPrefix(binName),
+          quantity: 0,
+          ageWeighted: 0,
+          thresholdWeighted: 0,
+          approachingUnits: 0,
+          atUnits: 0,
+          diotUnits: 0,
+          owners: new Map(),
+          dispositions: new Map(),
+        };
+        groups.set(key, group);
+      }
+      group.quantity += quantity;
+      group.ageWeighted += ageValue * quantity;
+      group.thresholdWeighted += thresholdValue * quantity;
+      group[status + "Units"] += quantity;
+      group.owners.set(ownerName, (group.owners.get(ownerName) || 0) + quantity);
+      group.dispositions.set(dispositionName, (group.dispositions.get(dispositionName) || 0) + quantity);
+    }
+  }
+
+  const byPerson = new Map();
+  for (const [name, assigned] of peoplePlaces) {
+    byPerson.set(name, {
+      name,
+      assignments: assigned.size,
+      containers: [],
+      approachingUnits: 0,
+      atUnits: 0,
+      diotUnits: 0,
+    });
+  }
+  for (const group of groups.values()) {
+    const person = byPerson.get(group.responder);
+    const quantity = group.quantity;
+    person.containers.push({
+      outer: group.outer,
+      bin: group.bin,
+      owner: primaryByQuantity(group.owners),
+      disposition: primaryByQuantity(group.dispositions),
+      quantity,
+      age: quantity ? group.ageWeighted / quantity : 0,
+      threshold: quantity ? group.thresholdWeighted / quantity : 0,
+      type: group.type,
+    });
+    person.approachingUnits += group.approachingUnits;
+    person.atUnits += group.atUnits;
+    person.diotUnits += group.diotUnits;
+  }
+
+  const responders = Array.from(byPerson.values()).sort((a, b) => a.name.localeCompare(b.name));
+  for (const person of responders) {
+    person.containers.sort((a, b) => b.quantity - a.quantity || a.outer.localeCompare(b.outer) || a.bin.localeCompare(b.bin));
+    const locations = new Map();
+    const types = new Map();
+    for (const row of person.containers) {
+      locations.set(row.outer, (locations.get(row.outer) || 0) + row.quantity);
+      types.set(row.type, (types.get(row.type) || 0) + row.quantity);
+    }
+    person.locations = rankedQuantity(locations);
+    person.types = rankedQuantity(types);
+    person.quantity = person.approachingUnits + person.atUnits + person.diotUnits;
+    person.uniqueContainers = person.containers.length;
+  }
+  return { responders };
+}
+
 export function sortMatch(dataset, matchIndex, mode) {
   const copy = new Uint32Array(matchIndex);
   if (!mode || mode === "file") return copy;
