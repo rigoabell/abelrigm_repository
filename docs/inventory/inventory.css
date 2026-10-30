@@ -180,12 +180,8 @@
 .inv-dash-total { margin: 8px 0 0; font-size: 13px; }
 .inv-dash-metrics { display: flex; gap: 14px; margin-top: 8px; }
 .inv-dash-metrics div { min-width: 0; }
-.inv-dash-metrics b { display: block; font-size: 18px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.inv-dash-metrics b { display: block; font-size: 18px; line-height: 1.1; font-variant-numeric: tabular-nums; color: var(--text); }
 .inv-dash-metrics span { color: var(--muted); font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; }
-.inv-dash-metrics .approaching b, .inv-dash-metrics .at b { color: var(--text); }
-.inv-dash-metrics .diot.over b { color: #b12704; }
-.inv-dash-metrics .diot.under b { color: #137333; }
-.inv-dash-metrics .diot.even b { color: var(--text); }
 .inv-dash-metrics .empty b { color: var(--muted); font-weight: 600; }
 .inv-dash-types { width: 100%; border-collapse: collapse; margin: 8px 0 4px; font-size: 13px; }
 .inv-dash-types th { font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); font-weight: 700; text-align: left; padding: 0 8px 4px 0; }
