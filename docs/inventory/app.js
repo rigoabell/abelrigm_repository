@@ -472,9 +472,9 @@ function renderSummary() {
     card.className = "inv-kpi " + id;
     card.setAttribute("aria-pressed", selected.size === 1 && selected.has(id) ? "true" : "false");
     const strong = document.createElement("b");
-    strong.textContent = formatInt(view.status[id].lines);
+    strong.textContent = formatQty(view.status[id].units);
     const caption = document.createElement("span");
-    caption.textContent = label + " · " + formatQty(view.status[id].units) + " units · " + detail;
+    caption.textContent = label + " units · " + detail;
     card.appendChild(strong);
     card.appendChild(caption);
     if (id === "diot") {
@@ -800,16 +800,7 @@ function renderTable() {
     const age = columns["Average Age"].values[index];
     const threshold = columns["Average Threshold"].values[index];
     const row = document.createElement("tr");
-    const status = thresholdStatus(age, threshold);
-    const statusCell = document.createElement("td");
-    statusCell.className = "inv-status";
-    statusCell.textContent = STATUS_LABEL[status];
-    if (status === "diot") {
-      const note = document.createElement("small");
-      note.textContent = diotOverageText(view.status.diot.units, inventoryThreshold());
-      statusCell.appendChild(note);
-    }
-    row.appendChild(statusCell);
+    addCell(row, STATUS_LABEL[thresholdStatus(age, threshold)]);
     addCell(row, valueAt(columns["Outer Location"], index));
     addCell(row, valueAt(columns.Bin, index));
     addCell(row, valueAt(columns.ASIN, index));
