@@ -914,6 +914,7 @@ export function assignmentPackage(dataset, places, groupings) {
           outer: location,
           bin: binName,
           type: letterPrefix(binName),
+          typeName,
           quantity: 0,
           ageWeighted: 0,
           thresholdWeighted: 0,
@@ -960,6 +961,7 @@ export function assignmentPackage(dataset, places, groupings) {
       age: quantity ? group.ageWeighted / quantity : 0,
       threshold: quantity ? group.thresholdWeighted / quantity : 0,
       type: group.type,
+      typeName: group.typeName,
     });
     person.approachingUnits += group.approachingUnits;
     person.atUnits += group.atUnits;

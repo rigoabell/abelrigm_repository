@@ -94,9 +94,10 @@
 .inv-kpi b { display: block; font-size: 26px; line-height: 1.1; color: var(--ink); }
 .inv-kpi span { color: var(--muted); font-size: 12.5px; }
 .inv-kpi[aria-pressed="true"] { border-color: var(--orange); box-shadow: 0 0 0 2px var(--orange-050) inset, var(--shadow); }
-.inv-kpi.diot b { color: #b12704; }
-.inv-kpi.at b { color: #b25e00; }
-.inv-kpi.approaching b { color: #8a6a00; }
+.inv-kpi.at b, .inv-kpi.approaching b { color: var(--text); }
+.inv-kpi.diot.over b { color: #b12704; }
+.inv-kpi.diot.under b { color: #137333; }
+.inv-kpi.diot.even b { color: var(--text); }
 .inv-count { border: 0; background: transparent; font: inherit; color: var(--link); cursor: pointer; padding: 0; font-variant-numeric: tabular-nums; }
 .inv-count:hover { text-decoration: underline; }
 .inv-loc-name { border: 0; background: transparent; font: inherit; font-weight: 700; cursor: pointer; padding: 0; color: var(--text); text-align: left; }
@@ -171,7 +172,7 @@
 .inv-responder { font-weight: 700; }
 .inv-dash { margin-top: 14px; }
 .inv-dash h3 { margin: 0 0 4px; font-size: 16px; }
-.inv-dash-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-top: 10px; }
+.inv-dash-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; margin-top: 10px; }
 .inv-dash-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; background: #fff; }
 .inv-dash-card h3 { margin: 0 0 8px; font-size: 16px; }
 .inv-dash-assigned { margin: 0 0 4px; color: var(--muted); font-size: 13px; }
@@ -181,10 +182,16 @@
 .inv-dash-metrics div { min-width: 0; }
 .inv-dash-metrics b { display: block; font-size: 18px; line-height: 1.1; font-variant-numeric: tabular-nums; }
 .inv-dash-metrics span { color: var(--muted); font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; }
-.inv-dash-metrics .approaching b { color: #8a6a00; }
-.inv-dash-metrics .at b { color: #b25e00; }
-.inv-dash-metrics .diot b { color: #b12704; }
+.inv-dash-metrics .approaching b, .inv-dash-metrics .at b { color: var(--text); }
+.inv-dash-metrics .diot.over b { color: #b12704; }
+.inv-dash-metrics .diot.under b { color: #137333; }
+.inv-dash-metrics .diot.even b { color: var(--text); }
 .inv-dash-metrics .empty b { color: var(--muted); font-weight: 600; }
+.inv-dash-types { width: 100%; border-collapse: collapse; margin: 8px 0 4px; font-size: 13px; }
+.inv-dash-types th { font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); font-weight: 700; text-align: left; padding: 0 8px 4px 0; }
+.inv-dash-types td { padding: 4px 8px 4px 0; border-top: 1px solid var(--line-2); vertical-align: top; }
+.inv-dash-types .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.inv-dash-types small { display: block; color: var(--muted); font-size: 11px; font-weight: 600; }
 .inv-table td.num, .inv-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .inv-table tbody tr:hover { background: var(--band); }
 .inv-pager { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
