@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { asinCsv, detailCsv, parseCsvText, query, rollupCsv, valueAt } from "../docs/inventory/engine.js";
+import { asinCsv, detailCsv, locationStatusCsv, parseCsvText, query, rollupCsv, thresholdStatus, valueAt } from "../docs/inventory/engine.js";
 
 const fixture = [
   "\uFEFF\"Region\",\"Warehouse\",\"Outer Location\",\"Bin\",\"ASIN\",\"Owner\",\"Disposition\",\"Amazon Device Flag\",\"Quantity\",\"Average Age\",\"Average Threshold\",\"Note\"",
@@ -39,6 +39,13 @@ assert.ok(Math.abs(whole.byName["Average Age"].values[0] - 3.5) < 1e-9);
 
 for (const size of [1, 2, 3, 5, 7, 16, 64]) sameShape(whole, parsed(size));
 
+assert.equal(thresholdStatus(3, 5), "approaching");
+assert.equal(thresholdStatus(4, 5), "approaching");
+assert.equal(thresholdStatus(4.2, 5), "at");
+assert.equal(thresholdStatus(5, 5), "at");
+assert.equal(thresholdStatus(5.01, 5), "diot");
+assert.equal(thresholdStatus(0, 5), "early");
+
 const summary = query(whole, {});
 assert.equal(summary.lines, 4);
 assert.equal(summary.units, 8);
@@ -55,7 +62,15 @@ const aged = query(whole, { ageMin: 180 });
 assert.equal(aged.lines, 1);
 assert.equal(valueAt(whole.byName.Warehouse, aged.matchIndex[0]), "PHX1");
 
+const hot = query(whole, { statuses: new Set(["approaching", "at", "diot"]) });
+assert.equal(hot.lines, 3);
+assert.equal(hot.status.approaching.lines, 1);
+assert.equal(hot.status.diot.lines, 2);
+assert.equal(hot.status.early.lines, 1);
+assert.ok(hot.locations.some((row) => row.name === "Dock A" && row.approaching === 1));
+
 const detail = detailCsv(whole, filtered.matchIndex).join("");
+assert.ok(detail.includes("Status,Days before threshold"));
 assert.ok(detail.startsWith("Region,Warehouse"));
 assert.equal(detail.trim().split("\n").length, 3);
 assert.ok(detail.includes('say ""hi""') || detail.includes('"say ""hi"""'));
@@ -91,6 +106,18 @@ if (fs.existsSync(realPath)) {
   assert.equal(view.warehouse[0].name, "MEM3");
   assert.equal(view.disposition.find((row) => row.name === "SELLABLE").lines, 142315);
   assert.equal(view.disposition.find((row) => row.name === "SELLABLE").units, 145639);
+  const watched = query(real, { statuses: new Set(["approaching", "at", "diot"]) });
+  assert.equal(watched.status.diot.lines, 1668);
+  assert.equal(watched.status.at.lines, 329);
+  assert.equal(watched.status.approaching.lines, 395);
+  assert.equal(watched.lines, 2392);
+  assert.equal(watched.locations[0].name, "dz-P-SortedReloInv");
+  assert.equal(watched.locations[0].diot, 785);
+  assert.equal(watched.locations[0].at, 177);
+  assert.equal(watched.locations[0].approaching, 142);
+  const locationFile = locationStatusCsv(watched.locations).join("");
+  assert.ok(locationFile.startsWith("Outer Location,Approaching,At,DIOT"));
+  assert.ok(locationFile.includes("dz-P-SortedReloInv,142,177,785"));
   assert.equal(valueAt(real.byName.ASIN, 0), "B08BR9HBZ3");
   assert.equal(valueAt(real.byName.ASIN, real.rowCount - 1), "ZZPROU6OYF");
   const sellable = view.disposition.find((row) => row.name === "SELLABLE");

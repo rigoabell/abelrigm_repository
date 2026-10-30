@@ -493,6 +493,21 @@ function dictAllow(col, selected) {
   return allow;
 }
 
+export function thresholdStatus(age, threshold) {
+  const before = threshold - age;
+  if (before < 0) return "diot";
+  if (before < 1) return "at";
+  if (before <= 2) return "approaching";
+  return "early";
+}
+
+export const STATUS_LABEL = {
+  approaching: "Approaching",
+  at: "At",
+  diot: "DIOT",
+  early: "More than 2 days out",
+};
+
 function emptyFilter(filter) {
   if (!filter) return true;
   if (filter.asin) return false;
@@ -500,6 +515,7 @@ function emptyFilter(filter) {
   if (filter.ageMin != null && filter.ageMin !== "") return false;
   if (filter.ageMax != null && filter.ageMax !== "") return false;
   if (filter.qtyMin != null && filter.qtyMin !== "") return false;
+  if (filter.statuses && filter.statuses.size !== 4) return false;
   if (filter.allow) {
     for (const key of Object.keys(filter.allow)) {
       if (filter.allow[key]) return false;
@@ -568,6 +584,20 @@ export function query(dataset, filter) {
   const deviceUnits = new Float64Array(device.dict.length);
   const bucketLines = [0, 0, 0, 0, 0];
   const bucketUnits = [0, 0, 0, 0, 0];
+  const statusLines = { approaching: 0, at: 0, diot: 0, early: 0 };
+  const statusUnits = { approaching: 0, at: 0, diot: 0, early: 0 };
+  const locationStatus = Array.from({ length: outer.dict.length }, () => ({
+    approaching: 0,
+    at: 0,
+    diot: 0,
+    early: 0,
+    approachingUnits: 0,
+    atUnits: 0,
+    diotUnits: 0,
+    earlyUnits: 0,
+  }));
+  const statuses = filter && filter.statuses;
+  const statusLimited = Boolean(statuses && statuses.size !== 4);
 
   const match = createGrow(Uint32Array, Math.max(1, Math.min(rowCount || 1, 8192)));
   const asinSet = new Set();
@@ -608,6 +638,13 @@ export function query(dataset, filter) {
     const warehouseId = warehouse.codes[i];
     const deviceId = device.codes[i];
     const bucket = ageBucketIndex(ageValue);
+    const status = thresholdStatus(ageValue, thresholdValue);
+    const spot = locationStatus[outerId];
+    statusLines[status] += 1;
+    statusUnits[status] += quantity;
+    spot[status] += 1;
+    spot[status + "Units"] += quantity;
+    if (statusLimited && !statuses.has(status)) continue;
 
     lines += 1;
     units += quantity;
@@ -656,7 +693,38 @@ export function query(dataset, filter) {
     })),
     matchIndex: match.finish(),
     unfiltered,
+    status: {
+      approaching: { lines: statusLines.approaching, units: statusUnits.approaching },
+      at: { lines: statusLines.at, units: statusUnits.at },
+      diot: { lines: statusLines.diot, units: statusUnits.diot },
+      early: { lines: statusLines.early, units: statusUnits.early },
+    },
+    locations: locationRows(outer, locationStatus, statuses),
   };
+}
+
+function locationRows(outer, locationStatus, statuses) {
+  const rows = [];
+  for (let id = 0; id < outer.dict.length; id++) {
+    const spot = locationStatus[id];
+    const visible = !statuses || statuses.size === 4 || ["approaching", "at", "diot", "early"].some((name) => statuses.has(name) && spot[name] > 0);
+    if (!visible) continue;
+    if (!(spot.approaching || spot.at || spot.diot || spot.early)) continue;
+    rows.push({
+      id,
+      name: outer.dict[id],
+      approaching: spot.approaching,
+      at: spot.at,
+      diot: spot.diot,
+      early: spot.early,
+      approachingUnits: spot.approachingUnits,
+      atUnits: spot.atUnits,
+      diotUnits: spot.diotUnits,
+      earlyUnits: spot.earlyUnits,
+    });
+  }
+  rows.sort((a, b) => b.diot - a.diot || b.at - a.at || b.approaching - a.approaching || a.name.localeCompare(b.name));
+  return rows;
 }
 
 export function sortMatch(dataset, matchIndex, mode) {
@@ -675,6 +743,12 @@ export function sortMatch(dataset, matchIndex, mode) {
   if (mode === "asin") {
     const asin = column(dataset, "ASIN");
     copy.sort((a, b) => compareBytes(asin, a, b) || a - b);
+    return copy;
+  }
+  if (mode === "before") {
+    const age = column(dataset, "Average Age").values;
+    const threshold = column(dataset, "Average Threshold").values;
+    copy.sort((a, b) => threshold[a] - age[a] - (threshold[b] - age[b]) || a - b);
     return copy;
   }
   return copy;
@@ -721,14 +795,40 @@ function yieldChunks(produce) {
 }
 
 export function detailCsv(dataset, matchIndex) {
+  const age = column(dataset, "Average Age");
+  const threshold = column(dataset, "Average Threshold");
   return yieldChunks((pushLine) => {
-    pushLine(dataset.header.map(csvEscape).join(",") + "\n");
+    pushLine(dataset.header.concat(["Status", "Days before threshold"]).map(csvEscape).join(",") + "\n");
     const columns = dataset.columns;
-    const cells = new Array(columns.length);
+    const cells = new Array(columns.length + 2);
     for (let p = 0; p < matchIndex.length; p++) {
       const row = matchIndex[p];
       for (let c = 0; c < columns.length; c++) cells[c] = csvEscape(valueAt(columns[c], row));
+      const before = threshold.values[row] - age.values[row];
+      cells[columns.length] = csvEscape(STATUS_LABEL[thresholdStatus(age.values[row], threshold.values[row])]);
+      cells[columns.length + 1] = formatExportNumber(before);
       pushLine(cells.join(",") + "\n");
+    }
+  });
+}
+
+export function locationStatusCsv(locations) {
+  return yieldChunks((pushLine) => {
+    pushLine("Outer Location,Approaching,At,DIOT,More than 2 days out,Approaching units,At units,DIOT units,More than 2 days out units\n");
+    for (const row of locations) {
+      pushLine(
+        [
+          csvEscape(row.name),
+          String(row.approaching),
+          String(row.at),
+          String(row.diot),
+          String(row.early),
+          formatExportNumber(row.approachingUnits),
+          formatExportNumber(row.atUnits),
+          formatExportNumber(row.diotUnits),
+          formatExportNumber(row.earlyUnits),
+        ].join(",") + "\n"
+      );
     }
   });
 }

@@ -1,4 +1,4 @@
-import { asinCsv, detailCsv, query, rollupCsv, sortMatch, valueAt } from "./engine.js";
+import { asinCsv, detailCsv, locationStatusCsv, query, rollupCsv, sortMatch, STATUS_LABEL, thresholdStatus, valueAt } from "./engine.js";
 
 const PAGE_SIZE = 50;
 const FILTER_COLUMNS = [
@@ -38,7 +38,7 @@ let catalog = null;
 let view = null;
 let matchIndex = null;
 let page = 0;
-let sortMode = "file";
+let sortMode = "before";
 let worker = null;
 let filterTimer = 0;
 let textTimer = 0;
@@ -81,6 +81,13 @@ document.getElementById("page-first").addEventListener("click", () => goPage(0))
 document.getElementById("page-prev").addEventListener("click", () => goPage(page - 1));
 document.getElementById("page-next").addEventListener("click", () => goPage(page + 1));
 document.getElementById("page-last").addEventListener("click", () => goPage(pageCount() - 1));
+
+for (const box of document.querySelectorAll("[data-status]")) {
+  box.addEventListener("change", () => {
+    clearTimeout(filterTimer);
+    filterTimer = setTimeout(applyFilters, 0);
+  });
+}
 
 for (const id of ["filter-asin", "filter-bin", "filter-age-min", "filter-age-max", "filter-qty-min"]) {
   document.getElementById(id).addEventListener("input", () => {
@@ -186,6 +193,8 @@ async function acceptDataset(next, file) {
   loadingTitle.textContent = "Summarizing " + formatInt(dataset.rowCount) + " lines";
   await new Promise((resolve) => setTimeout(resolve, 0));
   catalog = query(dataset, {});
+  sortMode = "before";
+  document.getElementById("sort-mode").value = "before";
   clearFilters(false);
   loading.classList.add("hidden");
   errorBox.classList.add("hidden");
@@ -305,12 +314,26 @@ function readFilter() {
     ageMax: document.getElementById("filter-age-max").value,
     qtyMin: document.getElementById("filter-qty-min").value,
     allow,
+    statuses: readStatuses(),
   };
+}
+
+function readStatuses() {
+  const statuses = new Set();
+  document.querySelectorAll("[data-status]").forEach((box) => {
+    if (box.checked) statuses.add(box.dataset.status);
+  });
+  return statuses;
+}
+
+function isDefaultStatus(statuses) {
+  return statuses.size === 3 && statuses.has("approaching") && statuses.has("at") && statuses.has("diot");
 }
 
 function filtersActive(filter) {
   if (filter.asin.trim() || filter.bin.trim()) return true;
   if (filter.ageMin !== "" || filter.ageMax !== "" || filter.qtyMin !== "") return true;
+  if (!isDefaultStatus(filter.statuses)) return true;
   return Object.keys(filter.allow).length > 0;
 }
 
@@ -322,6 +345,7 @@ function applyFilters() {
   applySort();
   clearButton.classList.toggle("hidden", !filtersActive(filter));
   renderSummary();
+  renderLocations();
   renderCharts();
   renderTable();
   updateCounts();
@@ -338,6 +362,9 @@ function clearFilters(rerun) {
   }
   filterGroups.querySelectorAll("input[type=checkbox]").forEach((box) => {
     box.checked = true;
+  });
+  document.querySelectorAll("[data-status]").forEach((box) => {
+    box.checked = box.dataset.status !== "early";
   });
   filterGroups.querySelectorAll(".inv-check").forEach((label) => label.classList.remove("hidden"));
   filterGroups.querySelectorAll(".inv-group-find").forEach((input) => {
@@ -368,27 +395,85 @@ function isolateAge(bucket) {
 }
 
 function renderSummary() {
-  const total = dataset.rowCount;
+  const selected = readStatuses();
   const cards = [
-    ["Lines", view.lines, total],
-    ["Units", view.units, null],
-    ["ASINs", view.uniqueAsins, null],
-    ["Bins", view.uniqueBins, null],
-    ["Avg age", view.avgAge, null, true],
-    ["Avg threshold", view.avgThreshold, null, true],
+    ["diot", "DIOT", "Past the threshold"],
+    ["at", "At", "Less than 1 day before"],
+    ["approaching", "Approaching", "1–2 days before"],
   ];
   kpis.replaceChildren();
-  for (const [label, value, ofTotal, average] of cards) {
-    const card = document.createElement("div");
-    card.className = "inv-kpi";
+  for (const [id, label, detail] of cards) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "inv-kpi " + id;
+    card.setAttribute("aria-pressed", selected.size === 1 && selected.has(id) ? "true" : "false");
     const strong = document.createElement("b");
-    strong.textContent = average ? formatAvg(value) : formatQty(value);
+    strong.textContent = formatInt(view.status[id].lines);
     const caption = document.createElement("span");
-    caption.textContent = ofTotal != null && value !== ofTotal ? label + " of " + formatInt(ofTotal) : label;
+    caption.textContent = label + " · " + formatQty(view.status[id].units) + " units · " + detail;
     card.appendChild(strong);
     card.appendChild(caption);
+    card.addEventListener("click", () => setOnlyStatus(id));
     kpis.appendChild(card);
   }
+}
+
+function setOnlyStatus(statusId) {
+  const boxes = Array.from(document.querySelectorAll("[data-status]"));
+  const onlyThis = boxes.every((box) => (box.dataset.status === statusId ? box.checked : !box.checked));
+  boxes.forEach((box) => {
+    box.checked = onlyThis ? box.dataset.status !== "early" : box.dataset.status === statusId;
+  });
+  applyFilters();
+}
+
+function renderLocations() {
+  const body = document.getElementById("location-body");
+  const rows = view.locations;
+  body.replaceChildren();
+  if (!rows.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 5;
+    cell.className = "inv-empty";
+    cell.textContent = "No outer locations in this view.";
+    row.appendChild(cell);
+    body.appendChild(row);
+    return;
+  }
+  for (const item of rows) {
+    const row = document.createElement("tr");
+    const nameCell = document.createElement("td");
+    const nameButton = document.createElement("button");
+    nameButton.type = "button";
+    nameButton.className = "inv-loc-name";
+    nameButton.textContent = item.name || "(blank)";
+    nameButton.addEventListener("click", () => isolate("Outer Location", item.id));
+    nameCell.appendChild(nameButton);
+    row.appendChild(nameCell);
+    for (const key of ["approaching", "at", "diot", "early"]) {
+      const cell = document.createElement("td");
+      cell.className = "num";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "inv-count";
+      button.textContent = formatInt(item[key]);
+      button.addEventListener("click", () => focusLocationStatus(item.id, key));
+      cell.appendChild(button);
+      row.appendChild(cell);
+    }
+    body.appendChild(row);
+  }
+}
+
+function focusLocationStatus(outerId, statusId) {
+  filterGroups.querySelectorAll('input[data-filter="Outer Location"]').forEach((box) => {
+    box.checked = Number(box.dataset.id) === outerId;
+  });
+  document.querySelectorAll("[data-status]").forEach((box) => {
+    box.checked = box.dataset.status === statusId;
+  });
+  applyFilters();
 }
 
 function renderCharts() {
@@ -538,7 +623,7 @@ function renderTable() {
   if (!total) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 9;
+    cell.colSpan = 10;
     cell.className = "inv-empty";
     cell.textContent = "Nothing to show.";
     row.appendChild(cell);
@@ -558,16 +643,19 @@ function renderTable() {
   };
   for (let slot = start; slot < end; slot++) {
     const index = matchIndex[slot];
+    const age = columns["Average Age"].values[index];
+    const threshold = columns["Average Threshold"].values[index];
     const row = document.createElement("tr");
-    addCell(row, valueAt(columns.ASIN, index));
+    addCell(row, STATUS_LABEL[thresholdStatus(age, threshold)]);
+    addCell(row, formatDays(threshold - age), true);
     addCell(row, valueAt(columns["Outer Location"], index));
     addCell(row, valueAt(columns.Bin, index));
-    addCell(row, valueAt(columns.Owner, index));
-    addCell(row, valueAt(columns.Disposition, index));
-    addCell(row, valueAt(columns.Quantity, index), true);
+    addCell(row, valueAt(columns.ASIN, index));
     addCell(row, valueAt(columns["Average Age"], index), true);
     addCell(row, valueAt(columns["Average Threshold"], index), true);
-    addCell(row, valueAt(columns["Amazon Device Flag"], index));
+    addCell(row, valueAt(columns.Quantity, index), true);
+    addCell(row, valueAt(columns.Owner, index));
+    addCell(row, valueAt(columns.Disposition, index));
     tableBody.appendChild(row);
   }
 }
@@ -591,7 +679,8 @@ function pageCount() {
 }
 
 async function exportFile(kind, button) {
-  if (!dataset || !matchIndex || !matchIndex.length) {
+  const locationExport = kind === "locations";
+  if (!dataset || (locationExport ? !view || !view.locations.length : !matchIndex || !matchIndex.length)) {
     exportStatus.textContent = "Nothing to export for the current filters.";
     return;
   }
@@ -600,6 +689,7 @@ async function exportFile(kind, button) {
     lines: base + "-filtered.csv",
     rollup: base + "-rollup.csv",
     asin: base + "-by-asin.csv",
+    locations: base + "-by-location.csv",
   };
   const filename = names[kind];
   let writable = null;
@@ -617,12 +707,17 @@ async function exportFile(kind, button) {
       }
     }
   }
-  const builders = { lines: detailCsv, rollup: rollupCsv, asin: asinCsv };
+  const builders = {
+    lines: () => detailCsv(dataset, view.matchIndex),
+    rollup: () => rollupCsv(dataset, view.matchIndex),
+    asin: () => asinCsv(dataset, view.matchIndex),
+    locations: () => locationStatusCsv(view.locations),
+  };
   button.disabled = true;
   exportStatus.textContent = "Building " + filename + "…";
   await new Promise((resolve) => setTimeout(resolve, 0));
   try {
-    const chunks = builders[kind](dataset, view.matchIndex);
+    const chunks = builders[kind]();
     if (writable) {
       await writable.write("\uFEFF");
       for (const chunk of chunks) await writable.write(chunk);
@@ -681,6 +776,11 @@ function formatQty(value) {
 function formatAvg(value) {
   if (!Number.isFinite(value)) return "—";
   return value.toLocaleString("en-US", { maximumFractionDigits: 2 });
+}
+function formatDays(value) {
+  if (!Number.isFinite(value)) return "";
+  if (Math.abs(value - Math.round(value)) < 1e-6) return String(Math.round(value));
+  return String(Math.round(value * 100) / 100);
 }
 function formatBytes(bytes) {
   const size = Number(bytes) || 0;

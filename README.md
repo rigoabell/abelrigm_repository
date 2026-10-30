@@ -12,9 +12,11 @@ Central hub for the work: portfolio, tools built, and notes.
 - **`docs/` — Dev Hub website** (static, GitHub Pages ready).
   - **Portfolio** lists Rig Setup (abelrigm) and 49 Tampermonkey scripts. Each script downloads as a `.txt` file.
   - **Toolkit** lists tools built and ready to download.
-  - **Inventory** opens a large inventory CSV in the browser, shows a filterable
-    dashboard, and downloads a filtered line file, a location rollup, or an ASIN
-    rollup. The file stays on the machine. Open it at
+  - **Inventory** opens a large inventory CSV in the browser. Average Age and
+    Average Threshold are the ASIN’s age and threshold. The desk groups containers
+    as Approaching (1–2 days before), At (less than 1 day before), or DIOT (past
+    the threshold), and lists them by outer location. Downloads stay on the machine.
+    Open it at
     `https://rigoabell.github.io/abelrigm_repository/inventory/`.
   - **Rig Setup** is a project on the Portfolio page, not its own site page.
     That project installs Python, Node, and the other machine dependencies into
