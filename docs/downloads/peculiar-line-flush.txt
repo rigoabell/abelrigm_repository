@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Peculiar Line Flush (abelrigm)
 // @namespace    peculiar-line-flush
-// @version      2.8.0
-// @description  Scan containers in Tampermonkey. Looks up AFT Aging Inventory or Peculiar Inventory and saves each operator’s file to the SOS Report Upload Folder.
+// @version      2.9.0
+// @description  Scan containers in Tampermonkey. Looks up AFT Aging Inventory or Peculiar Inventory and saves each operator’s workbook to the SOS Report Upload Folder, with a timestamp, a Total sheet, and one sheet per location.
 // @author       abelrigm
 // @match        https://aft-aging-inventory.na.aftx.amazonoperations.app/*
 // @match        https://peculiar-inventory-na.aka.corp.amazon.com/*
@@ -24,20 +24,23 @@
 
   Each operator scans in the panel. Each person gets their own daily file in:
     Documents / IOL Assignments / SOS Report Upload Folder
-  Example: LineFlush_2026-08-28_abelrigm.csv
+  Example: LineFlush_2026-08-28_abelrigm.xlsx
+  The workbook has a Total sheet with every scan, plus one sheet per location
+  (EOL 1, L3 Even, or whatever location is selected). A location sheet only
+  contains that location. Every row has a Timestamp.
 
   1. Install this script (replace any older Peculiar Line Flush copy).
   2. Open AFT Aging Inventory MEM3 (or Peculiar MEM3), finish Midway, leave that tab open.
   3. Open the SOS folder once in Firefox so Microsoft 365 cookies work.
-  4. Scan into the panel box and press Enter.
-  5. Do not open today’s file in Excel while you are still scanning (it locks).
-     Open it when the shift is done.
+  4. Pick the location (EOL 1, L3 Even, or Other), then scan into the panel box and press Enter.
+  5. Do not open today’s workbook in Excel while you are still scanning (it locks).
+     Open it when the shift is done. Total has every scan. Each location is its own sheet.
 */
 
 (function () {
   "use strict";
 
-  const VERSION = "2.8.0";
+  const VERSION = "2.9.0";
   const AFT_URL = "https://aft-aging-inventory.na.aftx.amazonoperations.app/MEM3/overview";
   const PECULIAR_LEGACY_URL = "https://peculiar-inventory-na.aka.corp.amazon.com/MEM3/overview";
   const PECULIAR_URL = AFT_URL;
@@ -55,10 +58,26 @@
     response: "plf.response",
     session: "plf.sosSession",
     history: "plf.scanHistory",
+    location: "plf.location",
   };
+  const LOCATIONS = [
+    "EOL 1",
+    "EOL 2",
+    "EOL 3",
+    "EOL 4",
+    "L1 Odd",
+    "L1 Even",
+    "L2 Odd",
+    "L2 Even",
+    "L3 Odd",
+    "L3 Even",
+    "L4 Odd",
+    "L4 Even",
+  ];
   const HEADERS = [
+    "Timestamp",
+    "Location",
     "Container ID",
-    "Scanned At",
     "Scanner",
     "Container Type",
     "Total Units",
@@ -168,6 +187,385 @@
     }
     return rows.filter((r) => r.some((c) => String(c).trim()));
   }
+
+  // BEGIN workbook
+  function xmlEscape(value) {
+    return String(value ?? "")
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function xmlUnescape(value) {
+    return String(value ?? "")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&amp;/g, "&");
+  }
+
+  function colLetters(index) {
+    let n = index + 1;
+    let letters = "";
+    while (n > 0) {
+      const rem = (n - 1) % 26;
+      letters = String.fromCharCode(65 + rem) + letters;
+      n = Math.floor((n - 1) / 26);
+    }
+    return letters;
+  }
+
+  function colIndex(letters) {
+    let n = 0;
+    for (let i = 0; i < letters.length; i++) n = n * 26 + (letters.charCodeAt(i) - 64);
+    return n - 1;
+  }
+
+  function sheetName(raw, used) {
+    let base = String(raw || "Unassigned")
+      .replace(/[:\\/?*\[\]]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!base) base = "Unassigned";
+    if (/^total$/i.test(base)) base = "Total location";
+    base = base.slice(0, 31);
+    let name = base;
+    let n = 2;
+    while (used.has(name.toLowerCase())) {
+      const suffix = " " + n;
+      name = base.slice(0, Math.max(1, 31 - suffix.length)) + suffix;
+      n += 1;
+    }
+    used.add(name.toLowerCase());
+    return name;
+  }
+
+  function workbookSheets(rows) {
+    const header = rows[0] || [];
+    const locIdx = header.indexOf("Location");
+    const groups = new Map();
+    for (let i = 1; i < rows.length; i++) {
+      const loc = locIdx >= 0 ? String(rows[i][locIdx] || "").trim() : "";
+      const key = loc || "Unassigned";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(rows[i]);
+    }
+    const used = new Set(["total"]);
+    const sheets = [{ name: "Total", rows: rows }];
+    const keys = Array.from(groups.keys()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      sheets.push({ name: sheetName(key, used), rows: [header.slice()].concat(groups.get(key)) });
+    }
+    return sheets;
+  }
+
+  function alignRows(rows, headers) {
+    if (!rows || !rows.length) return [headers.slice()];
+    const incoming = rows[0].map((cell) => String(cell || "").trim());
+    const index = Object.create(null);
+    for (let i = 0; i < incoming.length; i++) {
+      if (incoming[i] && index[incoming[i]] == null) index[incoming[i]] = i;
+    }
+    const timestampIdx = index.Timestamp != null ? index.Timestamp : index["Scanned At"];
+    const out = [headers.slice()];
+    for (let r = 1; r < rows.length; r++) {
+      const src = rows[r];
+      out.push(
+        headers.map((name) => {
+          if (name === "Timestamp") return timestampIdx == null ? "" : src[timestampIdx] || "";
+          if (name === "Location") {
+            if (index.Location == null) return "Unassigned";
+            return String(src[index.Location] || "").trim() || "Unassigned";
+          }
+          const at = index[name];
+          return at == null ? "" : src[at] || "";
+        })
+      );
+    }
+    return out;
+  }
+
+  function crc32(bytes) {
+    if (!crc32.table) {
+      const table = new Uint32Array(256);
+      for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+        table[n] = c >>> 0;
+      }
+      crc32.table = table;
+    }
+    let crc = 0xffffffff;
+    for (let i = 0; i < bytes.length; i++) crc = crc32.table[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+
+  function u16(n) {
+    return Uint8Array.of(n & 255, (n >>> 8) & 255);
+  }
+
+  function u32(n) {
+    return Uint8Array.of(n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255);
+  }
+
+  function concatBytes(parts) {
+    let size = 0;
+    for (let i = 0; i < parts.length; i++) size += parts[i].length;
+    const out = new Uint8Array(size);
+    let offset = 0;
+    for (let i = 0; i < parts.length; i++) {
+      out.set(parts[i], offset);
+      offset += parts[i].length;
+    }
+    return out;
+  }
+
+  function utf8(text) {
+    return new TextEncoder().encode(String(text));
+  }
+
+  function utf8Decode(bytes) {
+    return new TextDecoder("utf-8").decode(bytes);
+  }
+
+  function zipStore(files) {
+    const locals = [];
+    const centrals = [];
+    let offset = 0;
+    for (let i = 0; i < files.length; i++) {
+      const name = utf8(files[i].name);
+      const data = files[i].data;
+      const crc = crc32(data);
+      const local = concatBytes([
+        u32(0x04034b50),
+        u16(20),
+        u16(0),
+        u16(0),
+        u16(0),
+        u16(0),
+        u32(crc),
+        u32(data.length),
+        u32(data.length),
+        u16(name.length),
+        u16(0),
+        name,
+        data,
+      ]);
+      locals.push(local);
+      centrals.push(
+        concatBytes([
+          u32(0x02014b50),
+          u16(20),
+          u16(20),
+          u16(0),
+          u16(0),
+          u16(0),
+          u16(0),
+          u32(crc),
+          u32(data.length),
+          u32(data.length),
+          u16(name.length),
+          u16(0),
+          u16(0),
+          u16(0),
+          u16(0),
+          u32(0),
+          u32(offset),
+          name,
+        ])
+      );
+      offset += local.length;
+    }
+    const central = concatBytes(centrals);
+    const end = concatBytes([
+      u32(0x06054b50),
+      u16(0),
+      u16(0),
+      u16(files.length),
+      u16(files.length),
+      u32(central.length),
+      u32(offset),
+      u16(0),
+    ]);
+    return concatBytes(locals.concat([central, end]));
+  }
+
+  function worksheetXml(rows) {
+    const lines = [
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+      '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>',
+    ];
+    for (let r = 0; r < rows.length; r++) {
+      const row = rows[r];
+      const cells = [];
+      for (let c = 0; c < row.length; c++) {
+        const ref = colLetters(c) + (r + 1);
+        cells.push('<c r="' + ref + '" t="inlineStr"><is><t xml:space="preserve">' + xmlEscape(row[c]) + "</t></is></c>");
+      }
+      lines.push('<row r="' + (r + 1) + '">' + cells.join("") + "</row>");
+    }
+    lines.push("</sheetData></worksheet>");
+    return lines.join("");
+  }
+
+  function buildXlsx(sheets) {
+    const files = [];
+    const overrides = [];
+    const rels = [];
+    const sheetTags = [];
+    for (let i = 0; i < sheets.length; i++) {
+      const part = "xl/worksheets/sheet" + (i + 1) + ".xml";
+      files.push({ name: part, data: utf8(worksheetXml(sheets[i].rows)) });
+      overrides.push(
+        '<Override PartName="/' +
+          part +
+          '" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+      );
+      rels.push(
+        '<Relationship Id="rId' +
+          (i + 1) +
+          '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet' +
+          (i + 1) +
+          '.xml"/>'
+      );
+      sheetTags.push('<sheet name="' + xmlEscape(sheets[i].name) + '" sheetId="' + (i + 1) + '" r:id="rId' + (i + 1) + '"/>');
+    }
+    files.push({
+      name: "[Content_Types].xml",
+      data: utf8(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+          '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+          '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+          '<Default Extension="xml" ContentType="application/xml"/>' +
+          '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+          overrides.join("") +
+          "</Types>"
+      ),
+    });
+    files.push({
+      name: "_rels/.rels",
+      data: utf8(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+          '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+          '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+          "</Relationships>"
+      ),
+    });
+    files.push({
+      name: "xl/workbook.xml",
+      data: utf8(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+          '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' +
+          sheetTags.join("") +
+          "</sheets></workbook>"
+      ),
+    });
+    files.push({
+      name: "xl/_rels/workbook.xml.rels",
+      data: utf8(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+          '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+          rels.join("") +
+          "</Relationships>"
+      ),
+    });
+    return zipStore(files);
+  }
+
+  function readU16(bytes, offset) {
+    return bytes[offset] | (bytes[offset + 1] << 8);
+  }
+
+  function readU32(bytes, offset) {
+    return (bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)) >>> 0;
+  }
+
+  function unzipStore(bytes) {
+    const files = new Map();
+    let i = 0;
+    while (i + 30 <= bytes.length) {
+      const sig = readU32(bytes, i);
+      if (sig === 0x02014b50 || sig === 0x06054b50) break;
+      if (sig !== 0x04034b50) break;
+      const flags = readU16(bytes, i + 6);
+      const method = readU16(bytes, i + 8);
+      const compSize = readU32(bytes, i + 18);
+      const nameLen = readU16(bytes, i + 26);
+      const extraLen = readU16(bytes, i + 28);
+      const nameStart = i + 30;
+      const name = utf8Decode(bytes.subarray(nameStart, nameStart + nameLen));
+      const dataStart = nameStart + nameLen + extraLen;
+      if (flags & 8) throw new Error("SOS workbook uses a zip format this script cannot read. Close it in Excel, then scan again.");
+      const data = bytes.subarray(dataStart, dataStart + compSize);
+      if (method !== 0) throw new Error("SOS file was saved by Excel. Close it without saving, then scan again.");
+      files.set(name.replace(/\\/g, "/"), data);
+      i = dataStart + compSize;
+    }
+    return files;
+  }
+
+  function parseSheetXml(xml) {
+    const rows = [];
+    const rowRe = /<row\b[^>]*\br="(\d+)"[^>]*>([\s\S]*?)<\/row>/g;
+    const cellRe = /<c\b[^>]*\br="([A-Z]+)(\d+)"[^>]*>([\s\S]*?)<\/c>/g;
+    let rowMatch;
+    while ((rowMatch = rowRe.exec(xml))) {
+      const rowNumber = Number(rowMatch[1]);
+      const cells = [];
+      let cellMatch;
+      cellRe.lastIndex = 0;
+      const body = rowMatch[2];
+      while ((cellMatch = cellRe.exec(body))) {
+        const textMatch = cellMatch[3].match(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/);
+        cells[colIndex(cellMatch[1])] = textMatch ? xmlUnescape(textMatch[1]) : "";
+      }
+      const line = [];
+      for (let c = 0; c < cells.length; c++) line.push(cells[c] == null ? "" : cells[c]);
+      rows[rowNumber - 1] = line;
+    }
+    const width = rows.reduce((max, row) => Math.max(max, row ? row.length : 0), 0);
+    const filled = [];
+    for (let r = 0; r < rows.length; r++) {
+      const line = rows[r] ? rows[r].slice() : [];
+      while (line.length < width) line.push("");
+      if (line.some((cell) => String(cell).trim())) filled.push(line);
+    }
+    return filled;
+  }
+
+  function readXlsxSheets(bytes) {
+    const files = unzipStore(bytes);
+    const workbook = files.get("xl/workbook.xml");
+    const rels = files.get("xl/_rels/workbook.xml.rels");
+    if (!workbook || !rels) throw new Error("SOS workbook is missing its sheet list.");
+    const workbookXml = utf8Decode(workbook);
+    const relsXml = utf8Decode(rels);
+    const relTargets = Object.create(null);
+    const relRe = /Id="(rId\d+)"[^>]*Target="([^"]+)"/g;
+    let relMatch;
+    while ((relMatch = relRe.exec(relsXml))) {
+      const target = relMatch[2].replace(/^\//, "");
+      relTargets[relMatch[1]] = target.indexOf("xl/") === 0 ? target : "xl/" + target.replace(/^\.\//, "");
+    }
+    const sheets = [];
+    const sheetRe = /<sheet\b([^>]*)\/>/g;
+    let sheetMatch;
+    while ((sheetMatch = sheetRe.exec(workbookXml))) {
+      const attrs = sheetMatch[1];
+      const name = ((attrs.match(/\bname="([^"]*)"/) || [])[1] || "").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+      const rid = (attrs.match(/\br:id="(rId\d+)"/) || [])[1];
+      const path = rid ? relTargets[rid] : "";
+      const data = path ? files.get(path) : null;
+      if (!data) continue;
+      sheets.push({ name: xmlUnescape(name), rows: parseSheetXml(utf8Decode(data)) });
+    }
+    return sheets;
+  }
+  // END workbook
 
   function parseAgeDays(raw) {
     const s = cellText(raw).toLowerCase().replace(/,/g, " ");
@@ -559,6 +957,8 @@
         url,
         headers: opts.headers || {},
         data: opts.body,
+        binary: Boolean(opts.binary),
+        responseType: opts.responseType || "",
         anonymous: false,
         onload: (res) => resolve(res),
         onerror: () => reject(new Error("Network error talking to SharePoint.")),
@@ -618,7 +1018,20 @@
   }
 
   function fileNameFor(alias) {
+    return `LineFlush_${dayStamp()}_${alias}.xlsx`;
+  }
+
+  function legacyCsvName(alias) {
     return `LineFlush_${dayStamp()}_${alias}.csv`;
+  }
+
+  function bytesToBinaryString(bytes) {
+    let text = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      text += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return text;
   }
 
   function filePathFor(name) {
@@ -700,20 +1113,22 @@
     lastError = "";
   }
 
-  async function readSosFile(path) {
+  async function readSosBytes(path) {
     const res = await gmReq(spFileUrl(path, "/$value"), {
       method: "GET",
-      headers: { Accept: "text/plain" },
+      responseType: "arraybuffer",
+      headers: { Accept: "application/octet-stream" },
     });
     if (res.status === 404) return null;
     if (res.status < 200 || res.status >= 300) {
       lastError = `${res.status} ${clip(res.responseText, 180)}`;
       throw new Error(lastError);
     }
-    return res.responseText || "";
+    if (res.response instanceof ArrayBuffer) return new Uint8Array(res.response);
+    return utf8(res.responseText || "");
   }
 
-  async function writeSosFile(name, csv) {
+  async function writeSosFile(name, bytes) {
     const d = await digest();
     const url = `${SP_SITE}/_api/web/GetFolderByServerRelativeUrl(@p)/Files/add(url='${name.replace(
       /'/g,
@@ -721,12 +1136,13 @@
     )}',overwrite=true)?@p='${quotePath(SOS_FOLDER)}'`;
     const res = await gmReq(url, {
       method: "POST",
+      binary: true,
       headers: {
         Accept: "application/json;odata=nometadata",
-        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "X-RequestDigest": d,
       },
-      body: csv,
+      body: bytesToBinaryString(bytes),
     });
     if (res.status === 423) {
       throw new Error("SharePoint locked the file. Close it in Excel, then scan again.");
@@ -736,12 +1152,13 @@
         await assertSosFolder();
         const retry = await gmReq(url, {
           method: "POST",
+          binary: true,
           headers: {
             Accept: "application/json;odata=nometadata",
-            "Content-Type": "text/csv; charset=utf-8",
+            "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "X-RequestDigest": d,
           },
-          body: csv,
+          body: bytesToBinaryString(bytes),
         });
         if (retry.status >= 200 && retry.status < 300) {
           lastError = "";
@@ -758,9 +1175,11 @@
     fileOk = true;
   }
 
-  function rowsFromResult(containerId, result, alias) {
+  function rowsFromResult(containerId, result, alias, location) {
     const inventory = result.inventory && result.inventory.length ? result.inventory : [{}];
     const extra = Math.max(0, inventory.length - 1);
+    const stamped = nowIso();
+    const where = String(location || "").trim() || "Unassigned";
     return inventory.map((inv, i) => {
       const status = result.ok ? "OK" : result.error === "NOT_FOUND" ? "NOT FOUND" : "ERROR";
       const notes = result.ok
@@ -769,8 +1188,9 @@
           : ""
         : result.notes || result.error || "Lookup failed";
       return [
+        stamped,
+        where,
         result.containerId || containerId,
-        nowIso(),
         alias,
         i === 0 ? result.containerType || "" : "",
         i === 0 ? result.totalUnits || "" : "",
@@ -799,20 +1219,26 @@
     return run;
   }
 
+  async function loadSosRows(alias) {
+    const workbook = await readSosBytes(filePathFor(fileNameFor(alias)));
+    if (workbook && workbook.length) {
+      const sheets = readXlsxSheets(workbook);
+      const total = sheets.find((sheet) => sheet.name === "Total") || sheets[0];
+      return alignRows(total ? total.rows : [], HEADERS);
+    }
+    const legacy = await readSosBytes(filePathFor(legacyCsvName(alias)));
+    if (legacy && legacy.length) return alignRows(parseCsv(utf8Decode(legacy)), HEADERS);
+    return [HEADERS.slice()];
+  }
+
   async function ensureSosCache(alias) {
     if (sosCache.rows && sosCache.alias === alias && sosCache.day === dayStamp()) return;
     await assertSosFolder();
     const name = fileNameFor(alias);
-    const path = filePathFor(name);
-    let rows = [];
-    const existing = await readSosFile(path);
-    if (existing) rows = parseCsv(existing);
-    if (!rows.length) rows.push(HEADERS.slice());
-    else if (rows[0][0] !== "Container ID") rows.unshift(HEADERS.slice());
     sosCache.alias = alias;
     sosCache.day = dayStamp();
     sosCache.name = name;
-    sosCache.rows = rows;
+    sosCache.rows = await loadSosRows(alias);
   }
 
   async function appendSosRows(newRows, alias) {
@@ -820,7 +1246,7 @@
     const before = sosCache.rows.length;
     sosCache.rows.push(...newRows);
     try {
-      await writeSosFile(sosCache.name, toCsv(sosCache.rows));
+      await writeSosFile(sosCache.name, buildXlsx(workbookSheets(sosCache.rows)));
     } catch (err) {
       sosCache.rows.splice(before);
       fileOk = false;
@@ -970,6 +1396,14 @@
         .ok .dot { background: #3dd68c; box-shadow: 0 0 8px #3dd68c; }
         .bad .dot { background: #ff5d5d; box-shadow: 0 0 8px #ff5d5d; }
         .scanbox { padding: 12px 16px 8px; background: #121b26; border-bottom: 1px solid #2c3c4e; }
+        .loc-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+        .loc-row label { font-size: 11px; letter-spacing: .12em; font-weight: 700; color: #8fb4d4; }
+        #loc, #locCustom {
+          background: #071018; color: #f6fbff; border: 1px solid #3d7cc9; border-radius: 8px;
+          padding: 8px 10px; font-size: 14px; font-weight: 700;
+        }
+        #loc { min-width: 160px; }
+        #locCustom { flex: 1; min-width: 0; }
         .scan-label { font-size: 11px; letter-spacing: .12em; font-weight: 700; color: #8fb4d4; margin-bottom: 6px; }
         #q {
           width: 100%; border: 2px solid #3d7cc9; background: #071018; color: #f6fbff;
@@ -1076,6 +1510,11 @@
             </div>
           </div>
           <div class="scanbox">
+            <div class="loc-row">
+              <label for="loc">LOCATION</label>
+              <select id="loc"></select>
+              <input id="locCustom" type="text" placeholder="Type a location" hidden autocomplete="off" />
+            </div>
             <div class="scan-label">SCANNER — keep this box focused; gun sends Enter</div>
             <input id="q" type="text" placeholder="Waiting for scan…" autocomplete="off" spellcheck="false" />
             <div class="actions">
@@ -1118,13 +1557,13 @@
             <h2>SHIFT HISTORY <input id="filter" placeholder="Filter ID / SKU" /></h2>
             <div class="histwrap">
               <table>
-                <thead><tr><th>Time</th><th>Container</th><th>Age</th><th>FcSku</th><th>St</th></tr></thead>
+                <thead><tr><th>Time</th><th>Location</th><th>Container</th><th>Age</th><th>FcSku</th><th>St</th></tr></thead>
                 <tbody id="hist"></tbody>
               </table>
             </div>
           </div>
           <div class="foot">
-            <span id="footMsg">SOS file will be created on the first save. Do not open it in Excel while scanning.</span>
+            <span id="footMsg">SOS workbook will be created on the first save. Total holds every scan. Each location gets its own sheet. Do not open it in Excel while scanning.</span>
             <span class="note ready" id="note">READY · scan</span>
           </div>
         </div>
@@ -1141,6 +1580,58 @@
     let alias = "";
     let spOk = false;
     let selectedId = "";
+    const locSelect = shadow.getElementById("loc");
+    const locCustom = shadow.getElementById("locCustom");
+    for (let i = 0; i < LOCATIONS.length; i++) {
+      const opt = document.createElement("option");
+      opt.value = LOCATIONS[i];
+      opt.textContent = LOCATIONS[i];
+      locSelect.appendChild(opt);
+    }
+    const otherLoc = document.createElement("option");
+    otherLoc.value = "__custom__";
+    otherLoc.textContent = "Other…";
+    locSelect.appendChild(otherLoc);
+    const chooseLoc = document.createElement("option");
+    chooseLoc.value = "";
+    chooseLoc.textContent = "Choose location";
+    locSelect.insertBefore(chooseLoc, locSelect.firstChild);
+    const savedLoc = GM_getValue(KEYS.location, null);
+    if (savedLoc && typeof savedLoc === "object") {
+      if (savedLoc.id === "__custom__") {
+        locSelect.value = "__custom__";
+        locCustom.hidden = false;
+        locCustom.value = savedLoc.custom || "";
+      } else if (savedLoc.id && LOCATIONS.indexOf(savedLoc.id) !== -1) {
+        locSelect.value = savedLoc.id;
+      } else {
+        locSelect.value = "";
+      }
+    } else {
+      locSelect.value = "";
+    }
+
+    function rememberLocation() {
+      GM_setValue(KEYS.location, {
+        id: locSelect.value,
+        custom: locCustom.value,
+      });
+    }
+
+    function currentLocation() {
+      const picked = locSelect.value === "__custom__" ? locCustom.value : locSelect.value;
+      return cellText(picked) || "Unassigned";
+    }
+
+    locSelect.addEventListener("change", () => {
+      locCustom.hidden = locSelect.value !== "__custom__";
+      rememberLocation();
+      if (locSelect.value === "__custom__") locCustom.focus();
+      else input.focus();
+    });
+    locCustom.addEventListener("input", rememberLocation);
+    locCustom.addEventListener("change", rememberLocation);
+    rememberLocation();
 
     function setBanner(kind, html) {
       note.className = "note " + kind;
@@ -1229,17 +1720,17 @@
 
     function renderHistory() {
       const q = cellText(shadow.getElementById("filter").value).toLowerCase();
-      const rows = recent.filter((r) => !q || `${r.id} ${r.sku} ${r.age}`.toLowerCase().includes(q));
+      const rows = recent.filter((r) => !q || `${r.id} ${r.sku} ${r.age} ${r.location || ""}`.toLowerCase().includes(q));
       shadow.getElementById("hist").innerHTML = rows.length
         ? rows
             .map((r) => {
               const st =
                 r.status === "OK" ? "st-ok" : r.status === "NOT FOUND" || r.status === "NOT_FOUND" ? "st-miss" : "st-err";
               const active = r.id === selectedId ? "active" : "";
-              return `<tr class="${active}" data-id="${escapeHtml(r.id)}"><td>${escapeHtml((r.t || "").slice(11))}</td><td>${escapeHtml(r.id)}</td><td>${escapeHtml(r.age || "")}</td><td>${escapeHtml(r.sku || "")}</td><td class="${st}">${escapeHtml(r.status || "")}</td></tr>`;
+              return `<tr class="${active}" data-id="${escapeHtml(r.id)}"><td>${escapeHtml((r.t || "").slice(11))}</td><td>${escapeHtml(r.location || "")}</td><td>${escapeHtml(r.id)}</td><td>${escapeHtml(r.age || "")}</td><td>${escapeHtml(r.sku || "")}</td><td class="${st}">${escapeHtml(r.status || "")}</td></tr>`;
             })
             .join("")
-        : `<tr><td colspan="5" class="empty">No scans this shift</td></tr>`;
+        : `<tr><td colspan="6" class="empty">No scans this shift</td></tr>`;
     }
 
     function persist() {
@@ -1259,10 +1750,10 @@
         shadow.getElementById("footMsg").innerHTML = `<span style="color:#ffd7d7">Save error: ${escapeHtml(clip(lastError, 160))}</span>`;
       } else if (today && fileOk) {
         shadow.getElementById("footMsg").innerHTML =
-          `Saving to <b>${escapeHtml(ses.name)}</b> · ${ses.count} row(s) · close this file in Excel while scanning`;
+          `Saving to <b>${escapeHtml(ses.name)}</b> · ${ses.count} row(s) · Total plus one sheet per location · close this file in Excel while scanning`;
       } else {
         shadow.getElementById("footMsg").innerHTML =
-          "SOS file will be created on the first save. Do not open it in Excel while scanning.";
+          "SOS workbook will be created on the first save. Total holds every scan. Each location gets its own sheet. Do not open it in Excel while scanning.";
       }
       const filter = shadow.getElementById("filter");
       if (open && shadow.activeElement !== filter && shadow.activeElement !== input) input.focus();
@@ -1375,9 +1866,11 @@
         const sku = result.inventory?.[0]?.fcSku || "";
         const status = result.ok ? "OK" : result.error === "NOT_FOUND" ? "NOT FOUND" : result.error || "ERROR";
         selectedId = id;
+        const where = currentLocation();
         recent.unshift({
           t: nowIso(),
           id,
+          location: where,
           age: result.oldestAge || "",
           sku,
           status,
@@ -1391,10 +1884,10 @@
         setBanner(
           result.ok ? "found" : result.error === "NOT_FOUND" ? "missing" : "error",
           result.ok
-            ? `<strong>SAVING</strong> ${escapeHtml(id)}${extra}`
-            : `<strong>${escapeHtml(status)}</strong> ${escapeHtml(id)}${extra}`
+            ? `<strong>SAVING</strong> ${escapeHtml(id)} · ${escapeHtml(where)}${extra}`
+            : `<strong>${escapeHtml(status)}</strong> ${escapeHtml(id)} · ${escapeHtml(where)}${extra}`
         );
-        const rows = rowsFromResult(id, result, who);
+        const rows = rowsFromResult(id, result, who, where);
         enqueueSave(() => appendSosRows(rows, who))
           .then((session) => {
             spOk = true;
@@ -1442,7 +1935,9 @@
         if (!open) return;
         const path = typeof e.composedPath === "function" ? e.composedPath() : [];
         const filter = shadow.getElementById("filter");
-        if (path.includes(filter)) return;
+        const loc = shadow.getElementById("loc");
+        const locCustom = shadow.getElementById("locCustom");
+        if (path.includes(filter) || path.includes(loc) || path.includes(locCustom)) return;
         if (e.ctrlKey || e.metaKey || e.altKey) return;
         e.stopPropagation();
         e.stopImmediatePropagation();
