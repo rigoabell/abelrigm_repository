@@ -1315,15 +1315,8 @@ function renderResponderDashboard() {
     const showCounts = Boolean(dataset && assigned);
     metrics.appendChild(dashMetric(showCounts ? "approaching" : "empty", showCounts ? formatQty(stats ? stats.approachingUnits : 0) : "—", "Approaching"));
     metrics.appendChild(dashMetric(showCounts ? "at" : "empty", showCounts ? formatQty(stats ? stats.atUnits : 0) : "—", "At"));
-    const diotUnits = stats ? stats.diotUnits : 0;
-    metrics.appendChild(dashMetric(showCounts ? "diot" : "empty", showCounts ? formatQty(diotUnits) : "—", "DIOT"));
+    metrics.appendChild(dashMetric(showCounts ? "diot" : "empty", showCounts ? formatQty(stats ? stats.diotUnits : 0) : "—", "DIOT"));
     card.appendChild(metrics);
-    if (showCounts) {
-      const note = document.createElement("p");
-      note.className = "inv-dash-overage";
-      note.textContent = "DIOT is " + diotOverageText(diotUnits, inventoryThreshold());
-      card.appendChild(note);
-    }
     grid.appendChild(card);
   }
   body.appendChild(grid);
