@@ -850,19 +850,28 @@ function rankedQuantity(counts) {
 
 export function assignmentPackage(dataset, places, groupings) {
   const rules = normalizeGroupings(groupings);
-  const locationPeople = new Map();
-  const typePeople = new Map();
   const peoplePlaces = new Map();
+  const maskCache = new Map();
+  const prepared = [];
   for (const place of Array.isArray(places) ? places : []) {
     const responder = String((place && place.responder) || "").replace(/[\u0000-\u001f]/g, "").trim();
     const name = String((place && place.name) || "").replace(/[\u0000-\u001f]/g, "").trim();
     if (!responder || !name) continue;
     const kind = place.kind === "type" ? "type" : "location";
-    const bucket = kind === "type" ? typePeople : locationPeople;
-    if (!bucket.has(name)) bucket.set(name, new Set());
-    bucket.get(name).add(responder);
+    let mask = null;
+    if (place.scope) {
+      const scopeKey = place.scopeKey || place.scope;
+      if (maskCache.has(scopeKey)) mask = maskCache.get(scopeKey);
+      else {
+        mask = new Uint8Array(dataset.rowCount);
+        const match = query(dataset, place.scope).matchIndex;
+        for (let n = 0; n < match.length; n++) mask[match[n]] = 1;
+        maskCache.set(scopeKey, mask);
+      }
+    }
+    prepared.push({ responder, kind, name, mask });
     if (!peoplePlaces.has(responder)) peoplePlaces.set(responder, new Set());
-    peoplePlaces.get(responder).add(kind + "\t" + name);
+    peoplePlaces.get(responder).add(kind + "\t" + name + (place.scopeKey ? "\t" + place.scopeKey : ""));
   }
 
   const outer = column(dataset, "Outer Location");
@@ -873,18 +882,23 @@ export function assignmentPackage(dataset, places, groupings) {
   const age = column(dataset, "Average Age");
   const threshold = column(dataset, "Average Threshold");
   const groups = new Map();
+  const scoped = prepared.some((place) => place.mask);
 
   for (let i = 0; i < dataset.rowCount; i++) {
     const status = thresholdStatus(age.values[i], threshold.values[i]);
-    if (status !== "approaching" && status !== "at" && status !== "diot") continue;
+    const hot = status === "approaching" || status === "at" || status === "diot";
+    if (!hot && !scoped) continue;
     const location = outer.dict[outer.codes[i]] || "(blank)";
     const binName = bin.dict[bin.codes[i]] || "(blank)";
     const typeName = containerTypeName(binName, rules);
     const people = new Set();
-    const fromLocation = locationPeople.get(location);
-    const fromType = typePeople.get(typeName);
-    if (fromLocation) fromLocation.forEach((person) => people.add(person));
-    if (fromType) fromType.forEach((person) => people.add(person));
+    for (const place of prepared) {
+      if (place.mask) {
+        if (!place.mask[i]) continue;
+      } else if (!hot) continue;
+      if (place.kind === "type" ? typeName !== place.name : location !== place.name) continue;
+      people.add(place.responder);
+    }
     if (!people.size) continue;
     const quantity = qty.values[i];
     const ageValue = age.values[i];
@@ -906,6 +920,7 @@ export function assignmentPackage(dataset, places, groupings) {
           approachingUnits: 0,
           atUnits: 0,
           diotUnits: 0,
+          earlyUnits: 0,
           owners: new Map(),
           dispositions: new Map(),
         };
@@ -914,7 +929,8 @@ export function assignmentPackage(dataset, places, groupings) {
       group.quantity += quantity;
       group.ageWeighted += ageValue * quantity;
       group.thresholdWeighted += thresholdValue * quantity;
-      group[status + "Units"] += quantity;
+      if (hot) group[status + "Units"] += quantity;
+      else group.earlyUnits += quantity;
       group.owners.set(ownerName, (group.owners.get(ownerName) || 0) + quantity);
       group.dispositions.set(dispositionName, (group.dispositions.get(dispositionName) || 0) + quantity);
     }
@@ -929,6 +945,7 @@ export function assignmentPackage(dataset, places, groupings) {
       approachingUnits: 0,
       atUnits: 0,
       diotUnits: 0,
+      earlyUnits: 0,
     });
   }
   for (const group of groups.values()) {
@@ -947,6 +964,7 @@ export function assignmentPackage(dataset, places, groupings) {
     person.approachingUnits += group.approachingUnits;
     person.atUnits += group.atUnits;
     person.diotUnits += group.diotUnits;
+    person.earlyUnits += group.earlyUnits;
   }
 
   const responders = Array.from(byPerson.values()).sort((a, b) => a.name.localeCompare(b.name));
@@ -960,7 +978,7 @@ export function assignmentPackage(dataset, places, groupings) {
     }
     person.locations = rankedQuantity(locations);
     person.types = rankedQuantity(types);
-    person.quantity = person.approachingUnits + person.atUnits + person.diotUnits;
+    person.quantity = person.approachingUnits + person.atUnits + person.diotUnits + person.earlyUnits;
     person.uniqueContainers = person.containers.length;
   }
   return { responders };
