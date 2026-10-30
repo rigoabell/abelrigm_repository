@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { asinCsv, detailCsv, locationStatusCsv, parseCsvText, query, rollupCsv, thresholdStatus, valueAt } from "../docs/inventory/engine.js";
+import { asinCsv, containerTypeCsv, containerTypeName, detailCsv, letterPrefix, locationStatusCsv, normalizeGroupings, parseCsvText, query, rollupCsv, thresholdStatus, valueAt } from "../docs/inventory/engine.js";
 
 const fixture = [
   "\uFEFF\"Region\",\"Warehouse\",\"Outer Location\",\"Bin\",\"ASIN\",\"Owner\",\"Disposition\",\"Amazon Device Flag\",\"Quantity\",\"Average Age\",\"Average Threshold\",\"Note\"",
@@ -38,6 +38,25 @@ assert.equal(valueAt(whole.byName["Average Age"], 0), "3.5");
 assert.ok(Math.abs(whole.byName["Average Age"].values[0] - 3.5) < 1e-9);
 
 for (const size of [1, 2, 3, 5, 7, 16, 64]) sameShape(whole, parsed(size));
+
+assert.equal(letterPrefix("tsX27482942"), "tsX");
+assert.equal(letterPrefix("tsTDST34394839"), "tsTDST");
+assert.equal(letterPrefix(""), "(blank)");
+assert.equal(containerTypeName("tsX27482942", []), "tsX");
+const rules = normalizeGroupings([
+  { name: "ts", prefix: "ts" },
+  { name: "Transfer station", prefix: "tsTDST" },
+  { name: "Scan X", prefix: "tsX" },
+]);
+assert.equal(rules[0].prefix, "tsTDST");
+assert.equal(containerTypeName("tsTDST34394839", rules), "Transfer station");
+assert.equal(containerTypeName("tsX27482942", rules), "Scan X");
+assert.equal(containerTypeName("tsAUD040818", rules), "ts");
+const grouped = query(whole, { groupings: [{ name: "Bin dash", prefix: "bin-" }] });
+assert.equal(grouped.containerTypes.find((row) => row.name === "Bin dash").containers, 3);
+assert.equal(grouped.containerTypes.find((row) => row.name === "bin,").containers, 1);
+const typedOnly = query(whole, { containerType: "Bin dash", groupings: [{ name: "Bin dash", prefix: "bin-" }] });
+assert.equal(typedOnly.lines, 3);
 
 assert.equal(thresholdStatus(3, 5), "approaching");
 assert.equal(thresholdStatus(4, 5), "approaching");
@@ -118,6 +137,15 @@ if (fs.existsSync(realPath)) {
   assert.equal(view.warehouse[0].name, "MEM3");
   assert.equal(view.disposition.find((row) => row.name === "SELLABLE").lines, 142315);
   assert.equal(view.disposition.find((row) => row.name === "SELLABLE").units, 145639);
+  const tsx = view.containerTypes.find((row) => row.name === "tsX");
+  const station = view.containerTypes.find((row) => row.name === "tsTDST");
+  assert.equal(view.containerTypes[0].name, "tsX");
+  assert.ok(tsx.containers > 100000);
+  assert.ok(station.containers > 2000);
+  const renamed = query(real, { groupings: [{ name: "Scan X", prefix: "tsX" }] });
+  const scanX = renamed.containerTypes.find((row) => row.name === "Scan X");
+  assert.ok(scanX.containers >= tsx.containers);
+  assert.equal(renamed.containerTypes.find((row) => row.name === "tsX"), undefined);
   const watched = query(real, { statuses: new Set(["approaching", "at", "diot"]) });
   assert.equal(watched.status.diot.lines, 1668);
   assert.equal(watched.status.at.lines, 329);
