@@ -443,9 +443,9 @@
     "id": "peculiar-line-flush",
     "name": "Peculiar Line Flush (abelrigm)",
     "category": "Peculiar",
-    "summary": "Scan a line of containers, look each up, and save the operator workbook.",
-    "detail": "Scanning stays in the userscript. Each lookup on AFT Aging Inventory or Peculiar Inventory is saved to the SOS Report Upload folder for that operator. The workbook stamps every row and keeps a Total sheet plus one sheet per location, such as EOL 1 or L3 Even. Copy Debug is on the panel and in the Tampermonkey menu.",
-    "version": "2.9.0",
+    "summary": "Scan containers and save each operator’s daily dashboard, with the scan time on every row.",
+    "detail": "Scanning stays in the userscript. Each lookup is saved to the Line Flush Records folder for that operator. The workbook matches the dashboard: totals, each location, then each container with its parent, age, status, and the time it was scanned. The team install updates from the peculiar-line-flush repository.",
+    "version": "2.9.24",
     "runsOn": "aft-aging-inventory.na.aftx.amazonoperations.app, peculiar-inventory-na.aka.corp.amazon.com",
     "file": "downloads/peculiar-line-flush.txt",
     "downloadName": "Peculiar Line Flush (abelrigm).txt"
