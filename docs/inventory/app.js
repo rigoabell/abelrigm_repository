@@ -1,5 +1,5 @@
-import { asinCsv, detailCsv, locationStatusCsv, query, rollupCsv, sortMatch, STATUS_LABEL, thresholdStatus, valueAt } from "./engine.js";
-import { forgetToken, loadSavedFile, readToken, saveInventoryFile, writeToken } from "./github-save.js";
+import { asinCsv, containerTypeCsv, detailCsv, locationStatusCsv, query, rollupCsv, sortMatch, STATUS_LABEL, thresholdStatus, valueAt, normalizeGroupings } from "./engine.js";
+import { forgetToken, loadSavedFile, readToken, saveDataFile, saveInventoryFile, writeToken } from "./github-save.js";
 
 const PAGE_SIZE = 50;
 const FILTER_COLUMNS = [
@@ -51,6 +51,11 @@ let filterTimer = 0;
 let textTimer = 0;
 let loadGeneration = 0;
 let saving = false;
+let placeMode = "location";
+let containerType = "";
+let groupings = [];
+let editingGroup = -1;
+const GROUP_KEY = "inventory.containerGroups";
 
 fileInput.addEventListener("change", () => {
   const file = fileInput.files && fileInput.files[0];
@@ -116,6 +121,15 @@ document.getElementById("forget-token").addEventListener("click", () => {
   saveNote.textContent = "The token was removed from this browser. The public file is unchanged.";
 });
 if (readToken()) tokenInput.value = readToken();
+document.getElementById("mode-location").addEventListener("click", () => setPlaceMode("location"));
+document.getElementById("mode-type").addEventListener("click", () => setPlaceMode("type"));
+document.getElementById("group-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  addGrouping();
+});
+document.getElementById("save-groupings").addEventListener("click", () => saveGroupingsToSite());
+document.getElementById("group-help").textContent =
+  "Optional. A bin uses the longest grouping it starts with. Otherwise it is grouped by the letters before the first number. Saved groupings stay in this browser until you save them to the site.";
 
 function openFile(file, kind) {
   const generation = ++loadGeneration;
@@ -215,6 +229,7 @@ function fail(message) {
 }
 
 async function acceptDataset(next, file, kind, generation) {
+  await groupingsReady;
   if (generation !== loadGeneration) return;
   dataset = next;
   loadingTitle.textContent = "Summarizing " + formatInt(dataset.rowCount) + " lines";
@@ -338,6 +353,8 @@ function readFilter() {
     qtyMin: document.getElementById("filter-qty-min").value,
     allow,
     statuses: readStatuses(),
+    containerType,
+    groupings,
   };
 }
 
@@ -357,6 +374,7 @@ function filtersActive(filter) {
   if (filter.asin.trim() || filter.bin.trim()) return true;
   if (filter.ageMin !== "" || filter.ageMax !== "" || filter.qtyMin !== "") return true;
   if (!isDefaultStatus(filter.statuses)) return true;
+  if (filter.containerType) return true;
   return Object.keys(filter.allow).length > 0;
 }
 
@@ -368,7 +386,7 @@ function applyFilters() {
   applySort();
   clearButton.classList.toggle("hidden", !filtersActive(filter));
   renderSummary();
-  renderLocations();
+  renderPlace();
   renderCharts();
   renderTable();
   updateCounts();
@@ -389,6 +407,7 @@ function clearFilters(rerun) {
   document.querySelectorAll("[data-status]").forEach((box) => {
     box.checked = box.dataset.status !== "early";
   });
+  containerType = "";
   filterGroups.querySelectorAll(".inv-check").forEach((label) => label.classList.remove("hidden"));
   filterGroups.querySelectorAll(".inv-group-find").forEach((input) => {
     input.value = "";
@@ -450,6 +469,25 @@ function setOnlyStatus(statusId) {
   applyFilters();
 }
 
+function renderPlace() {
+  const typeMode = placeMode === "type";
+  document.getElementById("place-title").textContent = typeMode ? "Container type" : "Outer locations";
+  document.getElementById("mode-location").setAttribute("aria-pressed", typeMode ? "false" : "true");
+  document.getElementById("mode-type").setAttribute("aria-pressed", typeMode ? "true" : "false");
+  document.getElementById("group-editor").classList.toggle("hidden", !typeMode);
+  const note = document.getElementById("location-count");
+  if (typeMode) {
+    note.textContent = containerType
+      ? "Filtered to " + containerType + ". Click it again to show every type. Grouped by the letters before the first number, unless a grouping matches."
+      : "Grouped by the letters before the first number. tsX27482942 is tsX, and tsTDST34394839 is tsTDST. Click a type to filter to it.";
+    renderContainerTypes();
+    renderGroupEditor();
+    return;
+  }
+  note.textContent = "Containers and units for the threshold states that are checked. Click a location to filter to it.";
+  renderLocations();
+}
+
 function renderLocations() {
   const head = document.getElementById("location-head");
   const body = document.getElementById("location-body");
@@ -481,20 +519,63 @@ function renderLocations() {
     nameButton.addEventListener("click", () => isolate("Outer Location", item.id));
     nameCell.appendChild(nameButton);
     row.appendChild(nameCell);
-    appendCount(row, formatInt(item.containers), item.id);
-    appendCount(row, formatQty(item.units), item.id);
+    appendCount(row, formatInt(item.containers), () => isolate("Outer Location", item.id));
+    appendCount(row, formatQty(item.units), () => isolate("Outer Location", item.id));
     body.appendChild(row);
   }
 }
 
-function appendCount(row, text, outerId) {
+function renderContainerTypes() {
+  const head = document.getElementById("location-head");
+  const body = document.getElementById("location-body");
+  const rows = view.containerTypes || [];
+  head.replaceChildren();
+  const headRow = document.createElement("tr");
+  appendHeader(headRow, "Container type", false);
+  appendHeader(headRow, "Containers", true);
+  appendHeader(headRow, "Units", true);
+  head.appendChild(headRow);
+  body.replaceChildren();
+  if (!rows.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 3;
+    cell.className = "inv-empty";
+    cell.textContent = "No container types in this view.";
+    row.appendChild(cell);
+    body.appendChild(row);
+    return;
+  }
+  for (const item of rows) {
+    const row = document.createElement("tr");
+    const nameCell = document.createElement("td");
+    const nameButton = document.createElement("button");
+    nameButton.type = "button";
+    nameButton.className = "inv-loc-name";
+    nameButton.textContent = item.name || "(blank)";
+    nameButton.setAttribute("aria-pressed", containerType === item.name ? "true" : "false");
+    nameButton.addEventListener("click", () => toggleContainerType(item.name));
+    nameCell.appendChild(nameButton);
+    row.appendChild(nameCell);
+    appendCount(row, formatInt(item.containers), () => toggleContainerType(item.name));
+    appendCount(row, formatQty(item.units), () => toggleContainerType(item.name));
+    body.appendChild(row);
+  }
+}
+
+function toggleContainerType(name) {
+  containerType = containerType === name ? "" : name;
+  applyFilters();
+}
+
+function appendCount(row, text, onClick) {
   const cell = document.createElement("td");
   cell.className = "num";
   const button = document.createElement("button");
   button.type = "button";
   button.className = "inv-count";
   button.textContent = text;
-  button.addEventListener("click", () => isolate("Outer Location", outerId));
+  button.addEventListener("click", onClick);
   cell.appendChild(button);
   row.appendChild(cell);
 }
@@ -709,8 +790,9 @@ function pageCount() {
 }
 
 async function exportFile(kind, button) {
-  const locationExport = kind === "locations";
-  if (!dataset || (locationExport ? !view || !view.locations.length : !matchIndex || !matchIndex.length)) {
+  const summaryExport = kind === "locations" || kind === "types";
+  const summaryRows = kind === "types" ? view && view.containerTypes : view && view.locations;
+  if (!dataset || (summaryExport ? !summaryRows || !summaryRows.length : !matchIndex || !matchIndex.length)) {
     exportStatus.textContent = "Nothing to export for the current filters.";
     return;
   }
@@ -720,6 +802,7 @@ async function exportFile(kind, button) {
     rollup: base + "-rollup.csv",
     asin: base + "-by-asin.csv",
     locations: base + "-by-location.csv",
+    types: base + "-by-type.csv",
   };
   const filename = names[kind];
   let writable = null;
@@ -742,6 +825,7 @@ async function exportFile(kind, button) {
     rollup: () => rollupCsv(dataset, view.matchIndex),
     asin: () => asinCsv(dataset, view.matchIndex),
     locations: () => locationStatusCsv(view.locations),
+    types: () => containerTypeCsv(view.containerTypes),
   };
   button.disabled = true;
   exportStatus.textContent = "Building " + filename + "…";
@@ -891,6 +975,126 @@ async function saveNow() {
     if (generation !== loadGeneration && sourceFile && sourceFile !== publicFile && readToken()) saveNow();
   }
 }
+
+function setPlaceMode(mode) {
+  placeMode = mode === "type" ? "type" : "location";
+  if (view) renderPlace();
+}
+
+function addGrouping() {
+  const name = document.getElementById("group-name").value.trim();
+  const prefix = document.getElementById("group-prefix").value.trim();
+  if (!name || !prefix) {
+    document.getElementById("group-note").textContent = "Enter a group name and the letters it starts with.";
+    return;
+  }
+  const next = groupings.slice();
+  if (editingGroup >= 0 && editingGroup < next.length) next[editingGroup] = { name, prefix };
+  else next.push({ name, prefix });
+  groupings = normalizeGroupings(next);
+  editingGroup = -1;
+  document.getElementById("group-name").value = "";
+  document.getElementById("group-prefix").value = "";
+  document.getElementById("group-submit").textContent = "Add grouping";
+  storeGroupings();
+  document.getElementById("group-note").textContent = "Saved in this browser.";
+  if (dataset) applyFilters();
+  else renderGroupEditor();
+}
+
+function storeGroupings() {
+  localStorage.setItem(GROUP_KEY, JSON.stringify(groupings));
+}
+
+function renderGroupEditor() {
+  const list = document.getElementById("group-list");
+  list.replaceChildren();
+  if (!groupings.length) {
+    const item = document.createElement("li");
+    item.textContent = "No groupings yet. Letter prefixes are used on their own.";
+    list.appendChild(item);
+    return;
+  }
+  groupings.forEach((group, index) => {
+    const item = document.createElement("li");
+    const name = document.createElement("b");
+    name.textContent = group.name;
+    const prefix = document.createElement("span");
+    prefix.textContent = "starts with " + group.prefix;
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "btn btn-outline btn-sm";
+    edit.textContent = "Edit";
+    edit.addEventListener("click", () => {
+      editingGroup = index;
+      document.getElementById("group-name").value = group.name;
+      document.getElementById("group-prefix").value = group.prefix;
+      document.getElementById("group-submit").textContent = "Update grouping";
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "btn btn-outline btn-sm";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", () => {
+      groupings = groupings.filter((_, itemIndex) => itemIndex !== index);
+      if (editingGroup === index) editingGroup = -1;
+      storeGroupings();
+      document.getElementById("group-note").textContent = "Saved in this browser.";
+      if (dataset) applyFilters();
+      else renderGroupEditor();
+    });
+    item.appendChild(name);
+    item.appendChild(prefix);
+    item.appendChild(edit);
+    item.appendChild(remove);
+    list.appendChild(item);
+  });
+}
+
+async function saveGroupingsToSite() {
+  const note = document.getElementById("group-note");
+  const token = (tokenInput.value || readToken()).trim();
+  if (!token) {
+    note.textContent = "Paste a GitHub token in Saved copy, then save. The groupings are already kept in this browser.";
+    return;
+  }
+  writeToken(token);
+  note.textContent = "Saving groupings…";
+  try {
+    const result = await saveDataFile(
+      "groupings.json",
+      JSON.stringify(groupings, null, 2) + "\n",
+      token,
+      "Save container groupings"
+    );
+    note.textContent = result.direct
+      ? "Saved. Other machines see these groupings after GitHub Pages deploys, usually within a few minutes."
+      : "Main is protected, so the groupings are on branch inventory-saved." + (result.prUrl ? " Merge " + result.prUrl + "." : "");
+  } catch (error) {
+    note.textContent = error && error.message ? error.message : String(error);
+  }
+}
+
+async function loadGroupings() {
+  try {
+    const stored = localStorage.getItem(GROUP_KEY);
+    if (stored != null) {
+      groupings = normalizeGroupings(JSON.parse(stored));
+      return;
+    }
+  } catch (error) {
+    groupings = [];
+  }
+  try {
+    const response = await fetch(new URL("data/groupings.json", import.meta.url), { cache: "no-store" });
+    if (!response.ok) return;
+    groupings = normalizeGroupings(await response.json());
+  } catch (error) {
+    groupings = [];
+  }
+}
+
+const groupingsReady = loadGroupings();
 
 async function loadSavedOnStart() {
   const generation = ++loadGeneration;

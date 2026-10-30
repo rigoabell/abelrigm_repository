@@ -210,6 +210,57 @@ export async function saveInventoryFile(file, token, onProgress) {
   return { branch: "inventory-saved", manifest, prUrl, direct: false };
 }
 
+export async function saveDataFile(name, text, token, message) {
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error("Unexpected file name.");
+  const auth = String(token || "").trim();
+  if (!auth) throw new Error("Paste a GitHub token with Contents access to this repository, then save.");
+  const content = bytesToBase64(new TextEncoder().encode(text));
+  const fileSha = await createBlob(auth, content);
+  const treeEntries = [
+    {
+      path: DATA_DIR + "/" + name,
+      mode: "100644",
+      type: "blob",
+      sha: fileSha,
+    },
+  ];
+
+  async function commitOnMain() {
+    const ref = await github(auth, "GET", "/git/ref/heads/main");
+    const parent = ref.object && ref.object.sha;
+    if (!parent) throw new Error("GitHub did not return the main branch.");
+    const current = await github(auth, "GET", "/git/commits/" + parent);
+    const tree = await github(auth, "POST", "/git/trees", { base_tree: current.tree.sha, tree: treeEntries });
+    const commit = await github(auth, "POST", "/git/commits", {
+      message: message || "Save " + name,
+      tree: tree.sha,
+      parents: [parent],
+    });
+    return commit.sha;
+  }
+
+  let sha = await commitOnMain();
+  let update = await updateRef(auth, "heads/main", sha, false);
+  if (!update.ok && refUpdateFailure(update.status, update.message) === "retry-forward") {
+    sha = await commitOnMain();
+    update = await updateRef(auth, "heads/main", sha, false);
+  }
+  if (update.ok) return { branch: "main", prUrl: null, direct: true };
+  const failure = refUpdateFailure(update.status, update.message);
+  if (failure === "token") {
+    throw new Error("GitHub rejected the token. Create a fine-grained token for this repository with Contents read and write.");
+  }
+  if (failure !== "branch") throw new Error(update.message || "GitHub could not update main.");
+  await pointBranch(auth, "inventory-saved", sha);
+  let prUrl = null;
+  try {
+    prUrl = await ensurePullRequest(auth, name);
+  } catch (error) {
+    prUrl = null;
+  }
+  return { branch: "inventory-saved", prUrl, direct: false };
+}
+
 async function createBlob(token, content) {
   const data = await github(token, "POST", "/git/blobs", { content, encoding: "base64" });
   if (!data.sha) throw new Error("GitHub did not return a file id.");

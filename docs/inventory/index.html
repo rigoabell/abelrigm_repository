@@ -130,8 +130,12 @@
               <div class="card inv-table-card" id="location-card">
                 <div class="inv-table-head">
                   <div>
-                    <h2>Outer locations</h2>
+                    <h2 id="place-title">Outer locations</h2>
                     <p id="location-count" class="inv-file-meta">Containers and units for the threshold states that are checked. Click a location to filter to it.</p>
+                  </div>
+                  <div class="inv-toggle" role="group" aria-label="Group by">
+                    <button type="button" id="mode-location" aria-pressed="true">Outer locations</button>
+                    <button type="button" id="mode-type" aria-pressed="false">Container type</button>
                   </div>
                 </div>
                 <div class="inv-table-scroll">
@@ -139,6 +143,20 @@
                     <thead id="location-head"></thead>
                     <tbody id="location-body"></tbody>
                   </table>
+                </div>
+                <div id="group-editor" class="inv-group-editor hidden">
+                  <h3>Groupings</h3>
+                  <p id="group-help" class="inv-file-meta"></p>
+                  <form id="group-form" class="inv-group-form">
+                    <input id="group-name" type="text" placeholder="Group name" autocomplete="off" />
+                    <input id="group-prefix" type="text" placeholder="Starts with" autocomplete="off" spellcheck="false" />
+                    <button type="submit" class="btn btn-outline btn-sm" id="group-submit">Add grouping</button>
+                  </form>
+                  <ul id="group-list" class="inv-group-list"></ul>
+                  <div class="inv-export-actions">
+                    <button type="button" class="btn btn-outline btn-sm" id="save-groupings">Save groupings to the site</button>
+                  </div>
+                  <p id="group-note" class="inv-file-meta" aria-live="polite"></p>
                 </div>
               </div>
               <div id="charts" class="inv-charts"></div>
@@ -197,6 +215,7 @@
                   <button type="button" class="btn btn-outline" id="export-rollup" data-export="rollup">Location rollup</button>
                   <button type="button" class="btn btn-outline" id="export-asin" data-export="asin">ASIN rollup</button>
                   <button type="button" class="btn btn-outline" id="export-locations" data-export="locations">Containers by location</button>
+                  <button type="button" class="btn btn-outline" id="export-types" data-export="types">Container types</button>
                 </div>
                 <p id="export-status" class="inv-file-meta" aria-live="polite"></p>
               </div>

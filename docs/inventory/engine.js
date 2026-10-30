@@ -501,6 +501,39 @@ export function thresholdStatus(age, threshold) {
   return "early";
 }
 
+export function letterPrefix(bin) {
+  const text = String(bin || "");
+  let index = 0;
+  while (index < text.length) {
+    const code = text.charCodeAt(index);
+    if (code >= 48 && code <= 57) break;
+    index += 1;
+  }
+  if (index === 0) return text || "(blank)";
+  return text.slice(0, index);
+}
+
+export function normalizeGroupings(input) {
+  const byPrefix = new Map();
+  const source = Array.isArray(input) ? input : [];
+  for (const item of source) {
+    const name = String((item && item.name) || "").replace(/[\u0000-\u001f]/g, "").trim();
+    const prefix = String((item && item.prefix) || "").replace(/[\u0000-\u001f]/g, "").trim();
+    if (!name || !prefix) continue;
+    byPrefix.set(prefix, { name, prefix });
+  }
+  return Array.from(byPrefix.values()).sort((a, b) => b.prefix.length - a.prefix.length || a.prefix.localeCompare(b.prefix));
+}
+
+export function containerTypeName(bin, groupings) {
+  const text = String(bin || "");
+  const rules = groupings || [];
+  for (let i = 0; i < rules.length; i++) {
+    if (rules[i].prefix && text.startsWith(rules[i].prefix)) return rules[i].name;
+  }
+  return letterPrefix(text);
+}
+
 export const STATUS_LABEL = {
   approaching: "Approaching",
   at: "At",
@@ -516,6 +549,7 @@ function emptyFilter(filter) {
   if (filter.ageMax != null && filter.ageMax !== "") return false;
   if (filter.qtyMin != null && filter.qtyMin !== "") return false;
   if (filter.statuses && filter.statuses.size !== 4) return false;
+  if (filter.containerType) return false;
   if (filter.allow) {
     for (const key of Object.keys(filter.allow)) {
       if (filter.allow[key]) return false;
@@ -569,6 +603,10 @@ export function query(dataset, filter) {
   const ageMin = filter && filter.ageMin != null && filter.ageMin !== "" ? Number(filter.ageMin) : null;
   const ageMax = filter && filter.ageMax != null && filter.ageMax !== "" ? Number(filter.ageMax) : null;
   const qtyMin = filter && filter.qtyMin != null && filter.qtyMin !== "" ? Number(filter.qtyMin) : null;
+  const groupings = normalizeGroupings(filter && filter.groupings);
+  const selectedType = filter && filter.containerType ? String(filter.containerType) : "";
+  const typeByBin = new Array(bin.dict.length);
+  for (let id = 0; id < bin.dict.length; id++) typeByBin[id] = containerTypeName(bin.dict[id], groupings);
 
   const ownerLines = new Uint32Array(owner.dict.length);
   const ownerUnits = new Float64Array(owner.dict.length);
@@ -586,6 +624,8 @@ export function query(dataset, filter) {
   const bucketUnits = [0, 0, 0, 0, 0];
   const statusLines = { approaching: 0, at: 0, diot: 0, early: 0 };
   const statusUnits = { approaching: 0, at: 0, diot: 0, early: 0 };
+  const typeLines = new Map();
+  const typeUnits = new Map();
   const locationStatus = Array.from({ length: outer.dict.length }, () => ({
     approaching: 0,
     at: 0,
@@ -620,6 +660,7 @@ export function query(dataset, filter) {
       if (warehouseAllow && !warehouseAllow[warehouse.codes[i]]) continue;
       if (deviceAllow && !deviceAllow[device.codes[i]]) continue;
       if (binAllow && !binAllow[bin.codes[i]]) continue;
+      if (selectedType && typeByBin[bin.codes[i]] !== selectedType) continue;
       if (asinQuery && !includesBytes(asin, i, asinQuery)) continue;
       const quantity = qty.values[i];
       if (qtyMin != null && quantity < qtyMin) continue;
@@ -645,6 +686,9 @@ export function query(dataset, filter) {
     const spot = locationStatus[outerId];
     spot[status] += 1;
     spot[status + "Units"] += quantity;
+    const typeName = typeByBin[bin.codes[i]];
+    typeLines.set(typeName, (typeLines.get(typeName) || 0) + 1);
+    typeUnits.set(typeName, (typeUnits.get(typeName) || 0) + quantity);
 
     lines += 1;
     units += quantity;
@@ -700,6 +744,7 @@ export function query(dataset, filter) {
       early: { lines: statusLines.early, units: statusUnits.early },
     },
     locations: locationRows(outer, locationStatus, statuses),
+    containerTypes: containerTypeRows(typeLines, typeUnits),
   };
 }
 
@@ -726,6 +771,15 @@ function locationRows(outer, locationStatus, statuses) {
       diotUnits: spot.diotUnits,
       earlyUnits: spot.earlyUnits,
     });
+  }
+  rows.sort((a, b) => b.containers - a.containers || b.units - a.units || a.name.localeCompare(b.name));
+  return rows;
+}
+
+function containerTypeRows(typeLines, typeUnits) {
+  const rows = [];
+  for (const [name, containers] of typeLines) {
+    rows.push({ name, containers, units: typeUnits.get(name) || 0 });
   }
   rows.sort((a, b) => b.containers - a.containers || b.units - a.units || a.name.localeCompare(b.name));
   return rows;
@@ -820,6 +874,15 @@ export function locationStatusCsv(locations) {
   return yieldChunks((pushLine) => {
     pushLine("Outer Location,Containers,Units\n");
     for (const row of locations) {
+      pushLine([csvEscape(row.name), String(row.containers), formatExportNumber(row.units)].join(",") + "\n");
+    }
+  });
+}
+
+export function containerTypeCsv(types) {
+  return yieldChunks((pushLine) => {
+    pushLine("Container type,Containers,Units\n");
+    for (const row of types) {
       pushLine([csvEscape(row.name), String(row.containers), formatExportNumber(row.units)].join(",") + "\n");
     }
   });
