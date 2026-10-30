@@ -534,6 +534,22 @@ export function containerTypeName(bin, groupings) {
   return letterPrefix(text);
 }
 
+export const INVENTORY_THRESHOLD_RATE = 0.005;
+
+export function formatUnits(value) {
+  const number = Number(value) || 0;
+  const rounded = Math.abs(number - Math.round(number)) < 1e-6 ? Math.round(number) : Math.round(number * 100) / 100;
+  return rounded.toLocaleString("en-US", { maximumFractionDigits: 2 });
+}
+
+export function diotOverageText(diotUnits, threshold) {
+  const over = (Number(diotUnits) || 0) - (Number(threshold) || 0);
+  const thresholdText = formatUnits(threshold);
+  if (Math.abs(over) < 1e-6) return "At the inventory threshold (" + thresholdText + " units)";
+  const direction = over > 0 ? "over" : "under";
+  return formatUnits(Math.abs(over)) + " units " + direction + " the inventory threshold (" + thresholdText + " units)";
+}
+
 export const STATUS_LABEL = {
   approaching: "Approaching",
   at: "At",
