@@ -1,4 +1,5 @@
 import { asinCsv, detailCsv, locationStatusCsv, query, rollupCsv, sortMatch, STATUS_LABEL, thresholdStatus, valueAt } from "./engine.js";
+import { forgetToken, loadSavedFile, readToken, saveInventoryFile, writeToken } from "./github-save.js";
 
 const PAGE_SIZE = 50;
 const FILTER_COLUMNS = [
@@ -31,9 +32,15 @@ const tableCount = document.getElementById("table-count");
 const pageLabel = document.getElementById("page-label");
 const exportStatus = document.getElementById("export-status");
 const clearButton = document.getElementById("clear-filters");
+const saveStatus = document.getElementById("save-status");
+const saveNote = document.getElementById("save-note");
+const tokenInput = document.getElementById("github-token");
+const saveButton = document.getElementById("save-now");
 
 let dataset = null;
 let sourceFile = null;
+let publicFile = null;
+let savedManifest = null;
 let catalog = null;
 let view = null;
 let matchIndex = null;
@@ -42,6 +49,8 @@ let sortMode = "before";
 let worker = null;
 let filterTimer = 0;
 let textTimer = 0;
+let loadGeneration = 0;
+let saving = false;
 
 fileInput.addEventListener("change", () => {
   const file = fileInput.files && fileInput.files[0];
@@ -100,7 +109,20 @@ for (const button of document.querySelectorAll("[data-export]")) {
   button.addEventListener("click", () => exportFile(button.dataset.export, button));
 }
 
-function openFile(file) {
+saveButton.addEventListener("click", () => saveNow());
+document.getElementById("forget-token").addEventListener("click", () => {
+  forgetToken();
+  tokenInput.value = "";
+  saveNote.textContent = "The token was removed from this browser. The public file is unchanged.";
+});
+if (readToken()) tokenInput.value = readToken();
+
+function openFile(file, kind) {
+  const generation = ++loadGeneration;
+  startParse(file, kind || "upload", generation);
+}
+
+function startParse(file, kind, generation) {
   sourceFile = file;
   fileInput.value = "";
   showLoading(file);
@@ -111,10 +133,11 @@ function openFile(file) {
   try {
     worker = new Worker(new URL("./parse-worker.js", import.meta.url), { type: "module" });
   } catch (error) {
-    parseOnPage(file);
+    parseOnPage(file, kind, generation);
     return;
   }
   worker.onmessage = (event) => {
+    if (generation !== loadGeneration) return;
     const message = event.data;
     if (message.type === "progress") {
       setProgress(message.rows || 0, message.bytes || 0, message.size || file.size);
@@ -127,16 +150,17 @@ function openFile(file) {
     if (message.type === "done") {
       worker.terminate();
       worker = null;
-      acceptDataset(message.dataset, file);
+      acceptDataset(message.dataset, file, kind, generation);
     }
   };
   worker.onerror = (event) => {
+    if (generation !== loadGeneration) return;
     fail(event.message || "The parser stopped unexpectedly.");
   };
   worker.postMessage({ file });
 }
 
-async function parseOnPage(file) {
+async function parseOnPage(file, kind, generation) {
   const { createDatasetParser } = await import("./engine.js");
   const parser = createDatasetParser({
     onProgress(rows) {
@@ -156,8 +180,10 @@ async function parseOnPage(file) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     parser.push(decoder.decode());
-    acceptDataset(parser.finish(), file);
+    if (generation !== loadGeneration) return;
+    acceptDataset(parser.finish(), file, kind, generation);
   } catch (error) {
+    if (generation !== loadGeneration) return;
     fail(error && error.message ? error.message : String(error));
   }
 }
@@ -188,10 +214,12 @@ function fail(message) {
   errorText.textContent = message;
 }
 
-async function acceptDataset(next, file) {
+async function acceptDataset(next, file, kind, generation) {
+  if (generation !== loadGeneration) return;
   dataset = next;
   loadingTitle.textContent = "Summarizing " + formatInt(dataset.rowCount) + " lines";
   await new Promise((resolve) => setTimeout(resolve, 0));
+  if (generation !== loadGeneration) return;
   catalog = query(dataset, {});
   sortMode = "before";
   document.getElementById("sort-mode").value = "before";
@@ -201,14 +229,8 @@ async function acceptDataset(next, file) {
   dropPanel.classList.add("hidden");
   workspace.classList.remove("hidden");
   fileName.textContent = file.name;
-  const places = placeSummary(catalog);
-  fileMeta.textContent =
-    formatBytes(file.size) +
-    " · " +
-    formatInt(dataset.rowCount) +
-    " lines in the file · " +
-    places +
-    " · stays in this browser";
+  updateFileMeta();
+  updateSavePanel();
   if (dataset.badNumbers) {
     badNumbers.hidden = false;
     badNumbers.classList.remove("hidden");
@@ -220,6 +242,7 @@ async function acceptDataset(next, file) {
   }
   buildFilterGroups();
   applyFilters();
+  if (kind === "upload" && readToken()) saveNow();
 }
 
 function placeSummary(summary) {
@@ -788,3 +811,110 @@ function formatBytes(bytes) {
   if (size < 1024 * 1024) return (size / 1024).toFixed(1) + " KB";
   return (size / (1024 * 1024)).toFixed(1) + " MB";
 }
+
+function updateFileMeta() {
+  const places = placeSummary(catalog);
+  const where = sourceFile === publicFile ? "public copy" : "only in this browser until you save it";
+  fileMeta.textContent =
+    formatBytes(sourceFile.size) +
+    " · " +
+    formatInt(dataset.rowCount) +
+    " lines in the file · " +
+    places +
+    " · " +
+    where;
+}
+
+function updateSavePanel(result) {
+  if (sourceFile === publicFile && savedManifest) {
+    saveStatus.textContent =
+      "Public copy on the site. Saved " +
+      formatChicago(savedManifest.savedAt) +
+      ". Anyone who can open this site can read the file.";
+  } else {
+    saveStatus.textContent = "This file is only in this browser until you save it. The saved copy is public.";
+  }
+  if (!result) return;
+  if (result.direct) {
+    saveNote.textContent = "Saved. Other machines see this file after GitHub Pages deploys, usually within a few minutes.";
+    return;
+  }
+  const link = result.prUrl ? " Merge " + result.prUrl + "." : " Open a pull request from inventory-saved into main.";
+  saveNote.textContent = "Main is protected, so the file is on branch inventory-saved." + link + " Other machines see it after that merge and the Pages deploy.";
+}
+
+function formatChicago(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return String(iso || "");
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date) + " CT";
+}
+
+async function saveNow() {
+  if (!sourceFile || !dataset || saving) return;
+  const token = tokenInput.value.trim();
+  if (!token) {
+    saveNote.textContent = "Paste a GitHub token with Contents access to this repository, then save.";
+    return;
+  }
+  writeToken(token);
+  const generation = loadGeneration;
+  const file = sourceFile;
+  saving = true;
+  saveButton.disabled = true;
+  saveNote.textContent = "Saving the public copy…";
+  try {
+    const result = await saveInventoryFile(file, token, (message) => {
+      if (generation === loadGeneration) saveNote.textContent = message;
+    });
+    if (generation !== loadGeneration) return;
+    savedManifest = result.manifest;
+    publicFile = file;
+    updateFileMeta();
+    updateSavePanel(result);
+  } catch (error) {
+    if (generation !== loadGeneration) return;
+    saveNote.textContent = error && error.message ? error.message : String(error);
+  } finally {
+    saving = false;
+    saveButton.disabled = false;
+    if (generation !== loadGeneration && sourceFile && sourceFile !== publicFile && readToken()) saveNow();
+  }
+}
+
+async function loadSavedOnStart() {
+  const generation = ++loadGeneration;
+  dropPanel.classList.add("hidden");
+  errorBox.classList.add("hidden");
+  loading.classList.remove("hidden");
+  loadingTitle.textContent = "Looking for the saved inventory";
+  loadingStat.textContent = "";
+  loadingBar.style.width = "0%";
+  try {
+    const saved = await loadSavedFile();
+    if (generation !== loadGeneration) return;
+    if (!saved) {
+      loading.classList.add("hidden");
+      dropPanel.classList.remove("hidden");
+      return;
+    }
+    savedManifest = saved.manifest;
+    publicFile = saved.file;
+    startParse(saved.file, "saved", generation);
+  } catch (error) {
+    if (generation !== loadGeneration) return;
+    loading.classList.add("hidden");
+    dropPanel.classList.remove("hidden");
+    const note = document.getElementById("saved-note");
+    note.classList.remove("hidden");
+    note.textContent =
+      "The saved inventory could not be loaded (" +
+      (error && error.message ? error.message : "error") +
+      "). You can still open a file from this machine.";
+  }
+}
+
+loadSavedOnStart();

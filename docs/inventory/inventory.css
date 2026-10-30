@@ -19,7 +19,7 @@
 .inv-drop-note { color: var(--muted); max-width: 640px; margin: 0; }
 .inv-columns { color: var(--muted); font-size: 13px; margin: 14px 0 0; }
 
-.inv-loading, .inv-error, .inv-filebar, .inv-exports, .inv-table-card, .inv-filters { padding: 18px; }
+.inv-loading, .inv-error, .inv-filebar, .inv-exports, .inv-save, .inv-table-card, .inv-filters { padding: 18px; }
 .inv-loading-head, .inv-filebar, .inv-table-head, .inv-filters-head, .inv-exports {
   display: flex;
   justify-content: space-between;
@@ -128,6 +128,10 @@
 .inv-empty { color: var(--muted); padding: 18px 10px; }
 
 .inv-exports { margin-top: 14px; align-items: flex-start; }
+.inv-save { margin-bottom: 16px; display: block; }
+.inv-save h2 { margin: 0 0 4px; font-size: 18px; }
+.inv-save .inv-field { max-width: 420px; margin-top: 12px; }
+.inv-save .inv-export-actions { margin-top: 8px; }
 .inv-export-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .inv-sort { margin: 0; min-width: 180px; }
 
