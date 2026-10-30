@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Inventory &middot; Dev Hub</title>
-  <meta name="description" content="Open a large inventory CSV in the browser and work a dashboard from it." />
+  <meta name="description" content="Open a large inventory CSV and keep a public saved copy so the same file opens on any machine." />
   <link rel="stylesheet" href="../assets/styles.css" />
   <link rel="stylesheet" href="inventory.css" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='18' fill='%23232F3E'/%3E%3Ctext x='50' y='68' font-size='58' text-anchor='middle' fill='%23FF9900' font-family='Arial'%3ED%3C/text%3E%3C/svg%3E" />
@@ -34,7 +34,7 @@
       <p class="page-hero-sub">
         Open a current-inventory CSV. Average Age and Average Threshold are the ASIN’s age and threshold.
         Approaching is 1–2 days before the threshold, At is less than 1 day before it, and DIOT is past it.
-        The file stays in this browser.
+        A saved copy is stored in this public repository, so the same file opens on any machine.
       </p>
     </div>
   </section>
@@ -46,9 +46,10 @@
         <div id="drop-panel" class="card inv-drop">
           <label class="inv-drop-target" id="drop-target" for="file-input">
             <span class="inv-drop-title">Drop a CSV here, or choose a file</span>
-            <span class="inv-drop-note">Built for large inventory extracts. Parsing uses this tab’s memory, so a bigger file needs a machine that can hold it.</span>
+            <span class="inv-drop-note">Built for large inventory extracts. Parsing uses this tab’s memory, so a bigger file needs a machine that can hold it. A saved public file opens here on its own.</span>
           </label>
           <p class="inv-columns">Expected columns: Region, Warehouse, Outer Location, Bin, ASIN, Owner, Disposition, Amazon Device Flag, Quantity, Average Age, Average Threshold. Extra columns are kept on the line export.</p>
+          <p id="saved-note" class="inv-columns hidden"></p>
         </div>
 
         <div id="loading" class="card inv-loading hidden" aria-live="polite">
@@ -72,6 +73,22 @@
               <p id="file-meta" class="inv-file-meta"></p>
             </div>
             <button type="button" class="btn btn-outline btn-sm" id="replace-file">Open a different file</button>
+          </div>
+
+          <div class="card inv-save" id="save-panel">
+            <div>
+              <h2>Saved copy</h2>
+              <p id="save-status" class="inv-file-meta"></p>
+            </div>
+            <label class="inv-field" for="github-token">GitHub token
+              <input id="github-token" type="password" autocomplete="off" spellcheck="false" placeholder="Fine-grained token, this repo only" />
+            </label>
+            <p class="inv-file-meta">The saved file is public. The token stays in this browser and is only used to replace that file. Create a <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">fine-grained token</a> for rigoabell/abelrigm_repository with Contents read and write.</p>
+            <div class="inv-export-actions">
+              <button type="button" class="btn btn-primary btn-sm" id="save-now">Save this file to the site</button>
+              <button type="button" class="btn btn-outline btn-sm" id="forget-token">Forget token</button>
+            </div>
+            <p id="save-note" class="inv-file-meta" aria-live="polite"></p>
           </div>
 
           <div class="inv-layout">
@@ -201,7 +218,7 @@
   <footer class="footer">
     <div class="container footer-inner">
       <span class="brand small"><span class="brand-badge">D</span> Dev Hub</span>
-      <span class="footer-note">&copy; <span id="year"></span> <span data-text="name"></span> (<span data-text="login"></span>) &middot; inventory stays in the browser.</span>
+      <span class="footer-note">&copy; <span id="year"></span> <span data-text="name"></span> (<span data-text="login"></span>) &middot; the saved inventory file is public.</span>
     </div>
   </footer>
 
