@@ -120,7 +120,7 @@
 .inv-table-scroll { overflow: auto; margin-top: 12px; }
 .inv-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .inv-table th, .inv-table td { padding: 8px 10px; border-bottom: 1px solid var(--line-2); text-align: left; white-space: nowrap; }
-.inv-table th { font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted-2); }
+.inv-table th { font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted-2); position: sticky; top: 0; background: #fff; z-index: 1; }
 .inv-table td.num, .inv-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .inv-table tbody tr:hover { background: var(--band); }
 .inv-pager { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }

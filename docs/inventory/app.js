@@ -450,36 +450,21 @@ function setOnlyStatus(statusId) {
   applyFilters();
 }
 
-const STATUS_COLUMNS = [
-  ["approaching", "Approaching"],
-  ["at", "At"],
-  ["diot", "DIOT"],
-  ["early", "More than 2 days"],
-];
-
-function selectedStatusKeys() {
-  const selected = readStatuses();
-  return STATUS_COLUMNS.map(([key]) => key).filter((key) => selected.has(key));
-}
-
 function renderLocations() {
-  const keys = selectedStatusKeys();
   const head = document.getElementById("location-head");
   const body = document.getElementById("location-body");
   const rows = view.locations;
   head.replaceChildren();
   const headRow = document.createElement("tr");
   appendHeader(headRow, "Outer location", false);
-  for (const key of keys) {
-    const label = STATUS_COLUMNS.find((column) => column[0] === key)[1];
-    appendHeader(headRow, label, true);
-  }
+  appendHeader(headRow, "Containers", true);
+  appendHeader(headRow, "Units", true);
   head.appendChild(headRow);
   body.replaceChildren();
   if (!rows.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 1 + keys.length;
+    cell.colSpan = 3;
     cell.className = "inv-empty";
     cell.textContent = "No outer locations in this view.";
     row.appendChild(cell);
@@ -496,19 +481,22 @@ function renderLocations() {
     nameButton.addEventListener("click", () => isolate("Outer Location", item.id));
     nameCell.appendChild(nameButton);
     row.appendChild(nameCell);
-    for (const key of keys) {
-      const cell = document.createElement("td");
-      cell.className = "num";
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "inv-count";
-      button.textContent = formatInt(item[key]);
-      button.addEventListener("click", () => focusLocationStatus(item.id, key));
-      cell.appendChild(button);
-      row.appendChild(cell);
-    }
+    appendCount(row, formatInt(item.containers), item.id);
+    appendCount(row, formatQty(item.units), item.id);
     body.appendChild(row);
   }
+}
+
+function appendCount(row, text, outerId) {
+  const cell = document.createElement("td");
+  cell.className = "num";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "inv-count";
+  button.textContent = text;
+  button.addEventListener("click", () => isolate("Outer Location", outerId));
+  cell.appendChild(button);
+  row.appendChild(cell);
 }
 
 function appendHeader(row, text, numeric) {
@@ -516,16 +504,6 @@ function appendHeader(row, text, numeric) {
   if (numeric) cell.className = "num";
   cell.textContent = text;
   row.appendChild(cell);
-}
-
-function focusLocationStatus(outerId, statusId) {
-  filterGroups.querySelectorAll('input[data-filter="Outer Location"]').forEach((box) => {
-    box.checked = Number(box.dataset.id) === outerId;
-  });
-  document.querySelectorAll("[data-status]").forEach((box) => {
-    box.checked = box.dataset.status === statusId;
-  });
-  applyFilters();
 }
 
 function renderCharts() {
@@ -763,7 +741,7 @@ async function exportFile(kind, button) {
     lines: () => detailCsv(dataset, view.matchIndex),
     rollup: () => rollupCsv(dataset, view.matchIndex),
     asin: () => asinCsv(dataset, view.matchIndex),
-    locations: () => locationStatusCsv(view.locations, readStatuses()),
+    locations: () => locationStatusCsv(view.locations),
   };
   button.disabled = true;
   exportStatus.textContent = "Building " + filename + "…";
