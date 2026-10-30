@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -115,5 +115,34 @@ assert.equal(filled[1].scannedAt, "2026-10-30 08:05:00");
 const untouched = api.fileRecordsWithScanTimes([{ ...body }], [pending], pending);
 assert.equal(untouched.length, 1);
 assert.equal(untouched[0].scannedAt, "");
+
+const eol = { ...body, scannedAt: "2026-10-30 09:00:00" };
+const eolLater = { ...body, container: "csX9999", scannedAt: "2026-10-30 09:05:00" };
+const line = { ...body, location: "L3 Even", container: "csX5678", scannedAt: "2026-10-30 09:10:00" };
+const book = api.dashboardBook([eol, line, eolLater]);
+assert.deepEqual(
+  [...book.sheets.map((sheet) => sheet.name)],
+  ["Dashboard", "EOL 1", "L3 Even"]
+);
+const eolSheet = book.sheets.find((sheet) => sheet.name === "EOL 1");
+assert.deepEqual(
+  [...eolSheet.rows.slice(1).map((row) => row[2])],
+  ["csX1234", "csX9999"]
+);
+assert.ok(eolSheet.rows.slice(1).every((row) => row[0] === "EOL 1" && row[6]));
+const lineSheet = book.sheets.find((sheet) => sheet.name === "L3 Even");
+assert.deepEqual(
+  [...lineSheet.rows.slice(1).map((row) => row[2])],
+  ["csX5678"]
+);
+const loaded = api.recordsFromBook(book);
+assert.equal(loaded.length, 3);
+assert.deepEqual(
+  [...loaded.map((rec) => rec.container)],
+  ["csX1234", "csX5678", "csX9999"]
+);
+
+const locationOnly = api.recordsFromBook({ sheets: book.sheets.filter((sheet) => sheet.name !== "Dashboard") });
+assert.equal(locationOnly.length, 3);
 
 console.log("scan timestamp tests passed");
