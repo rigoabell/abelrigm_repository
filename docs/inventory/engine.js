@@ -785,6 +785,34 @@ function containerTypeRows(typeLines, typeUnits) {
   return rows;
 }
 
+function addStatusUnits(map, name, status, quantity) {
+  if (status !== "approaching" && status !== "at" && status !== "diot") return;
+  let row = map.get(name);
+  if (!row) {
+    row = { name, approachingUnits: 0, atUnits: 0, diotUnits: 0 };
+    map.set(name, row);
+  }
+  row[status + "Units"] += quantity;
+}
+
+export function placeStatusUnits(dataset, groupings) {
+  const outer = column(dataset, "Outer Location");
+  const bin = column(dataset, "Bin");
+  const qty = column(dataset, "Quantity");
+  const age = column(dataset, "Average Age");
+  const threshold = column(dataset, "Average Threshold");
+  const rules = normalizeGroupings(groupings);
+  const locations = new Map();
+  const types = new Map();
+  for (let i = 0; i < dataset.rowCount; i++) {
+    const status = thresholdStatus(age.values[i], threshold.values[i]);
+    const quantity = qty.values[i];
+    addStatusUnits(locations, outer.dict[outer.codes[i]] || "(blank)", status, quantity);
+    addStatusUnits(types, containerTypeName(bin.dict[bin.codes[i]], rules), status, quantity);
+  }
+  return { locations, types };
+}
+
 export function sortMatch(dataset, matchIndex, mode) {
   const copy = new Uint32Array(matchIndex);
   if (!mode || mode === "file") return copy;
