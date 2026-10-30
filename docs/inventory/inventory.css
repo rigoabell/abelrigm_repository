@@ -186,7 +186,6 @@
 .inv-dash-metrics .approaching b { color: #8a6a00; }
 .inv-dash-metrics .at b { color: #b25e00; }
 .inv-dash-metrics .diot b { color: #b12704; }
-.inv-dash-overage { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.35; }
 .inv-dash-metrics .empty b { color: var(--muted); font-weight: 600; }
 .inv-table td.num, .inv-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .inv-table tbody tr:hover { background: var(--band); }
