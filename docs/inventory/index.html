@@ -34,6 +34,7 @@
       <p class="page-hero-sub">
         Open a current-inventory CSV. Average Age and Average Threshold are the ASIN’s age and threshold.
         Approaching is 1–2 days before the threshold, At is less than 1 day before it, and DIOT is past it.
+        The inventory threshold is 0.5% of the site’s total units, and every DIOT count shows how far those units sit from it.
         A saved copy is stored in this public repository, so the same file opens on any machine.
       </p>
     </div>
@@ -101,7 +102,7 @@
                 <h3>Threshold</h3>
                 <label class="inv-check"><input type="checkbox" data-status="approaching" checked /> <span><b>Approaching</b> · 1–2 days before</span></label>
                 <label class="inv-check"><input type="checkbox" data-status="at" checked /> <span><b>At</b> · less than 1 day before</span></label>
-                <label class="inv-check"><input type="checkbox" data-status="diot" checked /> <span><b>DIOT</b> · past the threshold</span></label>
+                <label class="inv-check"><input type="checkbox" data-status="diot" checked /> <span><b>DIOT</b> · past the threshold<small id="diot-overage"></small></span></label>
                 <label class="inv-check"><input type="checkbox" data-status="early" /> <span><b>More than 2 days out</b></span></label>
               </div>
               <label class="inv-field">ASIN contains
@@ -157,7 +158,7 @@
                   <p id="responder-note" class="inv-file-meta" aria-live="polite"></p>
                   <div id="responder-dashboard" class="inv-dash">
                     <h3>Responder dashboard</h3>
-                    <p class="inv-file-meta">Approaching, At, and DIOT units for what each person has been assigned.</p>
+                    <p class="inv-file-meta">Approaching, At, and DIOT units for what each person has been assigned. DIOT shows units over or under the inventory threshold.</p>
                     <div id="responder-dashboard-body"></div>
                   </div>
                 </div>

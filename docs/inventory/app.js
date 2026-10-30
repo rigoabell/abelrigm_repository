@@ -1,4 +1,4 @@
-import { asinCsv, assignmentPackage, containerTypeCsv, detailCsv, locationStatusCsv, query, rollupCsv, sortMatch, STATUS_LABEL, thresholdStatus, valueAt, normalizeGroupings } from "./engine.js";
+import { asinCsv, assignmentPackage, containerTypeCsv, detailCsv, diotOverageText, INVENTORY_THRESHOLD_RATE, locationStatusCsv, query, rollupCsv, sortMatch, STATUS_LABEL, thresholdStatus, valueAt, normalizeGroupings } from "./engine.js";
 import { forgetToken, loadSavedFile, readToken, saveDataFile, saveInventoryFile, writeToken } from "./github-save.js";
 import { assignmentWorkbook } from "./xlsx.js";
 
@@ -453,6 +453,10 @@ function isolateAge(bucket) {
   applyFilters();
 }
 
+function inventoryThreshold() {
+  return catalog ? catalog.units * INVENTORY_THRESHOLD_RATE : 0;
+}
+
 function renderSummary() {
   const selected = readStatuses();
   const cards = [
@@ -460,6 +464,7 @@ function renderSummary() {
     ["at", "At", "Less than 1 day before"],
     ["approaching", "Approaching", "1–2 days before"],
   ];
+  const overage = diotOverageText(view.status.diot.units, inventoryThreshold());
   kpis.replaceChildren();
   for (const [id, label, detail] of cards) {
     const card = document.createElement("button");
@@ -472,9 +477,16 @@ function renderSummary() {
     caption.textContent = label + " · " + formatQty(view.status[id].units) + " units · " + detail;
     card.appendChild(strong);
     card.appendChild(caption);
+    if (id === "diot") {
+      const note = document.createElement("small");
+      note.textContent = overage;
+      card.appendChild(note);
+    }
     card.addEventListener("click", () => setOnlyStatus(id));
     kpis.appendChild(card);
   }
+  const filterNote = document.getElementById("diot-overage");
+  if (filterNote) filterNote.textContent = overage;
 }
 
 function setOnlyStatus(statusId) {
@@ -787,7 +799,16 @@ function renderTable() {
     const age = columns["Average Age"].values[index];
     const threshold = columns["Average Threshold"].values[index];
     const row = document.createElement("tr");
-    addCell(row, STATUS_LABEL[thresholdStatus(age, threshold)]);
+    const status = thresholdStatus(age, threshold);
+    const statusCell = document.createElement("td");
+    statusCell.className = "inv-status";
+    statusCell.textContent = STATUS_LABEL[status];
+    if (status === "diot") {
+      const note = document.createElement("small");
+      note.textContent = diotOverageText(view.status.diot.units, inventoryThreshold());
+      statusCell.appendChild(note);
+    }
+    row.appendChild(statusCell);
     addCell(row, valueAt(columns["Outer Location"], index));
     addCell(row, valueAt(columns.Bin, index));
     addCell(row, valueAt(columns.ASIN, index));
@@ -833,13 +854,13 @@ async function exportAssignments(button) {
     document.getElementById("responder-note").textContent = "Assign at least one row to an IOL Responder first.";
     return;
   }
-  const filename = "assignments.xlsm";
+  const filename = "assignments.xlsx";
   let writable = null;
   if (typeof window.showSaveFilePicker === "function") {
     try {
       const handle = await window.showSaveFilePicker({
         suggestedName: filename,
-        types: [{ description: "Excel workbook", accept: { "application/vnd.ms-excel.sheet.macroEnabled.12": [".xlsm"] } }],
+        types: [{ description: "Excel workbook", accept: { "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"] } }],
       });
       writable = await handle.createWritable();
     } catch (error) {
@@ -854,12 +875,12 @@ async function exportAssignments(button) {
   await new Promise((resolve) => setTimeout(resolve, 0));
   try {
     const pack = assignmentPackage(dataset, assignmentPlaces(), groupings);
-    const bytes = assignmentWorkbook(pack);
+    const bytes = assignmentWorkbook(pack, inventoryThreshold());
     if (writable) {
       await writable.write(bytes);
       await writable.close();
     } else {
-      downloadBytes(filename, bytes, "application/vnd.ms-excel.sheet.macroEnabled.12");
+      downloadBytes(filename, bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     }
     const people = pack.responders.length;
     exportStatus.textContent = "Saved " + filename + " (" + formatInt(people) + (people === 1 ? " responder" : " responders") + "). Unit counts are from the full inventory file.";
@@ -1227,7 +1248,7 @@ function assignedLine(label, names) {
   return line;
 }
 
-function dashMetric(className, value, label) {
+function dashMetric(className, value, label, note) {
   const wrap = document.createElement("div");
   wrap.className = className;
   const strong = document.createElement("b");
@@ -1235,6 +1256,11 @@ function dashMetric(className, value, label) {
   const span = document.createElement("span");
   span.textContent = label;
   wrap.append(strong, span);
+  if (note) {
+    const small = document.createElement("small");
+    small.textContent = note;
+    wrap.appendChild(small);
+  }
   return wrap;
 }
 
@@ -1289,8 +1315,15 @@ function renderResponderDashboard() {
     const showCounts = Boolean(dataset && assigned);
     metrics.appendChild(dashMetric(showCounts ? "approaching" : "empty", showCounts ? formatQty(stats ? stats.approachingUnits : 0) : "—", "Approaching"));
     metrics.appendChild(dashMetric(showCounts ? "at" : "empty", showCounts ? formatQty(stats ? stats.atUnits : 0) : "—", "At"));
-    metrics.appendChild(dashMetric(showCounts ? "diot" : "empty", showCounts ? formatQty(stats ? stats.diotUnits : 0) : "—", "DIOT"));
+    const diotUnits = stats ? stats.diotUnits : 0;
+    metrics.appendChild(dashMetric(showCounts ? "diot" : "empty", showCounts ? formatQty(diotUnits) : "—", "DIOT"));
     card.appendChild(metrics);
+    if (showCounts) {
+      const note = document.createElement("p");
+      note.className = "inv-dash-overage";
+      note.textContent = "DIOT is " + diotOverageText(diotUnits, inventoryThreshold());
+      card.appendChild(note);
+    }
     grid.appendChild(card);
   }
   body.appendChild(grid);
