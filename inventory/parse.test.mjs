@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { asinCsv, assignmentPackage, containerTypeCsv, containerTypeName, detailCsv, diotOverageText, INVENTORY_THRESHOLD_RATE, letterPrefix, locationStatusCsv, normalizeGroupings, parseCsvText, placeStatusUnits, query, rollupCsv, thresholdStatus, valueAt } from "../docs/inventory/engine.js";
+import { asinCsv, assignmentPackage, containerTypeCsv, containerTypeName, detailCsv, letterPrefix, locationStatusCsv, normalizeGroupings, parseCsvText, placeStatusUnits, query, rollupCsv, thresholdStatus, valueAt } from "../docs/inventory/engine.js";
 import { assignmentWorkbook } from "../docs/inventory/xlsx.js";
 
 const fixture = [
@@ -156,19 +156,31 @@ assert.equal(scopedCorey.containers[0].bin, "bin-1");
 assert.equal(scopedCorey.approachingUnits, 1);
 assert.equal(scopedCorey.diotUnits, 0);
 assert.equal(scopedCorey.containers.some((row) => row.outer === "Dock B"), false);
-const threshold = summary.units * INVENTORY_THRESHOLD_RATE;
-const book = new TextDecoder().decode(assignmentWorkbook(assigned, threshold));
+const site = {
+  diotUnits: summary.status.diot.units,
+  approachingUnits: summary.status.approaching.units,
+  atUnits: summary.status.at.units,
+};
+assert.equal(site.diotUnits, 5);
+assert.equal(site.approachingUnits, 1);
+assert.equal(site.atUnits, 0);
+assert.notEqual(site.diotUnits, corey.diotUnits);
+const book = new TextDecoder().decode(assignmentWorkbook(assigned, site));
 assert.equal(book.includes("Assignment Summaries"), false);
 assert.equal(book.includes("Import Scan-History Sheets"), false);
 assert.equal(book.includes("ImportScanHistorySheets"), false);
 assert.equal(book.includes("xl/vbaProject.bin"), false);
 assert.equal(book.includes("macroEnabled.main+xml"), false);
+assert.equal(book.includes("inventory threshold"), false);
+assert.equal(book.includes("E4:G4"), false);
 assert.ok(book.includes("MEM3 DIOT Metrics"));
 assert.ok(book.includes(">DIOT<"));
 assert.ok(book.includes(">Approaching<"));
 assert.ok(book.includes(">AT<"));
-assert.ok(book.includes(diotOverageText(corey.diotUnits, threshold)));
-assert.ok(book.includes(diotOverageText(alex.diotUnits, threshold)));
+assert.equal(book.split('<c r="E3" s="14"><v>5</v></c>').length - 1, 2);
+assert.equal(book.split('<c r="F3" s="14"><v>1</v></c>').length - 1, 2);
+assert.equal(book.split('<c r="G3" s="14"><v>0</v></c>').length - 1, 2);
+assert.ok(book.includes('horizontal="center" vertical="center"'));
 assert.ok(book.includes("Uncompleted"));
 assert.ok(book.includes("Alex &amp; Sam"));
 assert.ok(book.includes("Primary Disposition"));
@@ -252,11 +264,19 @@ if (fs.existsSync(realPath)) {
   assert.equal(packed.responders[0].atUnits, sorted.atUnits);
   assert.equal(packed.responders[0].diotUnits, sorted.diotUnits);
   assert.equal(packed.responders[0].quantity, sorted.approachingUnits + sorted.atUnits + sorted.diotUnits);
-  const realBook = new TextDecoder().decode(assignmentWorkbook(packed, view.units * INVENTORY_THRESHOLD_RATE));
+  const realBook = new TextDecoder().decode(assignmentWorkbook(packed, {
+    diotUnits: view.status.diot.units,
+    approachingUnits: view.status.approaching.units,
+    atUnits: view.status.at.units,
+  }));
   assert.equal(realBook.includes("Assignment Summaries"), false);
   assert.equal(realBook.includes("Import Scan History"), false);
+  assert.equal(realBook.includes("inventory threshold"), false);
   assert.ok(realBook.includes("MEM3 DIOT Metrics"));
-  assert.ok(realBook.includes(diotOverageText(sorted.diotUnits, view.units * INVENTORY_THRESHOLD_RATE)));
+  assert.ok(realBook.includes('<c r="E3" s="14"><v>' + view.status.diot.units + "</v></c>"));
+  assert.ok(realBook.includes('<c r="F3" s="14"><v>' + view.status.approaching.units + "</v></c>"));
+  assert.ok(realBook.includes('<c r="G3" s="14"><v>' + view.status.at.units + "</v></c>"));
+  assert.notEqual(view.status.diot.units, sorted.diotUnits);
   assert.equal(realBook.split("<sheet ").length - 1, 1);
   let typeDiot = 0;
   for (const row of fullCounts.types.values()) typeDiot += row.diotUnits;

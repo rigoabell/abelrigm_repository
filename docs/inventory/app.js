@@ -1029,7 +1029,11 @@ async function exportAssignments(button) {
   await new Promise((resolve) => setTimeout(resolve, 0));
   try {
     const pack = assignmentPackage(dataset, assignmentPlaces(), groupings);
-    const bytes = assignmentWorkbook(pack, inventoryThreshold());
+    const bytes = assignmentWorkbook(pack, {
+      diotUnits: catalog.status.diot.units,
+      approachingUnits: catalog.status.approaching.units,
+      atUnits: catalog.status.at.units,
+    });
     if (writable) {
       await writable.write(bytes);
       await writable.close();
