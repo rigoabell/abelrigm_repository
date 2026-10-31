@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-panel.txt", import.meta.url), "utf8");
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.8\.4/);
+assert.match(src, /@version\s+1\.8\.5/);
 assert.match(src, /const MAX_TIME_TRIES = 1;/);
 assert.equal(src.includes("TIME_PASS_GAP_MS"), false);
 assert.equal(src.includes("TIME_PER_PASS"), false);
@@ -17,7 +17,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.8.4");
+assert.equal(entry.version, "1.8.5");
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
 
 function DOMParser() {}
@@ -127,7 +127,7 @@ sandbox.unsafeWindow = sandbox;
 const patched = src.replace(
     "applyTodayDateOnce();\n    init();\n    startSilentUpdates();\n})();",
     `globalThis.__mem3 = {
-        refreshData, forceWindow, loadBoardTimes, timeProgress,
+        refreshData, forceWindow, loadBoardTimes, timeProgress, queueMissingTimes,
         setBoard(ids) { BOARD_IDS = ids.slice(); },
         boardIds() { return BOARD_IDS.slice(); },
         bigsIds() { return BIGS_IDS.slice(); },
@@ -387,6 +387,31 @@ try {
     assert.equal(api.timeProgress().done, 2);
     assert.equal(api.time("j1").gaveUp, true);
     sandbox.plainDetails = false;
+
+    api.stop();
+    failDetails = false;
+    api.setDown(false);
+    held.splice(0, held.length);
+    api.setRollup({ "99": { functions: {} } });
+    sandbox.plainDetails = true;
+    api.setBoard(["n1", "n2"]);
+    await api.loadBoardTimes();
+    sandbox.plainDetails = false;
+    const beforeNew = detailsStarted;
+    const rollupBefore = api.rollupKeys().length;
+    api.setBoard(["n1", "n2", "n3"]);
+    api.queueMissingTimes();
+    await flush();
+    assert.equal(detailsStarted - beforeNew, 1);
+    assert.equal(held.length, 1);
+    assert.equal(api.rollupKeys().length, rollupBefore);
+    api.queueMissingTimes();
+    await flush();
+    assert.equal(held.length, 1);
+    assert.equal(overlap, false);
+    releaseAll();
+    await new Promise((resolve) => realSetTimeout(resolve, 700));
+    await flush();
 
     const root = makeNode("div");
     const nonsort = stationTable([
