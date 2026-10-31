@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.25
+// @version      2.9.28
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
-// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet.
+// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
 // @author       abelrigm
 // @match        https://peculiar-inventory-na.aka.corp.amazon.com/*
 // @match        https://aft-aging-inventory.na.aftx.amazonoperations.app/*
@@ -32,7 +32,7 @@
   Each operator scans in the panel. Each person gets their own daily file in:
     Documents / IOL Assignments / Line Flush Records
   Example: LineFlush_2026-08-28_abelrigm.xlsx
-  The Dashboard sheet matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time. Each location that was scanned also has its own sheet.
+  The Dashboard sheet matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time. Each location that was scanned also has its own sheet. Status uses the oldest-units age: Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
 
   1. Install from the GitHub raw link. Do not paste this file into Tampermonkey.
   2. Open AFT Aging Inventory MEM3, finish Midway, leave that tab open.
@@ -45,7 +45,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.25";
+  const VERSION = "2.9.28";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -315,7 +315,7 @@
       bg,
       fg: contrastInk(bg),
       border: `hsl(${h}, ${s}%, ${Math.max(18, l - 14)}%)`,
-      label: age >= 5 ? "ALERT" : age >= 2 ? "CAUTION" : "GOOD",
+      label: age >= 5 ? "ALERT" : age >= 3 ? "CAUTION" : "GOOD",
       pct: Math.max(2, Math.min(100, (Math.min(age, 5) / 5) * 100)),
     };
   }
@@ -672,74 +672,20 @@
     if (!list.length) {
       return `<div class="dash-who">${escapeHtml(whoLine)}</div><div class="empty">No scans yet today.</div>`;
     }
-    const slices = [
-      { name: "Alert", count: summary.alert, color: DASH_COLORS.Alert },
-      { name: "Caution", count: summary.caution, color: DASH_COLORS.Caution },
-      { name: "Good", count: summary.good, color: DASH_COLORS.Good },
-    ];
-    if (summary.noAge) slices.push({ name: "No age", count: summary.noAge, color: DASH_COLORS["No age"] });
-    const legend = slices
+    const locationRows = summary.locations
       .map(
-        (slice) =>
-          `<div class="dash-key"><span class="swatch" style="background:${slice.color}"></span><span>${escapeHtml(slice.name)}</span><b>${slice.count}</b></div>`
+        (loc) =>
+          `<div class="dash-loc">${escapeHtml(loc.name)} · ${loc.containers} containers · ${formatUnits(loc.units)} units · ${loc.alert} alert</div>`
       )
       .join("");
-    const locSlices = summary.locations.map((loc, index) => ({
-      name: loc.name,
-      count: loc.containers,
-      color: locationHue(index),
-    }));
-    const locLegend = locSlices
-      .map(
-        (slice) =>
-          `<div class="dash-key"><span class="swatch" style="background:${slice.color}"></span><span>${escapeHtml(slice.name)}</span><b>${slice.count}</b></div>`
-      )
-      .join("");
-    const parents = [];
-    const parentCounts = new Map();
-    for (const rec of list) {
-      const name = rec.parent || "(no parent)";
-      parentCounts.set(name, (parentCounts.get(name) || 0) + 1);
-    }
-    for (const [label, count] of parentCounts) parents.push({ label, count });
-    const groups = [];
-    for (const rec of list) {
-      let loc = groups.find((item) => item.name === rec.location);
-      if (!loc) {
-        loc = { name: rec.location, parents: [] };
-        groups.push(loc);
-      }
-      let parent = loc.parents.find((item) => item.name === rec.parent);
-      if (!parent) {
-        parent = { name: rec.parent, rows: [] };
-        loc.parents.push(parent);
-      }
-      parent.rows.push(rec);
-    }
-    const grouped = groups
-      .map((loc) => {
-        const locCount = loc.parents.reduce((sum, parent) => sum + parent.rows.length, 0);
-        const locAlert = loc.parents.reduce(
-          (sum, parent) => sum + parent.rows.filter((row) => row.status === "Alert").length,
-          0
-        );
-        const parentsHtml = loc.parents
-          .map((parent) => {
-            const alert = parent.rows.filter((row) => row.status === "Alert").length;
-            const lines = parent.rows
-              .map((row) => {
-                const units = row.units ? `${escapeHtml(row.units)} units` : "";
-                const when = cellText(row.scannedAt).slice(11, 19);
-                return `<button type="button" class="dash-line" data-container="${escapeHtml(row.container)}"><span>${escapeHtml(row.container)}</span><span>${escapeHtml(when || "—")}</span><span>${escapeHtml(row.age || "—")}</span><span>${units}</span><span class="tag ${statusClass(row.status)}">${escapeHtml(row.status)}</span></button>`;
-              })
-              .join("");
-            return `<div class="dash-parent">${escapeHtml(parent.name)} · ${parent.rows.length} containers · ${alert} alert</div>${lines}`;
-          })
-          .join("");
-        return `<div class="dash-loc">${escapeHtml(loc.name)} · ${locCount} containers · ${locAlert} alert</div>${parentsHtml}`;
+    const scans = list
+      .map((row) => {
+        const units = row.units ? `${escapeHtml(row.units)} units` : "";
+        const when = cellText(row.scannedAt).slice(11, 19);
+        return `<button type="button" class="dash-line" data-container="${escapeHtml(row.container)}"><span>${escapeHtml(when || "—")}</span><span>${escapeHtml(row.location)}</span><span>${escapeHtml(row.container)}</span><span>${escapeHtml(row.age || "—")}</span><span>${units}</span><span class="tag ${statusClass(row.status)}">${escapeHtml(row.status)}</span></button>`;
       })
       .join("");
-    return `<div class="dash-who">${escapeHtml(whoLine)}</div>${tallyBoxes(summary)}<div class="dash-equal"><section class="dash-pane"><div class="dash-section">AGE</div><div class="dash-charts"><div class="dash-pie">${pieChart(slices)}</div><div class="dash-legend">${legend}</div></div></section><section class="dash-pane"><div class="dash-section">LOCATION</div><div class="dash-charts"><div class="dash-pie">${pieChart(locSlices)}</div><div class="dash-legend">${locLegend}</div></div></section></div><div class="dash-rule"><div class="dash-section">BY PARENT</div>${barChart(parents, "parent")}</div><div class="dash-rule"><div class="dash-section">CONTAINERS</div>${grouped}</div>`;
+    return `<div class="dash-who">${escapeHtml(whoLine)}</div>${tallyBoxes(summary)}<div class="dash-rule"><div class="dash-section">LOCATIONS</div>${locationRows}</div><div class="dash-rule"><div class="dash-section">SCANS</div>${scans}</div>`;
   }
 
   function splitIdType(raw) {
@@ -1335,7 +1281,13 @@
     return out;
   }
 
-  function zipStore(files) {
+  async function deflateRaw(bytes) {
+    if (typeof CompressionStream !== "function") return null;
+    const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate-raw"));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
+  async function zipStore(files) {
     const encoder = new TextEncoder();
     const locals = [];
     const centrals = [];
@@ -1344,13 +1296,20 @@
       const name = encoder.encode(file.name);
       const data = file.data instanceof Uint8Array ? file.data : encoder.encode(String(file.data));
       const crc = crc32(data);
+      let method = 0;
+      let stored = data;
+      const compressed = await deflateRaw(data);
+      if (compressed && compressed.length < data.length) {
+        method = 8;
+        stored = compressed;
+      }
       const local = new Uint8Array(30 + name.length);
       const localView = new DataView(local.buffer);
       u32(localView, 0, 0x04034b50);
       u16(localView, 4, 20);
-      u16(localView, 8, 0);
+      u16(localView, 8, method);
       u32(localView, 14, crc);
-      u32(localView, 18, data.length);
+      u32(localView, 18, stored.length);
       u32(localView, 22, data.length);
       u16(localView, 26, name.length);
       local.set(name, 30);
@@ -1359,15 +1318,16 @@
       u32(centralView, 0, 0x02014b50);
       u16(centralView, 4, 20);
       u16(centralView, 6, 20);
+      u16(centralView, 10, method);
       u32(centralView, 16, crc);
-      u32(centralView, 20, data.length);
+      u32(centralView, 20, stored.length);
       u32(centralView, 24, data.length);
       u16(centralView, 28, name.length);
       u32(centralView, 42, offset);
       central.set(name, 46);
-      locals.push(local, data);
+      locals.push(local, stored);
       centrals.push(central);
-      offset += local.length + data.length;
+      offset += local.length + stored.length;
     }
     const centralBytes = concatBytes(centrals);
     const end = new Uint8Array(22);
@@ -1430,7 +1390,33 @@
     return 0;
   }
 
-  function sheetXml(rows) {
+  function sharedStrings(sheets) {
+    const index = new Map();
+    const values = [];
+    let count = 0;
+    const idOf = (value) => {
+      const text = String(value);
+      let id = index.get(text);
+      if (id == null) {
+        id = values.length;
+        index.set(text, id);
+        values.push(text);
+      }
+      count += 1;
+      return id;
+    };
+    return { idOf, values, get count() { return count; } };
+  }
+
+  function sharedStringsXml(table) {
+    const items = table.values
+      .map((value) => `<si><t xml:space="preserve">${xmlEscape(value)}</t></si>`)
+      .join("");
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${table.count}" uniqueCount="${table.values.length}">${items}</sst>`;
+  }
+
+  function sheetXml(rows, idOf) {
     const body = rows
       .map((row, rowIndex) => {
         const cells = row
@@ -1439,7 +1425,7 @@
             const ref = `${colLetters(col)}${rowIndex + 1}`;
             const style = fillStyleIndex(value);
             const painted = style ? ` s="${style}"` : "";
-            return `<c r="${ref}"${painted} t="inlineStr"><is><t xml:space="preserve">${xmlEscape(value)}</t></is></c>`;
+            return `<c r="${ref}"${painted} t="s"><v>${idOf(value)}</v></c>`;
           })
           .join("");
         return `<row r="${rowIndex + 1}">${cells}</row>`;
@@ -1449,11 +1435,12 @@
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${body}</sheetData></worksheet>`;
   }
 
-  function workbookBytes(book) {
+  async function workbookBytes(book) {
     const sheets = book.sheets.length ? book.sheets : [{ name: "Scans", rows: [HEADERS.slice()] }];
+    const strings = sharedStrings(sheets);
     const sheetFiles = sheets.map((sheet, index) => ({
       name: `xl/worksheets/sheet${index + 1}.xml`,
-      data: sheetXml(sheet.rows),
+      data: sheetXml(sheet.rows, strings.idOf),
     }));
     const sheetTags = sheets
       .map(
@@ -1477,7 +1464,7 @@
       {
         name: "[Content_Types].xml",
         data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${overrides}</Types>`,
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>${overrides}</Types>`,
       },
       {
         name: "_rels/.rels",
@@ -1492,16 +1479,20 @@
       {
         name: "xl/_rels/workbook.xml.rels",
         data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheetRels}<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheetRels}<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rIdShared" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>`,
       },
       {
         name: "xl/styles.xml",
         data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="3"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FF111111"/><name val="Calibri"/></font></fonts><fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFB42318"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF5C518"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF0D7A3F"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="2" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="1" fillId="4" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs></styleSheet>`,
       },
+      {
+        name: "xl/sharedStrings.xml",
+        data: sharedStringsXml(strings),
+      },
       ...sheetFiles,
     ];
-    return zipStore(files);
+    return await zipStore(files);
   }
 
   async function inflateRaw(bytes) {
@@ -1881,7 +1872,7 @@
     sosCache.records.push(record);
     sosCache.book = dashboardBook(sosCache.records);
     try {
-      await writeSosFile(sosCache.name, workbookBytes(sosCache.book));
+      await writeSosFile(sosCache.name, await workbookBytes(sosCache.book));
     } catch (err) {
       sosCache.records = snapshot;
       sosCache.book = previous;
@@ -2109,7 +2100,7 @@
           display: flex; align-items: center; justify-content: center;
           pointer-events: none;
         }
-        .backdrop { position: absolute; inset: 0; background: rgba(4, 8, 12, .45); pointer-events: none; }
+        .backdrop { position: absolute; inset: 0; background: #e7e9ee; pointer-events: none; }
         .modal {
           position: relative; z-index: 1;
           pointer-events: auto;
@@ -2294,7 +2285,7 @@
           z-index: 35;
           overflow: auto;
           pointer-events: auto;
-          background: rgba(17, 17, 17, 0.45);
+          background: #e7e9ee;
         }
         .dash.open { display: block; }
         .dash-card {
@@ -2822,7 +2813,7 @@
       await assertSosFolder();
       await ensureSosCache(who);
       if (sosCache.book && sosCache.name) {
-        await writeSosFile(sosCache.name, workbookBytes(sosCache.book));
+        await writeSosFile(sosCache.name, await workbookBytes(sosCache.book));
       }
       spOk = true;
       fileOk = true;
@@ -3086,6 +3077,7 @@
       if (!on && (excelLockOpen || accessDeniedOpen)) return;
       open = on;
       hostEl.classList.toggle("closed", !on);
+      hostEl.style.setProperty("background", on ? "#e7e9ee" : "transparent", "important");
       GM_setValue(KEYS.panelOpen, !!on);
       document.documentElement.style.overflow = "";
       if (on) setTimeout(focusScanBox, 50);
