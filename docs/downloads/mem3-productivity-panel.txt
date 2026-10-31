@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.1
+// @version      1.8.2
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.1';
+    const SCRIPT_VERSION = '1.8.2';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -60,6 +60,15 @@
         window.open(SCRIPT_UPDATE_URL, '_blank');
     }
 
+    function updateStep(text, highlight) {
+        const item = document.createElement('li');
+        item.textContent = text;
+        item.style.cssText = 'margin:0 0 10px 0; line-height:1.4;' + (highlight
+            ? 'background:#3d2e00; border:2px solid #d29922; border-radius:8px; padding:10px 12px; font-weight:800; font-size:16px;'
+            : 'font-weight:650;');
+        return item;
+    }
+
     function showUpdatePrompt(remote) {
         if (!document.body) {
             setTimeout(function () { showUpdatePrompt(remote); }, 500);
@@ -77,33 +86,49 @@
             'display:flex; align-items:center; justify-content:center; ' +
             'font-family:Segoe UI,system-ui,sans-serif; color:#ffffff;';
         const card = document.createElement('div');
-        card.style.cssText = 'width:min(420px, calc(100% - 32px)); background:#161b22; ' +
-            'border:1px solid #8b949e; border-radius:12px; padding:16px;';
+        card.style.cssText = 'width:min(560px, calc(100% - 24px)); background:#161b22; ' +
+            'border:1px solid #8b949e; border-radius:12px; padding:18px;';
         const title = document.createElement('div');
-        title.textContent = 'Productivity Panel update';
-        title.style.cssText = 'font-size:16px; font-weight:800;';
+        title.textContent = 'Stop. Do these steps in order.';
+        title.style.cssText = 'font-size:20px; font-weight:800;';
         const note = document.createElement('div');
-        note.innerHTML = 'Version <span data-ver></span> is in GitHub. You have ' + SCRIPT_VERSION + '.';
-        note.style.cssText = 'font-size:13px; font-weight:500; color:#c9d1d9; margin-top:8px;';
-        note.querySelector('[data-ver]').textContent = remote;
+        note.style.cssText = 'font-size:15px; font-weight:650; color:#ffffff; margin-top:8px;';
+        note.appendChild(document.createTextNode('You have version ' + SCRIPT_VERSION + '. Version '));
+        const verEl = document.createElement('span');
+        verEl.setAttribute('data-ver', remote);
+        verEl.textContent = remote;
+        note.appendChild(verEl);
+        note.appendChild(document.createTextNode(' is ready. Do not skip the refresh.'));
+        const steps = document.createElement('ol');
+        steps.style.cssText = 'margin:14px 0 0; padding-left:22px; font-size:15px; color:#ffffff;';
+        steps.appendChild(updateStep('A new tab just opened. Click that tab.'));
+        steps.appendChild(updateStep('On that tab, click Install. The button might say Update or Reinstall. Click it.'));
+        steps.appendChild(updateStep('Come back to this tab. This is the screen you are looking at right now.'));
+        steps.appendChild(updateStep('Refresh this screen. Click the round arrow at the top of the browser. Or press the F5 key.', true));
+        steps.appendChild(updateStep('Wait until the page finishes loading. Then you are done.'));
+        const warn = document.createElement('div');
+        warn.textContent = 'If you do not refresh this screen, nothing changed. You are still on the old panel.';
+        warn.style.cssText = 'margin-top:4px; font-size:15px; font-weight:800; color:#d29922;';
         const row = document.createElement('div');
-        row.style.cssText = 'display:flex; justify-content:flex-end; gap:8px; margin-top:14px;';
+        row.style.cssText = 'display:flex; justify-content:flex-end; gap:8px; margin-top:16px;';
         const later = document.createElement('button');
         later.type = 'button';
-        later.textContent = 'Later';
-        later.style.cssText = 'padding:6px 12px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
-            'background:#0d1117; border:1px solid #8b949e; font:800 12px Segoe UI,system-ui,sans-serif;';
+        later.textContent = 'Not now';
+        later.style.cssText = 'padding:8px 12px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
+            'background:#0d1117; border:1px solid #8b949e; font:800 13px Segoe UI,system-ui,sans-serif;';
         later.addEventListener('click', function () { overlay.remove(); });
         const go = document.createElement('button');
         go.type = 'button';
-        go.textContent = 'Update';
-        go.style.cssText = 'padding:6px 12px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
-            'background:#0d1117; border:1px solid #58a6ff; font:800 12px Segoe UI,system-ui,sans-serif;';
+        go.textContent = 'Open the update tab again';
+        go.style.cssText = 'padding:8px 12px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
+            'background:#0d1117; border:1px solid #58a6ff; font:800 13px Segoe UI,system-ui,sans-serif;';
         go.addEventListener('click', function () { openScriptInstall(); });
         row.appendChild(later);
         row.appendChild(go);
         card.appendChild(title);
         card.appendChild(note);
+        card.appendChild(steps);
+        card.appendChild(warn);
         card.appendChild(row);
         overlay.appendChild(card);
         document.body.appendChild(overlay);

@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-panel.txt", import.meta.url), "utf8");
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.8\.1/);
+assert.match(src, /@version\s+1\.8\.2/);
 assert.equal(src.includes("TIME_PASS_GAP_MS"), false);
 assert.equal(src.includes("TIME_PER_PASS"), false);
 assert.equal(src.includes("scheduleTimeLoad"), false);
@@ -16,7 +16,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.8.1");
+assert.equal(entry.version, "1.8.2");
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
 
 function DOMParser() {}
@@ -139,6 +139,7 @@ const patched = src.replace(
             };
         },
         setDown(value) { FCLM_DOWN = value; },
+        showUpdate(remote) { showUpdatePrompt(remote); },
         stop() {
             refreshGeneration++;
             timeGeneration++;
@@ -196,6 +197,7 @@ function makeNode(tag) {
         node.parentNode = null;
     };
     node.closest = function () { return null; };
+    node.addEventListener = function () {};
     node.querySelectorAll = function (sel) {
         const out = [];
         const options = String(sel).split(",").map((part) => part.trim());
@@ -342,6 +344,30 @@ try {
     const labels = badges.map((badge) => badge.children.map((child) => String(child.textContent)).join("")).sort();
     assert.deepEqual(labels, ["12.5% IDLE", "25.0% IDLE"]);
     assert.equal(labels.some((label) => label.includes("UPH")), false);
+
+    document.body = makeNode("body");
+    document.createTextNode = function (text) {
+        const node = makeNode("#text");
+        node.textContent = String(text);
+        return node;
+    };
+    let opened = 0;
+    sandbox.GM_openInTab = function () { opened += 1; };
+    api.showUpdate("9.9.9");
+    function allText(node) {
+        let text = node.textContent || "";
+        const children = node.children || [];
+        for (let i = 0; i < children.length; i++) text += " " + allText(children[i]);
+        return text;
+    }
+    const prompt = allText(document.body);
+    assert.equal(opened, 1);
+    assert.match(prompt, /A new tab just opened/);
+    assert.match(prompt, /click Install/);
+    assert.match(prompt, /Come back to this tab/);
+    assert.match(prompt, /Refresh this screen/);
+    assert.match(prompt, /F5/);
+    assert.match(prompt, /If you do not refresh this screen/);
 } finally {
     if (api) api.stop();
 }
