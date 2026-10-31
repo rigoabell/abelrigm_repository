@@ -104,7 +104,7 @@
     "category": "Control Tower",
     "summary": "Show each associate's rate and idle time, and refresh both together every 5 minutes.",
     "detail": "On MEM3 assignments, Primary Grading rate and idle time update on one cycle. The rate is drawn as soon as its page arrives. Idle pages start then, two at a time, line people before BIGS, one try per person. Each row, the line idle total, and the floor idle total update as each person comes back. BIGS idle stays on those rows and out of the totals. A failed pull keeps the last good number.",
-    "version": "1.8.3",
+    "version": "1.8.4",
     "runsOn": "beta.control-tower.meta.amazon.dev, control-tower.meta.amazon.dev",
     "file": "downloads/mem3-productivity-panel.txt",
     "downloadName": "Productivity Panel (abelrigm).txt"

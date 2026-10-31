@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-panel.txt", import.meta.url), "utf8");
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.8\.3/);
+assert.match(src, /@version\s+1\.8\.4/);
 assert.match(src, /const MAX_TIME_TRIES = 1;/);
 assert.equal(src.includes("TIME_PASS_GAP_MS"), false);
 assert.equal(src.includes("TIME_PER_PASS"), false);
@@ -17,7 +17,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.8.3");
+assert.equal(entry.version, "1.8.4");
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
 
 function DOMParser() {}
@@ -293,7 +293,11 @@ try {
     for (let n = 0; n < 8; n++) {
         if (held.length) releaseAll();
         await flush();
-        if (!held.length && !api.state().loading && !api.state().inFlight) break;
+        if (!held.length && !api.state().inFlight) break;
+    }
+    if (api.state().loading) {
+        await new Promise((resolve) => realSetTimeout(resolve, 700));
+        await flush();
     }
     assert.equal(api.rollupKeys().includes("99"), true);
     assert.equal(api.state().loading, false);
@@ -353,6 +357,26 @@ try {
     await live;
     assert.equal(api.timeProgress().done, 4);
     assert.equal(detailsStarted - beforeLive, 4);
+
+    api.stop();
+    failDetails = false;
+    api.setDown(false);
+    held.splice(0, held.length);
+    api.setBoard(["early1", "early2"]);
+    const beforeLate = detailsStarted;
+    const late = api.loadBoardTimes();
+    await flush();
+    assert.equal(detailsStarted - beforeLate, 2);
+    api.setBoard(["early1", "early2", "late1", "late2"]);
+    for (let n = 0; n < 8; n++) {
+        if (held.length) releaseAll();
+        await flush();
+        if (detailsStarted - beforeLate >= 4 && !held.length && !api.state().inFlight) break;
+    }
+    assert.equal(detailsStarted - beforeLate, 4);
+    await late;
+    assert.equal(api.time("late1").hasTime, true);
+    assert.equal(api.time("late2").hasTime, true);
 
     api.stop();
     sandbox.plainDetails = true;

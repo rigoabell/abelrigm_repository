@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.3
+// @version      1.8.4
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.3';
+    const SCRIPT_VERSION = '1.8.4';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -1506,13 +1506,23 @@
     async function loadBoardTimes() {
         if (TIME_LOADING) return;
         const gen = ++timeGeneration;
-        const pool = cycleEmpIds();
         const ids = [];
-        for (let i = 0; i < pool.length; i++) {
-            if (needsTimeThisCycle(pool[i])) ids.push(pool[i]);
+        const queued = Object.create(null);
+        let cursor = 0;
+        // The assignment rows fill in after the first paint. Pick up anyone
+        // who shows up while these two pages are already open.
+        function pullNew() {
+            const pool = cycleEmpIds();
+            for (let i = 0; i < pool.length; i++) {
+                const id = pool[i];
+                if (!id || queued[id] || !needsTimeThisCycle(id)) continue;
+                queued[id] = true;
+                ids.push(id);
+            }
+            if (DEBUG.timeLoad) DEBUG.timeLoad.ids = ids.length;
         }
         DEBUG.timeLoad = {
-            ids: ids.length,
+            ids: 0,
             cycle: refreshCycle,
             startedAt: new Date().toISOString(),
             done: 0,
@@ -1520,22 +1530,31 @@
             error: null,
             maxTries: MAX_TIME_TRIES
         };
+        pullNew();
         if (!ids.length) return;
         TIME_LOADING = true;
-        let cursor = 0;
         const worker = async function () {
-            while (cursor < ids.length) {
-                if (gen !== timeGeneration) return;
-                if (FCLM_DOWN) return;
+            while (gen === timeGeneration && !FCLM_DOWN) {
+                pullNew();
+                if (cursor >= ids.length) return;
                 const empId = ids[cursor++];
                 await fetchTimeUntilFound(empId, gen, true);
             }
         };
         try {
             const workers = [];
-            const n = Math.min(TIME_WORKERS, ids.length);
-            for (let i = 0; i < n; i++) workers.push(worker());
+            for (let i = 0; i < TIME_WORKERS; i++) workers.push(worker());
             await Promise.all(workers);
+            if (gen !== timeGeneration) return;
+            // One short pause so a board that was still painting can join this cycle.
+            await sleep(500);
+            if (gen !== timeGeneration) return;
+            pullNew();
+            if (cursor < ids.length && !FCLM_DOWN) {
+                const more = [];
+                for (let i = 0; i < TIME_WORKERS; i++) more.push(worker());
+                await Promise.all(more);
+            }
             if (gen !== timeGeneration) return;
             settleUnfinished(ids);
             if (DEBUG.timeLoad) DEBUG.timeLoad.finished = true;
