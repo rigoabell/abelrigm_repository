@@ -15,11 +15,11 @@ Central hub for the work: portfolio, tools built, and notes.
   - **Inventory** opens a large inventory CSV in the browser. Average Age and
     Average Threshold are the ASIN’s age and threshold. The desk groups containers
     as Approaching (1–2 days before), At (less than 1 day before), or DIOT (past
-    the threshold), and lists them by outer location. A saved copy lives in
-    `docs/inventory/data/` (see `manifest.json`; one `latest.csv`, or `part-000`
-    and following parts in order). That copy is public and loads on any machine
-    that opens the page. Replacing it from the browser uses a GitHub token that
-    stays in that browser. Downloads you generate stay on the machine.
+    the threshold), and lists them by outer location. The last CSV dropped in
+    the desk is kept in that browser, and a refresh opens it. A shared copy
+    also lives in `docs/inventory/data/` (see `manifest.json`; one `latest.csv`,
+    or `part-000` and following parts in order) and opens when that browser has
+    not dropped a file yet. Downloads you generate stay on the machine.
     Open it at
     `https://rigoabell.github.io/abelrigm_repository/inventory/`.
   - **Rig Setup** is a project on the Portfolio page, not its own site page.
