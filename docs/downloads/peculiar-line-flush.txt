@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.25
+// @version      2.9.26
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet.
@@ -45,7 +45,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.25";
+  const VERSION = "2.9.26";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -672,74 +672,20 @@
     if (!list.length) {
       return `<div class="dash-who">${escapeHtml(whoLine)}</div><div class="empty">No scans yet today.</div>`;
     }
-    const slices = [
-      { name: "Alert", count: summary.alert, color: DASH_COLORS.Alert },
-      { name: "Caution", count: summary.caution, color: DASH_COLORS.Caution },
-      { name: "Good", count: summary.good, color: DASH_COLORS.Good },
-    ];
-    if (summary.noAge) slices.push({ name: "No age", count: summary.noAge, color: DASH_COLORS["No age"] });
-    const legend = slices
+    const locationRows = summary.locations
       .map(
-        (slice) =>
-          `<div class="dash-key"><span class="swatch" style="background:${slice.color}"></span><span>${escapeHtml(slice.name)}</span><b>${slice.count}</b></div>`
+        (loc) =>
+          `<div class="dash-loc">${escapeHtml(loc.name)} · ${loc.containers} containers · ${formatUnits(loc.units)} units · ${loc.alert} alert</div>`
       )
       .join("");
-    const locSlices = summary.locations.map((loc, index) => ({
-      name: loc.name,
-      count: loc.containers,
-      color: locationHue(index),
-    }));
-    const locLegend = locSlices
-      .map(
-        (slice) =>
-          `<div class="dash-key"><span class="swatch" style="background:${slice.color}"></span><span>${escapeHtml(slice.name)}</span><b>${slice.count}</b></div>`
-      )
-      .join("");
-    const parents = [];
-    const parentCounts = new Map();
-    for (const rec of list) {
-      const name = rec.parent || "(no parent)";
-      parentCounts.set(name, (parentCounts.get(name) || 0) + 1);
-    }
-    for (const [label, count] of parentCounts) parents.push({ label, count });
-    const groups = [];
-    for (const rec of list) {
-      let loc = groups.find((item) => item.name === rec.location);
-      if (!loc) {
-        loc = { name: rec.location, parents: [] };
-        groups.push(loc);
-      }
-      let parent = loc.parents.find((item) => item.name === rec.parent);
-      if (!parent) {
-        parent = { name: rec.parent, rows: [] };
-        loc.parents.push(parent);
-      }
-      parent.rows.push(rec);
-    }
-    const grouped = groups
-      .map((loc) => {
-        const locCount = loc.parents.reduce((sum, parent) => sum + parent.rows.length, 0);
-        const locAlert = loc.parents.reduce(
-          (sum, parent) => sum + parent.rows.filter((row) => row.status === "Alert").length,
-          0
-        );
-        const parentsHtml = loc.parents
-          .map((parent) => {
-            const alert = parent.rows.filter((row) => row.status === "Alert").length;
-            const lines = parent.rows
-              .map((row) => {
-                const units = row.units ? `${escapeHtml(row.units)} units` : "";
-                const when = cellText(row.scannedAt).slice(11, 19);
-                return `<button type="button" class="dash-line" data-container="${escapeHtml(row.container)}"><span>${escapeHtml(row.container)}</span><span>${escapeHtml(when || "—")}</span><span>${escapeHtml(row.age || "—")}</span><span>${units}</span><span class="tag ${statusClass(row.status)}">${escapeHtml(row.status)}</span></button>`;
-              })
-              .join("");
-            return `<div class="dash-parent">${escapeHtml(parent.name)} · ${parent.rows.length} containers · ${alert} alert</div>${lines}`;
-          })
-          .join("");
-        return `<div class="dash-loc">${escapeHtml(loc.name)} · ${locCount} containers · ${locAlert} alert</div>${parentsHtml}`;
+    const scans = list
+      .map((row) => {
+        const units = row.units ? `${escapeHtml(row.units)} units` : "";
+        const when = cellText(row.scannedAt).slice(11, 19);
+        return `<button type="button" class="dash-line" data-container="${escapeHtml(row.container)}"><span>${escapeHtml(when || "—")}</span><span>${escapeHtml(row.location)}</span><span>${escapeHtml(row.container)}</span><span>${escapeHtml(row.age || "—")}</span><span>${units}</span><span class="tag ${statusClass(row.status)}">${escapeHtml(row.status)}</span></button>`;
       })
       .join("");
-    return `<div class="dash-who">${escapeHtml(whoLine)}</div>${tallyBoxes(summary)}<div class="dash-equal"><section class="dash-pane"><div class="dash-section">AGE</div><div class="dash-charts"><div class="dash-pie">${pieChart(slices)}</div><div class="dash-legend">${legend}</div></div></section><section class="dash-pane"><div class="dash-section">LOCATION</div><div class="dash-charts"><div class="dash-pie">${pieChart(locSlices)}</div><div class="dash-legend">${locLegend}</div></div></section></div><div class="dash-rule"><div class="dash-section">BY PARENT</div>${barChart(parents, "parent")}</div><div class="dash-rule"><div class="dash-section">CONTAINERS</div>${grouped}</div>`;
+    return `<div class="dash-who">${escapeHtml(whoLine)}</div>${tallyBoxes(summary)}<div class="dash-rule"><div class="dash-section">LOCATIONS</div>${locationRows}</div><div class="dash-rule"><div class="dash-section">SCANS</div>${scans}</div>`;
   }
 
   function splitIdType(raw) {
@@ -2109,7 +2055,7 @@
           display: flex; align-items: center; justify-content: center;
           pointer-events: none;
         }
-        .backdrop { position: absolute; inset: 0; background: rgba(4, 8, 12, .45); pointer-events: none; }
+        .backdrop { position: absolute; inset: 0; background: #e7e9ee; pointer-events: none; }
         .modal {
           position: relative; z-index: 1;
           pointer-events: auto;
@@ -2294,7 +2240,7 @@
           z-index: 35;
           overflow: auto;
           pointer-events: auto;
-          background: rgba(17, 17, 17, 0.45);
+          background: #e7e9ee;
         }
         .dash.open { display: block; }
         .dash-card {
@@ -3086,6 +3032,7 @@
       if (!on && (excelLockOpen || accessDeniedOpen)) return;
       open = on;
       hostEl.classList.toggle("closed", !on);
+      hostEl.style.setProperty("background", on ? "#e7e9ee" : "transparent", "important");
       GM_setValue(KEYS.panelOpen, !!on);
       document.documentElement.style.overflow = "";
       if (on) setTimeout(focusScanBox, 50);

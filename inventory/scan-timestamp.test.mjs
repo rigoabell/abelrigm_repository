@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, dashboardHtml, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -144,5 +144,13 @@ assert.deepEqual(
 
 const locationOnly = api.recordsFromBook({ sheets: book.sheets.filter((sheet) => sheet.name !== "Dashboard") });
 assert.equal(locationOnly.length, 3);
+
+const dash = api.dashboardHtml([eol, line], "abelrigm");
+assert.match(dash, /LOCATIONS/);
+assert.match(dash, /SCANS/);
+assert.match(dash, /csX1234/);
+assert.match(dash, /L3 Even/);
+assert.equal(dash.includes("BY PARENT"), false);
+assert.equal(dash.includes("<svg"), false);
 
 console.log("scan timestamp tests passed");
