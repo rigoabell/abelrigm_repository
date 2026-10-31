@@ -25,13 +25,15 @@ async function forwardBlob(request, env) {
   if (length > MAX_BLOB) return Response.json({ error: "That file is over 90 MB." }, { status: 413 });
   const response = await fetch(API + "/git/blobs", {
     method: "POST",
-    headers: githubHeaders(env.GITHUB_TOKEN),
+    headers: githubHeaders(env.GITHUB_TOKEN, true),
     body: request.body,
     duplex: "half",
   });
   const data = await readJson(response);
   if (!response.ok || !data.sha) {
-    return Response.json({ error: "GitHub could not store that file." }, { status: response.status || 502 });
+    const detail = data && (data.message || data.error) ? String(data.message || data.error).slice(0, 180) : "";
+    const error = detail ? "GitHub could not store that file. " + detail : "GitHub could not store that file.";
+    return Response.json({ error }, { status: response.status || 502 });
   }
   return Response.json({ sha: data.sha });
 }
@@ -62,6 +64,7 @@ function githubHeaders(token, json) {
   const headers = {
     Authorization: "Bearer " + token,
     Accept: "application/vnd.github+json",
+    "User-Agent": "abelrigm-inventory",
     "X-GitHub-Api-Version": "2022-11-28",
   };
   if (json) headers["Content-Type"] = "application/json";
