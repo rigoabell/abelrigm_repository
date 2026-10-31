@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.0
+// @version      1.8.6
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.0';
+    const SCRIPT_VERSION = '1.8.6';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -60,6 +60,15 @@
         window.open(SCRIPT_UPDATE_URL, '_blank');
     }
 
+    function updateStep(text, highlight) {
+        const item = document.createElement('li');
+        item.textContent = text;
+        item.style.cssText = 'margin:0 0 10px 0; line-height:1.4;' + (highlight
+            ? 'background:#3d2e00; border:2px solid #d29922; border-radius:8px; padding:10px 12px; font-weight:800; font-size:16px;'
+            : 'font-weight:650;');
+        return item;
+    }
+
     function showUpdatePrompt(remote) {
         if (!document.body) {
             setTimeout(function () { showUpdatePrompt(remote); }, 500);
@@ -77,33 +86,49 @@
             'display:flex; align-items:center; justify-content:center; ' +
             'font-family:Segoe UI,system-ui,sans-serif; color:#ffffff;';
         const card = document.createElement('div');
-        card.style.cssText = 'width:min(420px, calc(100% - 32px)); background:#161b22; ' +
-            'border:1px solid #8b949e; border-radius:12px; padding:16px;';
+        card.style.cssText = 'width:min(560px, calc(100% - 24px)); background:#161b22; ' +
+            'border:1px solid #8b949e; border-radius:12px; padding:18px;';
         const title = document.createElement('div');
-        title.textContent = 'Productivity Panel update';
-        title.style.cssText = 'font-size:16px; font-weight:800;';
+        title.textContent = 'Stop. Do these steps in order.';
+        title.style.cssText = 'font-size:20px; font-weight:800;';
         const note = document.createElement('div');
-        note.innerHTML = 'Version <span data-ver></span> is in GitHub. You have ' + SCRIPT_VERSION + '.';
-        note.style.cssText = 'font-size:13px; font-weight:500; color:#c9d1d9; margin-top:8px;';
-        note.querySelector('[data-ver]').textContent = remote;
+        note.style.cssText = 'font-size:15px; font-weight:650; color:#ffffff; margin-top:8px;';
+        note.appendChild(document.createTextNode('You have version ' + SCRIPT_VERSION + '. Version '));
+        const verEl = document.createElement('span');
+        verEl.setAttribute('data-ver', remote);
+        verEl.textContent = remote;
+        note.appendChild(verEl);
+        note.appendChild(document.createTextNode(' is ready. Do not skip the refresh.'));
+        const steps = document.createElement('ol');
+        steps.style.cssText = 'margin:14px 0 0; padding-left:22px; font-size:15px; color:#ffffff;';
+        steps.appendChild(updateStep('A new tab just opened. Click that tab.'));
+        steps.appendChild(updateStep('On that tab, click Install. The button might say Update or Reinstall. Click it.'));
+        steps.appendChild(updateStep('Come back to this tab. This is the screen you are looking at right now.'));
+        steps.appendChild(updateStep('Refresh this screen. Click the round arrow at the top of the browser. Or press the F5 key.', true));
+        steps.appendChild(updateStep('Wait until the page finishes loading. Then you are done.'));
+        const warn = document.createElement('div');
+        warn.textContent = 'If you do not refresh this screen, nothing changed. You are still on the old panel.';
+        warn.style.cssText = 'margin-top:4px; font-size:15px; font-weight:800; color:#d29922;';
         const row = document.createElement('div');
-        row.style.cssText = 'display:flex; justify-content:flex-end; gap:8px; margin-top:14px;';
+        row.style.cssText = 'display:flex; justify-content:flex-end; gap:8px; margin-top:16px;';
         const later = document.createElement('button');
         later.type = 'button';
-        later.textContent = 'Later';
-        later.style.cssText = 'padding:6px 12px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
-            'background:#0d1117; border:1px solid #8b949e; font:800 12px Segoe UI,system-ui,sans-serif;';
+        later.textContent = 'Not now';
+        later.style.cssText = 'padding:8px 12px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
+            'background:#0d1117; border:1px solid #8b949e; font:800 13px Segoe UI,system-ui,sans-serif;';
         later.addEventListener('click', function () { overlay.remove(); });
         const go = document.createElement('button');
         go.type = 'button';
-        go.textContent = 'Update';
-        go.style.cssText = 'padding:6px 12px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
-            'background:#0d1117; border:1px solid #58a6ff; font:800 12px Segoe UI,system-ui,sans-serif;';
+        go.textContent = 'Open the update tab again';
+        go.style.cssText = 'padding:8px 12px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
+            'background:#0d1117; border:1px solid #58a6ff; font:800 13px Segoe UI,system-ui,sans-serif;';
         go.addEventListener('click', function () { openScriptInstall(); });
         row.appendChild(later);
         row.appendChild(go);
         card.appendChild(title);
         card.appendChild(note);
+        card.appendChild(steps);
+        card.appendChild(warn);
         card.appendChild(row);
         overlay.appendChild(card);
         document.body.appendChild(overlay);
@@ -160,7 +185,7 @@
     const WINDOW_GROUPS = ['Shift', 'Halves', 'Quarters', 'Fast starts'];
     let ACTIVE_WINDOW = 'all';
     const REFRESH_MS = 5 * 60 * 1000;
-    const TIME_WORKERS = 2;
+    const TIME_WORKERS = 4;
     const UPH_TARGET = 30;
 
     const TARGET_SECTIONS = {
@@ -175,6 +200,7 @@
     };
 
     const DECOR_CLASS = 'mem3-uph-badge';
+    const BIGS_IDLE_CLASS = 'mem3-bigs-idle';
     const SECTION_BADGE_CLASS = 'mem3-line-avg-badge';
     const POPUP_CLASS = 'mem3-popup-uph';
     const FLOOR_SUMMARY_ID = 'mem3-floor-summary';
@@ -836,7 +862,7 @@
     let LAST_TIME = Object.create(null);
     const TIME_IN_FLIGHT = Object.create(null);
     const TIME_TRIES = Object.create(null);
-    const MAX_TIME_TRIES = 5;
+    const MAX_TIME_TRIES = 1;
     let TIME_LOADING = false;
     let SUPPRESS_ENSURE = false;
     let timeGeneration = 0;
@@ -845,7 +871,9 @@
     let refreshBusy = false;
     let refreshDue = false;
     let refreshTimer = null;
+    let livePaintTimer = null;
     let BOARD_IDS = [];
+    let BIGS_IDS = [];
 
     function parseDuration(text) {
         const parts = String(text || '').trim().split(':').map(function (p) { return Number(p); });
@@ -1269,6 +1297,7 @@
     }
 
     function timeFinished(empId) {
+        if (TIME_IN_FLIGHT[empId]) return false;
         const t = LAST_TIME[empId];
         if (showsIdle(t) || (t && (t.noData || (t.gaveUp && t.cycle === refreshCycle)))) return true;
         return (TIME_TRIES[empId] || 0) >= MAX_TIME_TRIES;
@@ -1300,7 +1329,7 @@
         return (TIME_TRIES[empId] || 0) < MAX_TIME_TRIES;
     }
 
-    // One person, at most five Time Details pages. Drop each page before the next try.
+    // One person, one Time Details page. Drop the page before the next person.
     async function fetchTimeUntilFound(empId, gen, force) {
         if (!empId || TIME_IN_FLIGHT[empId]) return;
         if (!force && (timeSettled(LAST_TIME[empId]) || !triesLeft(empId))) return;
@@ -1339,6 +1368,7 @@
         } finally {
             html = '';
             delete TIME_IN_FLIGHT[empId];
+            noteTimeProgress();
             if (!pagesHeld()) pumpRefresh();
         }
     }
@@ -1401,7 +1431,7 @@
             prev.gaveUp = true;
             if (record && record.tries) prev.tries = record.tries;
             if (DEBUG.timeLoad) DEBUG.timeLoad.done = (DEBUG.timeLoad.done || 0) + 1;
-            noteTimeProgress();
+            scheduleLivePaint();
             return;
         }
         if (!record) return;
@@ -1419,7 +1449,19 @@
             };
         }
         if (DEBUG.timeLoad) DEBUG.timeLoad.done = (DEBUG.timeLoad.done || 0) + 1;
+        scheduleLivePaint();
+    }
+
+    // The progress bar moves immediately. Rows, line idle, and the floor idle
+    // follow on the next tick from whatever has arrived so far.
+    function scheduleLivePaint() {
         noteTimeProgress();
+        if (livePaintTimer || unassigning) return;
+        livePaintTimer = setTimeout(function () {
+            livePaintTimer = null;
+            if (unassigning) return;
+            render();
+        }, 50);
     }
 
     function resetTimeTries() {
@@ -1444,16 +1486,43 @@
         }
     }
 
+    // Line ids first, so both open pages stay on the lines until those ids are taken.
+    function cycleEmpIds() {
+        const ids = [];
+        const seen = Object.create(null);
+        const lists = [BOARD_IDS, BIGS_IDS];
+        for (let s = 0; s < lists.length; s++) {
+            const list = lists[s] || [];
+            for (let i = 0; i < list.length; i++) {
+                const id = list[i];
+                if (!id || seen[id]) continue;
+                seen[id] = true;
+                ids.push(id);
+            }
+        }
+        return ids.length ? ids : visibleEmpIds();
+    }
+
     async function loadBoardTimes() {
         if (TIME_LOADING) return;
         const gen = ++timeGeneration;
-        const pool = BOARD_IDS.length ? BOARD_IDS.slice() : visibleEmpIds();
         const ids = [];
-        for (let i = 0; i < pool.length; i++) {
-            if (needsTimeThisCycle(pool[i])) ids.push(pool[i]);
+        const queued = Object.create(null);
+        let cursor = 0;
+        // The assignment rows fill in after the first paint. Pick up anyone
+        // who shows up while these pages are already open.
+        function pullNew() {
+            const pool = cycleEmpIds();
+            for (let i = 0; i < pool.length; i++) {
+                const id = pool[i];
+                if (!id || queued[id] || !needsTimeThisCycle(id)) continue;
+                queued[id] = true;
+                ids.push(id);
+            }
+            if (DEBUG.timeLoad) DEBUG.timeLoad.ids = ids.length;
         }
         DEBUG.timeLoad = {
-            ids: ids.length,
+            ids: 0,
             cycle: refreshCycle,
             startedAt: new Date().toISOString(),
             done: 0,
@@ -1461,22 +1530,31 @@
             error: null,
             maxTries: MAX_TIME_TRIES
         };
+        pullNew();
         if (!ids.length) return;
         TIME_LOADING = true;
-        let cursor = 0;
         const worker = async function () {
-            while (cursor < ids.length) {
-                if (gen !== timeGeneration) return;
-                if (FCLM_DOWN) return;
+            while (gen === timeGeneration && !FCLM_DOWN) {
+                pullNew();
+                if (cursor >= ids.length) return;
                 const empId = ids[cursor++];
                 await fetchTimeUntilFound(empId, gen, true);
             }
         };
         try {
             const workers = [];
-            const n = Math.min(TIME_WORKERS, ids.length);
-            for (let i = 0; i < n; i++) workers.push(worker());
+            for (let i = 0; i < TIME_WORKERS; i++) workers.push(worker());
             await Promise.all(workers);
+            if (gen !== timeGeneration) return;
+            // One short pause so a board that was still painting can join this cycle.
+            await sleep(500);
+            if (gen !== timeGeneration) return;
+            pullNew();
+            if (cursor < ids.length && !FCLM_DOWN) {
+                const more = [];
+                for (let i = 0; i < TIME_WORKERS; i++) more.push(worker());
+                await Promise.all(more);
+            }
             if (gen !== timeGeneration) return;
             settleUnfinished(ids);
             if (DEBUG.timeLoad) DEBUG.timeLoad.finished = true;
@@ -1486,6 +1564,19 @@
             if (gen === timeGeneration) settleUnfinished(ids);
         } finally {
             TIME_LOADING = false;
+            if (!pagesHeld()) pumpRefresh();
+        }
+    }
+
+    // Between the 5-minute recalcs, a person who just showed up gets an idle
+    // page. Their rate comes from the rollup already downloaded.
+    function queueMissingTimes() {
+        if (unassigning || refreshBusy || TIME_LOADING || FCLM_DOWN || !LAST_ROLLUP_AT) return;
+        const pool = cycleEmpIds();
+        for (let i = 0; i < pool.length; i++) {
+            if (!needsTimeThisCycle(pool[i])) continue;
+            loadBoardTimes();
+            return;
         }
     }
 
@@ -1987,7 +2078,7 @@
     }
 
     function clearDecorations() {
-        const nodes = document.querySelectorAll('.' + DECOR_CLASS + ', .' + SECTION_BADGE_CLASS + ', body > .mem3-yield-hover-open');
+        const nodes = document.querySelectorAll('.' + DECOR_CLASS + ', .' + BIGS_IDLE_CLASS + ', .' + SECTION_BADGE_CLASS + ', body > .mem3-yield-hover-open');
         for (let i = 0; i < nodes.length; i++) nodes[i].remove();
     }
 
@@ -2014,6 +2105,78 @@
         if (existing && existing.getAttribute('data-sig') === sig) return;
         if (existing && existing.parentNode) existing.parentNode.replaceChild(badge, existing);
         else badgeHost(found.el, tr).appendChild(badge);
+    }
+
+    function assignmentHasBigs(text) {
+        return /\bbigs\b/i.test(String(text || ''));
+    }
+
+    function makeBigsIdleBadge(time) {
+        const wrap = document.createElement('span');
+        wrap.className = BIGS_IDLE_CLASS;
+        wrap.style.cssText = 'display:inline-flex; align-items:center; gap:6px; margin-left:8px; vertical-align:middle;';
+        const noTime = !!(time && time.noData);
+        const pct = idlePercent(time);
+        const idleText = noTime ? windowGapText() : (idleLabel(pct) + ' IDLE');
+        wrap.title = noTime ? windowGapText() : timeText(time);
+        wrap.appendChild(makePill(idleText, noTime ? '#8b949e' : idleColor(pct), 16.5));
+        wrap.setAttribute('data-sig', idleText);
+        return wrap;
+    }
+
+    function placeBigsIdle(tr, found, time) {
+        const badge = makeBigsIdleBadge(time);
+        const sig = badge.getAttribute('data-sig');
+        const existing = tr.querySelector('.' + BIGS_IDLE_CLASS);
+        if (existing && existing.getAttribute('data-sig') === sig) return;
+        if (existing && existing.parentNode) existing.parentNode.replaceChild(badge, existing);
+        else badgeHost(found.el, tr).appendChild(badge);
+    }
+
+    function tableRows(table) {
+        const body = table.querySelectorAll('tbody tr');
+        if (body.length) return body;
+        const all = table.querySelectorAll('tr');
+        const rows = [];
+        for (let i = 0; i < all.length; i++) {
+            if (all[i].closest && all[i].closest('thead')) continue;
+            rows.push(all[i]);
+        }
+        return rows;
+    }
+
+    // BIGS stations are display-only. Their idle percent is not added to a side or to Total.
+    function decorateBigsStations() {
+        const ids = [];
+        const seen = Object.create(null);
+        const tables = document.querySelectorAll('table');
+        for (let t = 0; t < tables.length; t++) {
+            const table = tables[t];
+            if (table.closest && table.closest('#' + FLOOR_SUMMARY_ID)) continue;
+            const trs = tableRows(table);
+            for (let i = 0; i < trs.length; i++) {
+                const tr = trs[i];
+                const show = assignmentHasBigs(tr.textContent) && !tr.querySelector('.' + DECOR_CLASS);
+                if (!show) {
+                    const leftover = tr.querySelector('.' + BIGS_IDLE_CLASS);
+                    if (leftover) leftover.remove();
+                    continue;
+                }
+                const found = findLoginInRow(tr);
+                if (!found) {
+                    const leftover = tr.querySelector('.' + BIGS_IDLE_CLASS);
+                    if (leftover) leftover.remove();
+                    continue;
+                }
+                const empId = resolveEmpId(IDENTITY.byLogin[found.login]);
+                if (empId && !seen[empId]) {
+                    seen[empId] = true;
+                    ids.push(empId);
+                }
+                placeBigsIdle(tr, found, timeFor(empId));
+            }
+        }
+        BIGS_IDS = ids;
     }
 
     function shortPanelName(name) {
@@ -4394,6 +4557,14 @@
                 sig += table.querySelectorAll('tbody tr').length + '.' + text.length + '.' + sum + '|';
             }
         }
+        const tables = document.querySelectorAll('table');
+        for (let t = 0; t < tables.length; t++) {
+            const trs = tableRows(tables[t]);
+            for (let i = 0; i < trs.length; i++) {
+                if (!assignmentHasBigs(trs[i].textContent)) continue;
+                sig += 'b' + (trs[i].textContent || '').length + ';';
+            }
+        }
         return sig;
     }
 
@@ -4474,6 +4645,7 @@
                     }
                 }
             }
+            decorateBigsStations();
             let sum = 0;
             for (let i = 0; i < avgList.length; i++) sum += avgList[i];
             const floorAvg = avgList.length ? (sum / avgList.length) : 0;
@@ -4511,7 +4683,73 @@
             observeRows();
             scheduleLinePairs();
             if (CLOCK.loadedAt) paintAllClockRings();
+            queueMissingTimes();
         }
+    }
+
+    function expectedIdleText(time) {
+        const noTime = !!(time && time.noData);
+        const pct = idlePercent(time);
+        return noTime ? windowGapText() : (idleLabel(pct) + ' IDLE');
+    }
+
+    function expectedRateText(empId) {
+        const stats = statsFor(empId);
+        if (!empId) return '?';
+        if (!stats.hasData) return uphGapText();
+        return (stats.uph > 0 ? stats.uph.toFixed(1) : '0') + ' UPH';
+    }
+
+    // Control Tower replaces rows and drops badges without changing the assignment text.
+    function rowsMissingBadges() {
+        try {
+            if (!isAssignmentsPage() || !assignmentsReady()) return false;
+            const keys = Object.keys(TARGET_SECTIONS);
+            for (let i = 0; i < keys.length; i++) {
+                const labels = TARGET_SECTIONS[keys[i]];
+                for (let j = 0; j < labels.length; j++) {
+                    const h = findH5(labels[j]);
+                    const table = h ? findTable(h) : null;
+                    if (!table) continue;
+                    const trs = table.querySelectorAll('tbody tr');
+                    for (let r = 0; r < trs.length; r++) {
+                        const tr = trs[r];
+                        const found = findLoginInRow(tr);
+                        if (!found) continue;
+                        const badge = tr.querySelector('.' + DECOR_CLASS);
+                        if (!badge) return true;
+                        const empId = resolveEmpId(IDENTITY.byLogin[found.login]);
+                        const sig = badge.getAttribute('data-sig') || '';
+                        if (sig.indexOf(expectedRateText(empId)) === -1) return true;
+                        if (sig.indexOf(expectedIdleText(empId ? LAST_TIME[empId] : null)) === -1) return true;
+                    }
+                }
+            }
+            const tables = document.querySelectorAll('table');
+            for (let t = 0; t < tables.length; t++) {
+                const table = tables[t];
+                if (table.closest && table.closest('#' + FLOOR_SUMMARY_ID)) continue;
+                const trs = tableRows(table);
+                for (let i = 0; i < trs.length; i++) {
+                    const tr = trs[i];
+                    if (!assignmentHasBigs(tr.textContent) || tr.querySelector('.' + DECOR_CLASS)) continue;
+                    const found = findLoginInRow(tr);
+                    if (!found) continue;
+                    const badge = tr.querySelector('.' + BIGS_IDLE_CLASS);
+                    if (!badge) return true;
+                    const empId = resolveEmpId(IDENTITY.byLogin[found.login]);
+                    if ((badge.getAttribute('data-sig') || '') !== expectedIdleText(empId ? LAST_TIME[empId] : null)) return true;
+                }
+            }
+        } catch (e) {
+            return false;
+        }
+        return false;
+    }
+
+    function repairBoard() {
+        if (unassigning || !LAST_ROLLUP_AT) return;
+        if (rowsMissingBadges()) scheduleLivePaint();
     }
 
     function scheduleRender() {
@@ -4521,6 +4759,10 @@
         renderTimer = setTimeout(function () {
             renderTimer = null;
             if (tablesSignature() === lastSignature) {
+                if (rowsMissingBadges()) {
+                    render();
+                    return;
+                }
                 if (!summaryIsMounted()) {
                     if (rowObserver) rowObserver.disconnect();
                     try { ensureFloorSummary(); } finally { observeRows(); }
@@ -4605,9 +4847,10 @@
             lastIdentified = null;
             render();
             if (gen !== refreshGeneration) return;
-            await scheduleClockLoad();
-            if (gen !== refreshGeneration) return;
+            const clockDone = scheduleClockLoad();
             await loadBoardTimes();
+            if (gen !== refreshGeneration) return;
+            await clockDone;
         } catch (e) {
             DEBUG.lastRunError = (e && e.message) ? e.message : String(e);
             warn('refresh failed:', e);
@@ -4812,7 +5055,8 @@
         idleSec.appendChild(infoRows([
             ['Formula', 'Indirect time + Time Off Task, divided by paid time clocked in'],
             ['Counts', 'Indirect function time and Time Off Task in the selected window'],
-            ['Does not count', 'Active graded time, or time outside the window']
+            ['Does not count', 'Active graded time, or time outside the window'],
+            ['BIGS stations', 'A station whose name contains BIGS shows that associate’s idle percent on the row. It is left out of every side and out of Total.']
         ]));
         card.appendChild(idleSec);
 
@@ -5193,6 +5437,7 @@
         if (!node || node.nodeType !== 1 || !node.closest) return false;
         return !!(node.closest('#' + FLOOR_SUMMARY_ID) ||
             node.closest('.' + DECOR_CLASS) ||
+            node.closest('.' + BIGS_IDLE_CLASS) ||
             node.closest('.' + SECTION_BADGE_CLASS) ||
             node.closest('.' + POPUP_CLASS) ||
             node.id === CORNER_DEBUG_ID ||
@@ -5235,6 +5480,7 @@
         watchRoute();
         showAssignments();
         initLinePairs();
+        setInterval(repairBoard, 1000);
     }
 
     applyTodayDateOnce();
