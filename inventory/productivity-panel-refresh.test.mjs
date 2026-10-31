@@ -5,7 +5,8 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-panel.txt", import.meta.url), "utf8");
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.8\.5/);
+assert.match(src, /@version\s+1\.8\.6/);
+assert.match(src, /const TIME_WORKERS = 4;/);
 assert.match(src, /const MAX_TIME_TRIES = 1;/);
 assert.equal(src.includes("TIME_PASS_GAP_MS"), false);
 assert.equal(src.includes("TIME_PER_PASS"), false);
@@ -17,7 +18,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.8.5");
+assert.equal(entry.version, "1.8.6");
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
 
 function DOMParser() {}
@@ -105,7 +106,7 @@ const sandbox = {
             opts.onload({ status: 200, responseText: "<html></html>", finalUrl: opts.url });
             return;
         }
-        if (held.length >= 2) {
+        if (held.length >= 4) {
             overlap = true;
             opts.onerror({ status: 0, finalUrl: opts.url, error: "overlap" });
             return;
@@ -278,14 +279,14 @@ try {
     api.setBoard(["a", "b", "c", "d"]);
     const first = api.refreshData();
     await flush();
-    assert.equal(held.length, 2);
-    assert.equal(detailsStarted, 2);
+    assert.equal(held.length, 4);
+    assert.equal(detailsStarted, 4);
     const startedWhileHeld = detailsStarted;
     api.refreshData();
     api.forceWindow("q1");
     await flush();
     assert.equal(detailsStarted, startedWhileHeld);
-    assert.equal(held.length, 2);
+    assert.equal(held.length, 4);
     assert.equal(api.state().refreshDue, true);
     assert.equal(delays.includes(8000), false);
     assert.equal(delays.includes(5 * 60 * 1000), true);
@@ -332,11 +333,11 @@ try {
     api.setDown(false);
     held.splice(0, held.length);
     const beforeLive = detailsStarted;
-    api.setBoard(["p1", "p2", "p3", "p4"]);
+    api.setBoard(["p1", "p2", "p3", "p4", "p5", "p6"]);
     const live = api.loadBoardTimes();
     await flush();
-    assert.equal(detailsStarted - beforeLive, 2);
-    assert.equal(held.length, 2);
+    assert.equal(detailsStarted - beforeLive, 4);
+    assert.equal(held.length, 4);
     assert.equal(api.timeProgress().done, 0);
     const firstPerson = held.shift();
     firstPerson.onload({
@@ -347,16 +348,17 @@ try {
     await flush();
     assert.equal(api.time("p1").hasTime, true);
     assert.equal(api.timeProgress().done, 1);
-    assert.equal(api.timeProgress().total, 4);
-    assert.equal(detailsStarted - beforeLive, 3);
+    assert.equal(api.timeProgress().total, 6);
+    assert.equal(held.length, 4);
+    assert.equal(detailsStarted - beforeLive, 5);
     for (let n = 0; n < 8; n++) {
         if (held.length) releaseAll();
         await flush();
         if (!held.length && !api.state().loading && !api.state().inFlight) break;
     }
     await live;
-    assert.equal(api.timeProgress().done, 4);
-    assert.equal(detailsStarted - beforeLive, 4);
+    assert.equal(api.timeProgress().done, 6);
+    assert.equal(detailsStarted - beforeLive, 6);
 
     api.stop();
     failDetails = false;

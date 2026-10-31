@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.5
+// @version      1.8.6
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.5';
+    const SCRIPT_VERSION = '1.8.6';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -185,7 +185,7 @@
     const WINDOW_GROUPS = ['Shift', 'Halves', 'Quarters', 'Fast starts'];
     let ACTIVE_WINDOW = 'all';
     const REFRESH_MS = 5 * 60 * 1000;
-    const TIME_WORKERS = 2;
+    const TIME_WORKERS = 4;
     const UPH_TARGET = 30;
 
     const TARGET_SECTIONS = {
@@ -1510,7 +1510,7 @@
         const queued = Object.create(null);
         let cursor = 0;
         // The assignment rows fill in after the first paint. Pick up anyone
-        // who shows up while these two pages are already open.
+        // who shows up while these pages are already open.
         function pullNew() {
             const pool = cycleEmpIds();
             for (let i = 0; i < pool.length; i++) {
