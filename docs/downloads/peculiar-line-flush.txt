@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.27
+// @version      2.9.28
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
-// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet.
+// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
 // @author       abelrigm
 // @match        https://peculiar-inventory-na.aka.corp.amazon.com/*
 // @match        https://aft-aging-inventory.na.aftx.amazonoperations.app/*
@@ -32,7 +32,7 @@
   Each operator scans in the panel. Each person gets their own daily file in:
     Documents / IOL Assignments / Line Flush Records
   Example: LineFlush_2026-08-28_abelrigm.xlsx
-  The Dashboard sheet matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time. Each location that was scanned also has its own sheet.
+  The Dashboard sheet matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time. Each location that was scanned also has its own sheet. Status uses the oldest-units age: Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
 
   1. Install from the GitHub raw link. Do not paste this file into Tampermonkey.
   2. Open AFT Aging Inventory MEM3, finish Midway, leave that tab open.
@@ -45,7 +45,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.27";
+  const VERSION = "2.9.28";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -315,7 +315,7 @@
       bg,
       fg: contrastInk(bg),
       border: `hsl(${h}, ${s}%, ${Math.max(18, l - 14)}%)`,
-      label: age >= 5 ? "ALERT" : age >= 2 ? "CAUTION" : "GOOD",
+      label: age >= 5 ? "ALERT" : age >= 3 ? "CAUTION" : "GOOD",
       pct: Math.max(2, Math.min(100, (Math.min(age, 5) / 5) * 100)),
     };
   }
@@ -1390,7 +1390,33 @@
     return 0;
   }
 
-  function sheetXml(rows) {
+  function sharedStrings(sheets) {
+    const index = new Map();
+    const values = [];
+    let count = 0;
+    const idOf = (value) => {
+      const text = String(value);
+      let id = index.get(text);
+      if (id == null) {
+        id = values.length;
+        index.set(text, id);
+        values.push(text);
+      }
+      count += 1;
+      return id;
+    };
+    return { idOf, values, get count() { return count; } };
+  }
+
+  function sharedStringsXml(table) {
+    const items = table.values
+      .map((value) => `<si><t xml:space="preserve">${xmlEscape(value)}</t></si>`)
+      .join("");
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${table.count}" uniqueCount="${table.values.length}">${items}</sst>`;
+  }
+
+  function sheetXml(rows, idOf) {
     const body = rows
       .map((row, rowIndex) => {
         const cells = row
@@ -1399,7 +1425,7 @@
             const ref = `${colLetters(col)}${rowIndex + 1}`;
             const style = fillStyleIndex(value);
             const painted = style ? ` s="${style}"` : "";
-            return `<c r="${ref}"${painted} t="inlineStr"><is><t xml:space="preserve">${xmlEscape(value)}</t></is></c>`;
+            return `<c r="${ref}"${painted} t="s"><v>${idOf(value)}</v></c>`;
           })
           .join("");
         return `<row r="${rowIndex + 1}">${cells}</row>`;
@@ -1411,9 +1437,10 @@
 
   async function workbookBytes(book) {
     const sheets = book.sheets.length ? book.sheets : [{ name: "Scans", rows: [HEADERS.slice()] }];
+    const strings = sharedStrings(sheets);
     const sheetFiles = sheets.map((sheet, index) => ({
       name: `xl/worksheets/sheet${index + 1}.xml`,
-      data: sheetXml(sheet.rows),
+      data: sheetXml(sheet.rows, strings.idOf),
     }));
     const sheetTags = sheets
       .map(
@@ -1437,7 +1464,7 @@
       {
         name: "[Content_Types].xml",
         data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${overrides}</Types>`,
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>${overrides}</Types>`,
       },
       {
         name: "_rels/.rels",
@@ -1452,12 +1479,16 @@
       {
         name: "xl/_rels/workbook.xml.rels",
         data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheetRels}<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheetRels}<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rIdShared" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>`,
       },
       {
         name: "xl/styles.xml",
         data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="3"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FF111111"/><name val="Calibri"/></font></fonts><fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFB42318"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF5C518"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF0D7A3F"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="2" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="1" fillId="4" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs></styleSheet>`,
+      },
+      {
+        name: "xl/sharedStrings.xml",
+        data: sharedStringsXml(strings),
       },
       ...sheetFiles,
     ];

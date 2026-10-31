@@ -40,6 +40,41 @@ assert.equal(record.scannedAt, scannedAt);
 assert.equal(record.container, "csX1234");
 assert.equal(record.status, "Good");
 
+const bands = [
+  ["0d", "Good"],
+  ["2d", "Good"],
+  ["2d 23h", "Good"],
+  ["3d", "Caution"],
+  ["4d", "Caution"],
+  ["4d 23h", "Caution"],
+  ["5d", "Alert"],
+  ["5d 1h", "Alert"],
+  ["12d", "Alert"],
+];
+for (const [age, status] of bands) {
+  const banded = api.scanRecord(
+    "csX1",
+    { ok: true, oldestAge: age, totalUnits: "1", parentContainer: "p", containerId: "csX1" },
+    "EOL 1",
+    scannedAt
+  );
+  assert.equal(banded.status, status, age);
+}
+
+const marked = api.scanRecord(
+  "csX&1",
+  { ok: true, oldestAge: "3d", totalUnits: "4", parentContainer: 'p&"1', containerId: "csX&1" },
+  "EOL 1",
+  scannedAt
+);
+const markedBook = await api.workbookFromXlsx(await api.workbookBytes(api.dashboardBook([marked])));
+const markedBack = api.recordsFromBook(markedBook);
+assert.equal(markedBack.length, 1);
+assert.equal(markedBack[0].container, "csX&1");
+assert.equal(markedBack[0].parent, 'p&"1');
+assert.equal(markedBack[0].status, "Caution");
+assert.equal(markedBack[0].age, "3d");
+
 const sheet = api.dashboardSheetRows([record]);
 const header = sheet.find((row) => row[0] === "Location" && row[1] === "Parent" && row[2] === "Container");
 assert.deepEqual([...header], ["Location", "Parent", "Container", "Age", "Status", "Units", "Scanned At"]);
