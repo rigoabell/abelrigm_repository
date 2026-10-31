@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, dashboardHtml, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, dashboardHtml, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -15,6 +15,14 @@ const sandbox = {
   location: { hostname: "example.test", href: "https://example.test/" },
   document: { addEventListener() {}, documentElement: null },
   window,
+  TextEncoder,
+  TextDecoder,
+  Blob,
+  CompressionStream,
+  DecompressionStream,
+  Response,
+  Uint8Array,
+  DataView,
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
@@ -152,5 +160,28 @@ assert.match(dash, /csX1234/);
 assert.match(dash, /L3 Even/);
 assert.equal(dash.includes("BY PARENT"), false);
 assert.equal(dash.includes("<svg"), false);
+
+const bulk = [];
+for (let i = 0; i < 3000; i++) {
+  const location = i % 2 === 0 ? "L3 Even" : "EOS Assignment";
+  bulk.push({
+    location,
+    parent: "rcCRetStations",
+    container: `tsWHD${String(i).padStart(8, "0")}`,
+    age: "1d 2h 3m",
+    status: i % 5 === 0 ? "Alert" : "Good",
+    units: "2",
+    scannedAt: `2026-10-30 17:${String(Math.floor(i / 60) % 60).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}`,
+  });
+}
+const packed = await api.workbookBytes(api.dashboardBook(bulk));
+assert.ok(packed.length < 400000, `packed ${packed.length} is still near the old 3 MB workbook`);
+const reread = api.recordsFromBook(await api.workbookFromXlsx(packed));
+assert.equal(reread.length, 3000);
+assert.equal(reread[0].container, "tsWHD00000000");
+assert.equal(reread[0].scannedAt, "2026-10-30 17:00:00");
+assert.equal(reread[2999].location, "EOS Assignment");
+assert.equal(reread[1].status, "Good");
+assert.equal(reread[5].status, "Alert");
 
 console.log("scan timestamp tests passed");

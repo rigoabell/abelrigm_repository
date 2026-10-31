@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.26
+// @version      2.9.27
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet.
@@ -45,7 +45,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.26";
+  const VERSION = "2.9.27";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -1281,7 +1281,13 @@
     return out;
   }
 
-  function zipStore(files) {
+  async function deflateRaw(bytes) {
+    if (typeof CompressionStream !== "function") return null;
+    const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate-raw"));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
+  async function zipStore(files) {
     const encoder = new TextEncoder();
     const locals = [];
     const centrals = [];
@@ -1290,13 +1296,20 @@
       const name = encoder.encode(file.name);
       const data = file.data instanceof Uint8Array ? file.data : encoder.encode(String(file.data));
       const crc = crc32(data);
+      let method = 0;
+      let stored = data;
+      const compressed = await deflateRaw(data);
+      if (compressed && compressed.length < data.length) {
+        method = 8;
+        stored = compressed;
+      }
       const local = new Uint8Array(30 + name.length);
       const localView = new DataView(local.buffer);
       u32(localView, 0, 0x04034b50);
       u16(localView, 4, 20);
-      u16(localView, 8, 0);
+      u16(localView, 8, method);
       u32(localView, 14, crc);
-      u32(localView, 18, data.length);
+      u32(localView, 18, stored.length);
       u32(localView, 22, data.length);
       u16(localView, 26, name.length);
       local.set(name, 30);
@@ -1305,15 +1318,16 @@
       u32(centralView, 0, 0x02014b50);
       u16(centralView, 4, 20);
       u16(centralView, 6, 20);
+      u16(centralView, 10, method);
       u32(centralView, 16, crc);
-      u32(centralView, 20, data.length);
+      u32(centralView, 20, stored.length);
       u32(centralView, 24, data.length);
       u16(centralView, 28, name.length);
       u32(centralView, 42, offset);
       central.set(name, 46);
-      locals.push(local, data);
+      locals.push(local, stored);
       centrals.push(central);
-      offset += local.length + data.length;
+      offset += local.length + stored.length;
     }
     const centralBytes = concatBytes(centrals);
     const end = new Uint8Array(22);
@@ -1395,7 +1409,7 @@
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${body}</sheetData></worksheet>`;
   }
 
-  function workbookBytes(book) {
+  async function workbookBytes(book) {
     const sheets = book.sheets.length ? book.sheets : [{ name: "Scans", rows: [HEADERS.slice()] }];
     const sheetFiles = sheets.map((sheet, index) => ({
       name: `xl/worksheets/sheet${index + 1}.xml`,
@@ -1447,7 +1461,7 @@
       },
       ...sheetFiles,
     ];
-    return zipStore(files);
+    return await zipStore(files);
   }
 
   async function inflateRaw(bytes) {
@@ -1827,7 +1841,7 @@
     sosCache.records.push(record);
     sosCache.book = dashboardBook(sosCache.records);
     try {
-      await writeSosFile(sosCache.name, workbookBytes(sosCache.book));
+      await writeSosFile(sosCache.name, await workbookBytes(sosCache.book));
     } catch (err) {
       sosCache.records = snapshot;
       sosCache.book = previous;
@@ -2768,7 +2782,7 @@
       await assertSosFolder();
       await ensureSosCache(who);
       if (sosCache.book && sosCache.name) {
-        await writeSosFile(sosCache.name, workbookBytes(sosCache.book));
+        await writeSosFile(sosCache.name, await workbookBytes(sosCache.book));
       }
       spOk = true;
       fileOk = true;
