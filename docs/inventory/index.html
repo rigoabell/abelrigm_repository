@@ -35,7 +35,7 @@
         Open a current-inventory CSV. Average Age and Average Threshold are the ASIN’s age and threshold.
         Approaching is 1–2 days before the threshold, At is less than 1 day before it, and DIOT is past it.
         The inventory threshold is 0.5% of the site’s total units, and every DIOT count shows how far those units sit from it.
-        A saved copy is stored in this public repository, so the same file opens on any machine.
+        Dropping a new CSV replaces the saved copy in this public repository and clears every assignment, so other people open that new file.
       </p>
     </div>
   </section>
@@ -47,7 +47,7 @@
         <div id="drop-panel" class="card inv-drop">
           <label class="inv-drop-target" id="drop-target" for="file-input">
             <span class="inv-drop-title">Drop a CSV here, or choose a file</span>
-            <span class="inv-drop-note">Built for large inventory extracts. Parsing uses this tab’s memory, so a bigger file needs a machine that can hold it. A saved public file opens here on its own.</span>
+            <span class="inv-drop-note">Drop a CSV to replace the public inventory file and clear every assignment. Parsing uses this tab’s memory, so a bigger file needs a machine that can hold it. A saved public file opens here on its own.</span>
           </label>
           <p class="inv-columns">Expected columns: Region, Warehouse, Outer Location, Bin, ASIN, Owner, Disposition, Amazon Device Flag, Quantity, Average Age, Average Threshold. Extra columns are kept on the line export.</p>
           <p id="saved-note" class="inv-columns hidden"></p>
@@ -84,7 +84,7 @@
             <label class="inv-field" for="github-token">GitHub token
               <input id="github-token" type="password" autocomplete="off" spellcheck="false" placeholder="Fine-grained token, this repo only" />
             </label>
-            <p class="inv-file-meta">The saved file is public. The token stays in this browser and is only used to replace that file. Create a <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">fine-grained token</a> for rigoabell/abelrigm_repository with Contents read and write.</p>
+            <p class="inv-file-meta">The saved file is public. Dropping a new CSV replaces that file automatically when a token is already stored in this browser, and removes the previous CSV. The token stays in this browser. Create a <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">fine-grained token</a> for rigoabell/abelrigm_repository with Contents read and write.</p>
             <div class="inv-export-actions">
               <button type="button" class="btn btn-primary btn-sm" id="save-now">Save this file to the site</button>
               <button type="button" class="btn btn-outline btn-sm" id="forget-token">Forget token</button>
