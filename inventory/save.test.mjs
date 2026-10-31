@@ -12,6 +12,7 @@ import {
   refUpdateFailure,
   safeFileName,
 } from "../docs/inventory/github-save.js";
+import { fileFromInventoryRecord } from "../docs/inventory/local-file.js";
 
 assert.deepEqual(planParts(0), ["latest.csv"]);
 assert.deepEqual(planParts(PART_BYTES), ["latest.csv"]);
@@ -77,5 +78,19 @@ assert.deepEqual(published.parts, ["latest.csv"]);
 assert.equal(published.assignmentEpoch, "epoch-2");
 const unchanged = inventoryManifest("drop.csv", 12, ["latest.csv"], "2026-10-31T18:00:00Z", "");
 assert.equal(Object.prototype.hasOwnProperty.call(unchanged, "assignmentEpoch"), false);
+
+const remembered = fileFromInventoryRecord({
+  name: "fresh.csv",
+  type: "text/csv",
+  lastModified: 1000,
+  savedAt: "2026-10-31T18:00:00Z",
+  epoch: "epoch-2",
+  blob: new Blob(["Region,Warehouse\n"]),
+});
+assert.equal(remembered.file.name, "fresh.csv");
+assert.equal(remembered.epoch, "epoch-2");
+assert.equal(await remembered.file.text(), "Region,Warehouse\n");
+assert.equal(fileFromInventoryRecord(null), null);
+assert.equal(fileFromInventoryRecord({}), null);
 
 console.log("save tests passed");

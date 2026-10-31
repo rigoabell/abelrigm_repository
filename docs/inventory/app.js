@@ -1,5 +1,6 @@
 import { asinCsv, assignmentPackage, containerTypeCsv, detailCsv, diotOverageText, INVENTORY_THRESHOLD_RATE, locationStatusCsv, query, rollupCsv, sortMatch, STATUS_LABEL, thresholdStatus, valueAt, normalizeGroupings } from "./engine.js";
-import { assignmentEpochAction, forgetToken, loadSavedFile, readToken, saveDataFile, saveInventoryFile, writeToken } from "./github-save.js";
+import { assignmentEpochAction, loadSavedFile } from "./github-save.js";
+import { loadLocalInventory, saveLocalInventory } from "./local-file.js";
 import { assignmentWorkbook } from "./xlsx.js";
 
 const PAGE_SIZE = 50;
@@ -33,14 +34,13 @@ const tableCount = document.getElementById("table-count");
 const pageLabel = document.getElementById("page-label");
 const exportStatus = document.getElementById("export-status");
 const clearButton = document.getElementById("clear-filters");
-const saveStatus = document.getElementById("save-status");
-const saveNote = document.getElementById("save-note");
-const tokenInput = document.getElementById("github-token");
-const saveButton = document.getElementById("save-now");
 
 let dataset = null;
 let sourceFile = null;
-let publicFile = null;
+let goodFile = null;
+let rememberedFile = null;
+let rememberedEpoch = "";
+let keepWarning = "";
 let savedManifest = null;
 let catalog = null;
 let view = null;
@@ -51,7 +51,6 @@ let worker = null;
 let filterTimer = 0;
 let textTimer = 0;
 let loadGeneration = 0;
-let saving = false;
 let placeMode = "location";
 let containerType = "";
 let groupings = [];
@@ -125,22 +124,14 @@ for (const button of document.querySelectorAll("[data-export]")) {
   });
 }
 
-saveButton.addEventListener("click", () => saveNow());
-document.getElementById("forget-token").addEventListener("click", () => {
-  forgetToken();
-  tokenInput.value = "";
-  saveNote.textContent = "The token was removed from this browser. The public file is unchanged.";
-});
-if (readToken()) tokenInput.value = readToken();
 document.getElementById("mode-location").addEventListener("click", () => setPlaceMode("location"));
 document.getElementById("mode-type").addEventListener("click", () => setPlaceMode("type"));
 document.getElementById("group-form").addEventListener("submit", (event) => {
   event.preventDefault();
   addGrouping();
 });
-document.getElementById("save-groupings").addEventListener("click", () => saveGroupingsToSite());
 document.getElementById("group-help").textContent =
-  "Optional. A bin uses the longest grouping it starts with. Otherwise it is grouped by the letters before the first number. Saved groupings stay in this browser until you save them to the site.";
+  "Optional. A bin uses the longest grouping it starts with. Otherwise it is grouped by the letters before the first number. Groupings stay in this browser.";
 document.getElementById("responder-form").addEventListener("submit", (event) => {
   event.preventDefault();
   addResponder();
@@ -148,14 +139,10 @@ document.getElementById("responder-form").addEventListener("submit", (event) => 
 document.getElementById("assign-selected").addEventListener("click", () => assignSelected());
 document.getElementById("clear-assignment").addEventListener("click", () => clearSelectedAssignments());
 document.getElementById("export-assignments").addEventListener("click", (event) => exportAssignments(event.currentTarget));
-document.getElementById("save-responders").addEventListener("click", () => saveRespondersToSite());
 
 function openFile(file, kind) {
   const nextKind = kind || "upload";
-  if (nextKind === "upload") {
-    uploadEpoch = crypto.randomUUID();
-    resetAssignments();
-  }
+  if (nextKind === "upload") uploadEpoch = crypto.randomUUID();
   const generation = ++loadGeneration;
   startParse(file, nextKind, generation);
 }
@@ -246,9 +233,16 @@ function fail(message) {
   if (worker) worker.terminate();
   worker = null;
   loading.classList.add("hidden");
+  errorBox.classList.remove("hidden");
+  if (dataset && goodFile) {
+    sourceFile = goodFile;
+    dropPanel.classList.add("hidden");
+    workspace.classList.remove("hidden");
+    errorText.textContent = message + " The previous file is still open.";
+    return;
+  }
   workspace.classList.add("hidden");
   dropPanel.classList.remove("hidden");
-  errorBox.classList.remove("hidden");
   errorText.textContent = message;
 }
 
@@ -263,13 +257,24 @@ async function acceptDataset(next, file, kind, generation) {
   sortMode = "file";
   document.getElementById("sort-mode").value = "file";
   clearFilters(false);
+  let clearedForDrop = false;
+  if (kind === "upload") {
+    loadingTitle.textContent = "Saving " + file.name;
+    try {
+      clearedForDrop = await keepDroppedFile(file, generation);
+    } catch (error) {
+      if (generation !== loadGeneration) return;
+      keepWarning = keepFailureMessage(error);
+    }
+    if (generation !== loadGeneration) return;
+  }
   loading.classList.add("hidden");
   errorBox.classList.add("hidden");
   dropPanel.classList.add("hidden");
   workspace.classList.remove("hidden");
+  goodFile = file;
   fileName.textContent = file.name;
   updateFileMeta();
-  updateSavePanel();
   if (dataset.badNumbers) {
     badNumbers.hidden = false;
     badNumbers.classList.remove("hidden");
@@ -280,8 +285,8 @@ async function acceptDataset(next, file, kind, generation) {
     badNumbers.classList.add("hidden");
   }
   let clearedOnLoad = false;
-  if (kind === "saved") {
-    const epoch = savedManifest && savedManifest.assignmentEpoch;
+  if (kind === "local" || kind === "saved") {
+    const epoch = kind === "local" ? rememberedEpoch : savedManifest && savedManifest.assignmentEpoch;
     if (assignmentEpochAction(localStorage.getItem(ASSIGNMENT_EPOCH_KEY), epoch) === "clear") {
       clearedOnLoad = resetAssignments();
       localStorage.setItem(ASSIGNMENT_EPOCH_KEY, String(epoch));
@@ -292,15 +297,27 @@ async function acceptDataset(next, file, kind, generation) {
   if (clearedOnLoad) {
     document.getElementById("responder-note").textContent = "Assignments were cleared because a new inventory file was saved.";
   }
-  if (kind === "upload") {
+  if (clearedForDrop) {
     document.getElementById("responder-note").textContent = "Assignments were cleared for this inventory file.";
-    const token = (tokenInput.value || readToken()).trim();
-    if (token) saveNow();
-    else {
-      saveNote.textContent =
-        "Assignments were cleared. Paste a GitHub token and save so this file replaces the public copy. Other people still see the previous file until then.";
-    }
   }
+}
+
+async function keepDroppedFile(file, generation) {
+  const epoch = uploadEpoch || crypto.randomUUID();
+  uploadEpoch = epoch;
+  await saveLocalInventory(file, epoch);
+  if (generation !== loadGeneration) return false;
+  resetAssignments();
+  localStorage.setItem(ASSIGNMENT_EPOCH_KEY, epoch);
+  rememberedFile = file;
+  rememberedEpoch = epoch;
+  keepWarning = "";
+  return true;
+}
+
+function keepFailureMessage(error) {
+  if (error && error.name === "QuotaExceededError") return "this browser did not have room to keep a file that large";
+  return "this browser could not keep it for the next refresh";
 }
 
 function placeSummary(summary) {
@@ -1157,7 +1174,9 @@ function formatBytes(bytes) {
 
 function updateFileMeta() {
   const places = placeSummary(catalog);
-  const where = sourceFile === publicFile ? "public copy" : "only in this browser until you save it";
+  let where = "shared copy";
+  if (sourceFile === rememberedFile) where = "kept in this browser · a refresh opens this file";
+  else if (keepWarning) where = "shown for now · " + keepWarning;
   fileMeta.textContent =
     formatBytes(sourceFile.size) +
     " · " +
@@ -1166,74 +1185,6 @@ function updateFileMeta() {
     places +
     " · " +
     where;
-}
-
-function updateSavePanel(result) {
-  if (sourceFile === publicFile && savedManifest) {
-    saveStatus.textContent =
-      "Public copy on the site. Saved " +
-      formatChicago(savedManifest.savedAt) +
-      ". Anyone who can open this site can read the file.";
-  } else {
-    saveStatus.textContent = "This file is only in this browser until you save it. The saved copy is public.";
-  }
-  if (!result) return;
-  if (result.direct) {
-    saveNote.textContent =
-      "Saved. This file replaces the previous public copy. Other machines see it after GitHub Pages deploys, usually within a few minutes.";
-    return;
-  }
-  const link = result.prUrl ? " Merge " + result.prUrl + "." : " Open a pull request from inventory-saved into main.";
-  saveNote.textContent = "Main is protected, so the file is on branch inventory-saved." + link + " Other machines see it after that merge and the Pages deploy.";
-}
-
-function formatChicago(iso) {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return String(iso || "");
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Chicago",
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(date) + " CT";
-}
-
-async function saveNow() {
-  if (!sourceFile || !dataset || saving) return;
-  const token = (tokenInput.value || readToken()).trim();
-  if (token && !tokenInput.value) tokenInput.value = token;
-  if (!token) {
-    saveNote.textContent = "Paste a GitHub token with Contents access to this repository, then save.";
-    return;
-  }
-  writeToken(token);
-  const generation = loadGeneration;
-  const file = sourceFile;
-  const replacing = file !== publicFile;
-  const epoch = replacing ? uploadEpoch || crypto.randomUUID() : (savedManifest && savedManifest.assignmentEpoch) || "";
-  if (replacing) uploadEpoch = epoch;
-  saving = true;
-  saveButton.disabled = true;
-  saveNote.textContent = replacing ? "Replacing the public inventory file…" : "Saving the public copy…";
-  try {
-    const result = await saveInventoryFile(file, token, (message) => {
-      if (generation === loadGeneration) saveNote.textContent = message;
-    }, epoch ? { assignmentEpoch: epoch } : undefined);
-    if (generation !== loadGeneration) return;
-    savedManifest = result.manifest;
-    publicFile = file;
-    if (result.manifest.assignmentEpoch) {
-      localStorage.setItem(ASSIGNMENT_EPOCH_KEY, String(result.manifest.assignmentEpoch));
-    }
-    updateFileMeta();
-    updateSavePanel(result);
-  } catch (error) {
-    if (generation !== loadGeneration) return;
-    saveNote.textContent = error && error.message ? error.message : String(error);
-  } finally {
-    saving = false;
-    saveButton.disabled = false;
-    if (generation !== loadGeneration && sourceFile && sourceFile !== publicFile && (tokenInput.value || readToken()).trim()) saveNow();
-  }
 }
 
 function resetAssignments() {
@@ -1323,30 +1274,6 @@ function renderGroupEditor() {
     item.appendChild(remove);
     list.appendChild(item);
   });
-}
-
-async function saveGroupingsToSite() {
-  const note = document.getElementById("group-note");
-  const token = (tokenInput.value || readToken()).trim();
-  if (!token) {
-    note.textContent = "Paste a GitHub token in Saved copy, then save. The groupings are already kept in this browser.";
-    return;
-  }
-  writeToken(token);
-  note.textContent = "Saving groupings…";
-  try {
-    const result = await saveDataFile(
-      "groupings.json",
-      JSON.stringify(groupings, null, 2) + "\n",
-      token,
-      "Save container groupings"
-    );
-    note.textContent = result.direct
-      ? "Saved. Other machines see these groupings after GitHub Pages deploys, usually within a few minutes."
-      : "Main is protected, so the groupings are on branch inventory-saved." + (result.prUrl ? " Merge " + result.prUrl + "." : "");
-  } catch (error) {
-    note.textContent = error && error.message ? error.message : String(error);
-  }
 }
 
 async function loadGroupings() {
@@ -1694,30 +1621,6 @@ function loadStoredAssignments() {
   }
 }
 
-async function saveRespondersToSite() {
-  const note = document.getElementById("responder-note");
-  const token = (tokenInput.value || readToken()).trim();
-  if (!token) {
-    note.textContent = "Paste a GitHub token in Saved copy, then save. The responders are already kept in this browser.";
-    return;
-  }
-  writeToken(token);
-  note.textContent = "Saving responders…";
-  try {
-    const result = await saveDataFile(
-      "responders.json",
-      JSON.stringify(responders, null, 2) + "\n",
-      token,
-      "Save IOL responders"
-    );
-    note.textContent = result.direct
-      ? "Saved. Other machines see these responders after GitHub Pages deploys, usually within a few minutes."
-      : "Main is protected, so the responders are on branch inventory-saved." + (result.prUrl ? " Merge " + result.prUrl + "." : "");
-  } catch (error) {
-    note.textContent = error && error.message ? error.message : String(error);
-  }
-}
-
 async function loadResponders() {
   loadStoredAssignments();
   try {
@@ -1753,9 +1656,21 @@ async function loadSavedOnStart() {
   dropPanel.classList.add("hidden");
   errorBox.classList.add("hidden");
   loading.classList.remove("hidden");
-  loadingTitle.textContent = "Looking for the saved inventory";
+  loadingTitle.textContent = "Opening the last inventory file";
   loadingStat.textContent = "";
   loadingBar.style.width = "0%";
+  try {
+    const local = await loadLocalInventory();
+    if (generation !== loadGeneration) return;
+    if (local) {
+      rememberedFile = local.file;
+      rememberedEpoch = local.epoch;
+      startParse(local.file, "local", generation);
+      return;
+    }
+  } catch (error) {
+    if (generation !== loadGeneration) return;
+  }
   try {
     const saved = await loadSavedFile();
     if (generation !== loadGeneration) return;
@@ -1765,7 +1680,6 @@ async function loadSavedOnStart() {
       return;
     }
     savedManifest = saved.manifest;
-    publicFile = saved.file;
     startParse(saved.file, "saved", generation);
   } catch (error) {
     if (generation !== loadGeneration) return;
