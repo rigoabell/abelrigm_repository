@@ -1,6 +1,6 @@
-// Publish the inventory CSV into this public repository so every machine
-// loads the same file. The token stays in localStorage and is never written
-// into the repo.
+// Build the git objects for the shared inventory file. The desk publishes
+// through the upload service in worker/. These helpers never write a token
+// into the repository.
 
 export const TOKEN_KEY = "inventory.githubToken";
 export const REPO = "rigoabell/abelrigm_repository";

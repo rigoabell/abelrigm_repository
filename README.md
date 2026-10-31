@@ -15,11 +15,13 @@ Central hub for the work: portfolio, tools built, and notes.
   - **Inventory** opens a large inventory CSV in the browser. Average Age and
     Average Threshold are the ASIN’s age and threshold. The desk groups containers
     as Approaching (1–2 days before), At (less than 1 day before), or DIOT (past
-    the threshold), and lists them by outer location. A saved copy lives in
+    the threshold), and lists them by outer location. The shared copy lives in
     `docs/inventory/data/` (see `manifest.json`; one `latest.csv`, or `part-000`
-    and following parts in order). That copy is public and loads on any machine
-    that opens the page. Replacing it from the browser uses a GitHub token that
-    stays in that browser. Downloads you generate stay on the machine.
+    and following parts in order). Dropping a CSV publishes that copy through
+    the inventory upload service, which replaces the previous file. The next
+    open of the desk reads that commit. The page reads the service address from
+    `remote.json` on `main`. The service in `worker/` is what writes the file.
+    Downloads you generate stay on the machine.
     Open it at
     `https://rigoabell.github.io/abelrigm_repository/inventory/`.
   - **Rig Setup** is a project on the Portfolio page, not its own site page.
@@ -43,6 +45,22 @@ python3 -m http.server 8080 --directory docs
 # open http://127.0.0.1:8080
 # inventory desk: http://127.0.0.1:8080/inventory/
 ```
+
+## Connect the shared inventory file
+
+A dropped CSV stays on that machine until the upload service is connected. The
+page then says the shared save is not connected yet.
+
+1. Create a fine-grained personal access token for this repository with
+   **Contents: Read and write**.
+2. Add repository secrets `CLOUDFLARE_API_TOKEN` (Workers Scripts: Edit),
+   `CLOUDFLARE_ACCOUNT_ID`, and `INVENTORY_GITHUB_TOKEN` (the token from step 1).
+3. Run **Actions → Deploy inventory upload**. It publishes `worker/`, stores
+   the GitHub token on the worker, and writes the worker address into
+   `docs/inventory/remote.json`.
+
+The page does not receive either token. After that, a drop replaces
+`docs/inventory/data/` and the next open of the desk reads that commit.
 
 ## Publish the site on GitHub Pages
 
