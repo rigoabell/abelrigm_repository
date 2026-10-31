@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-panel.txt", import.meta.url), "utf8");
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.8\.0/);
+assert.match(src, /@version\s+1\.8\.1/);
 assert.equal(src.includes("TIME_PASS_GAP_MS"), false);
 assert.equal(src.includes("TIME_PER_PASS"), false);
 assert.equal(src.includes("scheduleTimeLoad"), false);
@@ -16,7 +16,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.8.0");
+assert.equal(entry.version, "1.8.1");
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
 
 function DOMParser() {}
@@ -123,6 +123,11 @@ const patched = src.replace(
     `globalThis.__mem3 = {
         refreshData, forceWindow, loadBoardTimes, timeProgress,
         setBoard(ids) { BOARD_IDS = ids.slice(); },
+        boardIds() { return BOARD_IDS.slice(); },
+        bigsIds() { return BIGS_IDS.slice(); },
+        decorateBigs() { decorateBigsStations(); },
+        setPerson(rec) { storeIdentity(rec); },
+        setTime(id, rec) { LAST_TIME[id] = rec; },
         setRollup(map) { LAST_ROLLUP = map; LAST_ROLLUP_AT = new Date(); },
         rollupKeys() { return Object.keys(LAST_ROLLUP); },
         time(id) { return LAST_TIME[id] || null; },
@@ -153,6 +158,93 @@ vm.createContext(sandbox);
 vm.runInContext(patched, sandbox, { filename: "mem3-productivity-panel.user.js" });
 const api = sandbox.__mem3;
 assert.ok(api, "refresh hooks did not load");
+
+function makeNode(tag) {
+    const node = {
+        tagName: String(tag || "div").toUpperCase(),
+        textContent: "",
+        className: "",
+        style: {},
+        dataset: {},
+        attrs: {},
+        children: [],
+        parentElement: null,
+        parentNode: null
+    };
+    node.classList = {
+        add(cls) { node.className = (node.className + " " + cls).trim(); },
+        remove(cls) {
+            node.className = node.className.split(/\s+/).filter((part) => part && part !== cls).join(" ");
+        }
+    };
+    node.setAttribute = function (name, value) {
+        node.attrs[name] = String(value);
+        if (name === "class") node.className = String(value);
+    };
+    node.getAttribute = function (name) { return Object.prototype.hasOwnProperty.call(node.attrs, name) ? node.attrs[name] : null; };
+    node.appendChild = function (child) {
+        child.parentElement = node;
+        child.parentNode = node;
+        node.children.push(child);
+        return child;
+    };
+    node.remove = function () {
+        const parent = node.parentElement;
+        if (!parent) return;
+        parent.children = parent.children.filter((child) => child !== node);
+        node.parentElement = null;
+        node.parentNode = null;
+    };
+    node.closest = function () { return null; };
+    node.querySelectorAll = function (sel) {
+        const out = [];
+        const options = String(sel).split(",").map((part) => part.trim());
+        function visit(current) {
+            for (let i = 0; i < current.children.length; i++) {
+                const child = current.children[i];
+                if (options.some((opt) => nodeMatches(child, opt))) out.push(child);
+                visit(child);
+            }
+        }
+        visit(node);
+        return out;
+    };
+    node.querySelector = function (sel) { return node.querySelectorAll(sel)[0] || null; };
+    return node;
+}
+
+function nodeMatches(node, sel) {
+    if (sel.charAt(0) === ".") return node.className.split(/\s+/).includes(sel.slice(1));
+    if (sel === "table") return node.tagName === "TABLE";
+    if (sel === "tbody tr") return node.tagName === "TR" && node.parentElement && node.parentElement.tagName === "TBODY";
+    if (sel === "td") return node.tagName === "TD";
+    if (sel === "span") return node.tagName === "SPAN";
+    if (sel === "a") return node.tagName === "A";
+    if (sel === "button") return node.tagName === "BUTTON";
+    if (sel === "a[role=\"button\"]") return node.tagName === "A" && node.attrs.role === "button";
+    if (sel === "a[mdn-link]") return node.tagName === "A" && Object.prototype.hasOwnProperty.call(node.attrs, "mdn-link");
+    return false;
+}
+
+function stationTable(rows) {
+    const table = makeNode("table");
+    const body = makeNode("tbody");
+    table.appendChild(body);
+    for (let i = 0; i < rows.length; i++) {
+        const tr = makeNode("tr");
+        const job = makeNode("td");
+        job.textContent = rows[i][0];
+        const who = makeNode("td");
+        const login = makeNode("span");
+        login.textContent = rows[i][1];
+        who.appendChild(login);
+        tr.appendChild(job);
+        tr.appendChild(who);
+        tr.textContent = rows[i][0] + " " + rows[i][1];
+        body.appendChild(tr);
+    }
+    return table;
+}
 
 function releaseAll() {
     const batch = held.splice(0, held.length);
@@ -220,6 +312,36 @@ try {
     assert.equal(progress.done, 4);
     await first.catch(() => {});
     assert.equal(overlap, false);
+
+    const root = makeNode("div");
+    const nonsort = stationTable([
+        ["BIGS Problem Solve Station 8-04 | See PS PA", "aaabigs"],
+        ["Exceptions Station 8-06 | See PS PA", "aaaplain"],
+        ["BIGSHOT Station 8-07 | See PS PA", "aaashot"]
+    ]);
+    const other = stationTable([
+        ["AR/ Refurb BIGS Station 8-10 | See PS PA", "aaarefur"]
+    ]);
+    root.appendChild(nonsort);
+    root.appendChild(other);
+    document.querySelectorAll = function (sel) { return root.querySelectorAll(sel); };
+    document.createElement = function (tag) { return makeNode(tag); };
+    api.setPerson({ login: "aaabigs", id: "501" });
+    api.setPerson({ login: "aaarefur", id: "502" });
+    api.setPerson({ login: "aaaplain", id: "503" });
+    api.setPerson({ login: "aaashot", id: "504" });
+    api.setTime("501", { hasTime: true, idleMin: 25, clockedMin: 100, totalMin: 100 });
+    api.setTime("502", { hasTime: true, idleMin: 10, clockedMin: 80, totalMin: 80 });
+    const boardBefore = api.boardIds();
+    api.decorateBigs();
+    api.decorateBigs();
+    assert.equal(JSON.stringify([].map.call(api.bigsIds(), String)), JSON.stringify(["501", "502"]));
+    assert.equal(JSON.stringify([].map.call(api.boardIds(), String)), JSON.stringify([].map.call(boardBefore, String)));
+    const badges = root.querySelectorAll(".mem3-bigs-idle");
+    assert.equal(badges.length, 2);
+    const labels = badges.map((badge) => badge.children.map((child) => String(child.textContent)).join("")).sort();
+    assert.deepEqual(labels, ["12.5% IDLE", "25.0% IDLE"]);
+    assert.equal(labels.some((label) => label.includes("UPH")), false);
 } finally {
     if (api) api.stop();
 }
