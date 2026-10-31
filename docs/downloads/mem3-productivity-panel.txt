@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.2
+// @version      1.8.3
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.2';
+    const SCRIPT_VERSION = '1.8.3';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -862,7 +862,7 @@
     let LAST_TIME = Object.create(null);
     const TIME_IN_FLIGHT = Object.create(null);
     const TIME_TRIES = Object.create(null);
-    const MAX_TIME_TRIES = 5;
+    const MAX_TIME_TRIES = 1;
     let TIME_LOADING = false;
     let SUPPRESS_ENSURE = false;
     let timeGeneration = 0;
@@ -871,6 +871,7 @@
     let refreshBusy = false;
     let refreshDue = false;
     let refreshTimer = null;
+    let livePaintTimer = null;
     let BOARD_IDS = [];
     let BIGS_IDS = [];
 
@@ -1296,6 +1297,7 @@
     }
 
     function timeFinished(empId) {
+        if (TIME_IN_FLIGHT[empId]) return false;
         const t = LAST_TIME[empId];
         if (showsIdle(t) || (t && (t.noData || (t.gaveUp && t.cycle === refreshCycle)))) return true;
         return (TIME_TRIES[empId] || 0) >= MAX_TIME_TRIES;
@@ -1327,7 +1329,7 @@
         return (TIME_TRIES[empId] || 0) < MAX_TIME_TRIES;
     }
 
-    // One person, at most five Time Details pages. Drop each page before the next try.
+    // One person, one Time Details page. Drop the page before the next person.
     async function fetchTimeUntilFound(empId, gen, force) {
         if (!empId || TIME_IN_FLIGHT[empId]) return;
         if (!force && (timeSettled(LAST_TIME[empId]) || !triesLeft(empId))) return;
@@ -1366,6 +1368,7 @@
         } finally {
             html = '';
             delete TIME_IN_FLIGHT[empId];
+            noteTimeProgress();
             if (!pagesHeld()) pumpRefresh();
         }
     }
@@ -1428,7 +1431,7 @@
             prev.gaveUp = true;
             if (record && record.tries) prev.tries = record.tries;
             if (DEBUG.timeLoad) DEBUG.timeLoad.done = (DEBUG.timeLoad.done || 0) + 1;
-            noteTimeProgress();
+            scheduleLivePaint();
             return;
         }
         if (!record) return;
@@ -1446,7 +1449,19 @@
             };
         }
         if (DEBUG.timeLoad) DEBUG.timeLoad.done = (DEBUG.timeLoad.done || 0) + 1;
+        scheduleLivePaint();
+    }
+
+    // The progress bar moves immediately. Rows, line idle, and the floor idle
+    // follow on the next tick from whatever has arrived so far.
+    function scheduleLivePaint() {
         noteTimeProgress();
+        if (livePaintTimer || unassigning) return;
+        livePaintTimer = setTimeout(function () {
+            livePaintTimer = null;
+            if (unassigning) return;
+            render();
+        }, 50);
     }
 
     function resetTimeTries() {
@@ -1471,6 +1486,7 @@
         }
     }
 
+    // Line ids first, so both open pages stay on the lines until those ids are taken.
     function cycleEmpIds() {
         const ids = [];
         const seen = Object.create(null);
@@ -4638,6 +4654,71 @@
         }
     }
 
+    function expectedIdleText(time) {
+        const noTime = !!(time && time.noData);
+        const pct = idlePercent(time);
+        return noTime ? windowGapText() : (idleLabel(pct) + ' IDLE');
+    }
+
+    function expectedRateText(empId) {
+        const stats = statsFor(empId);
+        if (!empId) return '?';
+        if (!stats.hasData) return uphGapText();
+        return (stats.uph > 0 ? stats.uph.toFixed(1) : '0') + ' UPH';
+    }
+
+    // Control Tower replaces rows and drops badges without changing the assignment text.
+    function rowsMissingBadges() {
+        try {
+            if (!isAssignmentsPage() || !assignmentsReady()) return false;
+            const keys = Object.keys(TARGET_SECTIONS);
+            for (let i = 0; i < keys.length; i++) {
+                const labels = TARGET_SECTIONS[keys[i]];
+                for (let j = 0; j < labels.length; j++) {
+                    const h = findH5(labels[j]);
+                    const table = h ? findTable(h) : null;
+                    if (!table) continue;
+                    const trs = table.querySelectorAll('tbody tr');
+                    for (let r = 0; r < trs.length; r++) {
+                        const tr = trs[r];
+                        const found = findLoginInRow(tr);
+                        if (!found) continue;
+                        const badge = tr.querySelector('.' + DECOR_CLASS);
+                        if (!badge) return true;
+                        const empId = resolveEmpId(IDENTITY.byLogin[found.login]);
+                        const sig = badge.getAttribute('data-sig') || '';
+                        if (sig.indexOf(expectedRateText(empId)) === -1) return true;
+                        if (sig.indexOf(expectedIdleText(empId ? LAST_TIME[empId] : null)) === -1) return true;
+                    }
+                }
+            }
+            const tables = document.querySelectorAll('table');
+            for (let t = 0; t < tables.length; t++) {
+                const table = tables[t];
+                if (table.closest && table.closest('#' + FLOOR_SUMMARY_ID)) continue;
+                const trs = tableRows(table);
+                for (let i = 0; i < trs.length; i++) {
+                    const tr = trs[i];
+                    if (!assignmentHasBigs(tr.textContent) || tr.querySelector('.' + DECOR_CLASS)) continue;
+                    const found = findLoginInRow(tr);
+                    if (!found) continue;
+                    const badge = tr.querySelector('.' + BIGS_IDLE_CLASS);
+                    if (!badge) return true;
+                    const empId = resolveEmpId(IDENTITY.byLogin[found.login]);
+                    if ((badge.getAttribute('data-sig') || '') !== expectedIdleText(empId ? LAST_TIME[empId] : null)) return true;
+                }
+            }
+        } catch (e) {
+            return false;
+        }
+        return false;
+    }
+
+    function repairBoard() {
+        if (unassigning || !LAST_ROLLUP_AT) return;
+        if (rowsMissingBadges()) scheduleLivePaint();
+    }
+
     function scheduleRender() {
         if (unassigning) return;
         if (renderTimer) return;
@@ -4645,6 +4726,10 @@
         renderTimer = setTimeout(function () {
             renderTimer = null;
             if (tablesSignature() === lastSignature) {
+                if (rowsMissingBadges()) {
+                    render();
+                    return;
+                }
                 if (!summaryIsMounted()) {
                     if (rowObserver) rowObserver.disconnect();
                     try { ensureFloorSummary(); } finally { observeRows(); }
@@ -4729,9 +4814,10 @@
             lastIdentified = null;
             render();
             if (gen !== refreshGeneration) return;
-            await scheduleClockLoad();
-            if (gen !== refreshGeneration) return;
+            const clockDone = scheduleClockLoad();
             await loadBoardTimes();
+            if (gen !== refreshGeneration) return;
+            await clockDone;
         } catch (e) {
             DEBUG.lastRunError = (e && e.message) ? e.message : String(e);
             warn('refresh failed:', e);
@@ -5361,6 +5447,7 @@
         watchRoute();
         showAssignments();
         initLinePairs();
+        setInterval(repairBoard, 1000);
     }
 
     applyTodayDateOnce();

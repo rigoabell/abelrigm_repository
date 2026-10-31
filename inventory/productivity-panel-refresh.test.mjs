@@ -5,7 +5,8 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-panel.txt", import.meta.url), "utf8");
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.8\.2/);
+assert.match(src, /@version\s+1\.8\.3/);
+assert.match(src, /const MAX_TIME_TRIES = 1;/);
 assert.equal(src.includes("TIME_PASS_GAP_MS"), false);
 assert.equal(src.includes("TIME_PER_PASS"), false);
 assert.equal(src.includes("scheduleTimeLoad"), false);
@@ -16,7 +17,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.8.2");
+assert.equal(entry.version, "1.8.3");
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
 
 function DOMParser() {}
@@ -95,6 +96,11 @@ const sandbox = {
     },
     GM_xmlhttpRequest(opts) {
         const details = String(opts.url).includes("timeDetails");
+        if (details && sandbox.plainDetails) {
+            detailsStarted += 1;
+            opts.onload({ status: 200, responseText: "<html><title>Oops</title></html>", finalUrl: opts.url });
+            return;
+        }
         if (!details) {
             opts.onload({ status: 200, responseText: "<html></html>", finalUrl: opts.url });
             return;
@@ -148,8 +154,10 @@ const patched = src.replace(
             TIME_LOADING = false;
             if (refreshTimer) clearTimeout(refreshTimer);
             if (rollupRetryTimer) clearTimeout(rollupRetryTimer);
+            if (livePaintTimer) clearTimeout(livePaintTimer);
             refreshTimer = null;
             rollupRetryTimer = null;
+            livePaintTimer = null;
         }
     };
 })();`
@@ -314,6 +322,47 @@ try {
     assert.equal(progress.done, 4);
     await first.catch(() => {});
     assert.equal(overlap, false);
+
+    api.stop();
+    failDetails = false;
+    api.setDown(false);
+    held.splice(0, held.length);
+    const beforeLive = detailsStarted;
+    api.setBoard(["p1", "p2", "p3", "p4"]);
+    const live = api.loadBoardTimes();
+    await flush();
+    assert.equal(detailsStarted - beforeLive, 2);
+    assert.equal(held.length, 2);
+    assert.equal(api.timeProgress().done, 0);
+    const firstPerson = held.shift();
+    firstPerson.onload({
+        status: 200,
+        responseText: "<html><title>Time Details</title><tr class=\"clock-seg on-clock\"><td class=\"rightAlign\">1:00</td></tr></html>",
+        finalUrl: firstPerson.url
+    });
+    await flush();
+    assert.equal(api.time("p1").hasTime, true);
+    assert.equal(api.timeProgress().done, 1);
+    assert.equal(api.timeProgress().total, 4);
+    assert.equal(detailsStarted - beforeLive, 3);
+    for (let n = 0; n < 8; n++) {
+        if (held.length) releaseAll();
+        await flush();
+        if (!held.length && !api.state().loading && !api.state().inFlight) break;
+    }
+    await live;
+    assert.equal(api.timeProgress().done, 4);
+    assert.equal(detailsStarted - beforeLive, 4);
+
+    api.stop();
+    sandbox.plainDetails = true;
+    api.setBoard(["j1", "j2"]);
+    const beforeJunk = detailsStarted;
+    await api.loadBoardTimes();
+    assert.equal(detailsStarted - beforeJunk, 2);
+    assert.equal(api.timeProgress().done, 2);
+    assert.equal(api.time("j1").gaveUp, true);
+    sandbox.plainDetails = false;
 
     const root = makeNode("div");
     const nonsort = stationTable([
