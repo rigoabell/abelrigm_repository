@@ -52,6 +52,25 @@ export function safeFileName(name) {
   return cleaned || "inventory.csv";
 }
 
+export function inventoryManifest(fileName, bytes, partNames, savedAt, assignmentEpoch) {
+  const manifest = {
+    fileName: safeFileName(fileName),
+    bytes,
+    savedAt,
+    parts: partNames.slice(),
+  };
+  if (assignmentEpoch) manifest.assignmentEpoch = String(assignmentEpoch);
+  return manifest;
+}
+
+// "clear" when a published file is newer than the assignments stored in this browser.
+export function assignmentEpochAction(storedEpoch, manifestEpoch) {
+  const next = manifestEpoch ? String(manifestEpoch) : "";
+  if (!next) return "keep";
+  if (String(storedEpoch || "") === next) return "keep";
+  return "clear";
+}
+
 export function buildTreeEntries(partNames, partShas, manifestSha, existingNames) {
   const keep = new Set(partNames.concat("manifest.json"));
   const entries = partNames.map((name, index) => ({
@@ -134,7 +153,7 @@ export async function loadSavedFile() {
   return { file, manifest };
 }
 
-export async function saveInventoryFile(file, token, onProgress) {
+export async function saveInventoryFile(file, token, onProgress, options) {
   const progress = typeof onProgress === "function" ? onProgress : function () {};
   const auth = String(token || "").trim();
   if (!auth) throw new Error("Paste a GitHub token with Contents access to this repository, then save.");
@@ -150,12 +169,13 @@ export async function saveInventoryFile(file, token, onProgress) {
     const sha = await createBlob(auth, bytesToBase64(bytes.subarray(slice.start, slice.end)));
     partShas.push(sha);
   }
-  const manifest = {
-    fileName: safeFileName(file.name),
-    bytes: bytes.length,
-    savedAt: new Date().toISOString(),
-    parts: slices.map((slice) => slice.name),
-  };
+  const manifest = inventoryManifest(
+    file.name,
+    bytes.length,
+    slices.map((slice) => slice.name),
+    new Date().toISOString(),
+    options && options.assignmentEpoch
+  );
   progress("Writing the file list");
   const manifestSha = await createBlob(
     auth,
@@ -174,7 +194,7 @@ export async function saveInventoryFile(file, token, onProgress) {
       tree: treeEntries,
     });
     const commit = await github(auth, "POST", "/git/commits", {
-      message: "Save inventory file " + manifest.fileName,
+      message: "Replace inventory file " + manifest.fileName,
       tree: tree.sha,
       parents: [parent],
     });

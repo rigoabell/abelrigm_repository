@@ -1,5 +1,5 @@
 import { asinCsv, assignmentPackage, containerTypeCsv, detailCsv, diotOverageText, INVENTORY_THRESHOLD_RATE, locationStatusCsv, query, rollupCsv, sortMatch, STATUS_LABEL, thresholdStatus, valueAt, normalizeGroupings } from "./engine.js";
-import { forgetToken, loadSavedFile, readToken, saveDataFile, saveInventoryFile, writeToken } from "./github-save.js";
+import { assignmentEpochAction, forgetToken, loadSavedFile, readToken, saveDataFile, saveInventoryFile, writeToken } from "./github-save.js";
 import { assignmentWorkbook } from "./xlsx.js";
 
 const PAGE_SIZE = 50;
@@ -62,6 +62,8 @@ const assignments = new Map();
 const GROUP_KEY = "inventory.containerGroups";
 const RESPONDER_KEY = "inventory.iolResponders";
 const ASSIGNMENT_KEY = "inventory.assignments";
+const ASSIGNMENT_EPOCH_KEY = "inventory.assignmentEpoch";
+let uploadEpoch = "";
 
 fileInput.addEventListener("change", () => {
   const file = fileInput.files && fileInput.files[0];
@@ -149,8 +151,13 @@ document.getElementById("export-assignments").addEventListener("click", (event) 
 document.getElementById("save-responders").addEventListener("click", () => saveRespondersToSite());
 
 function openFile(file, kind) {
+  const nextKind = kind || "upload";
+  if (nextKind === "upload") {
+    uploadEpoch = crypto.randomUUID();
+    resetAssignments();
+  }
   const generation = ++loadGeneration;
-  startParse(file, kind || "upload", generation);
+  startParse(file, nextKind, generation);
 }
 
 function startParse(file, kind, generation) {
@@ -272,9 +279,28 @@ async function acceptDataset(next, file, kind, generation) {
   } else {
     badNumbers.classList.add("hidden");
   }
+  let clearedOnLoad = false;
+  if (kind === "saved") {
+    const epoch = savedManifest && savedManifest.assignmentEpoch;
+    if (assignmentEpochAction(localStorage.getItem(ASSIGNMENT_EPOCH_KEY), epoch) === "clear") {
+      clearedOnLoad = resetAssignments();
+      localStorage.setItem(ASSIGNMENT_EPOCH_KEY, String(epoch));
+    }
+  }
   buildFilterGroups();
   applyFilters();
-  if (kind === "upload" && readToken()) saveNow();
+  if (clearedOnLoad) {
+    document.getElementById("responder-note").textContent = "Assignments were cleared because a new inventory file was saved.";
+  }
+  if (kind === "upload") {
+    document.getElementById("responder-note").textContent = "Assignments were cleared for this inventory file.";
+    const token = (tokenInput.value || readToken()).trim();
+    if (token) saveNow();
+    else {
+      saveNote.textContent =
+        "Assignments were cleared. Paste a GitHub token and save so this file replaces the public copy. Other people still see the previous file until then.";
+    }
+  }
 }
 
 function placeSummary(summary) {
@@ -1153,7 +1179,8 @@ function updateSavePanel(result) {
   }
   if (!result) return;
   if (result.direct) {
-    saveNote.textContent = "Saved. Other machines see this file after GitHub Pages deploys, usually within a few minutes.";
+    saveNote.textContent =
+      "Saved. This file replaces the previous public copy. Other machines see it after GitHub Pages deploys, usually within a few minutes.";
     return;
   }
   const link = result.prUrl ? " Merge " + result.prUrl + "." : " Open a pull request from inventory-saved into main.";
@@ -1172,7 +1199,8 @@ function formatChicago(iso) {
 
 async function saveNow() {
   if (!sourceFile || !dataset || saving) return;
-  const token = tokenInput.value.trim();
+  const token = (tokenInput.value || readToken()).trim();
+  if (token && !tokenInput.value) tokenInput.value = token;
   if (!token) {
     saveNote.textContent = "Paste a GitHub token with Contents access to this repository, then save.";
     return;
@@ -1180,16 +1208,22 @@ async function saveNow() {
   writeToken(token);
   const generation = loadGeneration;
   const file = sourceFile;
+  const replacing = file !== publicFile;
+  const epoch = replacing ? uploadEpoch || crypto.randomUUID() : (savedManifest && savedManifest.assignmentEpoch) || "";
+  if (replacing) uploadEpoch = epoch;
   saving = true;
   saveButton.disabled = true;
-  saveNote.textContent = "Saving the public copy…";
+  saveNote.textContent = replacing ? "Replacing the public inventory file…" : "Saving the public copy…";
   try {
     const result = await saveInventoryFile(file, token, (message) => {
       if (generation === loadGeneration) saveNote.textContent = message;
-    });
+    }, epoch ? { assignmentEpoch: epoch } : undefined);
     if (generation !== loadGeneration) return;
     savedManifest = result.manifest;
     publicFile = file;
+    if (result.manifest.assignmentEpoch) {
+      localStorage.setItem(ASSIGNMENT_EPOCH_KEY, String(result.manifest.assignmentEpoch));
+    }
     updateFileMeta();
     updateSavePanel(result);
   } catch (error) {
@@ -1198,8 +1232,22 @@ async function saveNow() {
   } finally {
     saving = false;
     saveButton.disabled = false;
-    if (generation !== loadGeneration && sourceFile && sourceFile !== publicFile && readToken()) saveNow();
+    if (generation !== loadGeneration && sourceFile && sourceFile !== publicFile && (tokenInput.value || readToken()).trim()) saveNow();
   }
+}
+
+function resetAssignments() {
+  let had = assignments.size > 0;
+  assignments.clear();
+  selectedPlaces.clear();
+  try {
+    had = had || Boolean(localStorage.getItem(ASSIGNMENT_KEY));
+    localStorage.removeItem(ASSIGNMENT_KEY);
+    localStorage.removeItem(ASSIGNMENT_EPOCH_KEY);
+  } catch (error) {
+    assignments.clear();
+  }
+  return had;
 }
 
 function setPlaceMode(mode) {

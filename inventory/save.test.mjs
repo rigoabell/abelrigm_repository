@@ -3,8 +3,10 @@ import fs from "node:fs";
 import {
   PART_BYTES,
   MAX_BYTES,
+  assignmentEpochAction,
   buildTreeEntries,
   bytesToBase64,
+  inventoryManifest,
   partSlices,
   planParts,
   refUpdateFailure,
@@ -61,5 +63,19 @@ assert.equal(manifest.fileName, "Current_Inventory_De_1793288358912.csv");
 assert.deepEqual(manifest.parts, ["latest.csv"]);
 assert.equal(saved.size, manifest.bytes);
 assert.equal(saved.size, 25340258);
+
+assert.equal(assignmentEpochAction("", ""), "keep");
+assert.equal(assignmentEpochAction("epoch-1", ""), "keep");
+assert.equal(assignmentEpochAction("epoch-1", "epoch-1"), "keep");
+assert.equal(assignmentEpochAction("", "epoch-2"), "clear");
+assert.equal(assignmentEpochAction("epoch-1", "epoch-2"), "clear");
+
+const published = inventoryManifest("drop.csv", 12, ["latest.csv"], "2026-10-31T18:00:00Z", "epoch-2");
+assert.equal(published.fileName, "drop.csv");
+assert.equal(published.bytes, 12);
+assert.deepEqual(published.parts, ["latest.csv"]);
+assert.equal(published.assignmentEpoch, "epoch-2");
+const unchanged = inventoryManifest("drop.csv", 12, ["latest.csv"], "2026-10-31T18:00:00Z", "");
+assert.equal(Object.prototype.hasOwnProperty.call(unchanged, "assignmentEpoch"), false);
 
 console.log("save tests passed");
