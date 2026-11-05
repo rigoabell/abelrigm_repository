@@ -133,6 +133,9 @@
 .inv-table th, .inv-table td { padding: 8px 10px; border-bottom: 1px solid var(--line-2); text-align: left; white-space: nowrap; }
 .inv-table th { font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted-2); position: sticky; top: 0; background: #fff; z-index: 1; }
 #location-card .inv-table-scroll { max-height: 440px; }
+.inv-place-summary { border-top: 1px solid var(--line-2); margin-top: 14px; padding-top: 12px; }
+.inv-place-summary h3 { margin: 0; font-size: 16px; }
+.inv-place-summary .inv-table-scroll { max-height: 280px; }
 .inv-toggle { display: flex; gap: 6px; flex-wrap: wrap; }
 .inv-toggle button {
   border: 1px solid var(--line);

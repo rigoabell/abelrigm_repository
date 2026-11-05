@@ -555,23 +555,114 @@ function renderPlace() {
   pruneSelection();
   renderAssignControls();
   renderResponderDashboard();
+  const soleLocationId = soleCheckedId("Outer Location");
   if (typeMode) {
     note.textContent = containerType
       ? "Filtered to " + containerType + ". Click it again to show every type. Checked rows assign only what this view includes."
       : "Grouped by the letters before the first number. tsX27482942 is tsX, and tsTDST34394839 is tsTDST. Checked rows assign only what this view includes.";
-    renderPlaceRows("type", view.containerTypes || [], "Container type", "No container types in this view.", (item) => toggleContainerType(item.name));
+    renderPlaceRows("type", view.containerTypes || [], "Container type", "No container types in this view.", (item) => toggleContainerType(item.name), (item) => containerType === item.name);
+    renderPlaceSummary(typeMode, soleLocationId);
     renderGroupEditor();
     return;
   }
   note.textContent = "Containers and units for the threshold states that are checked. Checked rows assign only what this view includes. Click a name to filter to it.";
-  renderPlaceRows("location", view.locations, "Outer location", "No outer locations in this view.", (item) => isolate("Outer Location", item.id));
+  renderPlaceRows("location", view.locations, "Outer location", "No outer locations in this view.", (item) => isolate("Outer Location", item.id), (item) => item.id === soleLocationId);
+  renderPlaceSummary(typeMode, soleLocationId);
 }
 
 function placeKey(kind, name) {
   return kind + "\t" + (name || "(blank)");
 }
 
-function renderPlaceRows(kind, rows, nameHeader, emptyText, onOpen) {
+function soleCheckedId(columnName) {
+  const boxes = Array.from(filterGroups.querySelectorAll('input[data-filter="' + columnName + '"]'));
+  if (boxes.length < 2) return null;
+  const checked = boxes.filter((box) => box.checked);
+  if (checked.length !== 1) return null;
+  return Number(checked[0].dataset.id);
+}
+
+function catalogName(columnName, id) {
+  const series = catalog && catalog[seriesKey(columnName)];
+  const item = series && series.find((row) => row.id === id);
+  return item ? displayName(item) : "(blank)";
+}
+
+function renderPlaceSummary(typeMode, soleLocationId) {
+  const host = document.getElementById("place-summary");
+  host.replaceChildren();
+  if (typeMode && containerType) {
+    host.classList.remove("hidden");
+    host.appendChild(summaryBlock(
+      "Outer locations for " + containerType,
+      "Outer location",
+      view.locations || [],
+      "No outer locations for this container type."
+    ));
+    return;
+  }
+  if (!typeMode && soleLocationId != null) {
+    host.classList.remove("hidden");
+    host.appendChild(summaryBlock(
+      "Container types in " + catalogName("Outer Location", soleLocationId),
+      "Container type",
+      view.containerTypes || [],
+      "No container types in this outer location."
+    ));
+    return;
+  }
+  host.classList.add("hidden");
+}
+
+function summaryBlock(title, nameHeader, rows, emptyText) {
+  const block = document.createElement("section");
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  block.appendChild(heading);
+  const scroll = document.createElement("div");
+  scroll.className = "inv-table-scroll";
+  const table = document.createElement("table");
+  table.className = "inv-table";
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  appendHeader(headRow, nameHeader, false);
+  appendHeader(headRow, "Containers", true);
+  appendHeader(headRow, "Units", true);
+  head.appendChild(headRow);
+  table.appendChild(head);
+  const body = document.createElement("tbody");
+  if (!rows.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 3;
+    cell.className = "inv-empty";
+    cell.textContent = emptyText;
+    row.appendChild(cell);
+    body.appendChild(row);
+  } else {
+    for (const item of rows) {
+      const row = document.createElement("tr");
+      const name = document.createElement("td");
+      name.textContent = item.name || "(blank)";
+      row.appendChild(name);
+      const containers = document.createElement("td");
+      containers.className = "num";
+      containers.textContent = formatInt(item.containers);
+      row.appendChild(containers);
+      const units = document.createElement("td");
+      units.className = "num";
+      units.textContent = formatQty(item.units);
+      row.appendChild(units);
+      body.appendChild(row);
+    }
+  }
+  table.appendChild(body);
+  scroll.appendChild(table);
+  block.appendChild(scroll);
+  return block;
+}
+
+function renderPlaceRows(kind, rows, nameHeader, emptyText, onOpen, isPressed) {
   rows = rows || [];
   const head = document.getElementById("location-head");
   const body = document.getElementById("location-body");
@@ -639,7 +730,7 @@ function renderPlaceRows(kind, rows, nameHeader, emptyText, onOpen) {
     nameButton.type = "button";
     nameButton.className = "inv-loc-name";
     nameButton.textContent = label;
-    if (kind === "type") nameButton.setAttribute("aria-pressed", containerType === item.name ? "true" : "false");
+    if (isPressed) nameButton.setAttribute("aria-pressed", isPressed(item) ? "true" : "false");
     nameButton.addEventListener("click", () => onOpen(item));
     nameCell.appendChild(nameButton);
     row.appendChild(nameCell);
