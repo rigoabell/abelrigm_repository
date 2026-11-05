@@ -209,6 +209,17 @@
     "downloadName": "MEM3 LPN Batch Extractor (abelrigm).txt"
   },
   {
+    "id": "recent-login-lpns",
+    "name": "Recent Login LPNs (abelrigm)",
+    "category": "FC Research",
+    "summary": "Enter a login and get that person's three most recent unique LPNs.",
+    "detail": "A small Run button on any page. Type a login and the script reads Inventory History on FC Research in the background, then lists the three newest unique LPNs. Copy takes the LPNs. Copy debug copies a trace when the table does not parse.",
+    "version": "1.0.0",
+    "runsOn": "Any page. Looks up qifcr.na.aftx.amazonoperations.app and the other FC Research hosts.",
+    "file": "downloads/recent-login-lpns.txt",
+    "downloadName": "Recent Login LPNs (abelrigm).txt"
+  },
+  {
     "id": "amazon-login-photo-lookup",
     "name": "Amazon Login Photo Lookup (abelrigm)",
     "category": "FCLM",

@@ -1,0 +1,1519 @@
+// ==UserScript==
+// @name         Recent Login LPNs (abelrigm)
+// @namespace    https://github.com/rigoabell/abelrigm_repository
+// @version      1.0.0
+// @description  On any page, enter a login and list that person's three most recent unique Inventory History LPNs from FC Research.
+// @author       abelrigm
+// @match        *://*/*
+// @include      *
+// @noframes
+// @grant        GM_setClipboard
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_xmlhttpRequest
+// @grant        GM_openInTab
+// @grant        GM_addValueChangeListener
+// @grant        GM_removeValueChangeListener
+// @connect      qifcr.na.aftx.amazonoperations.app
+// @connect      qifcr.eu.aftx.amazonoperations.app
+// @connect      qifcr.fe.aftx.amazonoperations.app
+// @connect      qi-fcresearch-na.corp.amazon.com
+// @connect      qi-fcresearch-eu.corp.amazon.com
+// @connect      qi-fcresearch-fe.corp.amazon.com
+// @run-at       document-start
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const VERSION = '1.0.0';
+  const LIMIT = 3;
+  const JOB_KEY = 'rlp-job';
+  const LOGIN_KEY = 'rlp-login';
+  const SITE_KEY = 'rlp-site';
+  const ORIGIN_KEY = 'rlp-origin';
+  const OPEN_KEY = 'rlp-open';
+  const LAST_KEY = 'rlp-last';
+  const WORKER_STORAGE = 'rlp-active-job';
+  const ROOT_ID = 'rlp-root';
+  const DEFAULT_SITE = 'MEM3';
+  const ORIGINS = [
+    ['https://qifcr.na.aftx.amazonoperations.app', 'qifcr NA'],
+    ['https://qifcr.eu.aftx.amazonoperations.app', 'qifcr EU'],
+    ['https://qifcr.fe.aftx.amazonoperations.app', 'qifcr FE'],
+    ['https://qi-fcresearch-na.corp.amazon.com', 'fcresearch NA'],
+    ['https://qi-fcresearch-eu.corp.amazon.com', 'fcresearch EU'],
+    ['https://qi-fcresearch-fe.corp.amazon.com', 'fcresearch FE'],
+  ];
+
+  const earlyWorkerId = readHashJobId();
+  if (earlyWorkerId) {
+    try {
+      sessionStorage.setItem(WORKER_STORAGE, earlyWorkerId);
+    } catch (_) {
+      // sessionStorage can be blocked. The hash is still checked later.
+    }
+    try {
+      history.replaceState(null, '', `${location.pathname}${location.search}`);
+    } catch (_) {
+      // Leaving the hash in place is still enough to recognize this tab.
+    }
+  }
+
+  /* core:start */
+  function textFromHtml(value) {
+    return String(value || '')
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function normalizeText(value) {
+    return textFromHtml(value);
+  }
+
+  function isLpnHeader(value) {
+    const text = normalizeText(value).toLowerCase();
+    return text === 'lpn' || /^lpn\b/.test(text);
+  }
+
+  function looksLikeLpn(value) {
+    return /^LPN[A-Z0-9]+$/.test(normalizeText(value).toUpperCase());
+  }
+
+  function lpnColumn(headers) {
+    const index = (headers || []).findIndex((header) => isLpnHeader(header));
+    return index >= 0 ? index : 6;
+  }
+
+  function uniqueRecentLpns(headers, rows, limit) {
+    const column = lpnColumn(headers);
+    const max = Number.isFinite(limit) ? limit : Infinity;
+    const seen = new Set();
+    const lpns = [];
+    for (const row of rows || []) {
+      const lpn = normalizeText(row[column] || '').toUpperCase();
+      if (!looksLikeLpn(lpn) || seen.has(lpn)) continue;
+      seen.add(lpn);
+      lpns.push(lpn);
+      if (lpns.length >= max) break;
+    }
+    return lpns;
+  }
+
+  function recentLpnDetails(headers, rows, limit) {
+    const column = lpnColumn(headers);
+    const dateColumn = (headers || []).findIndex((header) => /^date\b/i.test(normalizeText(header)));
+    return uniqueRecentLpns(headers, rows, limit).map((lpn) => {
+      const row = (rows || []).find((cells) => normalizeText(cells[column] || '').toUpperCase() === lpn);
+      const date = dateColumn >= 0 && row ? normalizeText(row[dateColumn] || '') : '';
+      return { lpn, date };
+    });
+  }
+
+  function extractHistoryTable(html) {
+    const source = String(html || '');
+    const openRe = /<table\b(?=[^>]*\bid\s*=\s*["']table-inventory-history["'])[^>]*>/i;
+    const open = openRe.exec(source);
+    if (!open) return '';
+    const lower = source.toLowerCase();
+    let depth = 1;
+    let index = open.index + open[0].length;
+    while (index < source.length && depth > 0) {
+      const nextOpen = lower.indexOf('<table', index);
+      const nextClose = lower.indexOf('</table>', index);
+      if (nextClose < 0) return '';
+      if (nextOpen !== -1 && nextOpen < nextClose) {
+        depth += 1;
+        index = nextOpen + 6;
+      } else {
+        depth -= 1;
+        index = nextClose + 8;
+      }
+    }
+    return source.slice(open.index, index);
+  }
+
+  function rowCells(rowHtml) {
+    const cells = [];
+    const re = /<t([hd])\b([^>]*)>([\s\S]*?)<\/t\1>/gi;
+    let match;
+    while ((match = re.exec(rowHtml))) {
+      cells.push({
+        attrs: match[2] || '',
+        text: textFromHtml(match[3]),
+      });
+    }
+    return cells;
+  }
+
+  function tableRows(fragment) {
+    const rows = [];
+    const re = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+    let match;
+    while ((match = re.exec(fragment))) rows.push(rowCells(match[1]));
+    return rows;
+  }
+
+  function parseHistoryTableHtml(html) {
+    const empty = {
+      found: false,
+      headers: [],
+      rows: [],
+      rowCount: 0,
+      uniqueCount: 0,
+      emptyMessage: '',
+      infoText: '',
+    };
+    const source = String(html || '');
+    const table = extractHistoryTable(source);
+    if (!table) return empty;
+    const theadMatch = table.match(/<thead\b[^>]*>([\s\S]*?)<\/thead>/i);
+    const tbodyMatch = table.match(/<tbody\b[^>]*>([\s\S]*?)<\/tbody>/i);
+    const headerRows = tableRows(theadMatch ? theadMatch[1] : '');
+    const bodySource = tbodyMatch ? tbodyMatch[1] : table.replace(theadMatch ? theadMatch[0] : '', '');
+    const bodyRows = tableRows(bodySource);
+    let headers = [];
+    for (const row of headerRows) {
+      const texts = row.map((cell) => cell.text);
+      if (texts.some((text) => isLpnHeader(text))) {
+        headers = texts;
+        break;
+      }
+    }
+    if (!headers.length && headerRows.length) {
+      headers = headerRows[headerRows.length - 1].map((cell) => cell.text);
+    }
+    const rows = [];
+    let emptyMessage = '';
+    for (const row of bodyRows) {
+      const texts = row.map((cell) => cell.text);
+      const joined = texts.join(' ').toLowerCase();
+      const isEmpty = row.some((cell) => /dataTables_empty/i.test(cell.attrs));
+      if (isEmpty || /no matching records|no data available/.test(joined)) {
+        emptyMessage = texts.join(' ').trim();
+        continue;
+      }
+      if (texts.filter(Boolean).length < 2) continue;
+      rows.push(texts);
+    }
+    const infoMatch = source.match(/id\s*=\s*["']table-inventory-history_info["'][^>]*>([\s\S]*?)<\//i);
+    return {
+      found: true,
+      headers,
+      rows,
+      rowCount: rows.length,
+      uniqueCount: uniqueRecentLpns(headers, rows, Infinity).length,
+      emptyMessage,
+      infoText: infoMatch ? textFromHtml(infoMatch[1]) : '',
+    };
+  }
+
+  function shouldFollowRendered(report, limit) {
+    const max = Number.isFinite(limit) ? limit : 3;
+    if (!report || !report.found) return true;
+    if ((report.uniqueCount || 0) >= max) return false;
+    if (!report.rowCount) return true;
+    return [10, 25, 50, 100].includes(report.rowCount);
+  }
+
+  function buildResultsUrl(origin, site, login) {
+    const base = String(origin || '').replace(/\/+$/, '');
+    const fc = encodeURIComponent(String(site || '').trim().toUpperCase());
+    const query = encodeURIComponent(String(login || '').trim());
+    return `${base}/${fc}/results?s=${query}`;
+  }
+
+  function formatDateLike(sample, date) {
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const dd = String(date.getDate()).padStart(2, '0');
+    const yyyy = String(date.getFullYear());
+    if (/^\d{4}-\d{2}-\d{2}/.test(String(sample || ''))) return `${yyyy}-${mm}-${dd}`;
+    return `${mm}/${dd}/${yyyy}`;
+  }
+
+  function htmlTitle(html) {
+    const match = String(html || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    return match ? textFromHtml(match[1]) : '';
+  }
+
+  function snippetAround(html, needle, radius) {
+    const source = String(html || '');
+    const at = source.toLowerCase().indexOf(String(needle || '').toLowerCase());
+    if (at < 0) return source.slice(0, radius);
+    return source.slice(Math.max(0, at - 180), Math.max(0, at - 180) + radius);
+  }
+
+  function looksLikeAuth(finalUrl, html, tableFound) {
+    if (tableFound) return false;
+    const url = String(finalUrl || '').toLowerCase();
+    if (/midway|\/ap\/signin|signin|idp\.amazon|sso|oauth/.test(url)) return true;
+    const head = String(html || '').slice(0, 5000).toLowerCase();
+    return /type=["']password["']|midway-auth|sign in to continue/.test(head);
+  }
+
+  function discoverHistoryUrls(html, base) {
+    const found = [];
+    const re = /["']([^"']{0,300}inventory-history[^"']{0,300})["']/gi;
+    let match;
+    while ((match = re.exec(String(html || ''))) && found.length < 3) {
+      const raw = match[1];
+      if (/^(?:data:|javascript:|#)/i.test(raw)) continue;
+      try {
+        const absolute = new URL(raw, base);
+        if (absolute.protocol !== 'https:' && absolute.protocol !== 'http:') continue;
+        if (absolute.href === base) continue;
+        if (!found.includes(absolute.href)) found.push(absolute.href);
+      } catch (_) {
+        // Ignore fragments that are not URLs.
+      }
+    }
+    return found;
+  }
+  /* core:end */
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function makeId() {
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function readHashJobId() {
+    try {
+      return new URLSearchParams(location.hash.replace(/^#/, '')).get('tm-recent-lpn') || '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function gmGetValue(key, fallback) {
+    try {
+      if (typeof GM_getValue === 'function') return GM_getValue(key, fallback);
+    } catch (_) {
+      // Storage is optional for the panel. The lookup still runs.
+    }
+    return fallback;
+  }
+
+  function gmSetValue(key, value) {
+    try {
+      if (typeof GM_setValue === 'function') GM_setValue(key, value);
+    } catch (_) {
+      // Ignore storage failures and keep the in-memory result.
+    }
+  }
+
+  function gmGet(url) {
+    return new Promise((resolve, reject) => {
+      if (typeof GM_xmlhttpRequest !== 'function') {
+        reject(new Error('GM_xmlhttpRequest is not available'));
+        return;
+      }
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url,
+        timeout: 12000,
+        anonymous: false,
+        onload: (response) => {
+          resolve({
+            status: response.status,
+            finalUrl: response.finalUrl || url,
+            text: response.responseText || '',
+          });
+        },
+        onerror: () => reject(new Error(`Request failed for ${url}`)),
+        ontimeout: () => reject(new Error(`Request timed out for ${url}`)),
+      });
+    });
+  }
+
+  function failResult(mode, error) {
+    return {
+      mode,
+      settled: false,
+      empty: false,
+      needsMore: true,
+      lpns: [],
+      details: [],
+      error,
+      report: null,
+    };
+  }
+
+  function historyTable(doc) {
+    return doc.getElementById('table-inventory-history');
+  }
+
+  function findHistorySection(doc) {
+    const marked = doc.querySelector('[data-section-type="inventory-history"]');
+    if (marked) return marked;
+    const table = historyTable(doc);
+    if (table) {
+      const closest = table.closest('[data-section-type], .section-placeholder');
+      if (closest) return closest;
+    }
+    for (const title of doc.querySelectorAll('.section-title')) {
+      if (normalizeText(title.textContent).toLowerCase() === 'inventory history') {
+        return title.closest('[data-section-type], .section-placeholder') || title.parentElement;
+      }
+    }
+    return table ? table.parentElement : null;
+  }
+
+  function isProcessing(doc) {
+    const el = doc.querySelector('#table-inventory-history_processing');
+    if (!el) return false;
+    const view = doc.defaultView;
+    if (!view || typeof view.getComputedStyle !== 'function') return false;
+    const style = view.getComputedStyle(el);
+    return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+  }
+
+  function sectionTitles(doc) {
+    return [...doc.querySelectorAll('.section-title')]
+      .map((el) => normalizeText(el.textContent))
+      .filter(Boolean)
+      .slice(0, 30);
+  }
+
+  function snapshotHistory(doc) {
+    const table = historyTable(doc);
+    const info = doc.getElementById('table-inventory-history_info');
+    const infoText = normalizeText(info ? info.textContent : '');
+    if (!table) {
+      return {
+        tableFound: false,
+        headers: [],
+        rows: [],
+        rowCount: 0,
+        infoText,
+        emptyMessage: '',
+        processing: isProcessing(doc),
+        sectionTitles: sectionTitles(doc),
+        tableHtml: '',
+      };
+    }
+    const headerRows = [...table.querySelectorAll('thead tr')].map((tr) =>
+      [...tr.children].map((cell) => normalizeText(cell.textContent))
+    );
+    const headers =
+      headerRows.find((row) => row.some((cell) => isLpnHeader(cell))) ||
+      headerRows[headerRows.length - 1] ||
+      [];
+    const rows = [];
+    let emptyMessage = '';
+    for (const tr of table.querySelectorAll('tbody tr')) {
+      const cells = [...tr.children]
+        .filter((el) => el.tagName === 'TD')
+        .map((td) => normalizeText(td.textContent));
+      const joined = cells.join(' ').toLowerCase();
+      if (tr.querySelector('td.dataTables_empty, .dataTables_empty') || /no matching records|no data available/.test(joined)) {
+        emptyMessage = cells.join(' ').trim();
+        continue;
+      }
+      if (cells.filter(Boolean).length < 2) continue;
+      rows.push(cells);
+    }
+    if (!emptyMessage && (/of 0 entries/i.test(infoText) || /showing 0 to 0/i.test(infoText))) {
+      emptyMessage = infoText;
+    }
+    return {
+      tableFound: true,
+      headers,
+      rows,
+      rowCount: rows.length,
+      infoText,
+      emptyMessage,
+      processing: isProcessing(doc),
+      sectionTitles: sectionTitles(doc),
+      tableHtml: (table.outerHTML || '').slice(0, 2000),
+    };
+  }
+
+  function scrollHistory(doc, win) {
+    try {
+      const target = historyTable(doc) || findHistorySection(doc);
+      if (target && win) {
+        const top = target.getBoundingClientRect().top + (win.scrollY || win.pageYOffset || 0);
+        win.scrollTo(0, Math.max(0, top - 40));
+        return;
+      }
+      const height = doc.documentElement ? doc.documentElement.scrollHeight : 0;
+      if (win && height) win.scrollTo(0, height);
+    } catch (_) {
+      // Scrolling is only a hint for lazy sections.
+    }
+  }
+
+  async function waitForHistory(doc, win, timeoutMs, isAborted, allowScroll) {
+    const started = Date.now();
+    let lastKey = '';
+    let stableSince = 0;
+    let latest = snapshotHistory(doc);
+    while (Date.now() - started < timeoutMs) {
+      if (isAborted()) return latest;
+      if (allowScroll) scrollHistory(doc, win);
+      latest = snapshotHistory(doc);
+      const key = [
+        latest.tableFound,
+        latest.processing,
+        latest.rowCount,
+        latest.emptyMessage,
+        latest.infoText,
+      ].join('|');
+      const ready = latest.tableFound && !latest.processing && (latest.rowCount > 0 || latest.emptyMessage);
+      if (ready && key === lastKey && Date.now() - stableSince >= 700) {
+        latest.stable = true;
+        return latest;
+      }
+      if (key !== lastKey) stableSince = Date.now();
+      lastKey = key;
+      await sleep(200);
+    }
+    latest.stable = false;
+    return latest;
+  }
+
+  function historyApi(win) {
+    const $ = win && (win.jQuery || win.$);
+    if (typeof $ !== 'function' || !$.fn) return null;
+    const plugin = $.fn.dataTable || $.fn.DataTable;
+    if (!plugin || typeof plugin.isDataTable !== 'function') return null;
+    try {
+      if (!plugin.isDataTable('#table-inventory-history')) return null;
+      const node = $('#table-inventory-history');
+      if (!node || !node.length) return null;
+      if (typeof node.DataTable === 'function') return node.DataTable();
+      if (typeof node.dataTable === 'function') {
+        const table = node.dataTable();
+        return table && typeof table.api === 'function' ? table.api() : null;
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function pageInfo(win) {
+    const api = historyApi(win);
+    if (!api || typeof api.page !== 'function') return null;
+    try {
+      return api.page.info();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function textFromCellValue(value) {
+    if (value == null) return '';
+    if (typeof value === 'object' && value.nodeType) return normalizeText(value.textContent);
+    return normalizeText(String(value));
+  }
+
+  function cellsFromRowData(data, headers) {
+    if (Array.isArray(data)) return data.map((cell) => textFromCellValue(cell));
+    if (!data || typeof data !== 'object') return headers.map(() => '');
+    return headers.map((header, index) => {
+      if (data[index] != null && data[index] !== '') return textFromCellValue(data[index]);
+      const wanted = normalizeText(header).toLowerCase();
+      const key = Object.keys(data).find((name) => {
+        const label = normalizeText(name).toLowerCase();
+        return label === wanted || (isLpnHeader(header) && isLpnHeader(name));
+      });
+      return key ? textFromCellValue(data[key]) : '';
+    });
+  }
+
+  function rowsFromDataTables(win) {
+    const api = historyApi(win);
+    if (!api || typeof api.rows !== 'function' || typeof api.columns !== 'function') return null;
+    try {
+      const headerNodes = api.columns().header().toArray();
+      const headers = headerNodes.map((cell) => normalizeText(cell.textContent));
+      const indexes = api.rows({ order: 'current', search: 'applied' }).indexes().toArray();
+      const rows = indexes.map((rowIndex) => cellsFromRowData(api.row(rowIndex).data(), headers));
+      if (!rows.length) return null;
+      return { headers, rows };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function showAllHistoryRows(win, isAborted) {
+    const api = historyApi(win);
+    const info = pageInfo(win);
+    if (!api || !info || info.recordsDisplay <= info.length) return false;
+    const target = Math.min(info.recordsDisplay || 0, 300);
+    if (!target || target === info.length) return false;
+    await new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        resolve();
+      };
+      const timer = setTimeout(finish, 8000);
+      try {
+        const onDraw = () => {
+          clearTimeout(timer);
+          finish();
+        };
+        if (typeof api.one === 'function') api.one('draw', onDraw);
+        else if (typeof api.on === 'function') api.on('draw', onDraw);
+        api.page.len(target).draw(false);
+      } catch (_) {
+        clearTimeout(timer);
+        finish();
+      }
+    });
+    return !isAborted();
+  }
+
+  function clickElement(el) {
+    const view = el.ownerDocument && el.ownerDocument.defaultView;
+    try {
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view }));
+    } catch (_) {
+      // The direct click below still runs.
+    }
+    if (typeof el.click === 'function') el.click();
+  }
+
+  function setNativeValue(input, value) {
+    const view = (input.ownerDocument && input.ownerDocument.defaultView) || window;
+    const proto = view.HTMLInputElement && view.HTMLInputElement.prototype;
+    const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && desc.set) desc.set.call(input, value);
+    else input.value = value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function dateInputs(section) {
+    return [...section.querySelectorAll('input')].filter((input) => {
+      const type = (input.getAttribute('type') || 'text').toLowerCase();
+      if (['hidden', 'checkbox', 'radio', 'submit', 'button', 'file'].includes(type)) return false;
+      const blob = [
+        input.value,
+        input.placeholder,
+        input.name,
+        input.id,
+        input.getAttribute('aria-label'),
+      ].join(' ');
+      return /date|\d{1,4}[/-]\d{1,2}[/-]\d{1,4}/i.test(blob);
+    });
+  }
+
+  function findSearchButton(section) {
+    for (const node of section.querySelectorAll('button, input[type="submit"], input[type="button"], a')) {
+      const label = normalizeText(node.value || node.textContent).toLowerCase();
+      if (label === 'search') return node;
+    }
+    return null;
+  }
+
+  async function widenHistoryRange(doc, win) {
+    const result = { clicked: false, reason: '', start: '', end: '' };
+    const section = findHistorySection(doc);
+    if (!section) {
+      result.reason = 'no-section';
+      return result;
+    }
+    const inputs = dateInputs(section);
+    const button = findSearchButton(section);
+    if (inputs.length < 2 || !button) {
+      result.reason = inputs.length < 2 ? 'no-date-inputs' : 'no-search';
+      return result;
+    }
+    const startOn = new Date();
+    startOn.setDate(startOn.getDate() - 180);
+    const sample = inputs[0].value || inputs[1].value;
+    const startText = formatDateLike(sample, startOn);
+    const endText = formatDateLike(sample, new Date());
+    setNativeValue(inputs[0], startText);
+    setNativeValue(inputs[1], endText);
+    result.start = startText;
+    result.end = endText;
+    clickElement(button);
+    result.clicked = true;
+    result.reason = 'searched-180-days';
+    await sleep(300);
+    return result;
+  }
+
+  function publicReport(snap, extra) {
+    return {
+      tableFound: Boolean(snap && snap.tableFound),
+      stable: Boolean(snap && snap.stable),
+      headers: (snap && snap.headers) || [],
+      rowCount: snap ? snap.rowCount : 0,
+      unique: snap ? uniqueRecentLpns(snap.headers, snap.rows, 12) : [],
+      infoText: (snap && snap.infoText) || '',
+      emptyMessage: (snap && snap.emptyMessage) || '',
+      sectionTitles: (snap && snap.sectionTitles) || [],
+      widened: (snap && snap.widened) || null,
+      source: (snap && snap.source) || 'dom',
+      processing: Boolean(snap && snap.processing),
+      sampleRows: snap && snap.rows ? snap.rows.slice(0, 6) : [],
+      snippet: snap && snap.tableHtml ? snap.tableHtml.slice(0, 1800) : '',
+      ...extra,
+    };
+  }
+
+  function resultFromSnapshot(snap, mode) {
+    const details = recentLpnDetails(snap.headers, snap.rows, LIMIT);
+    const lpns = details.map((item) => item.lpn);
+    const empty = Boolean(snap.stable && snap.tableFound && snap.rowCount === 0 && snap.emptyMessage && !lpns.length);
+    return {
+      mode,
+      settled: lpns.length > 0 || empty,
+      empty,
+      needsMore: !empty && lpns.length < LIMIT && [10, 25, 50, 100].includes(snap.rowCount),
+      lpns,
+      details,
+      error: lpns.length > 0 || empty ? '' : 'Inventory history did not finish loading.',
+      report: publicReport(snap),
+    };
+  }
+
+  async function readRenderedDocument(doc, win, timeoutMs, mode, isAborted, allowScroll) {
+    let snap = await waitForHistory(doc, win, timeoutMs, isAborted, allowScroll);
+    if (isAborted()) return failResult(mode, 'Stopped.');
+    if (snap.rowCount > 0) {
+      const preview = uniqueRecentLpns(snap.headers, snap.rows, LIMIT);
+      const info = pageInfo(win);
+      if (preview.length < LIMIT && info && info.recordsDisplay > snap.rowCount) {
+        await showAllHistoryRows(win, isAborted);
+        if (!isAborted()) snap = await waitForHistory(doc, win, 8000, isAborted, allowScroll);
+      }
+    } else if (snap.stable && snap.emptyMessage) {
+      const widened = await widenHistoryRange(doc, win);
+      snap.widened = widened;
+      if (widened.clicked && !isAborted()) {
+        const next = await waitForHistory(doc, win, 15000, isAborted, allowScroll);
+        next.widened = widened;
+        snap = next;
+      }
+    }
+    const apiRows = rowsFromDataTables(win);
+    if (apiRows && apiRows.rows.length >= snap.rowCount) {
+      snap.headers = apiRows.headers.length ? apiRows.headers : snap.headers;
+      snap.rows = apiRows.rows;
+      snap.rowCount = apiRows.rows.length;
+      snap.source = 'datatables';
+    }
+    return resultFromSnapshot(snap, mode);
+  }
+
+  function reportFromParsed(parsed, extra) {
+    return {
+      found: parsed.found,
+      tableFound: parsed.found,
+      headers: parsed.headers,
+      rowCount: parsed.rowCount,
+      uniqueCount: parsed.uniqueCount,
+      unique: uniqueRecentLpns(parsed.headers, parsed.rows, 12),
+      emptyMessage: parsed.emptyMessage,
+      infoText: parsed.infoText,
+      sampleRows: parsed.rows.slice(0, 6),
+      ...extra,
+    };
+  }
+
+  function resultFromParsed(parsed, mode, extra) {
+    const details = recentLpnDetails(parsed.headers, parsed.rows, LIMIT);
+    return {
+      mode,
+      settled: parsed.found && parsed.uniqueCount >= LIMIT,
+      empty: false,
+      needsMore: shouldFollowRendered(parsed, LIMIT),
+      lpns: details.map((item) => item.lpn),
+      details,
+      error: '',
+      report: reportFromParsed(parsed, extra),
+    };
+  }
+
+  async function readViaXhr(url, isAborted) {
+    const response = await gmGet(url);
+    if (isAborted()) return failResult('xhr', 'Stopped.');
+    const parsed = parseHistoryTableHtml(response.text);
+    const auth = looksLikeAuth(response.finalUrl, response.text, parsed.found);
+    const result = resultFromParsed(parsed, 'xhr', {
+      status: response.status,
+      finalUrl: response.finalUrl,
+      title: htmlTitle(response.text),
+      auth,
+      discoveredUrls: discoverHistoryUrls(response.text, response.finalUrl || url),
+      snippet: snippetAround(response.text, 'inventory-history', 1800),
+    });
+    if (auth) result.error = 'Results page asked for sign-in.';
+    if (!result.needsMore || isAborted()) return result;
+
+    for (const sectionUrl of result.report.discoveredUrls || []) {
+      if (isAborted()) return result;
+      try {
+        const section = await gmGet(sectionUrl);
+        const sectionParsed = parseHistoryTableHtml(section.text);
+        if (!sectionParsed.found || !sectionParsed.uniqueCount) continue;
+        const follow = resultFromParsed(sectionParsed, 'xhr-section', {
+          status: section.status,
+          finalUrl: section.finalUrl,
+          title: htmlTitle(section.text),
+          snippet: snippetAround(section.text, 'table-inventory-history', 1800),
+        });
+        if (!follow.needsMore) return follow;
+        if (follow.lpns.length > result.lpns.length) return follow;
+      } catch (err) {
+        result.report.sectionError = err instanceof Error ? err.message : String(err);
+      }
+    }
+    return result;
+  }
+
+  let activeIframe = null;
+  let activeTab = null;
+
+  function cleanupTransport() {
+    if (activeIframe) {
+      activeIframe.remove();
+      activeIframe = null;
+    }
+    if (activeTab && typeof activeTab.close === 'function') {
+      try {
+        activeTab.close();
+      } catch (_) {
+        // The tab may already be closed.
+      }
+    }
+    activeTab = null;
+  }
+
+  function readViaIframe(url, timeoutMs, isAborted) {
+    return new Promise((resolve) => {
+      if (activeIframe) activeIframe.remove();
+      const iframe = document.createElement('iframe');
+      activeIframe = iframe;
+      iframe.setAttribute('aria-hidden', 'true');
+      iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms');
+      iframe.referrerPolicy = 'no-referrer';
+      iframe.style.cssText = [
+        'position:fixed',
+        'top:0',
+        'left:0',
+        'width:100vw',
+        'height:100vh',
+        'border:0',
+        'opacity:0',
+        'pointer-events:none',
+        'z-index:-1',
+      ].join(';');
+      let settled = false;
+      const timer = setTimeout(() => finish(failResult('iframe', 'Timed out waiting for inventory history.')), timeoutMs);
+
+      function finish(result) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (activeIframe === iframe) {
+          iframe.remove();
+          activeIframe = null;
+        }
+        resolve(result);
+      }
+
+      iframe.addEventListener('error', () => finish(failResult('iframe', 'Results frame failed to load.')));
+      iframe.addEventListener('load', () => {
+        void (async () => {
+          try {
+            const doc = iframe.contentDocument;
+            const win = iframe.contentWindow;
+            if (!doc || !win) {
+              finish(failResult('iframe', 'Could not read the results frame.'));
+              return;
+            }
+            const result = await readRenderedDocument(
+              doc,
+              win,
+              Math.max(5000, timeoutMs - 1000),
+              'iframe',
+              () => settled || isAborted(),
+              true
+            );
+            finish(result);
+          } catch (err) {
+            finish(failResult('iframe', err instanceof Error ? err.message : String(err)));
+          }
+        })();
+      });
+      iframe.src = url;
+      (document.body || document.documentElement).appendChild(iframe);
+    });
+  }
+
+  function workerUrl(requestUrl, id) {
+    const url = new URL(requestUrl);
+    url.hash = `tm-recent-lpn=${encodeURIComponent(id)}`;
+    return url.toString();
+  }
+
+  function readViaTab(requestUrl, timeoutMs, isAborted) {
+    return new Promise((resolve) => {
+      if (typeof GM_openInTab !== 'function') {
+        resolve(failResult('background-tab', 'GM_openInTab is not available.'));
+        return;
+      }
+      const id = makeId();
+      const job = {
+        id,
+        status: 'pending',
+        requestUrl,
+        createdAt: Date.now(),
+        result: null,
+      };
+      gmSetValue(JOB_KEY, job);
+      let tab = null;
+      try {
+        tab = GM_openInTab(workerUrl(requestUrl, id), { active: false, insert: true, setParent: true });
+      } catch (err) {
+        resolve(failResult('background-tab', err instanceof Error ? err.message : String(err)));
+        return;
+      }
+      activeTab = tab;
+      let settled = false;
+      let listenerId = null;
+      const timer = setTimeout(
+        () => finish(failResult('background-tab', 'Timed out waiting for the background results page.')),
+        timeoutMs
+      );
+
+      function finish(result) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        clearInterval(poll);
+        if (listenerId != null && typeof GM_removeValueChangeListener === 'function') {
+          try {
+            GM_removeValueChangeListener(listenerId);
+          } catch (_) {
+            // The listener is gone with the page.
+          }
+        }
+        if (activeTab === tab && tab && typeof tab.close === 'function') {
+          try {
+            tab.close();
+          } catch (_) {
+            // The worker tab closes itself too.
+          }
+          activeTab = null;
+        }
+        resolve(result);
+      }
+
+      function consider(value) {
+        if (isAborted()) {
+          finish(failResult('background-tab', 'Stopped.'));
+          return;
+        }
+        if (!value || value.id !== id) return;
+        if (value.status === 'done' || value.status === 'error') {
+          finish(value.result || failResult('background-tab', 'Background page returned no result.'));
+        }
+      }
+
+      if (typeof GM_addValueChangeListener === 'function') {
+        try {
+          listenerId = GM_addValueChangeListener(JOB_KEY, (_name, _oldValue, value) => consider(value));
+        } catch (_) {
+          listenerId = null;
+        }
+      }
+      const poll = setInterval(() => consider(gmGetValue(JOB_KEY, null)), 400);
+    });
+  }
+
+  function onRequestedResults(origin, site, login) {
+    try {
+      if (location.origin !== origin) return false;
+      const path = location.pathname.replace(/\/+$/, '').toUpperCase();
+      if (path !== `/${String(site || '').toUpperCase()}/RESULTS`) return false;
+      const param = new URLSearchParams(location.search).get('s') || '';
+      return param.toLowerCase() === String(login || '').toLowerCase();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function summarizeAttempt(result) {
+    if (!result) return { mode: 'none', error: 'no result' };
+    return {
+      mode: result.mode,
+      settled: Boolean(result.settled),
+      empty: Boolean(result.empty),
+      needsMore: Boolean(result.needsMore),
+      lpns: result.lpns || [],
+      error: result.error || '',
+      report: result.report || null,
+    };
+  }
+
+  function withFallback(result, debug) {
+    if (result && result.lpns && result.lpns.length) return result;
+    if (!debug.fallbackDetails || !debug.fallbackDetails.length) return result;
+    return {
+      ...result,
+      lpns: debug.fallbackDetails.map((item) => item.lpn),
+      details: debug.fallbackDetails,
+      settled: true,
+      note: 'Used LPNs found in the page HTML.',
+    };
+  }
+
+  async function runLookup(login, site, origin, token, setStatus) {
+    const requestUrl = buildResultsUrl(origin, site, login);
+    const debug = {
+      version: VERSION,
+      login,
+      site,
+      origin,
+      requestUrl,
+      pageUrl: location.href,
+      pageTitle: document.title,
+      attempts: [],
+      errors: [],
+      fallbackDetails: null,
+    };
+    const isAborted = () => token !== runToken;
+
+    if (onRequestedResults(origin, site, login)) {
+      setStatus('Reading inventory history on this page…');
+      const live = await readRenderedDocument(document, window, 20000, 'live-page', isAborted, false);
+      debug.attempts.push(summarizeAttempt(live));
+      if (isAborted()) return null;
+      if ((live.lpns.length && !live.needsMore) || live.empty) {
+        live.debug = debug;
+        return live;
+      }
+      if (live.details && live.details.length) debug.fallbackDetails = live.details;
+    }
+
+    setStatus('Fetching inventory history…');
+    try {
+      const viaHttp = await readViaXhr(requestUrl, isAborted);
+      debug.attempts.push(summarizeAttempt(viaHttp));
+      if (isAborted()) return null;
+      if (viaHttp.lpns.length && !viaHttp.needsMore) {
+        viaHttp.debug = debug;
+        return viaHttp;
+      }
+      if (viaHttp.details && viaHttp.details.length > (debug.fallbackDetails || []).length) {
+        debug.fallbackDetails = viaHttp.details;
+      }
+      if (viaHttp.error) debug.errors.push(viaHttp.error);
+    } catch (err) {
+      debug.errors.push(err instanceof Error ? err.message : String(err));
+    }
+
+    if (isAborted()) return null;
+
+    let rendered = null;
+    if (location.origin === origin) {
+      setStatus('Reading inventory history…');
+      rendered = await readViaIframe(requestUrl, 35000, isAborted);
+    } else {
+      setStatus('Opening inventory history in a background tab…');
+      rendered = await readViaTab(requestUrl, 45000, isAborted);
+    }
+    debug.attempts.push(summarizeAttempt(rendered));
+    if (isAborted()) return null;
+    const chosen = withFallback(rendered, debug);
+    chosen.debug = debug;
+    return chosen;
+  }
+
+  async function maybeWorkJob(job) {
+    gmSetValue(JOB_KEY, { ...job, status: 'running', updatedAt: Date.now() });
+    let result;
+    try {
+      result = await readRenderedDocument(document, window, 40000, 'background-tab', () => false, true);
+    } catch (err) {
+      result = failResult('background-tab', err instanceof Error ? err.message : String(err));
+    }
+    gmSetValue(JOB_KEY, {
+      ...job,
+      status: result.lpns.length || result.settled ? 'done' : 'error',
+      result,
+      updatedAt: Date.now(),
+    });
+    clearWorkerMark();
+    setTimeout(() => {
+      try {
+        window.close();
+      } catch (_) {
+        // Chrome closes script-opened tabs. If it refuses, the opener closes it.
+      }
+    }, 250);
+  }
+
+  function pageMatchesJob(job) {
+    try {
+      const wanted = new URL(job.requestUrl);
+      const site = wanted.pathname.split('/').filter(Boolean)[0] || '';
+      const login = wanted.searchParams.get('s') || '';
+      return onRequestedResults(wanted.origin, site, login);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function clearWorkerMark() {
+    try {
+      sessionStorage.removeItem(WORKER_STORAGE);
+    } catch (_) {
+      // The opener also closes this tab.
+    }
+  }
+
+  function rememberedWorkerJob() {
+    let stored = '';
+    try {
+      stored = sessionStorage.getItem(WORKER_STORAGE) || '';
+    } catch (_) {
+      stored = '';
+    }
+    const id = earlyWorkerId || stored || readHashJobId();
+    if (!id) return null;
+    const job = gmGetValue(JOB_KEY, null);
+    if (!job || job.id !== id || Date.now() - job.createdAt > 120000) {
+      clearWorkerMark();
+      return null;
+    }
+    if (job.status !== 'pending' && job.status !== 'running') {
+      clearWorkerMark();
+      return null;
+    }
+    if (!pageMatchesJob(job)) return null;
+    return job;
+  }
+
+  let runToken = 0;
+  const ui = {
+    details: [],
+    debug: null,
+  };
+
+  function injectStyle() {
+    const css = `
+      :host {
+        position: fixed;
+        right: 12px;
+        bottom: 12px;
+        z-index: 2147483647;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 13px;
+        line-height: 1.35;
+        color: #111827;
+      }
+      :host button, :host input, :host select { font-family: inherit; font-size: 13px; }
+      :host .rlp-fab {
+        border: 0;
+        border-radius: 999px;
+        background: #232f3e;
+        color: #fff;
+        padding: 8px 14px;
+        font-weight: 700;
+        cursor: pointer;
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22);
+      }
+      :host(.is-open) .rlp-fab { display: none; }
+      :host .rlp-panel {
+        display: none;
+        width: 300px;
+        box-sizing: border-box;
+        background: #fff;
+        border: 1px solid #d5dbdb;
+        border-radius: 12px;
+        box-shadow: 0 10px 28px rgba(15, 17, 17, 0.2);
+        padding: 10px;
+      }
+      :host(.is-open) .rlp-panel { display: block; }
+      :host .rlp-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+      :host .rlp-head strong { font-size: 14px; }
+      :host .rlp-x {
+        border: 0; background: transparent; cursor: pointer; color: #565959; font-size: 16px; padding: 0 4px;
+      }
+      :host .rlp-row { display: flex; gap: 6px; margin-bottom: 6px; }
+      :host input, :host select {
+        box-sizing: border-box;
+        width: 100%;
+        border: 1px solid #adb1b8;
+        border-radius: 8px;
+        padding: 6px 8px;
+        background: #fff;
+        color: #111827;
+      }
+      :host .rlp-site { width: 84px; flex: 0 0 84px; text-transform: uppercase; }
+      :host .rlp-run, :host .rlp-copy, :host .rlp-debug {
+        border-radius: 8px;
+        cursor: pointer;
+        border: 1px solid #888c8c;
+        background: #f0f2f2;
+        color: #111827;
+        padding: 6px 8px;
+      }
+      :host .rlp-run {
+        width: 100%;
+        border: 0;
+        background: #232f3e;
+        color: #fff;
+        font-weight: 700;
+      }
+      :host .rlp-run:disabled { opacity: 0.6; cursor: wait; }
+      :host .rlp-list { list-style: none; margin: 8px 0; padding: 0; }
+      :host .rlp-list button {
+        width: 100%;
+        text-align: left;
+        border: 1px solid #eaeded;
+        background: #f7fafa;
+        border-radius: 8px;
+        padding: 6px 8px;
+        margin: 0 0 4px;
+        cursor: pointer;
+        font-family: Consolas, Monaco, monospace;
+        color: #111827;
+      }
+      :host .rlp-date {
+        display: block;
+        margin-top: 2px;
+        font-family: Arial, Helvetica, sans-serif;
+        color: #565959;
+        font-size: 11px;
+      }
+      :host .rlp-empty { color: #565959; font-size: 12px; margin: 8px 0; }
+      :host .rlp-actions { display: flex; gap: 6px; }
+      :host .rlp-actions button { flex: 1; }
+      :host .rlp-status { min-height: 16px; margin-top: 6px; font-size: 12px; color: #565959; }
+      :host .rlp-status.is-ok { color: #067d62; }
+      :host select { display: block; margin: 0 0 6px; }
+      :host .rlp-status.is-error { color: #b12704; }
+    `;
+    return css;
+  }
+
+  async function copyText(text) {
+    try {
+      if (typeof GM_setClipboard === 'function') {
+        GM_setClipboard(text, 'text');
+        return true;
+      }
+    } catch (_) {
+      // Fall through to the page clipboard.
+    }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) {
+      // Fall through to the hidden textarea.
+    }
+    try {
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.setAttribute('readonly', 'readonly');
+      area.style.position = 'fixed';
+      area.style.left = '-9999px';
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand('copy');
+      area.remove();
+      return ok;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function mountUi() {
+    if (document.getElementById(ROOT_ID)) return;
+    const savedOrigin = gmGetValue(ORIGIN_KEY, '');
+    const currentKnown = ORIGINS.some(([origin]) => origin === location.origin);
+    const originValue = savedOrigin || (currentKnown ? location.origin : ORIGINS[0][0]);
+    const root = document.createElement('div');
+    root.id = ROOT_ID;
+    root.style.setProperty('all', 'initial', 'important');
+    root.style.setProperty('position', 'fixed', 'important');
+    root.style.setProperty('right', '12px', 'important');
+    root.style.setProperty('bottom', '12px', 'important');
+    root.style.setProperty('z-index', '2147483647', 'important');
+    root.style.setProperty('width', 'max-content', 'important');
+    root.style.setProperty('height', 'max-content', 'important');
+    const shadow = root.attachShadow({ mode: 'open' });
+    const style = document.createElement('style');
+    style.textContent = injectStyle();
+    const shell = document.createElement('div');
+    shell.className = 'rlp-shell';
+
+    const fab = document.createElement('button');
+    fab.type = 'button';
+    fab.className = 'rlp-fab';
+    fab.textContent = 'Run';
+    fab.title = 'Recent inventory-history LPNs';
+
+    const panel = document.createElement('div');
+    panel.className = 'rlp-panel';
+
+    const head = document.createElement('div');
+    head.className = 'rlp-head';
+    const title = document.createElement('strong');
+    title.textContent = 'Recent LPNs';
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'rlp-x';
+    close.textContent = '×';
+    close.setAttribute('aria-label', 'Close');
+    head.append(title, close);
+
+    const loginRow = document.createElement('div');
+    loginRow.className = 'rlp-row';
+    const loginInput = document.createElement('input');
+    loginInput.type = 'text';
+    loginInput.placeholder = 'Login, like williejf';
+    loginInput.autocomplete = 'off';
+    loginInput.spellcheck = false;
+    loginInput.value = gmGetValue(LOGIN_KEY, '') || '';
+    const siteInput = document.createElement('input');
+    siteInput.className = 'rlp-site';
+    siteInput.type = 'text';
+    siteInput.maxLength = 6;
+    siteInput.setAttribute('aria-label', 'Site');
+    siteInput.value = gmGetValue(SITE_KEY, DEFAULT_SITE) || DEFAULT_SITE;
+    loginRow.append(loginInput, siteInput);
+
+    const originSelect = document.createElement('select');
+    originSelect.setAttribute('aria-label', 'FC Research host');
+    for (const [origin, label] of ORIGINS) {
+      const option = document.createElement('option');
+      option.value = origin;
+      option.textContent = label;
+      originSelect.appendChild(option);
+    }
+    if ([...originSelect.options].some((option) => option.value === originValue)) {
+      originSelect.value = originValue;
+    }
+
+    const runButton = document.createElement('button');
+    runButton.type = 'button';
+    runButton.className = 'rlp-run';
+    runButton.textContent = 'Run';
+
+    const list = document.createElement('ol');
+    list.className = 'rlp-list';
+
+    const actions = document.createElement('div');
+    actions.className = 'rlp-actions';
+    const copyButton = document.createElement('button');
+    copyButton.type = 'button';
+    copyButton.className = 'rlp-copy';
+    copyButton.textContent = 'Copy';
+    const debugButton = document.createElement('button');
+    debugButton.type = 'button';
+    debugButton.className = 'rlp-debug';
+    debugButton.textContent = 'Copy debug';
+    actions.append(copyButton, debugButton);
+
+    const status = document.createElement('div');
+    status.className = 'rlp-status';
+    status.textContent = 'Enter a login, then Run.';
+
+    panel.append(head, loginRow, originSelect, runButton, list, actions, status);
+    shell.append(fab, panel);
+    shadow.append(style, shell);
+    if (typeof ResizeObserver === 'function') {
+      const observer = new ResizeObserver(() => {
+        const rect = shell.getBoundingClientRect();
+        root.style.setProperty('width', `${Math.ceil(rect.width)}px`, 'important');
+        root.style.setProperty('height', `${Math.ceil(rect.height)}px`, 'important');
+      });
+      observer.observe(shell);
+    }
+    root.addEventListener('mousedown', (event) => event.stopPropagation());
+    root.addEventListener('click', (event) => event.stopPropagation());
+
+    function setOpen(open) {
+      root.classList.toggle('is-open', Boolean(open));
+      fab.setAttribute('aria-expanded', open ? 'true' : 'false');
+      gmSetValue(OPEN_KEY, Boolean(open));
+    }
+
+    function setStatus(message, kind) {
+      status.textContent = message;
+      status.classList.toggle('is-ok', kind === 'ok');
+      status.classList.toggle('is-error', kind === 'error');
+    }
+
+    function renderList(details) {
+      list.replaceChildren();
+      if (!details.length) {
+        const empty = document.createElement('li');
+        empty.className = 'rlp-empty';
+        empty.textContent = 'No LPNs yet.';
+        list.appendChild(empty);
+        return;
+      }
+      for (const item of details) {
+        const li = document.createElement('li');
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = item.lpn;
+        if (item.date) {
+          const date = document.createElement('span');
+          date.className = 'rlp-date';
+          date.textContent = item.date;
+          button.appendChild(date);
+        }
+        button.addEventListener('click', () => {
+          void copyText(item.lpn).then((ok) => {
+            setStatus(ok ? `Copied ${item.lpn}.` : 'Copy failed.', ok ? 'ok' : 'error');
+          });
+        });
+        li.appendChild(button);
+        list.appendChild(li);
+      }
+    }
+
+    const last = gmGetValue(LAST_KEY, null);
+    if (last && Array.isArray(last.details)) {
+      ui.details = last.details;
+      renderList(ui.details);
+      if (last.login && !loginInput.value) loginInput.value = last.login;
+    } else {
+      renderList([]);
+    }
+    setOpen(gmGetValue(OPEN_KEY, false));
+
+    async function onRun() {
+      const login = loginInput.value.trim();
+      const site = siteInput.value.trim().toUpperCase();
+      const origin = originSelect.value;
+      siteInput.value = site;
+      if (!/^[A-Za-z][A-Za-z0-9._-]{1,31}$/.test(login)) {
+        setOpen(true);
+        setStatus('Enter one login, like williejf.', 'error');
+        loginInput.focus();
+        return;
+      }
+      if (!/^[A-Z0-9]{3,6}$/.test(site)) {
+        setOpen(true);
+        setStatus('Enter a site, like MEM3.', 'error');
+        siteInput.focus();
+        return;
+      }
+      gmSetValue(LOGIN_KEY, login);
+      gmSetValue(SITE_KEY, site);
+      gmSetValue(ORIGIN_KEY, origin);
+      setOpen(true);
+      cleanupTransport();
+      runToken += 1;
+      const token = runToken;
+      runButton.disabled = true;
+      setStatus('Running…');
+      try {
+        const result = await runLookup(login, site, origin, token, setStatus);
+        if (!result || token !== runToken) return;
+        ui.debug = result.debug || null;
+        ui.details = result.details || [];
+        renderList(ui.details);
+        gmSetValue(LAST_KEY, { login, details: ui.details });
+        if (result.lpns.length) {
+          const noun = result.lpns.length === 1 ? 'LPN' : 'LPNs';
+          setStatus(`${result.lpns.length} recent ${noun} for ${login}.`, 'ok');
+        } else if (result.empty) {
+          setStatus(`No inventory history LPNs for ${login}.`, 'error');
+        } else {
+          setStatus(`${result.error || 'Lookup failed.'} Copy debug.`, 'error');
+        }
+      } catch (err) {
+        if (token !== runToken) return;
+        const message = err instanceof Error ? err.message : String(err);
+        ui.debug = ui.debug || { errors: [message], attempts: [] };
+        setStatus(`${message} Copy debug.`, 'error');
+      } finally {
+        if (token === runToken) runButton.disabled = false;
+      }
+    }
+
+    fab.addEventListener('click', () => {
+      setOpen(true);
+      if (loginInput.value.trim()) void onRun();
+      else loginInput.focus();
+    });
+    close.addEventListener('click', () => setOpen(false));
+    runButton.addEventListener('click', () => void onRun());
+    loginInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        void onRun();
+      }
+    });
+    copyButton.addEventListener('click', () => {
+      if (!ui.details.length) {
+        setStatus('No LPNs to copy yet.', 'error');
+        return;
+      }
+      const text = ui.details.map((item) => item.lpn).join('\n');
+      void copyText(text).then((ok) => {
+        const noun = ui.details.length === 1 ? 'LPN' : 'LPNs';
+        setStatus(ok ? `Copied ${ui.details.length} ${noun}.` : 'Copy failed.', ok ? 'ok' : 'error');
+      });
+    });
+    debugButton.addEventListener('click', () => {
+      const payload = {
+        ...(ui.debug || { note: 'No lookup yet.' }),
+        version: VERSION,
+        generatedAt: new Date().toISOString(),
+        pageUrl: location.href,
+        pageTitle: document.title,
+        login: loginInput.value.trim(),
+        site: siteInput.value.trim().toUpperCase(),
+        origin: originSelect.value,
+        lpns: ui.details,
+      };
+      void copyText(JSON.stringify(payload, null, 2)).then((ok) => {
+        setStatus(ok ? 'Debug copied.' : 'Copy failed.', ok ? 'ok' : 'error');
+      });
+    });
+
+    (document.body || document.documentElement).appendChild(root);
+    requestAnimationFrame(() => {
+      const rect = shell.getBoundingClientRect();
+      if (!rect.width && !rect.height) return;
+      root.style.setProperty('width', `${Math.ceil(rect.width)}px`, 'important');
+      root.style.setProperty('height', `${Math.ceil(rect.height)}px`, 'important');
+    });
+  }
+
+  function boot() {
+    const job = rememberedWorkerJob();
+    if (job) {
+      void maybeWorkJob(job);
+      return;
+    }
+    mountUi();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot, { once: true });
+  } else {
+    boot();
+  }
+})();
