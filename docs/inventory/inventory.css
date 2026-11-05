@@ -102,6 +102,7 @@
 .inv-count:hover { text-decoration: underline; }
 .inv-loc-name { border: 0; background: transparent; font: inherit; font-weight: 700; cursor: pointer; padding: 0; color: var(--text); text-align: left; }
 .inv-loc-name:hover { color: var(--link); }
+.inv-loc-name[aria-pressed="true"] { color: var(--orange-600); }
 
 .inv-charts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
 .inv-chart { background: #fff; border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px 16px; }

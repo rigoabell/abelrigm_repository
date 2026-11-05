@@ -572,7 +572,9 @@ function renderPlace() {
     renderGroupEditor();
     return;
   }
-  note.textContent = "Containers and units for the threshold states that are checked. Checked rows assign only what this view includes. Click a name to filter to it.";
+  note.textContent = soleLocationId != null && containerType
+    ? "Filtered to " + catalogName("Outer Location", soleLocationId) + " · " + containerType + ". Click that type again to show every type in this location."
+    : "Containers and units for the threshold states that are checked. Checked rows assign only what this view includes. Click a name to filter to it.";
   renderPlaceRows("location", view.locations, "Outer location", "No outer locations in this view.", (item) => isolate("Outer Location", item.id), (item) => item.id === soleLocationId);
   renderPlaceSummary(typeMode, soleLocationId);
 }
@@ -613,15 +615,24 @@ function renderPlaceSummary(typeMode, soleLocationId) {
     host.appendChild(summaryBlock(
       "Container types in " + catalogName("Outer Location", soleLocationId),
       "Container type",
-      view.containerTypes || [],
-      "No container types in this outer location."
+      containerTypesInLocation(),
+      "No container types in this outer location.",
+      (item) => toggleContainerType(item.name),
+      (item) => containerType === item.name
     ));
     return;
   }
   host.classList.add("hidden");
 }
 
-function summaryBlock(title, nameHeader, rows, emptyText) {
+function containerTypesInLocation() {
+  if (!containerType) return view.containerTypes || [];
+  const filter = readFilter();
+  filter.containerType = "";
+  return query(dataset, filter).containerTypes || [];
+}
+
+function summaryBlock(title, nameHeader, rows, emptyText, onOpen, isPressed) {
   const block = document.createElement("section");
   const heading = document.createElement("h3");
   heading.textContent = title;
@@ -648,9 +659,22 @@ function summaryBlock(title, nameHeader, rows, emptyText) {
     body.appendChild(row);
   } else {
     for (const item of rows) {
+      const label = item.name || "(blank)";
+      const pressed = isPressed ? isPressed(item) : false;
       const row = document.createElement("tr");
+      if (pressed) row.className = "inv-picked";
       const name = document.createElement("td");
-      name.textContent = item.name || "(blank)";
+      if (onOpen) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "inv-loc-name";
+        button.textContent = label;
+        button.setAttribute("aria-pressed", pressed ? "true" : "false");
+        button.addEventListener("click", () => onOpen(item));
+        name.appendChild(button);
+      } else {
+        name.textContent = label;
+      }
       row.appendChild(name);
       const containers = document.createElement("td");
       containers.className = "num";
