@@ -30,8 +30,8 @@
       <p class="eyebrow">Portfolio</p>
       <h1>Projects I Completed</h1>
       <p class="page-hero-sub">
-        Select a project. Rig Setup (abelrigm) and each Tampermonkey script open here.
-        A script downloads as a .txt file.
+        Click a project to expand it. Rig Setup (abelrigm) and each Tampermonkey script
+        open underneath that row. A script downloads as a .txt file.
       </p>
     </div>
   </section>
@@ -39,33 +39,23 @@
   <main>
     <section class="section portfolio-section">
       <div class="container">
-        <div class="project-sheet">
-        <div class="project-tabs" role="tablist" aria-label="Open projects">
-          <button type="button" class="project-tab active" data-tab="projects" role="tab" aria-selected="true">Projects</button>
-          <button type="button" class="project-tab hidden" data-tab="rig-setup" id="rig-setup" role="tab" aria-selected="false" aria-controls="project-rig-setup">Rig Setup (abelrigm)</button>
-          <button type="button" class="project-tab hidden" data-tab="" id="script-tab" role="tab" aria-selected="false" aria-controls="project-script"></button>
-        </div>
-
-        <div id="panel-projects">
+        <div class="project-list">
           <div class="project-search">
             <input id="project-search" type="search" placeholder="Search projects&hellip;" autocomplete="off" />
           </div>
           <p id="project-count" class="project-count">Loading projects&hellip;</p>
           <div class="project-rows" id="project-rows" role="list">
-            <button type="button" class="project-row" data-project="rig-setup" role="listitem">
-              <span class="project-row-body">
-                <span class="project-cat">Setup</span>
-                <span class="project-row-name">Rig Setup (abelrigm)</span>
-                <span class="project-row-desc">Install Python, Node, Git, and the other dependencies, then follow the steps.</span>
-              </span>
-              <span class="status status-live">Live</span>
-              <span class="project-row-go" aria-hidden="true">&rarr;</span>
-            </button>
-          </div>
-          <p id="project-empty" class="project-empty hidden">No projects match that search.</p>
-        </div>
-
-        <div id="project-rig-setup" class="project-detail hidden" role="tabpanel" aria-labelledby="rig-setup">
+            <div class="project-item" id="rig-setup" data-project="rig-setup" role="listitem">
+              <button type="button" class="project-row" aria-expanded="false" aria-controls="detail-rig-setup">
+                <span class="project-row-body">
+                  <span class="project-cat">Setup</span>
+                  <span class="project-row-name">Rig Setup (abelrigm)</span>
+                  <span class="project-row-desc">Install Python, Node, Git, and the other dependencies, then follow the steps.</span>
+                </span>
+                <span class="status status-live">Live</span>
+                <span class="project-row-go" aria-hidden="true"></span>
+              </button>
+              <div id="detail-rig-setup" class="project-detail" role="region" aria-label="Rig Setup (abelrigm)">
           <header class="project-doc-head">
             <div>
               <h2>Rig Setup (abelrigm)</h2>
@@ -131,21 +121,9 @@
           </div>
         </div>
 
-        <div id="project-script" class="project-detail hidden" role="tabpanel" aria-labelledby="script-tab">
-          <header class="project-doc-head">
-            <div>
-              <p class="project-cat" id="script-category"></p>
-              <h2 id="script-name"></h2>
-              <p id="script-detail"></p>
             </div>
-            <a id="script-download" class="btn btn-primary" href="#" download>Download .txt</a>
-          </header>
-          <p class="script-download-note">The download is the Tampermonkey script saved as a .txt file.</p>
-          <dl class="script-meta">
-            <div><dt>Version</dt><dd id="script-version"></dd></div>
-            <div><dt>Runs on</dt><dd id="script-runs"></dd></div>
-          </dl>
-        </div>
+          </div>
+          <p id="project-empty" class="project-empty hidden">No projects match that search.</p>
         </div>
       </div>
     </section>

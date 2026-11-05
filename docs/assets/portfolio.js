@@ -1,113 +1,147 @@
 (function () {
-  var projectsPanel = document.getElementById("panel-projects");
   var rowsEl = document.getElementById("project-rows");
-  var sheet = document.querySelector(".project-sheet");
   var search = document.getElementById("project-search");
   var countEl = document.getElementById("project-count");
   var emptyEl = document.getElementById("project-empty");
-  var rigTab = document.getElementById("rig-setup");
-  var scriptTab = document.getElementById("script-tab");
   var catalogById = {};
+  var openId = "";
 
-  function showTab(id) {
-    var entry = catalogById[id];
-    var project = id && id !== "projects";
-    if (entry) fillScript(entry);
-    if (projectsPanel) projectsPanel.classList.toggle("hidden", !!project);
-    document.querySelectorAll(".project-detail").forEach(function (panel) {
-      var show = false;
-      if (id === "rig-setup") show = panel.id === "project-rig-setup";
-      else if (entry) show = panel.id === "project-script";
-      panel.classList.toggle("hidden", !show);
-    });
-    if (id === "rig-setup" && rigTab) {
-      rigTab.classList.remove("hidden");
-      if (scriptTab) scriptTab.classList.add("hidden");
-    } else if (entry && scriptTab) {
-      scriptTab.classList.remove("hidden");
-      scriptTab.setAttribute("data-tab", id);
-      scriptTab.textContent = entry.name;
-      if (rigTab) rigTab.classList.add("hidden");
-    }
-    document.querySelectorAll(".project-tab").forEach(function (tab) {
-      var on = tab.getAttribute("data-tab") === (project ? id : "projects");
-      tab.classList.toggle("active", on);
-      tab.setAttribute("aria-selected", on ? "true" : "false");
-    });
-    document.querySelectorAll(".project-row").forEach(function (row) {
-      row.classList.toggle("selected", row.getAttribute("data-project") === id);
-    });
-    if (project) {
-      if (location.hash !== "#" + id) history.replaceState(null, "", "#" + id);
-    } else if (location.hash) {
-      history.replaceState(null, "", location.pathname + location.search);
-    }
-    if (project && sheet) sheet.scrollIntoView({ block: "start" });
+  function text(tag, className, value) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    node.textContent = value;
+    return node;
   }
 
-  function fillScript(entry) {
-    document.getElementById("script-category").textContent = entry.category;
-    document.getElementById("script-name").textContent = entry.name;
-    document.getElementById("script-detail").textContent = entry.detail;
-    document.getElementById("script-version").textContent = entry.version || "—";
-    document.getElementById("script-runs").textContent = entry.runsOn || "—";
-    var link = document.getElementById("script-download");
-    link.href = entry.file;
-    link.setAttribute("download", entry.downloadName);
+  function setOpen(id, fromHash) {
+    var next = id || "";
+    document.querySelectorAll(".project-item").forEach(function (item) {
+      var on = !!next && item.getAttribute("data-project") === next;
+      item.classList.toggle("is-open", on);
+      var button = item.querySelector(".project-row");
+      if (button) button.setAttribute("aria-expanded", on ? "true" : "false");
+    });
+    openId = next;
+    if (!fromHash) {
+      var wanted = next ? "#" + next : "";
+      if (wanted !== location.hash) {
+        history.replaceState(null, "", next ? wanted : location.pathname + location.search);
+      }
+    }
+    if (next) {
+      var item = document.getElementById(next);
+      if (item) item.scrollIntoView({ block: "start" });
+    }
   }
 
-  function rowButton(entry) {
+  function toggle(id) {
+    setOpen(openId === id ? "" : id, false);
+  }
+
+  function metaRow(label, value) {
+    var row = document.createElement("div");
+    row.appendChild(text("dt", "", label));
+    row.appendChild(text("dd", "", value || "—"));
+    return row;
+  }
+
+  function scriptItem(entry) {
+    var item = document.createElement("div");
+    item.className = "project-item";
+    item.id = entry.id;
+    item.setAttribute("data-project", entry.id);
+    item.setAttribute("role", "listitem");
+
     var button = document.createElement("button");
     button.type = "button";
     button.className = "project-row";
-    button.setAttribute("data-project", entry.id);
-    button.setAttribute("role", "listitem");
-    button.innerHTML =
-      '<span class="project-row-body">' +
-        '<span class="project-cat"></span>' +
-        '<span class="project-row-name"></span>' +
-        '<span class="project-row-desc"></span>' +
-      '</span>' +
-      '<span class="status status-live">Script</span>' +
-      '<span class="project-row-go" aria-hidden="true">&rarr;</span>';
-    button.querySelector(".project-cat").textContent = entry.category;
-    button.querySelector(".project-row-name").textContent = entry.name;
-    button.querySelector(".project-row-desc").textContent = entry.summary;
-    return button;
+    button.setAttribute("aria-expanded", "false");
+    button.setAttribute("aria-controls", "detail-" + entry.id);
+    var body = document.createElement("span");
+    body.className = "project-row-body";
+    body.appendChild(text("span", "project-cat", entry.category));
+    body.appendChild(text("span", "project-row-name", entry.name));
+    body.appendChild(text("span", "project-row-desc", entry.summary));
+    button.appendChild(body);
+    button.appendChild(text("span", "status status-live", "Script"));
+    var chevron = document.createElement("span");
+    chevron.className = "project-row-go";
+    chevron.setAttribute("aria-hidden", "true");
+    button.appendChild(chevron);
+
+    var panel = document.createElement("div");
+    panel.className = "project-detail";
+    panel.id = "detail-" + entry.id;
+    panel.setAttribute("role", "region");
+    panel.setAttribute("aria-label", entry.name);
+
+    var head = document.createElement("header");
+    head.className = "project-doc-head";
+    var copy = document.createElement("div");
+    copy.appendChild(text("p", "project-cat", entry.category));
+    copy.appendChild(text("h2", "", entry.name));
+    copy.appendChild(text("p", "", entry.detail));
+    head.appendChild(copy);
+    var link = document.createElement("a");
+    link.className = "btn btn-primary";
+    link.href = entry.file;
+    link.setAttribute("download", entry.downloadName);
+    link.textContent = "Download .txt";
+    head.appendChild(link);
+
+    var note = text("p", "script-download-note", "The download is the Tampermonkey script saved as a .txt file.");
+    var meta = document.createElement("dl");
+    meta.className = "script-meta";
+    meta.appendChild(metaRow("Version", entry.version));
+    meta.appendChild(metaRow("Runs on", entry.runsOn));
+
+    panel.appendChild(head);
+    panel.appendChild(note);
+    panel.appendChild(meta);
+    item.appendChild(button);
+    item.appendChild(panel);
+    return item;
   }
 
   function applyFilter() {
     var q = (search && search.value || "").trim().toLowerCase();
     var shown = 0;
-    document.querySelectorAll(".project-row").forEach(function (row) {
-      var ok = !q || row.textContent.toLowerCase().indexOf(q) !== -1;
-      row.classList.toggle("is-filtered", !ok);
+    document.querySelectorAll(".project-item").forEach(function (item) {
+      var ok = !q || item.textContent.toLowerCase().indexOf(q) !== -1;
+      item.classList.toggle("is-filtered", !ok);
       if (ok) shown += 1;
     });
     if (emptyEl) emptyEl.classList.toggle("hidden", shown !== 0);
     if (countEl) {
-      var total = document.querySelectorAll(".project-row").length;
+      var total = document.querySelectorAll(".project-item").length;
       countEl.textContent = q ? (shown + " of " + total + " projects") : (total + " projects");
     }
+  }
+
+  function openFromHash() {
+    var hash = location.hash.replace(/^#/, "");
+    if (!hash) {
+      if (openId) setOpen("", true);
+      return;
+    }
+    if (hash === "rig-setup" || catalogById[hash]) setOpen(hash, true);
   }
 
   function bind() {
     if (rowsEl) {
       rowsEl.addEventListener("click", function (event) {
         var row = event.target.closest(".project-row");
-        if (!row) return;
-        showTab(row.getAttribute("data-project"));
+        if (!row || !rowsEl.contains(row)) return;
+        var item = row.closest(".project-item");
+        if (!item) return;
+        toggle(item.getAttribute("data-project"));
       });
     }
-    document.querySelectorAll(".project-tab").forEach(function (tab) {
-      tab.addEventListener("click", function () {
-        showTab(tab.getAttribute("data-tab") || "projects");
-      });
-    });
     if (search) search.addEventListener("input", applyFilter);
   }
 
   bind();
+  if (location.hash === "#rig-setup") setOpen("rig-setup", true);
 
   fetch("data/tampermonkey.json")
     .then(function (response) { return response.json(); })
@@ -115,22 +149,14 @@
       projects.forEach(function (entry) {
         catalogById[entry.id] = entry;
         if (!entry.file || !/\.txt($|\?)/.test(entry.file) || !/\.txt$/.test(entry.downloadName)) return;
-        rowsEl.appendChild(rowButton(entry));
+        rowsEl.appendChild(scriptItem(entry));
       });
       applyFilter();
-      var hash = location.hash.replace("#", "");
-      if (hash && catalogById[hash]) showTab(hash);
-      else if (hash === "rig-setup") showTab(hash);
+      openFromHash();
     })
     .catch(function () {
       if (countEl) countEl.textContent = "Could not load the script list.";
     });
 
-  if (location.hash === "#rig-setup") showTab("rig-setup");
-
-  window.addEventListener("hashchange", function () {
-    var hash = location.hash.replace("#", "");
-    if (!hash) showTab("projects");
-    else if (hash === "rig-setup" || catalogById[hash]) showTab(hash);
-  });
+  window.addEventListener("hashchange", openFromHash);
 })();
