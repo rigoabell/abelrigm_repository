@@ -43,6 +43,7 @@ let publicFile = null;
 let saveWarning = "";
 let savedManifest = null;
 let catalog = null;
+let siteUnits = null;
 let view = null;
 let matchIndex = null;
 let page = 0;
@@ -254,6 +255,11 @@ async function acceptDataset(next, file, kind, generation) {
   await new Promise((resolve) => setTimeout(resolve, 0));
   if (generation !== loadGeneration) return;
   catalog = query(dataset, {});
+  siteUnits = {
+    diot: catalog.status.diot.units,
+    at: catalog.status.at.units,
+    approaching: catalog.status.approaching.units,
+  };
   sortMode = "file";
   document.getElementById("sort-mode").value = "file";
   clearFilters(false);
@@ -511,16 +517,16 @@ function renderSummary() {
     ["at", "At", "Less than 1 day before"],
     ["approaching", "Approaching", "1–2 days before"],
   ];
-  const totals = catalog.status;
-  const overage = diotOverageText(totals.diot.units, inventoryThreshold());
+  const units = siteUnits || { diot: 0, at: 0, approaching: 0 };
+  const overage = diotOverageText(units.diot, inventoryThreshold());
   kpis.replaceChildren();
   for (const [id, label, detail] of cards) {
     const card = document.createElement("button");
     card.type = "button";
-    card.className = "inv-kpi " + id + (id === "diot" ? " " + diotTone(totals[id].units) : "");
+    card.className = "inv-kpi " + id + (id === "diot" ? " " + diotTone(units.diot) : "");
     card.setAttribute("aria-pressed", selected.size === 1 && selected.has(id) ? "true" : "false");
     const strong = document.createElement("b");
-    strong.textContent = formatQty(totals[id].units);
+    strong.textContent = formatQty(units[id]);
     const caption = document.createElement("span");
     caption.textContent = label + " units · " + detail;
     card.appendChild(strong);
