@@ -242,17 +242,6 @@
     "downloadName": "FCLM Clock Status Checker (abelrigm).txt"
   },
   {
-    "id": "fclm-clock-status-checker-1",
-    "name": "FCLM Clock Status Checker (1) (abelrigm)",
-    "category": "FCLM",
-    "summary": "Second export of FCLM Clock Status Checker. The script text is the same.",
-    "detail": "Tampermonkey exported this under a duplicate name. The source matches FCLM Clock Status Checker.",
-    "version": "1.3.0",
-    "runsOn": "fclm-portal.amazon.com",
-    "file": "downloads/fclm-clock-status-checker-1.txt",
-    "downloadName": "FCLM Clock Status Checker (1) (abelrigm).txt"
-  },
-  {
     "id": "fclm-copy-logins-idle-dashboard",
     "name": "FCLM Copy Logins + Idle + Dashboard (abelrigm)",
     "category": "FCLM",
@@ -421,23 +410,12 @@
     "id": "liquidation-sort-helper",
     "name": "Liquidation Sort Helper (abelrigm)",
     "category": "Liquidation",
-    "summary": "Guide a liquidation sort and stop stale-label loops. Version 1.11.8.",
-    "detail": "On the customer-returns sort tool, traces the workflow and copies a debug log. This version focuses on loops where a stale sort label disagrees with the source-container scan.",
-    "version": "1.11.8",
+    "summary": "Guide a liquidation sort, and start and end a job only on the accepted steps.",
+    "detail": "On the customer-returns sort tool, a job starts when WDSorting is accepted and ends only after the tote move succeeds and Update is clicked. The queue advances per LPN, and every branch is written to a trace you can copy.",
+    "version": "2.2.7",
     "runsOn": "us-creturns-web.aka.amazon.com",
     "file": "downloads/liquidation-sort-helper.txt",
     "downloadName": "Liquidation Sort Helper (abelrigm).txt"
-  },
-  {
-    "id": "liquidation-sort-helper-1",
-    "name": "Liquidation Sort Helper (1) (abelrigm)",
-    "category": "Liquidation",
-    "summary": "Later liquidation sort script, version 2.2.7, with stricter start and end rules.",
-    "detail": "A job starts when WDSorting is accepted and ends only after the tote move succeeds and Update is clicked. The queue advances per LPN, and every branch is written to a trace you can copy.",
-    "version": "2.2.7",
-    "runsOn": "us-creturns-web.aka.amazon.com",
-    "file": "downloads/liquidation-sort-helper-1.txt",
-    "downloadName": "Liquidation Sort Helper (1) (abelrigm).txt"
   },
   {
     "id": "peculiar-inventory-scan-panel",
@@ -487,23 +465,12 @@
     "id": "quicksight-pending-engagements-d-f-shift-logins",
     "name": "QuickSight Pending Engagements D/F Shift Logins (abelrigm)",
     "category": "QuickSight",
-    "summary": "Copy pending-engagement logins on D or F shifts. Version 0.1.2.",
-    "detail": "Reads the Pending Engagements visual and copies logins whose shift starts with D or F. This is the earlier, smaller script.",
-    "version": "0.1.2",
-    "runsOn": "us-east-1.quicksight.aws.amazon.com",
-    "file": "downloads/quicksight-pending-engagements-d-f-shift-logins.txt",
-    "downloadName": "QuickSight Pending Engagements D/F Shift Logins (abelrigm).txt"
-  },
-  {
-    "id": "quicksight-pending-engagements-d-f-shift-logins-1",
-    "name": "QuickSight Pending Engagements D/F Shift Logins (1) (abelrigm)",
-    "category": "QuickSight",
-    "summary": "Newer pending-engagements collector, version 1.3.1.",
-    "detail": "Auto-collects the Pending Engagements visual, copies logins, and copies a debug dump. It also blocks the older 0.1.2 script from adding a second button.",
+    "summary": "Auto-collect pending engagements and copy the D or F shift logins.",
+    "detail": "Auto-collects the Pending Engagements visual, copies logins whose shift starts with D or F, and copies a debug dump.",
     "version": "1.3.1",
     "runsOn": "us-east-1.quicksight.aws.amazon.com, quicksight.aws.amazon.com",
-    "file": "downloads/quicksight-pending-engagements-d-f-shift-logins-1.txt",
-    "downloadName": "QuickSight Pending Engagements D/F Shift Logins (1) (abelrigm).txt"
+    "file": "downloads/quicksight-pending-engagements-d-f-shift-logins.txt",
+    "downloadName": "QuickSight Pending Engagements D/F Shift Logins (abelrigm).txt"
   },
   {
     "id": "ultimate-tampermonkey-debug",

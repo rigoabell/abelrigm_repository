@@ -10,7 +10,7 @@ Central hub for the work: portfolio, tools built, and notes.
 ## Contents
 
 - **`docs/` — Dev Hub website** (static, GitHub Pages ready).
-  - **Portfolio** lists Rig Setup (abelrigm) and 49 Tampermonkey scripts. Each script downloads as a `.txt` file.
+  - **Portfolio** lists Rig Setup (abelrigm) and 47 Tampermonkey scripts. Each script downloads as a `.txt` file.
   - **Toolkit** lists tools built and ready to download.
   - **Inventory** opens a large inventory CSV in the browser. Average Age and
     Average Threshold are the ASIN’s age and threshold. The desk groups containers
