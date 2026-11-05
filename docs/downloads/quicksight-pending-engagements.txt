@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         QuickSight Pending Engagements (abelrigm)
 // @namespace    https://github.com/ap3x/quicksight-pending-engagements
-// @version      2.5.2
-// @description  Collect AP3X and IDNM Pending Engagements; panel for clocked-in / copy logins / copy table
+// @version      2.5.3
+// @description  Collect AP3X and IDNM Pending Engagements; select rows, copy that selection, and mark who is clocked in
 // @author       AP3X
 // @match        https://*.quicksight.aws.amazon.com/*
 // @match        https://quicksight.aws.amazon.com/*
@@ -17,7 +17,7 @@
 (function () {
   'use strict';
 
-  const SCRIPT = { name: 'QuickSight Pending Engagements', version: '2.5.2' };
+  const SCRIPT = { name: 'QuickSight Pending Engagements', version: '2.5.3' };
   const PREFERRED_VISUAL_TITLE = 'Pending Engagements';
   const KNOWN_BLOCK_ID =
     'block-ed0061b1-143a-4b06-adf5-8bbe28d30023_b9469711-c34c-4bc1-8ae8-827b8fe8ceca';
@@ -98,6 +98,7 @@
     autoCollectScheduled: false,
     collectPhases: [],
     attrByLogin: new Map(),
+    selectedLogins: new Set(),
     attrCollecting: false,
     clockFiltering: false,
     lastClockFilter: null,
@@ -1435,12 +1436,10 @@
     return order.length ? order : cached;
   }
 
-  function formatAttrTsv() {
-    const labels = currentMode().panelHeaders;
+  function orderedRecordedLogins() {
     const cached = getUniqueCachedLogins();
-    const lines = [labels.join('\t')];
-    const seen = new Set();
     const order = [];
+    const seen = new Set();
     for (const login of cached) {
       if (!STATE.attrByLogin.has(login)) continue;
       order.push(login);
@@ -1450,7 +1449,16 @@
       if (seen.has(login)) continue;
       order.push(login);
     }
+    return order;
+  }
+
+  function formatAttrTsv(onlyLogins) {
+    const labels = currentMode().panelHeaders;
+    const allowed = onlyLogins ? new Set(onlyLogins) : null;
+    const lines = [labels.join('\t')];
+    const order = orderedRecordedLogins();
     for (const login of order) {
+      if (allowed && !allowed.has(login)) continue;
       const rec = STATE.attrByLogin.get(login);
       const rows = rec?.values || [];
       if (!rows.length) {
@@ -1662,6 +1670,18 @@
     return punch ? punchClassFromType(punch.type) : 'out';
   }
 
+  /* core:start */
+  function clockedInSelection(logins, statusByLogin) {
+    const selected = [];
+    const leftOut = [];
+    for (const login of logins) {
+      if (statusByLogin.get(login) === 'in') selected.push(login);
+      else leftOut.push(login);
+    }
+    return { selected, leftOut };
+  }
+  /* core:end */
+
   async function keepClockedInOnly() {
     if (STATE.clockFiltering || STATE.attrCollecting || STATE.collecting) {
       toast('Busy — wait for collect to finish', true);
@@ -1709,29 +1729,25 @@
       );
       for (const row of lookupResults) statusByLogin.set(row.login, row.status);
 
-      const removedLogins = [];
-      for (const login of logins) {
-        if (statusByLogin.get(login) === 'in') continue;
-        STATE.attrByLogin.delete(login);
-        removedLogins.push(login);
-      }
-
-      const kept = STATE.attrByLogin.size;
+      const { selected, leftOut } = clockedInSelection(logins, statusByLogin);
+      STATE.selectedLogins = new Set(selected);
       STATE.lastClockFilter = {
         at: new Date().toISOString(),
         warehouseId,
         attendanceRows: attendanceRows.length,
-        kept,
-        removed: removedLogins.length,
+        kept: selected.length,
+        removed: 0,
+        selected: selected.length,
+        deselected: leftOut.length,
         unmatchedLookups: unmatched.length,
-        removedSample: removedLogins.slice(0, 12),
+        deselectedSample: leftOut.slice(0, 12),
       };
       diag('clock filter', STATE.lastClockFilter);
       STATE.panelFrozen = true;
       toast(
-        removedLogins.length
-          ? `Removed ${removedLogins.length} not clocked in — ${kept} left`
-          : `All ${kept} are clocked in`,
+        leftOut.length
+          ? `Selected ${selected.length} clocked in. ${leftOut.length} left unselected.`
+          : `Selected all ${selected.length}. Everyone is clocked in.`,
       );
     } catch (err) {
       STATE.lastError = String(err?.message || err);
@@ -1760,16 +1776,25 @@
           <button type="button" class="qstd-title-btn" data-qstd-panel="clocked-in">Keep clocked in</button>
           <button type="button" class="qstd-title-btn" data-qstd-panel="copy-logins">Copy visible logins</button>
           <button type="button" class="qstd-title-btn" data-qstd-panel="copy">Copy table</button>
+          <button type="button" class="qstd-title-btn" data-qstd-panel="copy-selected">Copy selected</button>
         </div>
       </div>
       <div class="qs-pe-attr-body">
         <table>
-          <thead><tr><th>Login</th><th>Attribute</th><th>Accuracy</th></tr></thead>
+          <thead><tr><th class="qs-pe-check"><input type="checkbox" data-qstd-select-all aria-label="Select all rows"></th><th>Login</th><th>Attribute</th><th>Accuracy</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
       <div class="qs-pe-attr-foot">No records yet</div>
     `;
+    panel.addEventListener('change', (e) => {
+      const selectAll = e.target.closest('[data-qstd-select-all]');
+      if (!selectAll) return;
+      const logins = orderedRecordedLogins();
+      if (selectAll.checked) logins.forEach((login) => STATE.selectedLogins.add(login));
+      else STATE.selectedLogins.clear();
+      renderAttrPanel();
+    });
     panel.addEventListener('click', async (e) => {
       const btn = e.target.closest('[data-qstd-panel]');
       if (!btn) return;
@@ -1788,6 +1813,18 @@
         }
         const ok = await copyText(logins.join('\n'));
         toast(ok ? `Copied ${logins.length} visible logins` : 'Copy failed', !ok);
+        return;
+      }
+      if (action === 'copy-selected') {
+        const logins = orderedRecordedLogins().filter((login) => STATE.selectedLogins.has(login));
+        if (!logins.length) {
+          toast('Select at least one row', true);
+          return;
+        }
+        const tsv = formatAttrTsv(logins);
+        const ok = await copyText(tsv);
+        const n = Math.max(0, tsv.split('\n').length - 1);
+        toast(ok ? `Copied ${n} selected rows` : 'Copy failed', !ok);
         return;
       }
       if (action !== 'copy') return;
@@ -1827,53 +1864,75 @@
     if (!tbody || !foot) return;
     const title = panel.querySelector('.qs-pe-attr-head strong');
     if (title) title.textContent = STATE.mode === 'idnm' ? 'IDNM Engagements (abelrigm)' : 'Recorded Attributes (abelrigm)';
-    const headCells = panel.querySelectorAll('thead th');
+    const headCells = panel.querySelectorAll('thead th:not(.qs-pe-check)');
     currentMode().panelHeaders.forEach((label, i) => {
       if (headCells[i]) headCells[i].textContent = label;
     });
     tbody.replaceChildren();
-    const cached = getUniqueCachedLogins();
-    const order = [];
-    const seen = new Set();
-    for (const login of cached) {
-      if (!STATE.attrByLogin.has(login)) continue;
-      order.push(login);
-      seen.add(login);
+    for (const login of [...STATE.selectedLogins]) {
+      if (!STATE.attrByLogin.has(login)) STATE.selectedLogins.delete(login);
     }
-    for (const login of STATE.attrByLogin.keys()) {
-      if (seen.has(login)) continue;
-      order.push(login);
-    }
+    const order = orderedRecordedLogins();
     for (const login of order) {
       const rec = STATE.attrByLogin.get(login);
+      const selected = STATE.selectedLogins.has(login);
       const rows = rec?.values?.length ? rec.values : [{ attribute: rec?.error || '', accuracy: '' }];
       rows.forEach((row, i) => {
         const tr = document.createElement('tr');
+        tr.dataset.login = login;
+        if (selected) tr.classList.add('is-selected');
         if (rec?.error) tr.dataset.state = 'error';
+        const tdCheck = document.createElement('td');
+        tdCheck.className = 'qs-pe-check';
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.checked = selected;
+        box.setAttribute('aria-label', `Select ${login}`);
+        box.addEventListener('click', (event) => event.stopPropagation());
+        box.addEventListener('change', () => {
+          if (box.checked) STATE.selectedLogins.add(login);
+          else STATE.selectedLogins.delete(login);
+          renderAttrPanel();
+        });
+        tdCheck.appendChild(box);
         const tdLogin = document.createElement('td');
         const tdAttr = document.createElement('td');
         const tdAcc = document.createElement('td');
         tdLogin.textContent = i === 0 ? login : '';
         tdAttr.textContent = row.attribute || '';
         tdAcc.textContent = row.accuracy || '';
-        tr.append(tdLogin, tdAttr, tdAcc);
+        tr.addEventListener('click', () => {
+          if (STATE.selectedLogins.has(login)) STATE.selectedLogins.delete(login);
+          else STATE.selectedLogins.add(login);
+          renderAttrPanel();
+        });
+        tr.append(tdCheck, tdLogin, tdAttr, tdAcc);
         tbody.appendChild(tr);
       });
     }
-    const total = cached.length || STATE.attrByLogin.size;
+    const total = getUniqueCachedLogins().length || STATE.attrByLogin.size;
     const n = STATE.attrByLogin.size;
+    const selectedCount = order.filter((login) => STATE.selectedLogins.has(login)).length;
+    const selectAll = panel.querySelector('[data-qstd-select-all]');
+    if (selectAll) {
+      selectAll.checked = order.length > 0 && selectedCount === order.length;
+      selectAll.indeterminate = selectedCount > 0 && selectedCount < order.length;
+    }
     const clockBtn = panel.querySelector('[data-qstd-panel="clocked-in"]');
     const copyLoginsBtn = panel.querySelector('[data-qstd-panel="copy-logins"]');
     const copyBtn = panel.querySelector('[data-qstd-panel="copy"]');
+    const copySelectedBtn = panel.querySelector('[data-qstd-panel="copy-selected"]');
     if (clockBtn) {
       clockBtn.disabled = STATE.attrCollecting || STATE.clockFiltering || !n;
     }
     if (copyLoginsBtn) copyLoginsBtn.disabled = getVisiblePanelLogins().length === 0;
     if (copyBtn) copyBtn.disabled = !n;
+    if (copySelectedBtn) copySelectedBtn.disabled = selectedCount === 0;
     if (STATE.clockFiltering) foot.textContent = `Checking FCLM clock status for ${n}…`;
     else if (STATE.attrCollecting) foot.textContent = `Recording ${n}/${total}…`;
     else if (!n) foot.textContent = 'No records yet';
-    else foot.textContent = STATE.mode === 'idnm' ? `${n} IDNM rows` : `${n} recorded`;
+    else if (STATE.mode === 'idnm') foot.textContent = selectedCount ? `${n} IDNM rows · ${selectedCount} selected` : `${n} IDNM rows`;
+    else foot.textContent = selectedCount ? `${n} recorded · ${selectedCount} selected` : `${n} recorded`;
   }
 
   function loginFromPeCell(cell, blockEl, blockId) {
@@ -2146,6 +2205,9 @@
         font-size: 11px; vertical-align: top; word-break: break-word;
       }
       #qs-pe-attr-panel th { color: #5f6368; font-weight: 600; position: sticky; top: 0; background: #fff; }
+      #qs-pe-attr-panel th.qs-pe-check, #qs-pe-attr-panel td.qs-pe-check { width: 28px; padding-right: 0; }
+      #qs-pe-attr-panel tbody tr { cursor: pointer; }
+      #qs-pe-attr-panel tbody tr.is-selected td { background: #e8f0fe; }
       #qs-pe-attr-panel tr[data-state="error"] td { color: #b3261e; }
       #qs-pe-attr-panel .qs-pe-attr-foot {
         padding: 6px 8px; font-size: 11px; color: #5f6368;
