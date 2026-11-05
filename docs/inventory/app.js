@@ -511,15 +511,16 @@ function renderSummary() {
     ["at", "At", "Less than 1 day before"],
     ["approaching", "Approaching", "1–2 days before"],
   ];
-  const overage = diotOverageText(view.status.diot.units, inventoryThreshold());
+  const totals = catalog.status;
+  const overage = diotOverageText(totals.diot.units, inventoryThreshold());
   kpis.replaceChildren();
   for (const [id, label, detail] of cards) {
     const card = document.createElement("button");
     card.type = "button";
-    card.className = "inv-kpi " + id + (id === "diot" ? " " + diotTone(view.status[id].units) : "");
+    card.className = "inv-kpi " + id + (id === "diot" ? " " + diotTone(totals[id].units) : "");
     card.setAttribute("aria-pressed", selected.size === 1 && selected.has(id) ? "true" : "false");
     const strong = document.createElement("b");
-    strong.textContent = formatQty(view.status[id].units);
+    strong.textContent = formatQty(totals[id].units);
     const caption = document.createElement("span");
     caption.textContent = label + " units · " + detail;
     card.appendChild(strong);
