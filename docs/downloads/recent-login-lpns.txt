@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Recent Login LPNs (abelrigm)
 // @namespace    https://github.com/rigoabell/abelrigm_repository
-// @version      1.0.0
+// @version      1.0.1
 // @description  On any page, enter a login and list that person's three most recent unique Inventory History LPNs from FC Research.
 // @author       abelrigm
 // @match        *://*/*
@@ -26,7 +26,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
   const LIMIT = 3;
   const JOB_KEY = 'rlp-job';
   const LOGIN_KEY = 'rlp-login';
@@ -80,9 +80,34 @@
     return textFromHtml(value);
   }
 
+  function headerLabel(value) {
+    return normalizeText(value).replace(/\s*:\s*activate to sort[\s\S]*$/i, '');
+  }
+
   function isLpnHeader(value) {
-    const text = normalizeText(value).toLowerCase();
+    const text = headerLabel(value).toLowerCase();
     return text === 'lpn' || /^lpn\b/.test(text);
+  }
+
+  function labelFromCell(attrs, text) {
+    const visible = headerLabel(text);
+    if (visible) return visible;
+    const aria = /aria-label\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(String(attrs || ''));
+    if (aria) {
+      const label = headerLabel(aria[1] || aria[2] || '');
+      if (label) return label;
+    }
+    const id = /\bid\s*=\s*(?:"([^"]+)"|'([^']+)')/i.exec(String(attrs || ''));
+    if (!id) return '';
+    const suffix = String(id[1] || id[2] || '').split('-').filter(Boolean).pop();
+    return suffix || '';
+  }
+
+  function dateColumnIndex(headers, rows) {
+    const fromHeader = (headers || []).findIndex((header) => /^date\b/i.test(headerLabel(header)));
+    if (fromHeader >= 0) return fromHeader;
+    const dated = (rows || []).some((cells) => /^\d{4}-\d{2}-\d{2}\b/.test(normalizeText(cells && cells[0])));
+    return dated ? 0 : -1;
   }
 
   function looksLikeLpn(value) {
@@ -111,7 +136,7 @@
 
   function recentLpnDetails(headers, rows, limit) {
     const column = lpnColumn(headers);
-    const dateColumn = (headers || []).findIndex((header) => /^date\b/i.test(normalizeText(header)));
+    const dateColumn = dateColumnIndex(headers, rows);
     return uniqueRecentLpns(headers, rows, limit).map((lpn) => {
       const row = (rows || []).find((cells) => normalizeText(cells[column] || '').toUpperCase() === lpn);
       const date = dateColumn >= 0 && row ? normalizeText(row[dateColumn] || '') : '';
@@ -183,14 +208,14 @@
     const bodyRows = tableRows(bodySource);
     let headers = [];
     for (const row of headerRows) {
-      const texts = row.map((cell) => cell.text);
+      const texts = row.map((cell) => labelFromCell(cell.attrs, cell.text));
       if (texts.some((text) => isLpnHeader(text))) {
         headers = texts;
         break;
       }
     }
     if (!headers.length && headerRows.length) {
-      headers = headerRows[headerRows.length - 1].map((cell) => cell.text);
+      headers = headerRows[headerRows.length - 1].map((cell) => labelFromCell(cell.attrs, cell.text));
     }
     const rows = [];
     let emptyMessage = '';
@@ -266,6 +291,7 @@
     let match;
     while ((match = re.exec(String(html || ''))) && found.length < 3) {
       const raw = match[1];
+      if (!/^(?:https?:\/\/|\/)/i.test(raw)) continue;
       if (/^(?:data:|javascript:|#)/i.test(raw)) continue;
       try {
         const absolute = new URL(raw, base);
@@ -386,6 +412,15 @@
       .slice(0, 30);
   }
 
+  function domHeaderLabel(cell) {
+    const visible = headerLabel(cell.textContent);
+    if (visible) return visible;
+    const fromAria = headerLabel(cell.getAttribute('aria-label') || '');
+    if (fromAria) return fromAria;
+    const suffix = String(cell.id || '').split('-').filter(Boolean).pop();
+    return suffix && suffix !== cell.id ? suffix : '';
+  }
+
   function snapshotHistory(doc) {
     const table = historyTable(doc);
     const info = doc.getElementById('table-inventory-history_info');
@@ -404,7 +439,7 @@
       };
     }
     const headerRows = [...table.querySelectorAll('thead tr')].map((tr) =>
-      [...tr.children].map((cell) => normalizeText(cell.textContent))
+      [...tr.children].map((cell) => domHeaderLabel(cell))
     );
     const headers =
       headerRows.find((row) => row.some((cell) => isLpnHeader(cell))) ||
@@ -539,7 +574,7 @@
     if (!api || typeof api.rows !== 'function' || typeof api.columns !== 'function') return null;
     try {
       const headerNodes = api.columns().header().toArray();
-      const headers = headerNodes.map((cell) => normalizeText(cell.textContent));
+      const headers = headerNodes.map((cell) => domHeaderLabel(cell));
       const indexes = api.rows({ order: 'current', search: 'applied' }).indexes().toArray();
       const rows = indexes.map((rowIndex) => cellsFromRowData(api.row(rowIndex).data(), headers));
       if (!rows.length) return null;
@@ -707,7 +742,8 @@
     }
     const apiRows = rowsFromDataTables(win);
     if (apiRows && apiRows.rows.length >= snap.rowCount) {
-      snap.headers = apiRows.headers.length ? apiRows.headers : snap.headers;
+      const apiHasLabel = apiRows.headers.some((header) => headerLabel(header));
+      if (apiHasLabel) snap.headers = apiRows.headers;
       snap.rows = apiRows.rows;
       snap.rowCount = apiRows.rows.length;
       snap.source = 'datatables';

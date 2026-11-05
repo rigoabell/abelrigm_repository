@@ -168,6 +168,55 @@ test("detects a sign-in page and a history section URL", () => {
   assert.match(core.snippetAround(html, "inventory-history", 80), /inventory-history/);
 });
 
+test("keeps the history date when DataTables leaves the header text empty", () => {
+  const blank = ["", "", "", "", "", "", "", "", "", "", "", "", "", ""];
+  const rows = [
+    ["2026-11-05 15:29:26", "R", "", "B0F8QP292C", "B0F8QP292C", "ZZPQSVPH4J", "LPNNJ6XPTRZJX", "1", "williejf"],
+    ["2026-11-05 15:10:39", "R", "", "B00002N6BA", "X003UKZRGP", "ZZPQTA6VKN", "LPNNJ6BR39P8R", "1", "williejf"],
+    ["2026-10-29 09:32:05", "R", "", "B000RUO5Y0", "X0045N4V5B", "ZZPRJ12M6X", "LPNNH6Q93ZCSL", "1", "williejf"],
+  ];
+  assert.deepEqual(core.recentLpnDetails(blank, rows, 3), [
+    { lpn: "LPNNJ6XPTRZJX", date: "2026-11-05 15:29:26" },
+    { lpn: "LPNNJ6BR39P8R", date: "2026-11-05 15:10:39" },
+    { lpn: "LPNNH6Q93ZCSL", date: "2026-10-29 09:32:05" },
+  ]);
+});
+
+test("reads Date and LPN from the sizing-row aria-label", () => {
+  const html = `
+    <table id="table-inventory-history">
+      <thead><tr style="height:0">
+        <th id="inventory-history-date" aria-label="Date (CST): activate to sort column ascending"></th>
+        <th id="inventory-history-op" aria-label="OP: activate to sort column ascending"></th>
+        <th id="inventory-history-lpn" aria-label="LPN: activate to sort column ascending"></th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td>2026-11-05 15:29:26</td><td>R</td>
+          <td><a href="/MEM3/results?s=LPNNJ6XPTRZJX">LPNNJ6XPTRZJX</a></td>
+        </tr>
+      </tbody>
+    </table>
+  `;
+  const parsed = core.parseHistoryTableHtml(html);
+  assert.deepEqual(parsed.headers.slice(0, 3), ["Date (CST)", "OP", "LPN"]);
+  assert.deepEqual(core.recentLpnDetails(parsed.headers, parsed.rows, 3), [
+    { lpn: "LPNNJ6XPTRZJX", date: "2026-11-05 15:29:26" },
+  ]);
+});
+
+test("ignores script names that only contain inventory-history", () => {
+  const html = `
+    J.declarative("inventory-history-search-button","click",function(){});
+    "inventory-history-nav"
+    <div data-url="/MEM3/sections/inventory-history?s=williejf"></div>
+  `;
+  assert.deepEqual(
+    core.discoverHistoryUrls(html, "https://qifcr.na.aftx.amazonoperations.app/MEM3/results?s=williejf"),
+    ["https://qifcr.na.aftx.amazonoperations.app/MEM3/sections/inventory-history?s=williejf"]
+  );
+});
+
 test("userscript header runs on any page and exposes copy debug", () => {
   assert.match(source, /@match\s+\*:\/\/\*\/\*/);
   assert.match(source, /@grant\s+GM_xmlhttpRequest/);
