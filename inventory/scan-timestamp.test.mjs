@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, dashboardHtml, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, dashboardHtml, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -218,5 +218,74 @@ assert.equal(reread[0].scannedAt, "2026-10-30 17:00:00");
 assert.equal(reread[2999].location, "EOS Assignment");
 assert.equal(reread[1].status, "Good");
 assert.equal(reread[5].status, "Alert");
+
+function eolRec(location, parent, container, units, scannedAt) {
+  return { location, parent, container, age: "1d", status: "Good", units, scannedAt };
+}
+const eolBook = api.eolWorkbook([
+  {
+    alias: "milesele",
+    records: [
+      eolRec("EOL 1", "rcCRetStations", "tsA", "4", "2026-11-05 11:14:04"),
+      eolRec("EOL 1", "rcCRetLane2", "tsB", "1", "2026-11-05 12:30:00"),
+      eolRec("L3 Even", "rcCRetStations", "tsLine", "9", "2026-11-05 11:00:00"),
+    ],
+  },
+  {
+    alias: "jkiearr",
+    records: [
+      eolRec("EOL 1", "rcCRetStations", "tsC", "2", "2026-11-05 09:00:00"),
+      eolRec("EOL 2", "rcCRetStations", "tsD", "6", "2026-11-05 13:05:00"),
+      eolRec("AR EOL", "rcCRetStations", "tsE", "3", "2026-11-05 12:29:59"),
+    ],
+  },
+]);
+assert.equal(eolBook.sheets[0].name, "Summary");
+assert.deepEqual(
+  [...eolBook.sheets.map((sheet) => sheet.name)],
+  ["Summary", "jkiearr", "milesele"]
+);
+const summary = eolBook.sheets[0];
+assert.equal(summary.rows[0][0], "1st Half Summary  ·  before 12:30 PM");
+assert.equal(summary.kinds[0], "title");
+assert.equal(summary.merges[0], "A1:E1");
+assert.deepEqual([...summary.rows[1]], ["EOL", "Dropzone", "Containers", "Units", "Percent"]);
+const firstLines = summary.rows.filter((row) => row[0] === "EOL 1" || row[0] === "AR EOL" || row[0] === "EOL 2");
+const firstEol1 = summary.rows.filter((row, index) => row[0] === "EOL 1" && index < summary.rows.findIndex((item) => String(item[0]).startsWith("2nd Half")));
+assert.deepEqual(
+  [...firstEol1.map((row) => [...row])],
+  [["EOL 1", "rcCRetStations", "2", "6", "100%"]]
+);
+const firstAr = summary.rows.filter((row, index) => row[0] === "AR EOL" && index < summary.rows.findIndex((item) => String(item[0]).startsWith("2nd Half")));
+assert.deepEqual([...firstAr.map((row) => [...row])], [["AR EOL", "rcCRetStations", "1", "3", "100%"]]);
+const secondStart = summary.rows.findIndex((row) => String(row[0]).startsWith("2nd Half"));
+const allStart = summary.rows.findIndex((row) => row[0] === "All Day Summary");
+const secondEol1 = summary.rows.slice(secondStart, allStart).filter((row) => row[0] === "EOL 1");
+assert.deepEqual([...secondEol1.map((row) => [...row])], [["EOL 1", "rcCRetLane2", "1", "1", "100%"]]);
+const allEol1 = summary.rows.slice(allStart).filter((row) => row[0] === "EOL 1");
+assert.deepEqual(
+  [...allEol1.map((row) => [...row])],
+  [
+    ["EOL 1", "rcCRetLane2", "1", "1", "33%"],
+    ["EOL 1", "rcCRetStations", "2", "6", "67%"],
+  ]
+);
+assert.equal(summary.rows.some((row) => row.join(" ").includes("jkiearr") || row.join(" ").includes("milesele")), false);
+assert.equal(summary.rows.some((row) => row[0] === "L3 Even"), false);
+const jkiearr = eolBook.sheets.find((sheet) => sheet.name === "jkiearr");
+assert.deepEqual(
+  [...jkiearr.rows.slice(1).map((row) => row[2])],
+  ["tsC", "tsD", "tsE"]
+);
+assert.equal(jkiearr.rows.some((row) => row[2] === "tsLine"), false);
+const packedEol = await api.workbookBytes(eolBook);
+const rereadEol = await api.workbookFromXlsx(packedEol);
+const rereadSummary = rereadEol.sheets.find((sheet) => sheet.name === "Summary");
+assert.ok(rereadSummary.rows.some((row) => String(row[0]).startsWith("1st Half Summary")));
+assert.ok(rereadSummary.rows.some((row) => row[0] === "All Day Summary"));
+assert.ok(rereadSummary.rows.some((row) => row[1] === "rcCRetStations" && row[4] === "67%"));
+const rereadPerson = api.recordsFromBook(rereadEol);
+assert.equal(rereadPerson.length, 5);
+assert.equal(firstLines.length > 0, true);
 
 console.log("scan timestamp tests passed");
