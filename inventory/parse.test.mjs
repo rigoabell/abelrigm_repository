@@ -156,6 +156,23 @@ assert.equal(scopedCorey.containers[0].bin, "bin-1");
 assert.equal(scopedCorey.approachingUnits, 1);
 assert.equal(scopedCorey.diotUnits, 0);
 assert.equal(scopedCorey.containers.some((row) => row.outer === "Dock B"), false);
+const dockOnly = query(whole, {
+  allow: { "Outer Location": new Set([dockA.id]) },
+  statuses: new Set(["approaching", "at", "diot"]),
+  groupings: [],
+});
+assert.deepEqual(dockOnly.containerTypes.map((row) => row.name), ["bin-"]);
+assert.equal(dockOnly.containerTypes[0].containers, 1);
+assert.equal(dockOnly.containerTypes[0].units, 1);
+const typeOnly = query(whole, {
+  containerType: "bin-",
+  statuses: new Set(["approaching", "at", "diot"]),
+  groupings: [],
+});
+assert.deepEqual(typeOnly.locations.map((row) => [row.name, row.containers, row.units]), [
+  ["Dock B", 1, 4],
+  ["Dock A", 1, 1],
+]);
 const site = {
   diotUnits: summary.status.diot.units,
   approachingUnits: summary.status.approaching.units,
