@@ -58,9 +58,9 @@
     "id": "apollo-audit-login-helper-29836",
     "name": "Apollo Audit Login Helper 29836 (abelrigm)",
     "category": "Apollo",
-    "summary": "Fill Apollo audit 29836 from a pasted QuickSight table.",
-    "detail": "Paste a QuickSight table of login, attribute, and percent. The panel fills audit 29836, completes the remaining fields, and can submit the audit.",
-    "version": "1.2.1",
+    "summary": "Fill Apollo audit 29836, with LPN 1–3 taken from the associate's inventory history.",
+    "detail": "Paste a QuickSight table of login, attribute, and percent. Run fills audit 29836 and loads the three newest unique LPNs from that associate's FC Research inventory history, then submits. A direct submit does the same history lookup instead of inventing LPNs.",
+    "version": "1.3.0",
     "runsOn": "apollo-audit.corp.amazon.com",
     "file": "downloads/apollo-audit-login-helper-29836.txt",
     "downloadName": "Apollo Audit Login Helper 29836 (abelrigm).txt"
@@ -207,6 +207,17 @@
     "runsOn": "qi-fcresearch-na.corp.amazon.com",
     "file": "downloads/mem3-lpn-batch-extractor.txt",
     "downloadName": "MEM3 LPN Batch Extractor (abelrigm).txt"
+  },
+  {
+    "id": "recent-login-lpns",
+    "name": "Recent Login LPNs (abelrigm)",
+    "category": "FC Research",
+    "summary": "Enter a login and get that person's three most recent unique LPNs.",
+    "detail": "A small Run button on any page. Type a login and the script reads Inventory History on FC Research in the background, then lists the three newest unique LPNs. Copy takes the LPNs. Copy debug copies a trace when the table does not parse.",
+    "version": "1.0.1",
+    "runsOn": "Any page. Looks up qifcr.na.aftx.amazonoperations.app and the other FC Research hosts.",
+    "file": "downloads/recent-login-lpns.txt",
+    "downloadName": "Recent Login LPNs (abelrigm).txt"
   },
   {
     "id": "amazon-login-photo-lookup",

@@ -1,17 +1,34 @@
 // ==UserScript==
 // @name         Apollo Audit Login Helper 29836 (abelrigm)
 // @namespace    https://apollo-audit.corp.amazon.com/
-// @version      1.2.1
-// @description  Runner panel for Apollo audit 29836 — paste QuickSight table (login/attribute/%), random fill remaining fields, optional auto-submit.
+// @version      1.3.0
+// @description  Audit 29836 desk. Paste a QuickSight queue, fill the audit, and load LPN 1–3 from that associate's FC Research inventory history.
 // @match        https://apollo-audit.corp.amazon.com/audits/new*
-// @grant        none
-// @run-at       document-idle
+// @match        https://qifcr.na.aftx.amazonoperations.app/*
+// @match        https://qifcr.eu.aftx.amazonoperations.app/*
+// @match        https://qifcr.fe.aftx.amazonoperations.app/*
+// @match        https://qi-fcresearch-na.corp.amazon.com/*
+// @match        https://qi-fcresearch-eu.corp.amazon.com/*
+// @match        https://qi-fcresearch-fe.corp.amazon.com/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_openInTab
+// @grant        GM_addValueChangeListener
+// @grant        GM_removeValueChangeListener
+// @connect      qifcr.na.aftx.amazonoperations.app
+// @connect      qifcr.eu.aftx.amazonoperations.app
+// @connect      qifcr.fe.aftx.amazonoperations.app
+// @connect      qi-fcresearch-na.corp.amazon.com
+// @connect      qi-fcresearch-eu.corp.amazon.com
+// @connect      qi-fcresearch-fe.corp.amazon.com
+// @noframes
+// @run-at       document-start
 // ==/UserScript==
 
 (function () {
   "use strict";
 
-  const SCRIPT = { name: "Apollo Audit Login Helper 29836", version: "1.2.1" };
+  const SCRIPT = { name: "Apollo Audit Login Helper 29836", version: "1.3.0" };
   const STORAGE_KEY = "apolloAuditSavedLogins29836";
   const ENGAGEMENT_NOTES_STORAGE_KEY = "apolloAuditSavedEngagementNotes29836";
   const ASSOCIATE_COMMENTS_STORAGE_KEY = "apolloAuditSavedAssociateComments29836";
@@ -25,6 +42,11 @@
     lastError: null,
     lastPaste: null,
     lastFill: null,
+    lastHistory: null,
+    applied: null,
+    allowSubmit: false,
+    running: false,
+    submitTimer: 0,
   };
 
   /** Set true when ready for hands-off submit after RUN. */
@@ -43,8 +65,42 @@
     "audit_properties_LPN 3",
   ];
 
-  const LPN_PREFIX = "LPNN";
-  const LPN_RANDOM_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const HISTORY_JOB_KEY = "apollo29836LpnJob";
+  const HISTORY_MARK = "apollo29836LpnWorker";
+  const HISTORY_ORIGIN_KEY = "apollo29836HistoryOrigin";
+  const HISTORY_SITE_KEY = "apollo29836HistorySite";
+  const DEFAULT_HISTORY_ORIGIN = "https://qifcr.na.aftx.amazonoperations.app";
+  const DEFAULT_HISTORY_SITE = "MEM3";
+  const HISTORY_ORIGINS = [
+    ["https://qifcr.na.aftx.amazonoperations.app", "qifcr NA"],
+    ["https://qifcr.eu.aftx.amazonoperations.app", "qifcr EU"],
+    ["https://qifcr.fe.aftx.amazonoperations.app", "qifcr FE"],
+    ["https://qi-fcresearch-na.corp.amazon.com", "fcresearch NA"],
+    ["https://qi-fcresearch-eu.corp.amazon.com", "fcresearch EU"],
+    ["https://qi-fcresearch-fe.corp.amazon.com", "fcresearch FE"],
+  ];
+
+  function readHistoryJobId() {
+    try {
+      return new URLSearchParams(location.hash.replace(/^#/, "")).get("apollo29836-lpn") || "";
+    } catch (error) {
+      return "";
+    }
+  }
+
+  const earlyHistoryJobId = readHistoryJobId();
+  if (earlyHistoryJobId) {
+    try {
+      sessionStorage.setItem(HISTORY_MARK, earlyHistoryJobId);
+    } catch (error) {
+      // The hash is still checked if storage is blocked.
+    }
+    try {
+      history.replaceState(null, "", `${location.pathname}${location.search}`);
+    } catch (error) {
+      // Keeping the hash is enough to recognize this tab.
+    }
+  }
 
   const OPPORTUNITIES = [
     {
@@ -132,6 +188,7 @@
             login: normalized,
             audited: Boolean(entry.audited),
             attributes: normalizeStoredAttributes(entry.attributes),
+            lpns: normalizeStoredLpns(entry.lpns),
           };
         })
         .filter(Boolean);
@@ -143,6 +200,95 @@
 
   function saveLogins(logins) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(logins));
+  }
+
+  function normalizeStoredLpns(value) {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    return value
+      .map((item) => {
+        if (typeof item === "string") {
+          const lpn = item.trim().toUpperCase();
+          return lpn ? { lpn, date: "" } : null;
+        }
+        const lpn = String(item?.lpn || "").trim().toUpperCase();
+        if (!lpn) {
+          return null;
+        }
+        return { lpn, date: String(item?.date || "").trim() };
+      })
+      .filter(Boolean);
+  }
+
+  /* core:start */
+  function headerLabel(value) {
+    return String(value || "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/\s*:\s*activate to sort[\s\S]*$/i, "");
+  }
+
+  function isLpnHeader(value) {
+    const text = headerLabel(value).toLowerCase();
+    return text === "lpn" || /^lpn\b/.test(text);
+  }
+
+  function lpnColumn(headers) {
+    const index = (headers || []).findIndex((header) => isLpnHeader(header));
+    return index >= 0 ? index : 6;
+  }
+
+  function looksLikeLpn(value) {
+    return /^LPN[A-Z0-9]+$/.test(String(value || "").replace(/\s+/g, "").toUpperCase());
+  }
+
+  function uniqueRecentLpns(headers, rows, limit) {
+    const column = lpnColumn(headers);
+    const max = Number.isFinite(limit) ? limit : Infinity;
+    const seen = new Set();
+    const lpns = [];
+    for (const row of rows || []) {
+      const lpn = String(row[column] || "").replace(/\s+/g, " ").trim().toUpperCase();
+      if (!looksLikeLpn(lpn) || seen.has(lpn)) {
+        continue;
+      }
+      seen.add(lpn);
+      lpns.push(lpn);
+      if (lpns.length >= max) {
+        break;
+      }
+    }
+    return lpns;
+  }
+
+  function recentLpnDetails(headers, rows, limit) {
+    const column = lpnColumn(headers);
+    let dateColumn = (headers || []).findIndex((header) => /^date\b/i.test(headerLabel(header)));
+    if (dateColumn < 0) {
+      const dated = (rows || []).some((cells) => /^\d{4}-\d{2}-\d{2}\b/.test(String(cells && cells[0] || "").trim()));
+      dateColumn = dated ? 0 : -1;
+    }
+    return uniqueRecentLpns(headers, rows, limit).map((lpn) => {
+      const row = (rows || []).find((cells) => String(cells[column] || "").replace(/\s+/g, " ").trim().toUpperCase() === lpn);
+      const date = dateColumn >= 0 && row ? String(row[dateColumn] || "").replace(/\s+/g, " ").trim() : "";
+      return { lpn, date };
+    });
+  }
+  /* core:end */
+
+  function domHeaderLabel(cell) {
+    const visible = headerLabel(cell.textContent);
+    if (visible) {
+      return visible;
+    }
+    const fromAria = headerLabel(cell.getAttribute("aria-label") || "");
+    if (fromAria) {
+      return fromAria;
+    }
+    const suffix = String(cell.id || "").split("-").filter(Boolean).pop();
+    return suffix && suffix !== cell.id ? suffix : "";
   }
 
   function normalizeStoredAttributes(value) {
@@ -276,25 +422,31 @@
     return setSelectValue(selectId, randomValue);
   }
 
-  function randomFromChars(length) {
-    let value = "";
-
-    for (let index = 0; index < length; index += 1) {
-      const randomIndex = Math.floor(Math.random() * LPN_RANDOM_CHARS.length);
-      value += LPN_RANDOM_CHARS[randomIndex];
-    }
-
-    return value;
-  }
-
-  function generateRandomLpn() {
-    return `${LPN_PREFIX}${randomFromChars(9)}`;
-  }
-
-  function fillRandomLpns() {
-    LPN_INPUT_IDS.forEach((inputId) => {
-      setInputValueById(inputId, generateRandomLpn());
+  function fillHistoryLpns(details) {
+    LPN_INPUT_IDS.forEach((inputId, index) => {
+      const item = details[index];
+      setInputValueById(inputId, item ? item.lpn : "");
     });
+  }
+
+  function rememberLpns(login, details) {
+    const normalized = normalizeLogin(login);
+    if (!normalized) {
+      return;
+    }
+    const lpns = normalizeStoredLpns(details);
+    const updated = loadLogins().map((entry) => {
+      if (entry.login !== normalized) {
+        return entry;
+      }
+      return {
+        login: entry.login,
+        audited: entry.audited,
+        attributes: normalizeStoredAttributes(entry.attributes),
+        lpns,
+      };
+    });
+    saveLogins(updated);
   }
 
   function setCheckboxChecked(checkboxId, checked) {
@@ -419,7 +571,6 @@
     const opportunities = entry?.attributes?.length
       ? fillOpportunitiesFromAttributes(entry.attributes)
       : { source: "random", selected: fillRandomOpportunities() };
-    fillRandomLpns();
     fillRandomEngagementNotes();
     fillRandomAssociateComments();
     return opportunities;
@@ -489,6 +640,7 @@
         login,
         audited: false,
         attributes,
+        lpns: [],
       });
       added += 1;
     });
@@ -658,6 +810,7 @@
         login: entry.login,
         audited: Boolean(audited),
         attributes: normalizeStoredAttributes(entry.attributes),
+        lpns: normalizeStoredLpns(entry.lpns),
       };
     });
 
@@ -754,6 +907,7 @@
       },
       lastPaste: STATE.lastPaste,
       lastFill: STATE.lastFill,
+      lastHistory: STATE.lastHistory,
       fields: snapshotFormFields(),
       recent: STATE.diagLog.slice(-40),
     };
@@ -777,169 +931,136 @@
   }
 
   function buildStyles() {
-    const style = document.createElement("style");
-    style.textContent = `
-      #${PANEL_ID} {
+    return `
+      :host {
+        all: initial;
         position: fixed;
-        top: 96px;
+        top: 16px;
         right: 16px;
-        width: 280px;
-        max-height: calc(100vh - 120px);
-        z-index: 99999;
-        background: #ffffff;
-        color: #111827;
-        border: 1px solid #d1d5db;
-        border-radius: 12px;
-        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.15);
-        font: 13px/1.4 Arial, sans-serif;
-      }
-
-      #${PANEL_ID} * {
-        box-sizing: border-box;
-      }
-
-      #${PANEL_ID} .apollo-helper-header {
-        padding: 12px 14px 8px;
-        border-bottom: 1px solid #e5e7eb;
-      }
-
-      #${PANEL_ID} .apollo-helper-title {
-        margin: 0;
-        font-size: 14px;
-        font-weight: 700;
-      }
-
-      #${PANEL_ID} .apollo-helper-subtitle {
-        margin: 4px 0 0;
-        color: #6b7280;
-        font-size: 12px;
-      }
-
-      #${PANEL_ID} .apollo-helper-progress {
-        margin: 6px 0 0;
-        color: #111827;
-        font-size: 12px;
-        font-weight: 700;
-      }
-
-      #${PANEL_ID} .apollo-helper-mode {
-        margin: 4px 0 0;
-        color: #92400e;
-        font-size: 11px;
-      }
-
-      #${PANEL_ID} button,
-      #${PANEL_ID} input,
-      #${PANEL_ID} textarea {
-        font: inherit;
-      }
-
-      #${PANEL_ID} .apollo-helper-input,
-      #${PANEL_ID} .apollo-helper-textarea {
-        width: calc(100% - 28px);
-        margin: 12px 14px 10px;
-        padding: 8px 10px;
-        border: 1px solid #cbd5e1;
-        border-radius: 8px;
-      }
-
-      #${PANEL_ID} .apollo-helper-field-label {
+        z-index: 2147483646;
+        width: 360px;
+        height: min(760px, calc(100vh - 32px));
         display: block;
-        margin: 0 14px 4px;
-        color: #6b7280;
+        color-scheme: light;
+      }
+      .desk {
+        height: 100%;
+        overflow: auto;
+        display: flex;
+        flex-direction: column;
+        background: #f4f0e8;
+        color: #1c1917;
+        border: 1px solid #e7e0d4;
+        border-radius: 18px;
+        box-shadow: 0 18px 50px rgba(28, 25, 23, 0.18);
+        font: 13px/1.4 "Segoe UI", sans-serif;
+      }
+      .desk * { box-sizing: border-box; }
+      .desk button, .desk input, .desk textarea, .desk select { font: inherit; color: inherit; }
+      .top {
+        padding: 16px 16px 12px;
+        background: #1c1917;
+        color: #faf7f2;
+      }
+      .eyebrow {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 11px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: #d6d3d1;
+      }
+      .apollo-helper-progress { font-weight: 700; color: #fdba74; letter-spacing: 0.04em; }
+      h2 { margin: 6px 0 0; font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
+      .lede { margin: 4px 0 10px; color: #d6d3d1; font-size: 12px; }
+      .bar { height: 4px; border-radius: 999px; background: #44403c; overflow: hidden; }
+      .bar > span { display: block; height: 100%; width: 0; background: #f97316; }
+      .apollo-helper-mode { margin-top: 8px; font-size: 11px; color: #a8a29e; }
+      .next, .queue, details { padding: 12px 14px; }
+      .next { background: #fffdf8; border-bottom: 1px solid #e7e0d4; }
+      .kicker {
         font-size: 11px;
         font-weight: 700;
+        letter-spacing: 0.08em;
         text-transform: uppercase;
-        letter-spacing: 0.04em;
+        color: #78716c;
       }
-
-      #${PANEL_ID} .apollo-helper-textarea {
-        min-height: 72px;
-        margin-top: 0;
-        resize: vertical;
-      }
-
-      #${PANEL_ID} .apollo-helper-textarea + .apollo-helper-field-label,
-      #${PANEL_ID} .apollo-helper-engagement-notes + .apollo-helper-field-label {
-        margin-top: 8px;
-      }
-
-      #${PANEL_ID} .apollo-helper-button {
-        width: calc(100% - 28px);
-        margin: 0 14px 12px;
-        padding: 8px 10px;
-        border: 1px solid #cbd5e1;
+      .apollo-helper-next { margin-top: 4px; font-size: 18px; font-weight: 700; }
+      .apollo-helper-next-meta { margin-top: 2px; color: #57534e; font-size: 12px; }
+      .apollo-helper-lpns { list-style: none; margin: 10px 0; padding: 0; display: grid; gap: 4px; }
+      .apollo-helper-lpns li {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 6px 8px;
         border-radius: 8px;
-        background: #f8fafc;
-        color: #111827;
+        background: #fff7ed;
+        border: 1px solid #fed7aa;
+        font-family: Consolas, monospace;
+        font-size: 12px;
+      }
+      .apollo-helper-lpns .when { color: #9a3412; font-family: "Segoe UI", sans-serif; font-size: 11px; }
+      .apollo-helper-run {
+        width: 100%;
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: #c2410c;
+        color: #fff;
+        font-weight: 700;
         cursor: pointer;
       }
-
-      #${PANEL_ID} .apollo-helper-button.apollo-helper-run {
-        background: #2563eb;
-        border-color: #2563eb;
-        color: #ffffff;
+      .apollo-helper-run:disabled { opacity: 0.6; cursor: wait; }
+      .apollo-helper-status { min-height: 16px; margin-top: 8px; font-size: 12px; color: #57534e; }
+      .apollo-helper-status.is-ok { color: #047857; }
+      .apollo-helper-status.is-error { color: #b91c1c; }
+      .apollo-helper-status.is-busy { color: #c2410c; }
+      .queue { padding-top: 8px; }
+      .apollo-helper-list { display: grid; gap: 6px; margin-top: 8px; }
+      .apollo-helper-item {
+        padding: 8px 10px;
+        border-radius: 10px;
+        background: #fff;
+        border: 1px solid #e7e0d4;
       }
-
-      #${PANEL_ID} .apollo-helper-button.apollo-helper-copy {
-        margin-bottom: 8px;
+      .apollo-helper-item.is-current { border-color: #c2410c; background: #fff7ed; }
+      .apollo-helper-item.is-done { opacity: 0.72; }
+      .apollo-helper-login { font-weight: 700; cursor: pointer; }
+      .apollo-helper-state { margin-top: 2px; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: #78716c; }
+      .apollo-helper-attrs, .mini-lpns { margin-top: 3px; font-size: 11px; color: #9a3412; word-break: break-word; }
+      details { border-top: 1px solid #e7e0d4; }
+      details summary { cursor: pointer; font-weight: 700; }
+      .apollo-helper-input, .apollo-helper-textarea, .origin-row select, .origin-row input {
+        width: 100%;
+        margin-top: 8px;
+        padding: 8px 10px;
+        border: 1px solid #d6d3d1;
+        border-radius: 8px;
+        background: #fff;
       }
-
-      #${PANEL_ID} .apollo-helper-list {
-        max-height: calc(100vh - 520px);
-        overflow-y: auto;
+      .apollo-helper-input, .apollo-helper-textarea { min-height: 72px; resize: vertical; font-family: Consolas, monospace; }
+      .field-label { display: block; margin-top: 8px; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: #78716c; }
+      .origin-row { display: flex; gap: 8px; }
+      .origin-row select { flex: 1; }
+      .origin-row input { width: 84px; text-transform: uppercase; }
+      .apollo-helper-add, .foot button {
+        border: 1px solid #d6d3d1;
+        background: #fff;
+        border-radius: 8px;
+        padding: 7px 10px;
+        cursor: pointer;
+      }
+      .apollo-helper-add { margin-top: 8px; }
+      .foot {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
         padding: 0 14px 14px;
       }
-
-      #${PANEL_ID} .apollo-helper-item {
-        padding: 8px 10px;
-        border: 1px solid #e5e7eb;
-        border-radius: 8px;
-        margin-bottom: 8px;
-        background: #f8fafc;
-      }
-
-      #${PANEL_ID} .apollo-helper-item.is-current {
-        border-color: #2563eb;
-        background: #eff6ff;
-      }
-
-      #${PANEL_ID} .apollo-helper-login {
-        cursor: pointer;
-        font-weight: 700;
-      }
-
-      #${PANEL_ID} .apollo-helper-state {
-        margin-top: 4px;
-        color: #6b7280;
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-      }
-
-      #${PANEL_ID} .apollo-helper-attrs {
-        margin-top: 4px;
-        color: #1e3a8a;
-        font-size: 11px;
-        font-weight: 600;
-        text-transform: none;
-        letter-spacing: 0;
-        word-break: break-word;
-      }
-
-      #${PANEL_ID} .apollo-helper-input {
-        min-height: 72px;
-        resize: vertical;
-        font-family: Consolas, "Courier New", monospace;
-      }
-
-      #${PANEL_ID} .apollo-helper-button.apollo-helper-debug {
-        background: #f59e0b;
-        border-color: #d97706;
-        color: #111827;
-      }
+      .foot button { font-size: 12px; }
+      .apollo-helper-clear { color: #b91c1c; }
     `;
-    document.head.appendChild(style);
   }
 
   function renderPanel(panel) {
@@ -953,6 +1074,39 @@
     progress.textContent = totalCount
       ? `${auditedCount} / ${totalCount} audited`
       : "0 / 0 audited";
+    const bar = panel.querySelector(".bar > span");
+    if (bar) {
+      bar.style.width = totalCount ? `${Math.round((auditedCount / totalCount) * 100)}%` : "0%";
+    }
+
+    const next = getNextUnauditedLogin();
+    const nextName = panel.querySelector(".apollo-helper-next");
+    const nextMeta = panel.querySelector(".apollo-helper-next-meta");
+    const lpnList = panel.querySelector(".apollo-helper-lpns");
+    if (nextName) {
+      nextName.textContent = next ? next.login : "Queue clear";
+    }
+    if (nextMeta) {
+      const attributes = next ? normalizeStoredAttributes(next.attributes) : [];
+      nextMeta.textContent = next
+        ? (attributes.length ? attributes.map((row) => row.attribute).join(", ") : "No QuickSight attributes")
+        : "Paste the next QuickSight table to continue.";
+    }
+    if (lpnList) {
+      lpnList.textContent = "";
+      const details = next ? normalizeStoredLpns(next.lpns) : [];
+      const shown = details.length ? details : [{ lpn: "LPN 1", date: "" }, { lpn: "LPN 2", date: "" }, { lpn: "LPN 3", date: "" }];
+      shown.slice(0, 3).forEach((item, index) => {
+        const li = document.createElement("li");
+        const name = document.createElement("span");
+        name.textContent = details.length ? item.lpn : `LPN ${index + 1}`;
+        const when = document.createElement("span");
+        when.className = "when";
+        when.textContent = details.length ? (item.date || "history") : "from history";
+        li.append(name, when);
+        lpnList.appendChild(li);
+      });
+    }
 
     list.textContent = "";
 
@@ -967,6 +1121,9 @@
         item.className = "apollo-helper-item";
         if (entry.login === currentLogin) {
           item.classList.add("is-current");
+        }
+        if (entry.audited) {
+          item.classList.add("is-done");
         }
 
         const loginLine = document.createElement("div");
@@ -989,10 +1146,364 @@
             .join(" · ");
           item.appendChild(attrLine);
         }
+        const lpns = normalizeStoredLpns(entry.lpns);
+        if (lpns.length) {
+          const lpnLine = document.createElement("div");
+          lpnLine.className = "mini-lpns";
+          lpnLine.textContent = lpns.map((item) => item.lpn).join(" · ");
+          item.appendChild(lpnLine);
+        }
 
         list.appendChild(item);
       });
     }
+  }
+
+  function gmGetValue(key, fallback) {
+    try {
+      if (typeof GM_getValue === "function") {
+        return GM_getValue(key, fallback);
+      }
+    } catch (error) {
+      // Storage is optional. The panel still runs.
+    }
+    return fallback;
+  }
+
+  function gmSetValue(key, value) {
+    try {
+      if (typeof GM_setValue === "function") {
+        GM_setValue(key, value);
+      }
+    } catch (error) {
+      // Ignore storage failures.
+    }
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  function loadHistoryOrigin() {
+    return localStorage.getItem(HISTORY_ORIGIN_KEY) || DEFAULT_HISTORY_ORIGIN;
+  }
+
+  function loadHistorySite() {
+    return (localStorage.getItem(HISTORY_SITE_KEY) || DEFAULT_HISTORY_SITE).toUpperCase();
+  }
+
+  function historyRequestUrl(login) {
+    const origin = String(loadHistoryOrigin() || DEFAULT_HISTORY_ORIGIN).replace(/\/+$/, "");
+    const site = encodeURIComponent(loadHistorySite() || DEFAULT_HISTORY_SITE);
+    return `${origin}/${site}/results?s=${encodeURIComponent(normalizeLogin(login))}`;
+  }
+
+  function snapshotHistoryTable(doc) {
+    const table = doc.getElementById("table-inventory-history");
+    const info = doc.getElementById("table-inventory-history_info");
+    const infoText = headerLabel(info ? info.textContent : "");
+    if (!table) {
+      return { tableFound: false, headers: [], rows: [], rowCount: 0, infoText, emptyMessage: "", processing: false };
+    }
+    const processingEl = doc.querySelector("#table-inventory-history_processing");
+    let processing = false;
+    if (processingEl && doc.defaultView && doc.defaultView.getComputedStyle) {
+      const style = doc.defaultView.getComputedStyle(processingEl);
+      processing = style.display !== "none" && style.visibility !== "hidden";
+    }
+    const headerRows = [...table.querySelectorAll("thead tr")].map((tr) =>
+      [...tr.children].map((cell) => domHeaderLabel(cell))
+    );
+    const headers = headerRows.find((row) => row.some((cell) => isLpnHeader(cell))) || headerRows[headerRows.length - 1] || [];
+    const rows = [];
+    let emptyMessage = "";
+    for (const tr of table.querySelectorAll("tbody tr")) {
+      const cells = [...tr.children].filter((el) => el.tagName === "TD").map((td) => headerLabel(td.textContent));
+      const joined = cells.join(" ").toLowerCase();
+      if (tr.querySelector("td.dataTables_empty, .dataTables_empty") || /no matching records|no data available/.test(joined)) {
+        emptyMessage = cells.join(" ").trim();
+        continue;
+      }
+      if (cells.filter(Boolean).length < 2) {
+        continue;
+      }
+      rows.push(cells);
+    }
+    if (!emptyMessage && (/of 0 entries/i.test(infoText) || /showing 0 to 0/i.test(infoText))) {
+      emptyMessage = infoText;
+    }
+    return { tableFound: true, headers, rows, rowCount: rows.length, infoText, emptyMessage, processing };
+  }
+
+  function scrollHistoryTable(doc, win) {
+    try {
+      const table = doc.getElementById("table-inventory-history");
+      const section = doc.querySelector('[data-section-type="inventory-history"]') || table;
+      if (section && win) {
+        const top = section.getBoundingClientRect().top + (win.scrollY || win.pageYOffset || 0);
+        win.scrollTo(0, Math.max(0, top - 40));
+      }
+    } catch (error) {
+      // Scrolling only nudges a lazy section into view.
+    }
+  }
+
+  async function waitForHistoryTable(doc, win, timeoutMs) {
+    const started = Date.now();
+    let lastKey = "";
+    let stableSince = 0;
+    let latest = snapshotHistoryTable(doc);
+    while (Date.now() - started < timeoutMs) {
+      scrollHistoryTable(doc, win);
+      latest = snapshotHistoryTable(doc);
+      const key = [latest.tableFound, latest.processing, latest.rowCount, latest.emptyMessage, latest.infoText].join("|");
+      const ready = latest.tableFound && !latest.processing && (latest.rowCount > 0 || latest.emptyMessage);
+      if (ready && key === lastKey && Date.now() - stableSince >= 700) {
+        latest.stable = true;
+        return latest;
+      }
+      if (key !== lastKey) {
+        stableSince = Date.now();
+      }
+      lastKey = key;
+      await sleep(200);
+    }
+    latest.stable = false;
+    return latest;
+  }
+
+  function historyResultFromSnapshot(snap) {
+    const details = recentLpnDetails(snap.headers, snap.rows, 3);
+    const lpns = details.map((item) => item.lpn);
+    const empty = Boolean(snap.stable && snap.tableFound && snap.rowCount === 0 && snap.emptyMessage);
+    return {
+      lpns,
+      details,
+      empty,
+      settled: lpns.length > 0 || empty,
+      error: lpns.length || empty ? "" : "Inventory history did not finish loading.",
+      report: {
+        tableFound: snap.tableFound,
+        stable: Boolean(snap.stable),
+        headers: snap.headers,
+        rowCount: snap.rowCount,
+        infoText: snap.infoText,
+        emptyMessage: snap.emptyMessage,
+        sampleRows: (snap.rows || []).slice(0, 4),
+      },
+    };
+  }
+
+  function clearHistoryMark() {
+    try {
+      sessionStorage.removeItem(HISTORY_MARK);
+    } catch (error) {
+      // The opener closes this tab too.
+    }
+  }
+
+  function pageMatchesHistoryJob(job) {
+    try {
+      const wanted = new URL(job.requestUrl);
+      if (location.origin !== wanted.origin) {
+        return false;
+      }
+      const herePath = location.pathname.replace(/\/+$/, "").toUpperCase();
+      const wantedPath = wanted.pathname.replace(/\/+$/, "").toUpperCase();
+      if (herePath !== wantedPath) {
+        return false;
+      }
+      const hereLogin = (new URLSearchParams(location.search).get("s") || "").toLowerCase();
+      const wantedLogin = (wanted.searchParams.get("s") || "").toLowerCase();
+      return hereLogin === wantedLogin;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  async function widenHistoryRange() {
+    const section = document.querySelector('[data-section-type="inventory-history"]');
+    const start = document.getElementById("searchStart");
+    const end = document.getElementById("searchEnd");
+    if (!section || !start || !end) {
+      return false;
+    }
+    const button = [...section.querySelectorAll("button, input[type='submit'], input[type='button'], a")].find((node) => {
+      return headerLabel(node.value || node.textContent).toLowerCase() === "search";
+    });
+    if (!button) {
+      return false;
+    }
+    const startOn = new Date();
+    startOn.setDate(startOn.getDate() - 180);
+    const pad = (value) => String(value).padStart(2, "0");
+    const format = (date) => `${pad(date.getMonth() + 1)}/${pad(date.getDate())}/${date.getFullYear()}`;
+    start.value = format(startOn);
+    end.value = format(new Date());
+    start.dispatchEvent(new Event("change", { bubbles: true }));
+    end.dispatchEvent(new Event("change", { bubbles: true }));
+    button.click();
+    await sleep(400);
+    return true;
+  }
+
+  function rememberedHistoryJob() {
+    let stored = "";
+    try {
+      stored = sessionStorage.getItem(HISTORY_MARK) || "";
+    } catch (error) {
+      stored = "";
+    }
+    const id = earlyHistoryJobId || stored || readHistoryJobId();
+    if (!id) {
+      return null;
+    }
+    const job = gmGetValue(HISTORY_JOB_KEY, null);
+    if (!job || job.id !== id || Date.now() - job.createdAt > 120000) {
+      clearHistoryMark();
+      return null;
+    }
+    if (job.status !== "pending" && job.status !== "running") {
+      clearHistoryMark();
+      return null;
+    }
+    if (!pageMatchesHistoryJob(job)) {
+      return null;
+    }
+    return job;
+  }
+
+  async function fulfillHistoryJob(job) {
+    gmSetValue(HISTORY_JOB_KEY, { ...job, status: "running", updatedAt: Date.now() });
+    let result;
+    try {
+      const snap = await waitForHistoryTable(document, window, 40000);
+      result = historyResultFromSnapshot(snap);
+      if (result.empty) {
+        const widened = await widenHistoryRange();
+        if (widened) {
+          const next = await waitForHistoryTable(document, window, 20000);
+          const widenedResult = historyResultFromSnapshot(next);
+          widenedResult.report = { ...(widenedResult.report || {}), widened: true };
+          result = widenedResult;
+        }
+      }
+    } catch (error) {
+      result = { lpns: [], details: [], empty: false, settled: false, error: String(error?.message || error), report: null };
+    }
+    gmSetValue(HISTORY_JOB_KEY, {
+      ...job,
+      status: result.lpns.length || result.settled ? "done" : "error",
+      result,
+      updatedAt: Date.now(),
+    });
+    clearHistoryMark();
+    window.setTimeout(() => {
+      try {
+        window.close();
+      } catch (error) {
+        // The opener closes the tab if this one stays open.
+      }
+    }, 250);
+  }
+
+  function fetchAssociateHistory(login) {
+    const requestUrl = historyRequestUrl(login);
+    if (typeof GM_openInTab !== "function" || typeof GM_getValue !== "function") {
+      return Promise.resolve({
+        lpns: [],
+        details: [],
+        error: "Tampermonkey storage is required to read inventory history. Reinstall the script so the grants apply.",
+        report: null,
+      });
+    }
+    return new Promise((resolve) => {
+      const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const job = { id, status: "pending", requestUrl, createdAt: Date.now(), result: null };
+      gmSetValue(HISTORY_JOB_KEY, job);
+      const url = new URL(requestUrl);
+      url.hash = `apollo29836-lpn=${encodeURIComponent(id)}`;
+      let tab = null;
+      try {
+        tab = GM_openInTab(url.toString(), { active: false, insert: true, setParent: true });
+      } catch (error) {
+        resolve({ lpns: [], details: [], error: String(error?.message || error), report: null });
+        return;
+      }
+      let settled = false;
+      let listenerId = null;
+      const timer = window.setTimeout(() => finish({
+        lpns: [],
+        details: [],
+        error: "Timed out waiting for inventory history.",
+        report: null,
+      }), 45000);
+
+      function finish(result) {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        window.clearTimeout(timer);
+        window.clearInterval(poll);
+        if (listenerId != null && typeof GM_removeValueChangeListener === "function") {
+          try {
+            GM_removeValueChangeListener(listenerId);
+          } catch (error) {
+            // The listener goes away with the page.
+          }
+        }
+        if (tab && typeof tab.close === "function") {
+          try {
+            tab.close();
+          } catch (error) {
+            // The worker tab closes itself.
+          }
+        }
+        resolve(result);
+      }
+
+      function consider(value) {
+        if (!value || value.id !== id) {
+          return;
+        }
+        if (value.status === "done" || value.status === "error") {
+          finish(value.result || { lpns: [], details: [], error: "Inventory history returned no result.", report: null });
+        }
+      }
+
+      if (typeof GM_addValueChangeListener === "function") {
+        try {
+          listenerId = GM_addValueChangeListener(HISTORY_JOB_KEY, (_name, _oldValue, value) => consider(value));
+        } catch (error) {
+          listenerId = null;
+        }
+      }
+      const poll = window.setInterval(() => consider(gmGetValue(HISTORY_JOB_KEY, null)), 400);
+    });
+  }
+
+  function readFilledLpns() {
+    return LPN_INPUT_IDS.map((id) => String(document.getElementById(id)?.value || "").trim().toUpperCase());
+  }
+
+  function historyAlreadyApplied(login) {
+    if (!STATE.applied || STATE.applied.login !== normalizeLogin(login)) {
+      return false;
+    }
+    const filled = readFilledLpns();
+    return STATE.applied.lpns.length > 0 && STATE.applied.lpns.every((lpn, index) => filled[index] === lpn);
+  }
+
+  function setStatus(panel, message, kind) {
+    const status = panel.querySelector(".apollo-helper-status");
+    if (!status) {
+      return;
+    }
+    status.textContent = message;
+    status.classList.toggle("is-ok", kind === "ok");
+    status.classList.toggle("is-error", kind === "error");
+    status.classList.toggle("is-busy", kind === "busy");
   }
 
   function hookFormAutosave(panel) {
@@ -1002,15 +1513,66 @@
     }
 
     submitButton.dataset[SUBMIT_HOOK_FLAG] = "true";
-    submitButton.addEventListener("click", () => {
-      const loginInput = getLoginInput();
-      if (loginInput && normalizeLogin(loginInput.value)) {
-        addLogin(loginInput.value);
-        markLoginAudited(loginInput.value, true);
-        diag("marked audited", { login: normalizeLogin(loginInput.value) });
-        renderPanel(panel);
+    submitButton.addEventListener(
+      "click",
+      (event) => {
+        const login = normalizeLogin(getLoginInput()?.value);
+        if (!login) {
+          return;
+        }
+        if (STATE.allowSubmit) {
+          STATE.allowSubmit = false;
+          addLogin(login);
+          markLoginAudited(login, true);
+          diag("marked audited", { login, lpns: STATE.applied?.lpns || readFilledLpns() });
+          renderPanel(panel);
+          return;
+        }
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (STATE.running) {
+          setStatus(panel, "Still reading inventory history…", "busy");
+          return;
+        }
+        if (historyAlreadyApplied(login)) {
+          window.clearTimeout(STATE.submitTimer);
+          STATE.submitTimer = 0;
+          STATE.allowSubmit = true;
+          submitButton.click();
+          return;
+        }
+        void applyHistoryAndSubmit(panel, login, submitButton);
+      },
+      true
+    );
+  }
+
+  async function applyHistoryAndSubmit(panel, login, submitButton) {
+    STATE.running = true;
+    setStatus(panel, `Reading inventory history for ${login}…`, "busy");
+    try {
+      const history = await fetchAssociateHistory(login);
+      STATE.lastHistory = { at: new Date().toISOString(), login, ...history };
+      diag("submit history", STATE.lastHistory);
+      if (!history.lpns.length) {
+        setStatus(panel, history.error || `No inventory-history LPNs for ${login}. Not submitted.`, "error");
+        return;
       }
-    });
+      fillHistoryLpns(history.details);
+      STATE.applied = { login, lpns: history.lpns, details: history.details };
+      rememberLpns(login, history.details);
+      renderPanel(panel);
+      setStatus(panel, `Using ${history.lpns.length} history LPNs for ${login}.`, "ok");
+      STATE.allowSubmit = true;
+      submitButton.click();
+    } catch (error) {
+      const message = String(error?.message || error);
+      STATE.lastError = message;
+      diag("submit history failed", message);
+      setStatus(panel, message, "error");
+    } finally {
+      STATE.running = false;
+    }
   }
 
   function hookLoginSync(panel) {
@@ -1028,6 +1590,7 @@
   function submitForm() {
     const form = document.getElementById("audits-form");
     if (form && typeof form.reportValidity === "function" && !form.reportValidity()) {
+      STATE.allowSubmit = false;
       alert("Apollo Audit Helper 29836: form validation failed before submit.");
       return;
     }
@@ -1037,46 +1600,91 @@
       if (document.activeElement && typeof document.activeElement.blur === "function") {
         document.activeElement.blur();
       }
+      STATE.allowSubmit = true;
       submitButton.click();
       return;
     }
 
+    STATE.allowSubmit = false;
     alert("Apollo Audit Helper 29836: submit button was not found.");
   }
 
-  function runNextAudit(panel) {
+  async function runNextAudit(panel) {
+    if (STATE.running) {
+      return;
+    }
     consumePendingText(panel);
     const nextEntry = getNextUnauditedLogin();
     if (!nextEntry) {
-      alert("Apollo Audit Helper 29836: no unaudited saved logins are available.");
+      setStatus(panel, "No unaudited associates left in the queue.", "ok");
       return;
     }
+
+    const runButton = panel.querySelector(".apollo-helper-run");
+    STATE.running = true;
+    if (runButton) {
+      runButton.disabled = true;
+    }
+    setStatus(panel, `Reading inventory history for ${nextEntry.login}…`, "busy");
 
     try {
       fillLogin(nextEntry.login);
       const opportunities = fillRandomAuditFields(nextEntry);
+      const history = await fetchAssociateHistory(nextEntry.login);
+      STATE.lastHistory = { at: new Date().toISOString(), login: nextEntry.login, ...history };
+      if (!history.lpns.length) {
+        STATE.lastFill = {
+          at: new Date().toISOString(),
+          login: nextEntry.login,
+          attributes: normalizeStoredAttributes(nextEntry.attributes),
+          opportunities,
+          lpns: [],
+          lpnSource: "inventory-history",
+          error: history.error || "No LPNs",
+          autoSubmit: false,
+        };
+        STATE.lastError = STATE.lastFill.error;
+        diag("history miss", STATE.lastFill);
+        setStatus(panel, history.error || `No inventory-history LPNs for ${nextEntry.login}. Not submitted.`, "error");
+        renderPanel(panel);
+        return;
+      }
+
+      fillHistoryLpns(history.details);
+      STATE.applied = { login: nextEntry.login, lpns: history.lpns, details: history.details };
+      rememberLpns(nextEntry.login, history.details);
       STATE.lastFill = {
         at: new Date().toISOString(),
         login: nextEntry.login,
         attributes: normalizeStoredAttributes(nextEntry.attributes),
         opportunities,
+        lpns: history.lpns,
+        lpnSource: "inventory-history",
         autoSubmit: AUTO_SUBMIT,
       };
       STATE.lastError = null;
       diag("run fill", STATE.lastFill);
       renderPanel(panel);
+      setStatus(panel, `${history.lpns.length} history LPNs ready for ${nextEntry.login}.`, "ok");
     } catch (error) {
       STATE.lastError = String(error?.message || error);
       diag("run fill failed", STATE.lastError);
-      alert(`Apollo Audit Helper 29836: fill failed — ${STATE.lastError}`);
+      setStatus(panel, STATE.lastError, "error");
       return;
+    } finally {
+      STATE.running = false;
+      if (runButton) {
+        runButton.disabled = false;
+      }
     }
 
     if (!AUTO_SUBMIT) {
       return;
     }
 
-    window.setTimeout(() => {
+    window.clearTimeout(STATE.submitTimer);
+    STATE.submitTimer = window.setTimeout(() => {
+      STATE.submitTimer = 0;
       submitForm();
     }, POST_FILL_SUBMIT_DELAY_MS);
   }
@@ -1086,35 +1694,69 @@
       return;
     }
 
-    buildStyles();
-
-    const panel = document.createElement("aside");
-    panel.id = PANEL_ID;
+    const host = document.createElement("aside");
+    host.id = PANEL_ID;
+    const shadow = host.attachShadow({ mode: "open" });
+    const style = document.createElement("style");
+    style.textContent = buildStyles();
+    const panel = document.createElement("div");
+    panel.className = "desk";
+    const originOptions = HISTORY_ORIGINS.map(([value, label]) => {
+      const selected = value === loadHistoryOrigin() ? " selected" : "";
+      return `<option value="${value}"${selected}>${label}</option>`;
+    }).join("");
     panel.innerHTML = `
-      <div class="apollo-helper-header">
-        <h2 class="apollo-helper-title">Saved Logins (abelrigm)</h2>
-        <p class="apollo-helper-subtitle">Audit 29836 — paste the QuickSight table; it is added automatically.</p>
-        <div class="apollo-helper-progress"></div>
-        <div class="apollo-helper-mode">${AUTO_SUBMIT ? "Auto-submit ON" : "Manual submit (testing)"}</div>
+      <header class="top">
+        <div class="eyebrow">
+          <span>Audit 29836</span>
+          <span class="apollo-helper-progress"></span>
+        </div>
+        <h2>Associate desk</h2>
+        <p class="lede">LPN 1–3 come from that associate’s inventory history.</p>
+        <div class="bar"><span></span></div>
+        <div class="apollo-helper-mode">${AUTO_SUBMIT ? "Run fills the audit, then submits" : "Run fills the audit. Submit stays manual."}</div>
+      </header>
+      <section class="next">
+        <div class="kicker">Up next</div>
+        <div class="apollo-helper-next"></div>
+        <div class="apollo-helper-next-meta"></div>
+        <ul class="apollo-helper-lpns"></ul>
+        <button class="apollo-helper-run" type="button">Run next audit</button>
+        <div class="apollo-helper-status"></div>
+      </section>
+      <section class="queue">
+        <div class="kicker">Queue</div>
+        <div class="apollo-helper-list"></div>
+      </section>
+      <details>
+        <summary>Paste QuickSight and notes</summary>
+        <textarea class="apollo-helper-input" placeholder="Paste Login / Attribute / Accuracy. Added on paste."></textarea>
+        <button class="apollo-helper-add" type="button">Add to queue</button>
+        <label class="field-label">Engagement notes, one per line</label>
+        <textarea class="apollo-helper-textarea apollo-helper-engagement-notes" placeholder="Run picks one at random."></textarea>
+        <label class="field-label">Associate comments, one per line</label>
+        <textarea class="apollo-helper-textarea apollo-helper-associate-comments" placeholder="Run picks one at random."></textarea>
+        <label class="field-label">Inventory history</label>
+        <div class="origin-row">
+          <select class="apollo-helper-origin">${originOptions}</select>
+          <input class="apollo-helper-site" value="${loadHistorySite()}" maxlength="8" spellcheck="false" />
+        </div>
+      </details>
+      <div class="foot">
+        <button class="apollo-helper-copy-audited" type="button">Copy audited</button>
+        <button class="apollo-helper-copy-unaudited" type="button">Copy unaudited</button>
+        <button class="apollo-helper-debug" type="button">Copy debug</button>
+        <button class="apollo-helper-clear" type="button">Wipe queue</button>
       </div>
-      <textarea class="apollo-helper-input" placeholder="Paste QuickSight Copy table here (Login / Attribute / Accuracy). Added on paste."></textarea>
-      <button class="apollo-helper-button apollo-helper-add" type="button">Add to queue</button>
-      <label class="apollo-helper-field-label" for="apollo-helper-engagement-notes-29836">Engagement notes (one per line)</label>
-      <textarea id="apollo-helper-engagement-notes-29836" class="apollo-helper-textarea apollo-helper-engagement-notes" placeholder="RUN picks one at random. Saved automatically."></textarea>
-      <label class="apollo-helper-field-label" for="apollo-helper-associate-comments-29836">Associate comments (one per line)</label>
-      <textarea id="apollo-helper-associate-comments-29836" class="apollo-helper-textarea apollo-helper-associate-comments" placeholder="RUN picks one at random. Saved automatically."></textarea>
-      <button class="apollo-helper-button apollo-helper-copy apollo-helper-copy-audited" type="button">Copy Audited</button>
-      <button class="apollo-helper-button apollo-helper-copy apollo-helper-copy-unaudited" type="button">Copy Unaudited</button>
-      <button class="apollo-helper-button apollo-helper-debug" type="button">Copy Debug</button>
-      <button class="apollo-helper-button apollo-helper-run" type="button">RUN</button>
-      <button class="apollo-helper-button apollo-helper-clear" type="button">Wipe Memory</button>
-      <div class="apollo-helper-list"></div>
     `;
+    shadow.append(style, panel);
 
     const helperInput = panel.querySelector(".apollo-helper-input");
     const addQueueButton = panel.querySelector(".apollo-helper-add");
     const engagementNotesInput = panel.querySelector(".apollo-helper-engagement-notes");
     const associateCommentsInput = panel.querySelector(".apollo-helper-associate-comments");
+    const originSelect = panel.querySelector(".apollo-helper-origin");
+    const siteInput = panel.querySelector(".apollo-helper-site");
     const copyAuditedButton = panel.querySelector(".apollo-helper-copy-audited");
     const copyUnauditedButton = panel.querySelector(".apollo-helper-copy-unaudited");
     const copyDebugButton = panel.querySelector(".apollo-helper-debug");
@@ -1123,6 +1765,12 @@
 
     engagementNotesInput.value = loadEngagementNotesList();
     associateCommentsInput.value = loadAssociateCommentsList();
+
+    function eventElement(event) {
+      const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+      const node = path[0] || event.target;
+      return node && node.nodeType === 1 ? node : node?.parentElement || null;
+    }
 
     helperInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey) {
@@ -1147,11 +1795,8 @@
     document.addEventListener(
       "paste",
       (event) => {
-        const target = event.target;
-        if (target?.closest?.(".apollo-helper-engagement-notes, .apollo-helper-associate-comments")) {
-          return;
-        }
-        if (target?.closest?.(".apollo-helper-input")) {
+        const target = eventElement(event);
+        if (target?.closest?.(".apollo-helper-engagement-notes, .apollo-helper-associate-comments, .apollo-helper-input")) {
           return;
         }
         const text = event.clipboardData?.getData("text/plain") || "";
@@ -1173,6 +1818,16 @@
       saveAssociateCommentsList(associateCommentsInput.value);
     });
 
+    originSelect.addEventListener("change", () => {
+      localStorage.setItem(HISTORY_ORIGIN_KEY, originSelect.value);
+    });
+
+    siteInput.addEventListener("change", () => {
+      const site = siteInput.value.trim().toUpperCase() || DEFAULT_HISTORY_SITE;
+      siteInput.value = site;
+      localStorage.setItem(HISTORY_SITE_KEY, site);
+    });
+
     copyAuditedButton.addEventListener("click", () => {
       void copyLoginsByAuditState(true);
     });
@@ -1185,36 +1840,57 @@
       void copyScriptDebug();
     });
 
-    runButton.addEventListener("click", () => runNextAudit(panel));
+    runButton.addEventListener("click", () => {
+      void runNextAudit(panel);
+    });
 
     clearButton.addEventListener("click", () => {
       if (!window.confirm("Wipe all saved login history from this browser?")) {
         return;
       }
-
       clearLogins();
       renderPanel(panel);
     });
 
-    document.body.appendChild(panel);
+    document.body.appendChild(host);
     renderPanel(panel);
-    hookFormAutosave(panel);
-    hookLoginSync(panel);
+    watchAuditForm(panel);
   }
 
-  function init() {
+  function watchAuditForm(panel) {
+    hookFormAutosave(panel);
+    hookLoginSync(panel);
+    const started = Date.now();
+    const timer = window.setInterval(() => {
+      hookFormAutosave(panel);
+      hookLoginSync(panel);
+      if (document.getElementById("audit-submit") || Date.now() - started > 20000) {
+        window.clearInterval(timer);
+      }
+    }, 400);
+  }
+
+  function isApolloAuditPage() {
     const auditTypeId = new URLSearchParams(window.location.search).get("audit_type_id");
-    if (window.location.pathname !== "/audits/new" || auditTypeId !== TARGET_AUDIT_TYPE_ID) {
+    return window.location.pathname === "/audits/new" && auditTypeId === TARGET_AUDIT_TYPE_ID;
+  }
+
+  function boot() {
+    const job = rememberedHistoryJob();
+    if (job) {
+      void fulfillHistoryJob(job);
       return;
     }
-
+    if (!isApolloAuditPage()) {
+      return;
+    }
     createPanel();
-    diag("loaded", { href: location.href, auditTypeId });
+    diag("loaded", { href: location.href });
   }
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init, { once: true });
+    document.addEventListener("DOMContentLoaded", boot, { once: true });
   } else {
-    init();
+    boot();
   }
 })();
