@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Apollo Audit Login Helper 29836 (abelrigm)
 // @namespace    https://apollo-audit.corp.amazon.com/
-// @version      1.3.0
+// @version      1.3.1
 // @description  Audit 29836 desk. Paste a QuickSight queue, fill the audit, and load LPN 1–3 from that associate's FC Research inventory history.
 // @match        https://apollo-audit.corp.amazon.com/audits/new*
 // @match        https://qifcr.na.aftx.amazonoperations.app/*
@@ -28,7 +28,7 @@
 (function () {
   "use strict";
 
-  const SCRIPT = { name: "Apollo Audit Login Helper 29836", version: "1.3.0" };
+  const SCRIPT = { name: "Apollo Audit Login Helper 29836", version: "1.3.1" };
   const STORAGE_KEY = "apolloAuditSavedLogins29836";
   const ENGAGEMENT_NOTES_STORAGE_KEY = "apolloAuditSavedEngagementNotes29836";
   const ASSOCIATE_COMMENTS_STORAGE_KEY = "apolloAuditSavedAssociateComments29836";
@@ -69,6 +69,7 @@
   const HISTORY_MARK = "apollo29836LpnWorker";
   const HISTORY_ORIGIN_KEY = "apollo29836HistoryOrigin";
   const HISTORY_SITE_KEY = "apollo29836HistorySite";
+  const CHOSEN_LOGIN_KEY = "apollo29836ChosenLogin";
   const DEFAULT_HISTORY_ORIGIN = "https://qifcr.na.aftx.amazonoperations.app";
   const DEFAULT_HISTORY_SITE = "MEM3";
   const HISTORY_ORIGINS = [
@@ -821,6 +822,40 @@
     return loadLogins().find((entry) => !entry.audited) || null;
   }
 
+  function loadChosenLogin() {
+    try {
+      return normalizeLogin(sessionStorage.getItem(CHOSEN_LOGIN_KEY) || "");
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function setChosenLogin(login) {
+    const normalized = normalizeLogin(login);
+    try {
+      if (normalized) {
+        sessionStorage.setItem(CHOSEN_LOGIN_KEY, normalized);
+      } else {
+        sessionStorage.removeItem(CHOSEN_LOGIN_KEY);
+      }
+    } catch (error) {
+      // The desk still shows the queue when storage is blocked.
+    }
+  }
+
+  function getAuditTarget() {
+    const saved = loadLogins();
+    const chosen = loadChosenLogin();
+    if (chosen) {
+      const found = saved.find((entry) => entry.login === chosen);
+      if (found) {
+        return { entry: found, pinned: true };
+      }
+      setChosenLogin("");
+    }
+    return { entry: getNextUnauditedLogin(), pinned: false };
+  }
+
   function parseLoginList(value) {
     return String(value || "")
       .split(/[\s,;]+/)
@@ -988,6 +1023,14 @@
       }
       .apollo-helper-next { margin-top: 4px; font-size: 18px; font-weight: 700; }
       .apollo-helper-next-meta { margin-top: 2px; color: #57534e; font-size: 12px; }
+      .apollo-helper-pick {
+        width: 100%;
+        margin-top: 8px;
+        padding: 8px 10px;
+        border: 1px solid #d6d3d1;
+        border-radius: 8px;
+        background: #fff;
+      }
       .apollo-helper-lpns { list-style: none; margin: 10px 0; padding: 0; display: grid; gap: 4px; }
       .apollo-helper-lpns li {
         display: flex;
@@ -1023,8 +1066,10 @@
         border-radius: 10px;
         background: #fff;
         border: 1px solid #e7e0d4;
+        cursor: pointer;
       }
-      .apollo-helper-item.is-current { border-color: #c2410c; background: #fff7ed; }
+      .apollo-helper-item.is-current { border-color: #fdba74; }
+      .apollo-helper-item.is-picked { border-color: #c2410c; background: #fff7ed; box-shadow: inset 3px 0 0 #c2410c; }
       .apollo-helper-item.is-done { opacity: 0.72; }
       .apollo-helper-login { font-weight: 700; cursor: pointer; }
       .apollo-helper-state { margin-top: 2px; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: #78716c; }
@@ -1079,18 +1124,46 @@
       bar.style.width = totalCount ? `${Math.round((auditedCount / totalCount) * 100)}%` : "0%";
     }
 
-    const next = getNextUnauditedLogin();
+    const target = getAuditTarget();
+    const next = target.entry;
+    const chosen = target.pinned ? next.login : "";
     const nextName = panel.querySelector(".apollo-helper-next");
     const nextMeta = panel.querySelector(".apollo-helper-next-meta");
+    const kicker = panel.querySelector(".apollo-helper-kicker");
+    const runButton = panel.querySelector(".apollo-helper-run");
     const lpnList = panel.querySelector(".apollo-helper-lpns");
+    const pick = panel.querySelector(".apollo-helper-pick");
+    if (kicker) {
+      kicker.textContent = target.pinned ? "Selected" : "Up next";
+    }
     if (nextName) {
       nextName.textContent = next ? next.login : "Queue clear";
     }
     if (nextMeta) {
       const attributes = next ? normalizeStoredAttributes(next.attributes) : [];
+      const attributeText = attributes.length
+        ? attributes.map((row) => row.attribute).join(", ")
+        : "No QuickSight attributes";
       nextMeta.textContent = next
-        ? (attributes.length ? attributes.map((row) => row.attribute).join(", ") : "No QuickSight attributes")
+        ? `${target.pinned ? "Chosen for this audit. " : ""}${attributeText}`
         : "Paste the next QuickSight table to continue.";
+    }
+    if (runButton && !STATE.running) {
+      runButton.textContent = next ? `Run ${next.login}` : "Run next audit";
+    }
+    if (pick) {
+      pick.textContent = "";
+      const automatic = document.createElement("option");
+      automatic.value = "";
+      automatic.textContent = "Next unaudited";
+      pick.appendChild(automatic);
+      savedLogins.forEach((entry) => {
+        const option = document.createElement("option");
+        option.value = entry.login;
+        option.textContent = entry.audited ? `${entry.login} · audited` : entry.login;
+        pick.appendChild(option);
+      });
+      pick.value = chosen;
     }
     if (lpnList) {
       lpnList.textContent = "";
@@ -1119,17 +1192,27 @@
       savedLogins.forEach((entry) => {
         const item = document.createElement("div");
         item.className = "apollo-helper-item";
-        if (entry.login === currentLogin) {
+        if (entry.login === chosen) {
+          item.classList.add("is-picked");
+        } else if (entry.login === currentLogin) {
           item.classList.add("is-current");
         }
         if (entry.audited) {
           item.classList.add("is-done");
         }
+        item.addEventListener("click", () => {
+          const picking = loadChosenLogin() === entry.login ? "" : entry.login;
+          setChosenLogin(picking);
+          const shown = picking || getNextUnauditedLogin()?.login || "";
+          if (shown) {
+            fillLogin(shown);
+          }
+          renderPanel(panel);
+        });
 
         const loginLine = document.createElement("div");
         loginLine.className = "apollo-helper-login";
         loginLine.textContent = entry.login;
-        loginLine.addEventListener("click", () => fillLogin(entry.login));
 
         const stateLine = document.createElement("div");
         stateLine.className = "apollo-helper-state";
@@ -1524,6 +1607,9 @@
           STATE.allowSubmit = false;
           addLogin(login);
           markLoginAudited(login, true);
+          if (loadChosenLogin() === login) {
+            setChosenLogin("");
+          }
           diag("marked audited", { login, lpns: STATE.applied?.lpns || readFilledLpns() });
           renderPanel(panel);
           return;
@@ -1614,7 +1700,7 @@
       return;
     }
     consumePendingText(panel);
-    const nextEntry = getNextUnauditedLogin();
+    const nextEntry = getAuditTarget().entry;
     if (!nextEntry) {
       setStatus(panel, "No unaudited associates left in the queue.", "ok");
       return;
@@ -1712,12 +1798,13 @@
           <span class="apollo-helper-progress"></span>
         </div>
         <h2>Associate desk</h2>
-        <p class="lede">LPN 1–3 come from that associate’s inventory history.</p>
+        <p class="lede">Choose the associate, then Run. LPN 1–3 come from their inventory history.</p>
         <div class="bar"><span></span></div>
         <div class="apollo-helper-mode">${AUTO_SUBMIT ? "Run fills the audit, then submits" : "Run fills the audit. Submit stays manual."}</div>
       </header>
       <section class="next">
-        <div class="kicker">Up next</div>
+        <div class="kicker apollo-helper-kicker">Up next</div>
+        <select class="apollo-helper-pick" aria-label="Associate for the next audit"></select>
         <div class="apollo-helper-next"></div>
         <div class="apollo-helper-next-meta"></div>
         <ul class="apollo-helper-lpns"></ul>
@@ -1725,7 +1812,7 @@
         <div class="apollo-helper-status"></div>
       </section>
       <section class="queue">
-        <div class="kicker">Queue</div>
+        <div class="kicker">Queue · click a name to choose</div>
         <div class="apollo-helper-list"></div>
       </section>
       <details>
@@ -1757,6 +1844,7 @@
     const associateCommentsInput = panel.querySelector(".apollo-helper-associate-comments");
     const originSelect = panel.querySelector(".apollo-helper-origin");
     const siteInput = panel.querySelector(".apollo-helper-site");
+    const pick = panel.querySelector(".apollo-helper-pick");
     const copyAuditedButton = panel.querySelector(".apollo-helper-copy-audited");
     const copyUnauditedButton = panel.querySelector(".apollo-helper-copy-unaudited");
     const copyDebugButton = panel.querySelector(".apollo-helper-debug");
@@ -1828,6 +1916,15 @@
       localStorage.setItem(HISTORY_SITE_KEY, site);
     });
 
+    pick.addEventListener("change", () => {
+      setChosenLogin(pick.value);
+      const shown = pick.value || getNextUnauditedLogin()?.login || "";
+      if (shown) {
+        fillLogin(shown);
+      }
+      renderPanel(panel);
+    });
+
     copyAuditedButton.addEventListener("click", () => {
       void copyLoginsByAuditState(true);
     });
@@ -1849,6 +1946,7 @@
         return;
       }
       clearLogins();
+      setChosenLogin("");
       renderPanel(panel);
     });
 

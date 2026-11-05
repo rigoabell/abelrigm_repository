@@ -56,7 +56,9 @@ test("reads dates when DataTables headers are blank and the LPN label is an aria
 });
 
 test("userscript loads history LPNs instead of generating them", () => {
-  assert.match(source, /@version\s+1\.3\.0/);
+  assert.match(source, /@version\s+1\.3\.1/);
+  assert.match(source, /apollo-helper-pick/);
+  assert.match(source, /function getAuditTarget/);
   assert.match(source, /apollo29836-lpn/);
   assert.match(source, /function fillHistoryLpns/);
   assert.doesNotMatch(source, /function fillRandomLpns|function generateRandomLpn|LPNN\$\{/);
