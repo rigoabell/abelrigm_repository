@@ -9,7 +9,10 @@ const index = fs.readFileSync(new URL("docs/index.html", root), "utf8");
 const readme = fs.readFileSync(new URL("README.md", root), "utf8");
 
 assert.match(src, /@name\s+Camera 2D Barcode Scanner \(abelrigm\)/);
-assert.match(src, /@version\s+1\.0\.0/);
+assert.match(src, /@version\s+1\.1\.0/);
+assert.equal(src.includes("scaleX(-1)"), false);
+assert.match(src, />Capture</);
+assert.match(src, />Copy debug</);
 assert.match(src, /@match\s+https:\/\/\*\/\*/);
 assert.match(src, /@match\s+http:\/\/\*\/\*/);
 assert.match(src, /@grant\s+none/);
@@ -21,12 +24,14 @@ assert.equal(src.includes("eval("), false);
 
 const entry = catalog.find((item) => item.id === "camera-2d-barcode-scanner");
 assert.ok(entry);
-assert.equal(entry.version, "1.0.0");
+assert.equal(entry.version, "1.1.0");
 assert.equal(entry.category, "Labels");
 assert.equal(entry.file, "downloads/camera-2d-barcode-scanner.txt");
 assert.equal(entry.downloadName, "Camera 2D Barcode Scanner (abelrigm).txt");
 assert.equal(entry.runsOn, "Any page");
-assert.match(entry.summary, /QR, Data Matrix, PDF417, and Aztec/);
+assert.match(entry.summary, /force a capture/);
+assert.match(entry.detail, /Copy debug/);
+assert.match(entry.detail, /not mirrored/);
 assert.equal(fs.existsSync(new URL("docs/" + entry.file, root)), true);
 
 const projects = catalog.length + 1;
@@ -117,7 +122,14 @@ const storage = {
 };
 const defaults = api.loadSettings(storage);
 assert.equal(defaults.beep, true);
-assert.equal(defaults.include1d, false);
+assert.equal(defaults.include1d, true);
+assert.equal(api.SCRIPT_VERSION, "1.1.0");
+storage.setItem(api.PREVIOUS_SETTINGS_KEY, JSON.stringify({ include1d: false, beep: false, deviceId: "old-cam" }));
+const migrated = api.loadSettings(storage);
+assert.equal(migrated.include1d, true);
+assert.equal(migrated.beep, false);
+assert.equal(migrated.deviceId, "old-cam");
+storage.items = {};
 assert.equal(defaults.typeIntoField, true);
 assert.deepEqual(fromVm(defaults.history), []);
 storage.setItem(api.SETTINGS_KEY, "{");
@@ -201,3 +213,32 @@ assert.equal(api.resultFromNative({ rawValue: "", format: "qr_code" }), null);
 
 const engine = await api.chooseEngine(false);
 assert.equal(engine.kind, "none");
+
+const center = fromVm(api.regionRect(1280, 720, api.CENTER_REGION));
+assert.equal(center.name, "center");
+assert.ok(center.sx > 0 && center.sy > 0);
+assert.ok(center.sw < 1280 && center.sh < 720);
+assert.equal(center.width, center.sw);
+assert.equal(center.height, center.sh);
+
+const report = api.debugReport({
+  version: "1.1.0",
+  time: "2026-11-06T15:00:00.000Z",
+  page: "https://example.test/scan",
+  engine: "Reading with ZXing",
+  camera: "Angetube Live camera",
+  video: "1280x720",
+  linear: true,
+  zxing: true,
+  detector: false,
+  status: "No code yet.",
+  value: "",
+  misses: 4,
+  capture: "center 900x500 miss",
+  attempts: [{ mode: "capture", detail: "center 900x500 miss", result: "miss" }],
+});
+assert.match(report, /Copy Debug v1\.1\.0/);
+assert.match(report, /preview mirrored: no/);
+assert.match(report, /linear barcodes: on/);
+assert.match(report, /Angetube Live camera/);
+assert.match(report, /center 900x500 miss/);
