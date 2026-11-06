@@ -84,7 +84,7 @@
     head.appendChild(copy);
     var link = document.createElement("a");
     link.className = "btn btn-primary";
-    link.href = entry.file;
+    link.href = entry.file + "?v=" + encodeURIComponent(entry.version || "");
     link.setAttribute("download", entry.downloadName);
     link.textContent = "Download .txt";
     head.appendChild(link);
@@ -143,7 +143,7 @@
   bind();
   if (location.hash === "#rig-setup") setOpen("rig-setup", true);
 
-  fetch("data/tampermonkey.json")
+  fetch("data/tampermonkey.json", { cache: "no-store" })
     .then(function (response) { return response.json(); })
     .then(function (projects) {
       projects.forEach(function (entry) {
