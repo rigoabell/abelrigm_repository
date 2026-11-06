@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Camera 2D Barcode Scanner (abelrigm)
 // @namespace    https://github.com/rigoabell/abelrigm_repository
-// @version      1.0.0
-// @description  Open the laptop camera and read QR, Data Matrix, PDF417, and Aztec codes. Copy the value or type it into the last text field.
+// @version      1.1.0
+// @description  Open the laptop camera and read 2D and linear barcodes. It keeps scanning. Capture forces this frame, and Copy debug copies a dump.
 // @author       abelrigm
 // @match        http://*/*
 // @match        https://*/*
@@ -15,10 +15,18 @@
 (function () {
   'use strict';
 
-  const SETTINGS_KEY = 'abelrigm.c2d.v1';
+  const SCRIPT_VERSION = '1.1.0';
+  const SETTINGS_KEY = 'abelrigm.c2d.v2';
+  const PREVIOUS_SETTINGS_KEY = 'abelrigm.c2d.v1';
   const ABSENT_MS = 1200;
   const HISTORY_LIMIT = 25;
-  const MAX_EDGE = 800;
+  const MAX_EDGE = 1400;
+  const CENTER_REGION = { name: 'center', x: 0.14, y: 0.16, w: 0.72, h: 0.68, maxEdge: 1600 };
+  const CAPTURE_REGIONS = [
+    CENTER_REGION,
+    { name: 'tight', x: 0.22, y: 0.3, w: 0.56, h: 0.4, maxEdge: 1600 },
+    { name: 'full', x: 0, y: 0, w: 1, h: 1, maxEdge: 1400 },
+  ];
   const NATIVE_2D = ['qr_code', 'data_matrix', 'pdf417', 'aztec'];
   const NATIVE_1D = ['code_128', 'code_39', 'code_93', 'codabar', 'ean_13', 'ean_8', 'itf', 'upc_a', 'upc_e'];
   const ZXING_2D = ['QR_CODE', 'DATA_MATRIX', 'PDF_417', 'AZTEC'];
@@ -110,20 +118,27 @@
     return rows;
   }
 
-  function loadSettings(storage) {
-    let parsed = {};
+  function readStored(storage, key) {
     try {
-      const raw = storage && storage.getItem(SETTINGS_KEY);
-      if (raw) parsed = JSON.parse(raw) || {};
+      const raw = storage && storage.getItem(key);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      return parsed;
     } catch (error) {
-      parsed = {};
+      return null;
     }
-    if (!parsed || typeof parsed !== 'object') parsed = {};
+  }
+
+  function loadSettings(storage) {
+    const current = readStored(storage, SETTINGS_KEY);
+    const previous = current ? null : readStored(storage, PREVIOUS_SETTINGS_KEY);
+    const parsed = current || previous || {};
     return {
       beep: boolSetting(parsed.beep, true),
       typeIntoField: boolSetting(parsed.typeIntoField, true),
       pressEnter: boolSetting(parsed.pressEnter, true),
-      include1d: boolSetting(parsed.include1d, false),
+      include1d: previous ? true : boolSetting(parsed.include1d, true),
       deviceId: typeof parsed.deviceId === 'string' ? parsed.deviceId : '',
       left: Number.isFinite(parsed.left) ? parsed.left : null,
       top: Number.isFinite(parsed.top) ? parsed.top : null,
@@ -302,21 +317,73 @@
     return hints;
   }
 
-  function readFromSource(lib, reader, hints, source) {
-    const sources = [source];
-    if (source && typeof source.invert === 'function') sources.push(source.invert());
-    else if (lib.InvertedLuminanceSource) sources.push(new lib.InvertedLuminanceSource(source));
-    for (let i = 0; i < sources.length; i++) {
-      try {
-        const result = reader.decode(new lib.BinaryBitmap(new lib.HybridBinarizer(sources[i])), hints);
-        return resultFromZxing(lib, result);
-      } catch (error) {
-        if (!isMiss(error, lib)) return null;
-      } finally {
-        reader.reset();
+  function readFromSource(lib, reader, hints, source, thorough) {
+    const binarizers = [lib.HybridBinarizer];
+    if (thorough && lib.GlobalHistogramBinarizer) binarizers.push(lib.GlobalHistogramBinarizer);
+    for (let b = 0; b < binarizers.length; b++) {
+      if (!binarizers[b]) continue;
+      const sources = [source];
+      if (source && typeof source.invert === 'function') sources.push(source.invert());
+      else if (lib.InvertedLuminanceSource) sources.push(new lib.InvertedLuminanceSource(source));
+      for (let i = 0; i < sources.length; i++) {
+        try {
+          const result = reader.decode(new lib.BinaryBitmap(new binarizers[b](sources[i])), hints);
+          const hit = resultFromZxing(lib, result);
+          if (hit) return hit;
+        } catch (error) {
+          if (!isMiss(error, lib)) return null;
+        } finally {
+          reader.reset();
+        }
       }
     }
     return null;
+  }
+
+  function regionRect(videoWidth, videoHeight, region) {
+    const box = region || { x: 0, y: 0, w: 1, h: 1, maxEdge: MAX_EDGE };
+    const sx = Math.max(0, Math.round(videoWidth * box.x));
+    const sy = Math.max(0, Math.round(videoHeight * box.y));
+    const sw = Math.max(1, Math.min(videoWidth - sx, Math.round(videoWidth * box.w)));
+    const sh = Math.max(1, Math.min(videoHeight - sy, Math.round(videoHeight * box.h)));
+    const maxEdge = box.maxEdge || MAX_EDGE;
+    const scale = Math.min(1, maxEdge / Math.max(sw, sh));
+    return {
+      name: box.name || 'full',
+      sx: sx,
+      sy: sy,
+      sw: sw,
+      sh: sh,
+      width: Math.max(1, Math.round(sw * scale)),
+      height: Math.max(1, Math.round(sh * scale)),
+    };
+  }
+
+  function debugReport(info) {
+    const attempts = (info && info.attempts) || [];
+    const lines = [
+      'Camera 2D Barcode Scanner — Copy Debug v' + ((info && info.version) || SCRIPT_VERSION),
+      'Paste everything below into the chat.',
+      'time: ' + ((info && info.time) || ''),
+      'page: ' + ((info && info.page) || ''),
+      'engine: ' + ((info && info.engine) || ''),
+      'camera: ' + ((info && info.camera) || ''),
+      'video: ' + ((info && info.video) || ''),
+      'linear barcodes: ' + (info && info.linear ? 'on' : 'off'),
+      'preview mirrored: no',
+      'zxing: ' + (info && info.zxing ? 'yes' : 'no'),
+      'built-in detector: ' + (info && info.detector ? 'yes' : 'no'),
+      'last status: ' + ((info && info.status) || ''),
+      'last value: ' + ((info && info.value) || ''),
+      'auto misses: ' + ((info && info.misses) || 0),
+      'last capture: ' + ((info && info.capture) || ''),
+      'recent attempts:',
+    ];
+    if (!attempts.length) lines.push('(none)');
+    attempts.forEach(function (row) {
+      lines.push('- ' + [row.mode, row.detail, row.result].filter(Boolean).join(' | '));
+    });
+    return lines.join('\n');
   }
 
   function decodeCanvas(canvas, include1d) {
@@ -328,17 +395,18 @@
     return readFromSource(lib, reader, hints, source);
   }
 
-  function drawVideoFrame(video, canvas, ctx, maxEdge) {
-    const edge = maxEdge || MAX_EDGE;
-    const scale = Math.min(1, edge / Math.max(video.videoWidth, video.videoHeight));
-    const width = Math.max(1, Math.round(video.videoWidth * scale));
-    const height = Math.max(1, Math.round(video.videoHeight * scale));
-    if (canvas.width !== width || canvas.height !== height) {
-      canvas.width = width;
-      canvas.height = height;
+  function drawVideoRegion(video, canvas, ctx, region) {
+    const rect = regionRect(video.videoWidth, video.videoHeight, region);
+    if (canvas.width !== rect.width || canvas.height !== rect.height) {
+      canvas.width = rect.width;
+      canvas.height = rect.height;
     }
-    ctx.drawImage(video, 0, 0, width, height);
-    return canvas;
+    ctx.drawImage(video, rect.sx, rect.sy, rect.sw, rect.sh, 0, 0, rect.width, rect.height);
+    return rect;
+  }
+
+  function drawVideoFrame(video, canvas, ctx, maxEdge) {
+    return drawVideoRegion(video, canvas, ctx, { name: 'full', x: 0, y: 0, w: 1, h: 1, maxEdge: maxEdge || MAX_EDGE });
   }
 
   async function chooseEngine(include1d) {
@@ -391,7 +459,13 @@
 
   const api = {
     ABSENT_MS: ABSENT_MS,
+    SCRIPT_VERSION: SCRIPT_VERSION,
     SETTINGS_KEY: SETTINGS_KEY,
+    PREVIOUS_SETTINGS_KEY: PREVIOUS_SETTINGS_KEY,
+    CENTER_REGION: CENTER_REGION,
+    CAPTURE_REGIONS: CAPTURE_REGIONS,
+    regionRect: regionRect,
+    debugReport: debugReport,
     canonicalFormat: canonicalFormat,
     labelFor: labelFor,
     nativeFormats: nativeFormats,
@@ -438,6 +512,11 @@
     scan: { hold: null, clearAt: 0 },
     resumeOnVisible: false,
     lastText: '',
+    misses: 0,
+    lastCapture: '',
+    lastFrame: '',
+    attempts: [],
+    capturing: false,
   };
   let lastField = null;
   let audioCtx = null;
@@ -458,7 +537,7 @@
       '<style>',
       ':host{all:initial;color-scheme:dark;}',
       '*{box-sizing:border-box;}',
-      '#fab,#panel,#drag button,#power,#copy,#clear,.toggle{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}',
+      '#fab,#panel,#drag button,#power,#capture,#copy,#debug,#clear,.toggle{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}',
       '#fab{pointer-events:auto;position:fixed;left:18px;bottom:18px;height:52px;padding:0 16px 0 12px;border:0;border-radius:999px;cursor:pointer;',
       'background:#12332f;color:#d9fff8;display:flex;align-items:center;gap:8px;box-shadow:0 8px 24px rgba(0,0,0,.35);}',
       '#fab svg{display:block;}',
@@ -471,20 +550,21 @@
       '#drag strong{display:block;font-size:14px;}',
       '#engine{display:block;color:#9aa3b5;font-size:11px;font-weight:500;}',
       '#drag-actions{display:flex;gap:6px;}',
-      '#drag button,#power,#copy,#clear,.toggle{border:1px solid #334;background:#222838;color:#e7ecf3;border-radius:8px;cursor:pointer;}',
+      '#drag button,#power,#capture,#copy,#debug,#clear,.toggle{border:1px solid #334;background:#222838;color:#e7ecf3;border-radius:8px;cursor:pointer;}',
       '#drag button{font-size:12px;padding:4px 8px;}',
       '#body{overflow:auto;min-height:0;padding:10px 12px 12px;display:flex;flex-direction:column;gap:8px;}',
       '#stage{position:relative;background:#000;border-radius:10px;overflow:hidden;aspect-ratio:4/3;}',
-      'video{width:100%;height:100%;object-fit:cover;transform:scaleX(-1);background:#000;}',
+      'video{width:100%;height:100%;object-fit:cover;background:#000;}',
       '#reticle{position:absolute;inset:16% 14%;border:2px solid rgba(61,214,198,.9);border-radius:10px;box-shadow:0 0 0 999px rgba(0,0,0,.35);pointer-events:none;}',
       '#stage.is-holding #reticle{border-color:#3ddc84;}',
       '#status{margin:0;min-height:2.6em;color:#c5cedd;font-size:13px;line-height:1.35;}',
       '#result{background:#1b2130;border-radius:10px;padding:8px;}',
       '#format{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#9ff7ec;}',
       '#value{margin:4px 0 8px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:14px;line-height:1.35;word-break:break-word;white-space:pre-wrap;max-height:4.2em;overflow:auto;}',
-      '#copy,#power,#clear{font-size:13px;padding:6px 10px;}',
-      '#copy{background:#1c3d38;border-color:#2f6f66;}',
-      '#copy:disabled{opacity:.45;cursor:default;}',
+      '#actions{display:flex;flex-wrap:wrap;gap:6px;}',
+      '#capture,#copy,#debug,#power,#clear{font-size:13px;padding:6px 10px;}',
+      '#capture,#copy{background:#1c3d38;border-color:#2f6f66;}',
+      '#copy:disabled,#capture:disabled{opacity:.45;cursor:default;}',
       '#toggles{display:flex;flex-wrap:wrap;gap:6px;}',
       '.toggle{font-size:12px;padding:5px 8px;}',
       '.toggle[aria-pressed="true"]{background:#1c3d38;border-color:#2f6f66;color:#d9fff8;}',
@@ -499,14 +579,15 @@
       '</style>',
       '<button id="fab" type="button" aria-label="Open 2D barcode scanner">',
       '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M9 4l1.2 2H18a2 2 0 012 2v10a2 2 0 01-2 2H6a2 2 0 01-2-2V8a2 2 0 012-2h1.8L9 4zm3 4.2A3.8 3.8 0 1012 15.8 3.8 3.8 0 0012 8.2z"/></svg>',
-      '<strong>2D scan</strong></button>',
-      '<section id="panel" hidden aria-label="2D barcode scanner">',
-      '<header id="drag"><div><strong>2D barcode scanner</strong><span id="engine">Camera off</span></div>',
+      '<strong>Scan</strong></button>',
+      '<section id="panel" hidden aria-label="Barcode scanner">',
+      '<header id="drag"><div><strong>Barcode scanner</strong><span id="engine">Camera off</span></div>',
       '<div id="drag-actions"><button id="min" type="button">Minimize</button><button id="close" type="button">Close</button></div></header>',
       '<div id="body">',
       '<div id="stage"><video id="video" autoplay muted playsinline></video><div id="reticle"></div></div>',
       '<p id="status" role="status">Camera off.</p>',
-      '<div id="result"><span id="format"></span><p id="value">No code yet.</p><button id="copy" type="button" disabled>Copy</button></div>',
+      '<div id="result"><span id="format"></span><p id="value">No code yet.</p>',
+      '<div id="actions"><button id="capture" type="button">Capture</button><button id="copy" type="button" disabled>Copy</button><button id="debug" type="button">Copy debug</button></div></div>',
       '<div id="controls"><button id="power" type="button" aria-pressed="false">Start camera</button></div>',
       '<div id="toggles">',
       '<button class="toggle" type="button" data-key="beep">Beep</button>',
@@ -518,7 +599,7 @@
       '<label id="zoom-row" hidden>Zoom<input id="zoom" type="range" min="1" max="1" step="1"></label>',
       '<div id="history-head"><span>Recent</span><button id="clear" type="button">Clear</button></div>',
       '<ol id="history"></ol>',
-      '<p id="hint">Alt+Shift+S toggles the scanner. With “Type into last field” on, a read fills the text box you clicked last. The camera turns off when this panel closes.</p>',
+      '<p id="hint">It keeps reading while this panel is open. Capture forces the current frame. Copy debug copies a dump you can paste in chat. The picture is not mirrored. Alt+Shift+S toggles the scanner.</p>',
       '</div></section>',
     ].join('');
 
@@ -533,6 +614,8 @@
     const formatEl = shadow.getElementById('format');
     const valueEl = shadow.getElementById('value');
     const copyBtn = shadow.getElementById('copy');
+    const captureBtn = shadow.getElementById('capture');
+    const debugBtn = shadow.getElementById('debug');
     const power = shadow.getElementById('power');
     const video = shadow.getElementById('video');
     const stage = shadow.getElementById('stage');
@@ -579,6 +662,29 @@
       copyText(session.lastText).then(function (ok) {
         copyBtn.textContent = ok ? 'Copied' : 'Copy failed';
         setTimeout(function () { copyBtn.textContent = 'Copy'; }, 1200);
+      });
+    });
+    captureBtn.addEventListener('click', function () { forceCapture(); });
+    debugBtn.addEventListener('click', function () {
+      const report = debugReport({
+        version: SCRIPT_VERSION,
+        time: new Date().toISOString(),
+        page: location.href,
+        engine: engineEl.textContent,
+        camera: cameraSelect.options[cameraSelect.selectedIndex] ? cameraSelect.options[cameraSelect.selectedIndex].textContent : '',
+        video: video.videoWidth ? (video.videoWidth + 'x' + video.videoHeight) : '',
+        linear: settings.include1d,
+        zxing: !!(globalThis.ZXing && globalThis.ZXing.MultiFormatReader),
+        detector: typeof BarcodeDetector === 'function',
+        status: statusEl.textContent,
+        value: session.lastText,
+        misses: session.misses,
+        capture: session.lastCapture,
+        attempts: session.attempts.slice(),
+      });
+      copyText(report).then(function (ok) {
+        debugBtn.textContent = ok ? 'Copied' : 'Copy failed';
+        setTimeout(function () { debugBtn.textContent = 'Copy debug'; }, 1200);
       });
     });
     shadow.querySelectorAll('.toggle').forEach(function (button) {
@@ -851,11 +957,25 @@
       updateEngineLabel();
     }
 
-    function deliver(hits) {
+    function recordAttempt(row) {
+      session.attempts.push(row);
+      if (session.attempts.length > 12) session.attempts.shift();
+    }
+
+    function deliver(hits, force) {
       const allowedHits = (hits || []).filter(function (hit) {
         return hit && hit.text && allowsFormat(hit.format, settings.include1d);
       });
+      if (force && allowedHits.length) {
+        const hit = allowedHits[0];
+        const scan = { text: hit.text, format: canonicalFormat(hit.format), at: Date.now() };
+        session.scan = { hold: scan, clearAt: 0 };
+        stage.classList.add('is-holding');
+        onEmit(scan);
+        return;
+      }
       if (!allowedHits.length) {
+        session.misses += 1;
         const reduced = reduceScan(session.scan, { type: 'miss' }, Date.now(), ABSENT_MS);
         session.scan = reduced.state;
         stage.classList.toggle('is-holding', !!session.scan.hold);
@@ -898,20 +1018,31 @@
       return true;
     }
 
+    function zxingHit(region, thorough) {
+      const lib = globalThis.ZXing;
+      if (!lib || !session.reader || !scratchCtx) return null;
+      const rect = drawVideoRegion(video, scratch, scratchCtx, region);
+      session.lastFrame = rect.name + ' ' + rect.width + 'x' + rect.height;
+      const source = new lib.HTMLCanvasElementLuminanceSource(scratch, false);
+      return readFromSource(lib, session.reader, session.hints, source, thorough);
+    }
+
     async function scanOnce(gen) {
-      if (gen !== session.generation) return;
+      if (gen !== session.generation || session.capturing) return;
       if (video.readyState < 2 || !video.videoWidth) return;
       if (session.engine && session.engine.kind === 'native' && session.detector) {
         try {
           const codes = await session.detector.detect(video);
-          if (gen !== session.generation) return;
+          if (gen !== session.generation || session.capturing) return;
           const hits = (codes || []).map(function (code) {
             const hit = resultFromNative(code);
             if (hit) hit.area = boxArea(code);
             return hit;
           }).filter(Boolean);
-          deliver(hits);
-          return;
+          if (hits.length) {
+            deliver(hits);
+            return;
+          }
         } catch (error) {
           if (gen !== session.generation) return;
           if (!fallbackToZxing()) {
@@ -920,18 +1051,62 @@
           }
         }
       }
-      const lib = globalThis.ZXing;
-      if (!lib || !session.reader || !scratchCtx) return;
+      if (globalThis.ZXing && globalThis.ZXing.MultiFormatReader && !session.reader) {
+        session.reader = new globalThis.ZXing.MultiFormatReader();
+        session.hints = makeHints(globalThis.ZXing, settings.include1d);
+      }
+      if (!globalThis.ZXing || !session.reader || !scratchCtx) return;
       try {
-        drawVideoFrame(video, scratch, scratchCtx, MAX_EDGE);
-        const source = new lib.HTMLCanvasElementLuminanceSource(scratch, false);
-        const hit = readFromSource(lib, session.reader, session.hints, source);
-        if (gen !== session.generation) return;
+        const hit = zxingHit(CENTER_REGION, false);
+        if (gen !== session.generation || session.capturing) return;
         deliver(hit ? [hit] : []);
       } catch (error) {
-        if (gen !== session.generation) return;
+        if (gen !== session.generation || session.capturing) return;
         deliver([]);
       }
+    }
+
+    async function forceCapture() {
+      if (!session.stream || video.readyState < 2 || !video.videoWidth) {
+        setStatus('Start the camera, then press Capture.');
+        return;
+      }
+      const gen = session.generation;
+      session.capturing = true;
+      captureBtn.disabled = true;
+      setStatus('Capturing this frame…');
+      const notes = [];
+      let hit = null;
+      if (session.detector) {
+        try {
+          const codes = await session.detector.detect(video);
+          notes.push('built-in ' + ((codes && codes.length) || 0));
+          if (codes && codes.length) hit = resultFromNative(codes[0]);
+        } catch (error) {
+          notes.push('built-in error ' + ((error && error.name) || 'failed'));
+        }
+      }
+      if (!hit && globalThis.ZXing) {
+        if (!session.reader) {
+          session.reader = new globalThis.ZXing.MultiFormatReader();
+          session.hints = makeHints(globalThis.ZXing, settings.include1d);
+        }
+        for (let i = 0; i < CAPTURE_REGIONS.length && !hit; i++) {
+          try {
+            hit = zxingHit(CAPTURE_REGIONS[i], true);
+            notes.push(session.lastFrame + (hit ? ' hit' : ' miss'));
+          } catch (error) {
+            notes.push(CAPTURE_REGIONS[i].name + ' error ' + ((error && error.name) || 'failed'));
+          }
+        }
+      }
+      session.lastCapture = notes.join('; ') || 'no decoder';
+      recordAttempt({ mode: 'capture', detail: session.lastCapture, result: hit ? (hit.format + ' ' + hit.text) : 'miss' });
+      session.capturing = false;
+      captureBtn.disabled = false;
+      if (gen !== session.generation) return;
+      if (hit && allowsFormat(hit.format, settings.include1d)) deliver([hit], true);
+      else setStatus('No code in this frame. Fill the box with the barcode and press Capture again.');
     }
 
     function tick(gen) {
@@ -995,8 +1170,8 @@
         return;
       }
       setStatus(settings.include1d
-        ? 'Point a barcode at the camera.'
-        : 'Point a QR, Data Matrix, PDF417, or Aztec code at the camera.');
+        ? 'Reading. Hold a barcode in the box. Capture forces this frame.'
+        : 'Reading 2D codes. Turn on linear barcodes for a normal barcode, or press Capture.');
       tick(gen);
     }
 

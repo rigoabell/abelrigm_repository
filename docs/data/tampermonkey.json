@@ -399,9 +399,9 @@
     "id": "camera-2d-barcode-scanner",
     "name": "Camera 2D Barcode Scanner (abelrigm)",
     "category": "Labels",
-    "summary": "Read QR, Data Matrix, PDF417, and Aztec codes with the laptop camera.",
-    "detail": "On any page, a button opens the laptop camera and reads QR, Data Matrix, PDF417, and Aztec codes. The value can be copied or typed into the text field you last clicked, with an optional Enter, the way a USB scanner does. Linear barcodes stay off until you turn them on. The camera turns off when the panel closes.",
-    "version": "1.0.0",
+    "summary": "Read 2D and linear barcodes with the laptop camera, and force a capture if it misses.",
+    "detail": "On any page, a button opens the laptop camera and keeps reading QR, Data Matrix, PDF417, Aztec, and linear codes such as Code 128. The picture is not mirrored. Capture forces the current frame. Copy debug copies a dump when a label will not read. The value can be copied or typed into the last text field. The camera turns off when the panel closes.",
+    "version": "1.1.0",
     "runsOn": "Any page",
     "file": "downloads/camera-2d-barcode-scanner.txt",
     "downloadName": "Camera 2D Barcode Scanner (abelrigm).txt"
