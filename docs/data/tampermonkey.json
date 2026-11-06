@@ -396,6 +396,17 @@
     "downloadName": "Dropzone Barcode Label Generator (abelrigm).txt"
   },
   {
+    "id": "camera-2d-barcode-scanner",
+    "name": "Camera 2D Barcode Scanner (abelrigm)",
+    "category": "Labels",
+    "summary": "Read QR, Data Matrix, PDF417, and Aztec codes with the laptop camera.",
+    "detail": "On any page, a button opens the laptop camera and reads QR, Data Matrix, PDF417, and Aztec codes. The value can be copied or typed into the text field you last clicked, with an optional Enter, the way a USB scanner does. Linear barcodes stay off until you turn them on. The camera turns off when the panel closes.",
+    "version": "1.0.0",
+    "runsOn": "Any page",
+    "file": "downloads/camera-2d-barcode-scanner.txt",
+    "downloadName": "Camera 2D Barcode Scanner (abelrigm).txt"
+  },
+  {
     "id": "printmon2-bulk-print-helper",
     "name": "Printmon2 Bulk Print Helper (abelrigm)",
     "category": "Labels",

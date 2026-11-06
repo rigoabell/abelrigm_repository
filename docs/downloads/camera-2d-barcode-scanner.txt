@@ -1,0 +1,1024 @@
+// ==UserScript==
+// @name         Camera 2D Barcode Scanner (abelrigm)
+// @namespace    https://github.com/rigoabell/abelrigm_repository
+// @version      1.0.0
+// @description  Open the laptop camera and read QR, Data Matrix, PDF417, and Aztec codes. Copy the value or type it into the last text field.
+// @author       abelrigm
+// @match        http://*/*
+// @match        https://*/*
+// @noframes
+// @grant        none
+// @require      https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const SETTINGS_KEY = 'abelrigm.c2d.v1';
+  const ABSENT_MS = 1200;
+  const HISTORY_LIMIT = 25;
+  const MAX_EDGE = 800;
+  const NATIVE_2D = ['qr_code', 'data_matrix', 'pdf417', 'aztec'];
+  const NATIVE_1D = ['code_128', 'code_39', 'code_93', 'codabar', 'ean_13', 'ean_8', 'itf', 'upc_a', 'upc_e'];
+  const ZXING_2D = ['QR_CODE', 'DATA_MATRIX', 'PDF_417', 'AZTEC'];
+  const ZXING_1D = ['CODE_128', 'CODE_39', 'CODE_93', 'CODABAR', 'EAN_13', 'EAN_8', 'ITF', 'UPC_A', 'UPC_E'];
+  const ONE_D = new Set(NATIVE_1D);
+  const FORMAT_LABELS = {
+    qr_code: 'QR Code',
+    data_matrix: 'Data Matrix',
+    pdf417: 'PDF417',
+    aztec: 'Aztec',
+    code_128: 'Code 128',
+    code_39: 'Code 39',
+    code_93: 'Code 93',
+    codabar: 'Codabar',
+    ean_13: 'EAN-13',
+    ean_8: 'EAN-8',
+    itf: 'ITF',
+    upc_a: 'UPC-A',
+    upc_e: 'UPC-E',
+  };
+  const FORMAT_ALIASES = {
+    QR_CODE: 'qr_code',
+    DATA_MATRIX: 'data_matrix',
+    PDF_417: 'pdf417',
+    AZTEC: 'aztec',
+    CODE_128: 'code_128',
+    CODE_39: 'code_39',
+    CODE_93: 'code_93',
+    CODABAR: 'codabar',
+    EAN_13: 'ean_13',
+    EAN_8: 'ean_8',
+    ITF: 'itf',
+    UPC_A: 'upc_a',
+    UPC_E: 'upc_e',
+  };
+
+  function canonicalFormat(format) {
+    const raw = String(format == null ? '' : format);
+    if (FORMAT_LABELS[raw]) return raw;
+    if (FORMAT_ALIASES[raw]) return FORMAT_ALIASES[raw];
+    const lower = raw.toLowerCase();
+    if (FORMAT_LABELS[lower]) return lower;
+    return lower || 'unknown';
+  }
+
+  function labelFor(format) {
+    const id = canonicalFormat(format);
+    return FORMAT_LABELS[id] || id;
+  }
+
+  function nativeFormats(include1d) {
+    return include1d ? NATIVE_2D.concat(NATIVE_1D) : NATIVE_2D.slice();
+  }
+
+  function zxingFormats(lib, include1d) {
+    const names = include1d ? ZXING_2D.concat(ZXING_1D) : ZXING_2D.slice();
+    const table = lib && lib.BarcodeFormat || {};
+    return names.map(function (name) { return table[name]; }).filter(function (value) { return value != null; });
+  }
+
+  function allowsFormat(format, include1d) {
+    const id = canonicalFormat(format);
+    if (include1d) return id !== 'unknown';
+    return !ONE_D.has(id) && id !== 'unknown';
+  }
+
+  function displayText(text) {
+    return String(text == null ? '' : text).replace(/[\u0000-\u001f]/g, function (ch) {
+      if (ch === '\n') return '⏎';
+      if (ch === '\r') return '';
+      if (ch === '\t') return '⇥';
+      if (ch === '\u001d') return '␝';
+      return '·';
+    });
+  }
+
+  function boolSetting(value, fallback) {
+    return typeof value === 'boolean' ? value : fallback;
+  }
+
+  function sanitizeHistory(value) {
+    if (!Array.isArray(value)) return [];
+    const rows = [];
+    for (let i = 0; i < value.length && rows.length < HISTORY_LIMIT; i++) {
+      const row = value[i];
+      if (!row || typeof row.text !== 'string' || !row.text) continue;
+      rows.push({ text: row.text, format: canonicalFormat(row.format), at: Number(row.at) || 0 });
+    }
+    return rows;
+  }
+
+  function loadSettings(storage) {
+    let parsed = {};
+    try {
+      const raw = storage && storage.getItem(SETTINGS_KEY);
+      if (raw) parsed = JSON.parse(raw) || {};
+    } catch (error) {
+      parsed = {};
+    }
+    if (!parsed || typeof parsed !== 'object') parsed = {};
+    return {
+      beep: boolSetting(parsed.beep, true),
+      typeIntoField: boolSetting(parsed.typeIntoField, true),
+      pressEnter: boolSetting(parsed.pressEnter, true),
+      include1d: boolSetting(parsed.include1d, false),
+      deviceId: typeof parsed.deviceId === 'string' ? parsed.deviceId : '',
+      left: Number.isFinite(parsed.left) ? parsed.left : null,
+      top: Number.isFinite(parsed.top) ? parsed.top : null,
+      history: sanitizeHistory(parsed.history),
+    };
+  }
+
+  function saveSettings(storage, settings) {
+    try {
+      storage.setItem(SETTINGS_KEY, JSON.stringify({
+        beep: !!settings.beep,
+        typeIntoField: !!settings.typeIntoField,
+        pressEnter: !!settings.pressEnter,
+        include1d: !!settings.include1d,
+        deviceId: settings.deviceId || '',
+        left: Number.isFinite(settings.left) ? settings.left : null,
+        top: Number.isFinite(settings.top) ? settings.top : null,
+        history: sanitizeHistory(settings.history),
+      }));
+    } catch (error) {}
+  }
+
+  function nextHistory(history, scan, limit) {
+    const cap = limit || HISTORY_LIMIT;
+    const row = { text: scan.text, format: canonicalFormat(scan.format), at: scan.at };
+    const rest = (history || []).filter(function (item) {
+      return !(item && item.text === row.text && canonicalFormat(item.format) === row.format);
+    });
+    return [row].concat(rest).slice(0, cap);
+  }
+
+  function reduceScan(state, event, now, absentMs) {
+    const current = state && state.hold !== undefined ? state : { hold: null, clearAt: 0 };
+    const wait = absentMs == null ? ABSENT_MS : absentMs;
+    if (!event || event.type === 'miss') {
+      if (!current.hold) return { state: current, emit: null };
+      if (!current.clearAt) return { state: { hold: current.hold, clearAt: now }, emit: null };
+      if (now - current.clearAt >= wait) return { state: { hold: null, clearAt: 0 }, emit: null };
+      return { state: current, emit: null };
+    }
+    const text = event.text;
+    const format = canonicalFormat(event.format);
+    const same = current.hold && current.hold.text === text && current.hold.format === format;
+    if (same) return { state: { hold: current.hold, clearAt: 0 }, emit: null };
+    const hold = { text: text, format: format, at: now };
+    return { state: { hold: hold, clearAt: 0 }, emit: { text: text, format: format, at: now } };
+  }
+
+  function cameraUnavailableReason(env) {
+    const secure = env ? env.isSecureContext : (typeof window !== 'undefined' ? window.isSecureContext : true);
+    const media = env ? env.mediaDevices : (typeof navigator !== 'undefined' ? navigator.mediaDevices : null);
+    if (secure === false) return 'The camera needs a secure page. Open this site with https://.';
+    if (!media || typeof media.getUserMedia !== 'function') return 'This browser cannot open a camera.';
+    return '';
+  }
+
+  function cameraErrorMessage(error) {
+    const name = error && error.name;
+    if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+      return 'Camera blocked. Allow the camera for this site in the address bar, then press Start camera.';
+    }
+    if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return 'No camera was found on this computer.';
+    if (name === 'NotReadableError' || name === 'TrackStartError') return 'The camera is busy in another app. Close that app and press Start camera.';
+    if (name === 'OverconstrainedError' || name === 'ConstraintNotSatisfiedError') return 'That camera is not available. Choose another one.';
+    if (name === 'SecurityError') return 'This page blocked the camera. Open the site with https://.';
+    return 'The camera did not start.';
+  }
+
+  function canWrite(el) {
+    if (!el || (el.nodeType != null && el.nodeType !== 1)) return false;
+    if (el.isContentEditable) return true;
+    const tag = el.tagName;
+    if (tag !== 'INPUT' && tag !== 'TEXTAREA') return false;
+    if (el.disabled || el.readOnly) return false;
+    if (tag === 'TEXTAREA') return true;
+    const type = String(el.type || 'text').toLowerCase();
+    return type === 'text' || type === 'search' || type === 'tel' || type === 'url' || type === 'email' || type === 'number';
+  }
+
+  function fieldStillThere(el) {
+    if (!canWrite(el)) return false;
+    if (el.isConnected === false) return false;
+    return true;
+  }
+
+  function setNativeValue(el, text) {
+    const view = (el.ownerDocument && el.ownerDocument.defaultView) || globalThis;
+    const Ctor = el.tagName === 'TEXTAREA' ? view.HTMLTextAreaElement : view.HTMLInputElement;
+    const desc = Ctor && Object.getOwnPropertyDescriptor(Ctor.prototype, 'value');
+    if (desc && typeof desc.set === 'function') {
+      try {
+        desc.set.call(el, text);
+        return;
+      } catch (error) {}
+    }
+    el.value = text;
+  }
+
+  function pressEnter(el) {
+    if (typeof KeyboardEvent !== 'function') return;
+    ['keydown', 'keypress', 'keyup'].forEach(function (type) {
+      let event;
+      try {
+        event = new KeyboardEvent(type, { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true });
+      } catch (error) {
+        return;
+      }
+      try {
+        Object.defineProperty(event, 'keyCode', { get: function () { return 13; } });
+        Object.defineProperty(event, 'which', { get: function () { return 13; } });
+      } catch (error) {}
+      el.dispatchEvent(event);
+    });
+  }
+
+  function writeScan(el, text, pressEnterAfter) {
+    if (!canWrite(el)) return false;
+    if (typeof el.focus === 'function') el.focus();
+    if (el.isContentEditable) {
+      const doc = el.ownerDocument || document;
+      const selection = doc.defaultView && doc.defaultView.getSelection ? doc.defaultView.getSelection() : null;
+      if (selection && typeof doc.createRange === 'function') {
+        const range = doc.createRange();
+        range.selectNodeContents(el);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+      let inserted = false;
+      try {
+        inserted = !!(doc.execCommand && doc.execCommand('insertText', false, text));
+      } catch (error) {
+        inserted = false;
+      }
+      if (!inserted) el.textContent = text;
+      if (typeof el.dispatchEvent === 'function') el.dispatchEvent(new Event('input', { bubbles: true }));
+    } else {
+      setNativeValue(el, text);
+      if (typeof el.dispatchEvent === 'function') {
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }
+    if (pressEnterAfter) pressEnter(el);
+    return true;
+  }
+
+  function isMiss(error, lib) {
+    if (!error) return false;
+    if (lib) {
+      if (lib.NotFoundException && error instanceof lib.NotFoundException) return true;
+      if (lib.ChecksumException && error instanceof lib.ChecksumException) return true;
+      if (lib.FormatException && error instanceof lib.FormatException) return true;
+    }
+    const name = error.name || '';
+    return name === 'NotFoundException' || name === 'ChecksumException' || name === 'FormatException';
+  }
+
+  function resultFromZxing(lib, result) {
+    if (!result || typeof result.getText !== 'function') return null;
+    const text = result.getText();
+    if (!text) return null;
+    const formatValue = typeof result.getBarcodeFormat === 'function' ? result.getBarcodeFormat() : '';
+    const formatName = lib && lib.BarcodeFormat ? (lib.BarcodeFormat[formatValue] || formatValue) : formatValue;
+    return { text: text, format: canonicalFormat(formatName) };
+  }
+
+  function resultFromNative(code) {
+    if (!code || !code.rawValue) return null;
+    return { text: code.rawValue, format: canonicalFormat(code.format) };
+  }
+
+  function makeHints(lib, include1d) {
+    const hints = new Map();
+    hints.set(lib.DecodeHintType.POSSIBLE_FORMATS, zxingFormats(lib, include1d));
+    hints.set(lib.DecodeHintType.TRY_HARDER, true);
+    return hints;
+  }
+
+  function readFromSource(lib, reader, hints, source) {
+    const sources = [source];
+    if (source && typeof source.invert === 'function') sources.push(source.invert());
+    else if (lib.InvertedLuminanceSource) sources.push(new lib.InvertedLuminanceSource(source));
+    for (let i = 0; i < sources.length; i++) {
+      try {
+        const result = reader.decode(new lib.BinaryBitmap(new lib.HybridBinarizer(sources[i])), hints);
+        return resultFromZxing(lib, result);
+      } catch (error) {
+        if (!isMiss(error, lib)) return null;
+      } finally {
+        reader.reset();
+      }
+    }
+    return null;
+  }
+
+  function decodeCanvas(canvas, include1d) {
+    const lib = globalThis.ZXing;
+    if (!lib || !lib.MultiFormatReader || !canvas) return null;
+    const reader = new lib.MultiFormatReader();
+    const hints = makeHints(lib, !!include1d);
+    const source = new lib.HTMLCanvasElementLuminanceSource(canvas, false);
+    return readFromSource(lib, reader, hints, source);
+  }
+
+  function drawVideoFrame(video, canvas, ctx, maxEdge) {
+    const edge = maxEdge || MAX_EDGE;
+    const scale = Math.min(1, edge / Math.max(video.videoWidth, video.videoHeight));
+    const width = Math.max(1, Math.round(video.videoWidth * scale));
+    const height = Math.max(1, Math.round(video.videoHeight * scale));
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    ctx.drawImage(video, 0, 0, width, height);
+    return canvas;
+  }
+
+  async function chooseEngine(include1d) {
+    const wanted = nativeFormats(include1d);
+    const twoD = nativeFormats(false);
+    if (typeof BarcodeDetector === 'function') {
+      try {
+        let supported = wanted.slice();
+        if (typeof BarcodeDetector.getSupportedFormats === 'function') {
+          supported = await BarcodeDetector.getSupportedFormats();
+        }
+        const have2d = twoD.every(function (format) { return supported.indexOf(format) !== -1; });
+        if (have2d) {
+          const missing1d = !!include1d && NATIVE_1D.some(function (format) { return supported.indexOf(format) === -1; });
+          if (!missing1d || !(globalThis.ZXing && globalThis.ZXing.MultiFormatReader)) {
+            return {
+              kind: 'native',
+              label: 'built-in',
+              formats: wanted.filter(function (format) { return supported.indexOf(format) !== -1; }),
+            };
+          }
+        }
+      } catch (error) {}
+    }
+    if (globalThis.ZXing && globalThis.ZXing.MultiFormatReader) {
+      return { kind: 'zxing', label: 'ZXing', formats: zxingFormats(globalThis.ZXing, include1d) };
+    }
+    return { kind: 'none', label: '', formats: [] };
+  }
+
+  function boxArea(code) {
+    const box = code && code.boundingBox;
+    if (!box) return 0;
+    return Math.max(0, box.width) * Math.max(0, box.height);
+  }
+
+  function videoConstraints(deviceId) {
+    const video = { width: { ideal: 1280 }, height: { ideal: 720 } };
+    if (deviceId) video.deviceId = { exact: deviceId };
+    return { audio: false, video: video };
+  }
+
+  function formatClock(at) {
+    try {
+      return new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    } catch (error) {
+      return '';
+    }
+  }
+
+  const api = {
+    ABSENT_MS: ABSENT_MS,
+    SETTINGS_KEY: SETTINGS_KEY,
+    canonicalFormat: canonicalFormat,
+    labelFor: labelFor,
+    nativeFormats: nativeFormats,
+    zxingFormats: zxingFormats,
+    allowsFormat: allowsFormat,
+    displayText: displayText,
+    loadSettings: loadSettings,
+    saveSettings: saveSettings,
+    nextHistory: nextHistory,
+    reduceScan: reduceScan,
+    cameraUnavailableReason: cameraUnavailableReason,
+    cameraErrorMessage: cameraErrorMessage,
+    canWrite: canWrite,
+    writeScan: writeScan,
+    decodeCanvas: decodeCanvas,
+    drawVideoFrame: drawVideoFrame,
+    chooseEngine: chooseEngine,
+    resultFromNative: resultFromNative,
+    isMiss: isMiss,
+  };
+
+  if (globalThis.__c2dExpose) globalThis.__c2d = api;
+  if (globalThis.__c2dNoBoot) return;
+
+  try {
+    if (window.top !== window.self) return;
+  } catch (error) {
+    return;
+  }
+
+  const installed = Symbol.for('abelrigm.camera2d');
+  if (globalThis[installed]) return;
+  globalThis[installed] = true;
+
+  const settings = loadSettings(localStorage);
+  const session = {
+    generation: 0,
+    stream: null,
+    timer: 0,
+    engine: null,
+    detector: null,
+    reader: null,
+    hints: null,
+    scan: { hold: null, clearAt: 0 },
+    resumeOnVisible: false,
+    lastText: '',
+  };
+  let lastField = null;
+  let audioCtx = null;
+
+  function boot() {
+    if (document.getElementById('c2d-scanner-host')) return;
+    const parent = document.body || document.documentElement;
+    if (!parent) {
+      document.addEventListener('DOMContentLoaded', boot, { once: true });
+      return;
+    }
+
+    const host = document.createElement('div');
+    host.id = 'c2d-scanner-host';
+    host.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:none;';
+    const shadow = host.attachShadow({ mode: 'open' });
+    shadow.innerHTML = [
+      '<style>',
+      ':host{all:initial;color-scheme:dark;}',
+      '*{box-sizing:border-box;}',
+      '#fab,#panel,#drag button,#power,#copy,#clear,.toggle{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}',
+      '#fab{pointer-events:auto;position:fixed;left:18px;bottom:18px;height:52px;padding:0 16px 0 12px;border:0;border-radius:999px;cursor:pointer;',
+      'background:#12332f;color:#d9fff8;display:flex;align-items:center;gap:8px;box-shadow:0 8px 24px rgba(0,0,0,.35);}',
+      '#fab svg{display:block;}',
+      '#fab strong{font-size:13px;letter-spacing:.02em;}',
+      '#panel{pointer-events:auto;position:fixed;left:18px;top:12px;width:340px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);',
+      'display:flex;flex-direction:column;background:#12151c;color:#e7ecf3;border:1px solid #2a3142;border-radius:14px;',
+      'box-shadow:0 16px 48px rgba(0,0,0,.45);overflow:hidden;}',
+      '#panel[hidden],#fab[hidden],#body[hidden],#zoom-row[hidden]{display:none !important;}',
+      '#drag{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 10px 10px 12px;cursor:grab;user-select:none;background:#181c27;}',
+      '#drag strong{display:block;font-size:14px;}',
+      '#engine{display:block;color:#9aa3b5;font-size:11px;font-weight:500;}',
+      '#drag-actions{display:flex;gap:6px;}',
+      '#drag button,#power,#copy,#clear,.toggle{border:1px solid #334;background:#222838;color:#e7ecf3;border-radius:8px;cursor:pointer;}',
+      '#drag button{font-size:12px;padding:4px 8px;}',
+      '#body{overflow:auto;min-height:0;padding:10px 12px 12px;display:flex;flex-direction:column;gap:8px;}',
+      '#stage{position:relative;background:#000;border-radius:10px;overflow:hidden;aspect-ratio:4/3;}',
+      'video{width:100%;height:100%;object-fit:cover;transform:scaleX(-1);background:#000;}',
+      '#reticle{position:absolute;inset:16% 14%;border:2px solid rgba(61,214,198,.9);border-radius:10px;box-shadow:0 0 0 999px rgba(0,0,0,.35);pointer-events:none;}',
+      '#stage.is-holding #reticle{border-color:#3ddc84;}',
+      '#status{margin:0;min-height:2.6em;color:#c5cedd;font-size:13px;line-height:1.35;}',
+      '#result{background:#1b2130;border-radius:10px;padding:8px;}',
+      '#format{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#9ff7ec;}',
+      '#value{margin:4px 0 8px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:14px;line-height:1.35;word-break:break-word;white-space:pre-wrap;max-height:4.2em;overflow:auto;}',
+      '#copy,#power,#clear{font-size:13px;padding:6px 10px;}',
+      '#copy{background:#1c3d38;border-color:#2f6f66;}',
+      '#copy:disabled{opacity:.45;cursor:default;}',
+      '#toggles{display:flex;flex-wrap:wrap;gap:6px;}',
+      '.toggle{font-size:12px;padding:5px 8px;}',
+      '.toggle[aria-pressed="true"]{background:#1c3d38;border-color:#2f6f66;color:#d9fff8;}',
+      'label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:#9aa3b5;}',
+      'select,input[type=range]{width:100%;accent-color:#3dd6c6;}',
+      'select{background:#222838;color:#e7ecf3;border:1px solid #334;border-radius:8px;padding:6px;}',
+      '#history-head{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#9aa3b5;}',
+      '#history{list-style:none;margin:0;padding:0;max-height:120px;overflow:auto;display:flex;flex-direction:column;gap:4px;}',
+      '#history button{width:100%;text-align:left;background:#1b2130;color:#e7ecf3;border:0;border-radius:8px;padding:6px 8px;cursor:pointer;font:12px/1.3 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}',
+      '#history small{display:block;color:#9aa3b5;font-family:system-ui,sans-serif;}',
+      '#hint{margin:0;color:#8b95a8;font-size:11px;line-height:1.35;}',
+      '</style>',
+      '<button id="fab" type="button" aria-label="Open 2D barcode scanner">',
+      '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M9 4l1.2 2H18a2 2 0 012 2v10a2 2 0 01-2 2H6a2 2 0 01-2-2V8a2 2 0 012-2h1.8L9 4zm3 4.2A3.8 3.8 0 1012 15.8 3.8 3.8 0 0012 8.2z"/></svg>',
+      '<strong>2D scan</strong></button>',
+      '<section id="panel" hidden aria-label="2D barcode scanner">',
+      '<header id="drag"><div><strong>2D barcode scanner</strong><span id="engine">Camera off</span></div>',
+      '<div id="drag-actions"><button id="min" type="button">Minimize</button><button id="close" type="button">Close</button></div></header>',
+      '<div id="body">',
+      '<div id="stage"><video id="video" autoplay muted playsinline></video><div id="reticle"></div></div>',
+      '<p id="status" role="status">Camera off.</p>',
+      '<div id="result"><span id="format"></span><p id="value">No code yet.</p><button id="copy" type="button" disabled>Copy</button></div>',
+      '<div id="controls"><button id="power" type="button" aria-pressed="false">Start camera</button></div>',
+      '<div id="toggles">',
+      '<button class="toggle" type="button" data-key="beep">Beep</button>',
+      '<button class="toggle" type="button" data-key="typeIntoField">Type into last field</button>',
+      '<button class="toggle" type="button" data-key="pressEnter">Enter after type</button>',
+      '<button class="toggle" type="button" data-key="include1d">Linear barcodes too</button>',
+      '</div>',
+      '<label>Camera<select id="camera"></select></label>',
+      '<label id="zoom-row" hidden>Zoom<input id="zoom" type="range" min="1" max="1" step="1"></label>',
+      '<div id="history-head"><span>Recent</span><button id="clear" type="button">Clear</button></div>',
+      '<ol id="history"></ol>',
+      '<p id="hint">Alt+Shift+S toggles the scanner. With “Type into last field” on, a read fills the text box you clicked last. The camera turns off when this panel closes.</p>',
+      '</div></section>',
+    ].join('');
+
+    parent.appendChild(host);
+
+    const fab = shadow.getElementById('fab');
+    const panel = shadow.getElementById('panel');
+    const body = shadow.getElementById('body');
+    const drag = shadow.getElementById('drag');
+    const engineEl = shadow.getElementById('engine');
+    const statusEl = shadow.getElementById('status');
+    const formatEl = shadow.getElementById('format');
+    const valueEl = shadow.getElementById('value');
+    const copyBtn = shadow.getElementById('copy');
+    const power = shadow.getElementById('power');
+    const video = shadow.getElementById('video');
+    const stage = shadow.getElementById('stage');
+    const cameraSelect = shadow.getElementById('camera');
+    const zoomRow = shadow.getElementById('zoom-row');
+    const zoom = shadow.getElementById('zoom');
+    const historyEl = shadow.getElementById('history');
+    const scratch = document.createElement('canvas');
+    const scratchCtx = scratch.getContext('2d', { willReadFrequently: true });
+    let minimized = false;
+
+    video.muted = true;
+    video.setAttribute('playsinline', '');
+    placePanel();
+    renderToggles();
+    renderHistory();
+    renderResult(null);
+
+    shadow.addEventListener('mousedown', function (event) {
+      const target = event.target;
+      if (target && target.closest && target.closest('select, input, textarea')) return;
+      event.preventDefault();
+    });
+
+    document.addEventListener('focusin', function (event) {
+      const target = event.target;
+      if (!target || target === host || (host.contains && host.contains(target))) return;
+      if (canWrite(target)) lastField = target;
+    }, true);
+
+    fab.addEventListener('click', openPanel);
+    shadow.getElementById('close').addEventListener('click', closePanel);
+    shadow.getElementById('min').addEventListener('click', function () {
+      minimized = !minimized;
+      body.hidden = minimized;
+      shadow.getElementById('min').textContent = minimized ? 'Expand' : 'Minimize';
+    });
+    power.addEventListener('click', function () {
+      if (session.stream) stopCamera();
+      else startCamera();
+    });
+    copyBtn.addEventListener('click', function () {
+      if (!session.lastText) return;
+      copyText(session.lastText).then(function (ok) {
+        copyBtn.textContent = ok ? 'Copied' : 'Copy failed';
+        setTimeout(function () { copyBtn.textContent = 'Copy'; }, 1200);
+      });
+    });
+    shadow.querySelectorAll('.toggle').forEach(function (button) {
+      button.addEventListener('click', function () {
+        const key = button.getAttribute('data-key');
+        settings[key] = !settings[key];
+        saveSettings(localStorage, settings);
+        renderToggles();
+        if (key === 'include1d' && session.stream) rebuildEngine();
+      });
+    });
+    cameraSelect.addEventListener('change', function () {
+      settings.deviceId = cameraSelect.value;
+      saveSettings(localStorage, settings);
+      if (session.stream) startCamera();
+      refocusField();
+    });
+    shadow.getElementById('clear').addEventListener('click', function () {
+      settings.history = [];
+      saveSettings(localStorage, settings);
+      renderHistory();
+    });
+
+    drag.addEventListener('pointerdown', function (event) {
+      if (event.button !== 0) return;
+      if (event.target.closest && event.target.closest('button')) return;
+      const rect = panel.getBoundingClientRect();
+      const offsetX = event.clientX - rect.left;
+      const offsetY = event.clientY - rect.top;
+      drag.setPointerCapture(event.pointerId);
+      function move(ev) {
+        panel.style.left = (ev.clientX - offsetX) + 'px';
+        panel.style.top = (ev.clientY - offsetY) + 'px';
+        panel.style.bottom = 'auto';
+        panel.style.right = 'auto';
+      }
+      function up() {
+        drag.removeEventListener('pointermove', move);
+        drag.removeEventListener('pointerup', up);
+        clampPanel();
+        settings.left = parseInt(panel.style.left, 10);
+        settings.top = parseInt(panel.style.top, 10);
+        saveSettings(localStorage, settings);
+      }
+      drag.addEventListener('pointermove', move);
+      drag.addEventListener('pointerup', up);
+    });
+
+    document.addEventListener('keydown', function (event) {
+      if (event.altKey && event.shiftKey && event.code === 'KeyS' && !event.repeat) {
+        event.preventDefault();
+        if (panel.hidden) openPanel();
+        else closePanel();
+        return;
+      }
+      if (event.key === 'Escape' && !panel.hidden && (event.target === host || host.contains(event.target))) {
+        closePanel();
+      }
+    });
+
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) {
+        if (session.stream) {
+          session.resumeOnVisible = true;
+          stopCamera({ silent: true });
+        }
+      } else if (session.resumeOnVisible && !panel.hidden) {
+        session.resumeOnVisible = false;
+        startCamera();
+      }
+    });
+    window.addEventListener('pagehide', function () { stopCamera({ silent: true }); });
+    window.addEventListener('resize', function () {
+      if (!panel.hidden) clampPanel();
+    });
+
+    function placePanel() {
+      if (Number.isFinite(settings.left) && Number.isFinite(settings.top)) {
+        panel.style.left = settings.left + 'px';
+        panel.style.top = settings.top + 'px';
+        panel.style.bottom = 'auto';
+      }
+    }
+
+    function clampPanel() {
+      const maxHeight = Math.max(160, window.innerHeight - 16);
+      panel.style.maxHeight = maxHeight + 'px';
+      const rect = panel.getBoundingClientRect();
+      const width = rect.width || panel.offsetWidth || 340;
+      const height = Math.min(rect.height || panel.offsetHeight || 0, maxHeight);
+      const left = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - width - 8));
+      const top = Math.min(Math.max(8, rect.top), Math.max(8, window.innerHeight - height - 8));
+      panel.style.left = left + 'px';
+      panel.style.top = top + 'px';
+      panel.style.bottom = 'auto';
+      panel.style.right = 'auto';
+    }
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    function renderToggles() {
+      shadow.querySelectorAll('.toggle').forEach(function (button) {
+        const key = button.getAttribute('data-key');
+        button.setAttribute('aria-pressed', settings[key] ? 'true' : 'false');
+      });
+    }
+
+    function renderResult(scan) {
+      if (!scan) {
+        formatEl.textContent = '';
+        valueEl.textContent = 'No code yet.';
+        valueEl.title = '';
+        copyBtn.disabled = true;
+        session.lastText = '';
+        return;
+      }
+      formatEl.textContent = labelFor(scan.format);
+      valueEl.textContent = displayText(scan.text);
+      valueEl.title = scan.text;
+      copyBtn.disabled = false;
+      session.lastText = scan.text;
+    }
+
+    function renderHistory() {
+      historyEl.replaceChildren();
+      (settings.history || []).forEach(function (row) {
+        const item = document.createElement('li');
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = displayText(row.text);
+        const meta = document.createElement('small');
+        meta.textContent = labelFor(row.format) + (row.at ? ' · ' + formatClock(row.at) : '');
+        button.appendChild(meta);
+        button.addEventListener('click', function () {
+          copyText(row.text);
+          renderResult(row);
+        });
+        item.appendChild(button);
+        historyEl.appendChild(item);
+      });
+    }
+
+    function updateEngineLabel() {
+      if (!session.stream) {
+        engineEl.textContent = 'Camera off';
+        return;
+      }
+      const label = session.engine && session.engine.label ? session.engine.label : '';
+      engineEl.textContent = label ? 'Reading with ' + label : 'Camera on';
+    }
+
+    function setPower(on) {
+      power.textContent = on ? 'Stop camera' : 'Start camera';
+      power.setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
+
+    function openPanel() {
+      panel.hidden = false;
+      fab.hidden = true;
+      clampPanel();
+      if (!session.stream) startCamera();
+    }
+
+    function closePanel() {
+      panel.hidden = true;
+      fab.hidden = false;
+      session.resumeOnVisible = false;
+      stopCamera({ silent: true });
+      setStatus('Camera off.');
+    }
+
+    function refocusField() {
+      if (fieldStillThere(lastField)) {
+        try { lastField.focus(); } catch (error) {}
+      }
+    }
+
+    function beep() {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      if (!audioCtx) audioCtx = new AudioCtx();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      const now = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.06, now + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start(now);
+      osc.stop(now + 0.13);
+    }
+
+    function bindZoom(track) {
+      const caps = track && track.getCapabilities ? track.getCapabilities() : {};
+      if (!caps.zoom) {
+        zoomRow.hidden = true;
+        zoom.oninput = null;
+        return;
+      }
+      zoomRow.hidden = false;
+      zoom.min = caps.zoom.min;
+      zoom.max = caps.zoom.max;
+      zoom.step = caps.zoom.step || 0.1;
+      const current = track.getSettings ? track.getSettings().zoom : caps.zoom.min;
+      zoom.value = current == null ? caps.zoom.min : current;
+      zoom.oninput = function () {
+        track.applyConstraints({ advanced: [{ zoom: Number(zoom.value) }] }).catch(function () {});
+      };
+    }
+
+    async function refreshDevices() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cams = devices.filter(function (device) { return device.kind === 'videoinput'; });
+      const previous = cameraSelect.value || settings.deviceId;
+      cameraSelect.replaceChildren();
+      cams.forEach(function (cam, index) {
+        const option = document.createElement('option');
+        option.value = cam.deviceId;
+        option.textContent = cam.label || ('Camera ' + (index + 1));
+        cameraSelect.appendChild(option);
+      });
+      const match = previous && Array.prototype.some.call(cameraSelect.options, function (option) { return option.value === previous; });
+      if (match) cameraSelect.value = previous;
+      if (cameraSelect.value) settings.deviceId = cameraSelect.value;
+    }
+
+    function stopTracks() {
+      if (session.timer) clearTimeout(session.timer);
+      session.timer = 0;
+      if (session.stream) {
+        session.stream.getTracks().forEach(function (track) { track.stop(); });
+        session.stream = null;
+      }
+      if (video.srcObject) video.srcObject = null;
+      stage.classList.remove('is-holding');
+    }
+
+    function stopCamera(options) {
+      session.generation += 1;
+      stopTracks();
+      setPower(false);
+      zoomRow.hidden = true;
+      updateEngineLabel();
+      if (!options || !options.silent) setStatus('Camera off.');
+    }
+
+    function prepareReader() {
+      session.detector = null;
+      session.reader = null;
+      session.hints = null;
+      session.scan = { hold: null, clearAt: 0 };
+      if (!session.engine) return;
+      if (session.engine.kind === 'native') {
+        session.detector = new BarcodeDetector({ formats: session.engine.formats });
+      } else if (session.engine.kind === 'zxing' && globalThis.ZXing) {
+        session.reader = new globalThis.ZXing.MultiFormatReader();
+        session.hints = makeHints(globalThis.ZXing, settings.include1d);
+      }
+    }
+
+    async function rebuildEngine() {
+      session.engine = await chooseEngine(settings.include1d);
+      prepareReader();
+      updateEngineLabel();
+    }
+
+    function deliver(hits) {
+      const allowedHits = (hits || []).filter(function (hit) {
+        return hit && hit.text && allowsFormat(hit.format, settings.include1d);
+      });
+      if (!allowedHits.length) {
+        const reduced = reduceScan(session.scan, { type: 'miss' }, Date.now(), ABSENT_MS);
+        session.scan = reduced.state;
+        stage.classList.toggle('is-holding', !!session.scan.hold);
+        return;
+      }
+      allowedHits.sort(function (a, b) { return (b.area || 0) - (a.area || 0); });
+      allowedHits.forEach(function (hit) {
+        const reduced = reduceScan(session.scan, { type: 'hit', text: hit.text, format: hit.format }, Date.now(), ABSENT_MS);
+        session.scan = reduced.state;
+        if (reduced.emit) onEmit(reduced.emit);
+      });
+      stage.classList.toggle('is-holding', !!session.scan.hold);
+    }
+
+    function onEmit(scan) {
+      settings.history = nextHistory(settings.history, scan, HISTORY_LIMIT);
+      saveSettings(localStorage, settings);
+      renderResult(scan);
+      renderHistory();
+      if (settings.beep) {
+        try { beep(); } catch (error) {}
+      }
+      if (settings.typeIntoField) {
+        if (fieldStillThere(lastField)) {
+          const wrote = writeScan(lastField, scan.text, settings.pressEnter);
+          setStatus(wrote ? ('Typed ' + labelFor(scan.format) + ' into the page.') : (labelFor(scan.format) + ' read.'));
+        } else {
+          setStatus(labelFor(scan.format) + ' read. Click a text field to type the next one.');
+        }
+      } else {
+        setStatus(labelFor(scan.format) + ' read.');
+      }
+    }
+
+    function fallbackToZxing() {
+      if (!(globalThis.ZXing && globalThis.ZXing.MultiFormatReader)) return false;
+      session.engine = { kind: 'zxing', label: 'ZXing', formats: [] };
+      prepareReader();
+      updateEngineLabel();
+      return true;
+    }
+
+    async function scanOnce(gen) {
+      if (gen !== session.generation) return;
+      if (video.readyState < 2 || !video.videoWidth) return;
+      if (session.engine && session.engine.kind === 'native' && session.detector) {
+        try {
+          const codes = await session.detector.detect(video);
+          if (gen !== session.generation) return;
+          const hits = (codes || []).map(function (code) {
+            const hit = resultFromNative(code);
+            if (hit) hit.area = boxArea(code);
+            return hit;
+          }).filter(Boolean);
+          deliver(hits);
+          return;
+        } catch (error) {
+          if (gen !== session.generation) return;
+          if (!fallbackToZxing()) {
+            setStatus('The built-in decoder stopped. Reload the page.');
+            return;
+          }
+        }
+      }
+      const lib = globalThis.ZXing;
+      if (!lib || !session.reader || !scratchCtx) return;
+      try {
+        drawVideoFrame(video, scratch, scratchCtx, MAX_EDGE);
+        const source = new lib.HTMLCanvasElementLuminanceSource(scratch, false);
+        const hit = readFromSource(lib, session.reader, session.hints, source);
+        if (gen !== session.generation) return;
+        deliver(hit ? [hit] : []);
+      } catch (error) {
+        if (gen !== session.generation) return;
+        deliver([]);
+      }
+    }
+
+    function tick(gen) {
+      scanOnce(gen).then(function () {
+        if (gen !== session.generation) return;
+        session.timer = setTimeout(function () { tick(gen); }, 90);
+      });
+    }
+
+    async function startCamera() {
+      const blocked = cameraUnavailableReason();
+      if (blocked) {
+        setStatus(blocked);
+        setPower(false);
+        return;
+      }
+      const gen = ++session.generation;
+      stopTracks();
+      setPower(true);
+      setStatus('Asking for the camera…');
+      updateEngineLabel();
+      let stream = null;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(videoConstraints(settings.deviceId));
+      } catch (error) {
+        if (error && (error.name === 'OverconstrainedError' || error.name === 'ConstraintNotSatisfiedError' || error.name === 'NotFoundError')) {
+          try {
+            const loose = settings.deviceId ? { deviceId: settings.deviceId } : true;
+            stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: loose });
+          } catch (again) {
+            if (gen !== session.generation) return;
+            setStatus(cameraErrorMessage(again));
+            setPower(false);
+            updateEngineLabel();
+            return;
+          }
+        } else {
+          if (gen !== session.generation) return;
+          setStatus(cameraErrorMessage(error));
+          setPower(false);
+          updateEngineLabel();
+          return;
+        }
+      }
+      if (gen !== session.generation) {
+        stream.getTracks().forEach(function (track) { track.stop(); });
+        return;
+      }
+      session.stream = stream;
+      video.srcObject = stream;
+      try { await video.play(); } catch (error) {}
+      const track = stream.getVideoTracks()[0];
+      bindZoom(track);
+      try { await refreshDevices(); } catch (error) {}
+      session.engine = await chooseEngine(settings.include1d);
+      if (gen !== session.generation) return;
+      prepareReader();
+      updateEngineLabel();
+      if (!session.engine || session.engine.kind === 'none') {
+        setStatus('This browser cannot read barcodes. Reinstall the script so the decoder downloads, or use Chrome or Edge.');
+        return;
+      }
+      setStatus(settings.include1d
+        ? 'Point a barcode at the camera.'
+        : 'Point a QR, Data Matrix, PDF417, or Aztec code at the camera.');
+      tick(gen);
+    }
+
+    async function copyText(text) {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch (error) {}
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.setAttribute('readonly', '');
+      area.style.cssText = 'position:fixed;left:-9999px;top:0;';
+      document.body.appendChild(area);
+      area.select();
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch (error) { ok = false; }
+      area.remove();
+      return ok;
+    }
+  }
+
+  boot();
+})();
