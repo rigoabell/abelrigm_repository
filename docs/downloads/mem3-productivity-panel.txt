@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.16
+// @version      1.8.17
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.16';
+    const SCRIPT_VERSION = '1.8.17';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -4361,13 +4361,27 @@
         const card = document.createElement('div');
         card.style.cssText = 'display:flex; align-items:center; gap:8px; background:#0d1117; ' +
             'border:1px solid #30363d; border-radius:8px; padding:8px;';
+        const photoPx = CLOCK_PHOTO_PX * 3;
+        const ringPx = CLOCK_RING_PX * 3;
+        const photoWrap = document.createElement('div');
+        photoWrap.style.cssText = 'flex:0 0 auto; padding:' + ringPx + 'px; line-height:0;';
         const photo = document.createElement('div');
         photo.setAttribute('data-mem3-photo', '1');
-        photo.setAttribute('aria-hidden', 'true');
         const photoUrl = photoForEmp(empId);
-        photo.style.cssText = 'flex:0 0 32px; width:32px; height:32px; border-radius:50%; ' +
-            'background:#21262d center/cover no-repeat;';
+        photo.style.cssText = 'position:relative; width:' + photoPx + 'px; height:' + photoPx + 'px; ' +
+            'border-radius:50%; background:#21262d center/cover no-repeat;';
         if (photoUrl) photo.style.backgroundImage = 'url("' + String(photoUrl).replace(/"/g, '') + '")';
+        const clock = clockLabel(person.clockStatus);
+        if (clock) {
+            photo.title = clock.text;
+            const ring = document.createElement('span');
+            ring.className = 'mem3-popup-clock-ring';
+            ring.style.cssText = 'position:absolute; inset:0; width:100%; height:100%; box-sizing:border-box; ' +
+                'border-radius:50%; pointer-events:none; border:0; background:transparent; ' +
+                'box-shadow:0 0 0 ' + ringPx + 'px ' + clock.color + ';';
+            photo.appendChild(ring);
+        }
+        photoWrap.appendChild(photo);
         const info = document.createElement('div');
         info.style.cssText = 'flex:1 1 auto; min-width:0;';
         const name = document.createElement('div');
@@ -4386,7 +4400,7 @@
         if (showsIdleNow(time, empId)) info.appendChild(idleField('Idle for', formatDuration(idleStretchMin(time))));
         else if (fn) info.appendChild(idleField('Latest', (fn.title || fn.bucket) + ' \u00b7 ' + formatDuration(fn.minutes)));
         info.appendChild(timeDetailsLink(empId));
-        card.appendChild(photo);
+        card.appendChild(photoWrap);
         card.appendChild(info);
         return card;
     }
@@ -5552,7 +5566,8 @@
             badge: (ident && ident.badge) || board.badge || '',
             line: board.line || '',
             station: board.station || '',
-            clock: clock === 'in' ? 'Clocked in' : (clock === 'out' ? 'Clocked out' : '')
+            clock: clock === 'in' ? 'Clocked in' : (clock === 'out' ? 'Clocked out' : ''),
+            clockStatus: clock
         };
     }
 
