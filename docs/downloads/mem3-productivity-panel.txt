@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.17
+// @version      1.8.18
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.17';
+    const SCRIPT_VERSION = '1.8.18';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -4353,11 +4353,47 @@
         return stored;
     }
 
+    function idleHoursLabel(minutes) {
+        const hours = (Number(minutes) || 0) / 60;
+        return '(' + hours.toFixed(2) + ' Hours of Idle Time)';
+    }
+
+    function idleNowYield() {
+        const mark = document.createElement('span');
+        mark.className = 'mem3-yield-mark';
+        mark.title = 'Idle now';
+        mark.style.marginLeft = '6px';
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('viewBox', '0 0 24 22');
+        svg.setAttribute('width', '16');
+        svg.setAttribute('height', '15');
+        svg.setAttribute('aria-hidden', 'true');
+        const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+        poly.setAttribute('points', '12,1.2 22.6,20.8 1.4,20.8');
+        poly.setAttribute('fill', '#f85149');
+        const bar = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        bar.setAttribute('x', '10.7');
+        bar.setAttribute('y', '7');
+        bar.setAttribute('width', '2.6');
+        bar.setAttribute('height', '7');
+        bar.setAttribute('rx', '0.6');
+        bar.setAttribute('fill', '#0d1117');
+        const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        dot.setAttribute('cx', '12');
+        dot.setAttribute('cy', '17.2');
+        dot.setAttribute('r', '1.35');
+        dot.setAttribute('fill', '#0d1117');
+        svg.appendChild(poly);
+        svg.appendChild(bar);
+        svg.appendChild(dot);
+        mark.appendChild(svg);
+        return mark;
+    }
+
     function personCard(empId) {
         const person = personForEmp(empId);
         const time = LAST_TIME[empId];
         const stats = statsFor(empId);
-        const fn = time && time.lastFunction;
         const card = document.createElement('div');
         card.style.cssText = 'display:flex; align-items:center; gap:8px; background:#0d1117; ' +
             'border:1px solid #30363d; border-radius:8px; padding:8px;';
@@ -4396,9 +4432,18 @@
             stats.hasData ? uphColor(stats.uph) : '#8b949e'
         ));
         const pct = idlePercent(time);
-        info.appendChild(idleField('Idle', idleLabel(pct), idleColor(pct)));
-        if (showsIdleNow(time, empId)) info.appendChild(idleField('Idle for', formatDuration(idleStretchMin(time))));
-        else if (fn) info.appendChild(idleField('Latest', (fn.title || fn.bucket) + ' \u00b7 ' + formatDuration(fn.minutes)));
+        const idleValue = idleLabel(pct) + (time && time.hasTime ? ' ' + idleHoursLabel(time.idleMin) : '');
+        info.appendChild(idleField('Idle', idleValue, idleColor(pct)));
+        if (showsIdleNow(time, empId)) {
+            const stretch = idleField('Idle for', formatDuration(idleStretchMin(time)));
+            stretch.appendChild(idleNowYield());
+            info.appendChild(stretch);
+        } else {
+            const quiet = document.createElement('div');
+            quiet.textContent = 'Not currently in Idle Time.';
+            quiet.style.cssText = 'font-size:12px; font-weight:650; line-height:1.35;';
+            info.appendChild(quiet);
+        }
         info.appendChild(timeDetailsLink(empId));
         card.appendChild(photoWrap);
         card.appendChild(info);
@@ -4420,6 +4465,7 @@
             idleNow: 'Latest function row is indirect or Time Off Task for at least 10 minutes. Clocked-out associates are left out.'
         };
         const headingText = (scopeLabel || 'Total') + ' \u00b7 ' + (titles[mode] || 'Associates');
+        installPulseStyles();
         const overlay = document.createElement('div');
         overlay.id = 'mem3-roster-popup';
         overlay.style.cssText = 'position:fixed; inset:0; z-index:2147483646; background:rgba(0,0,0,0.55); ' +
