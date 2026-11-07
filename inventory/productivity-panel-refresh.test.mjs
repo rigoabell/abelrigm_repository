@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-panel.txt", import.meta.url), "utf8");
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.8\.9/);
+assert.match(src, /@version\s+1\.8\.10/);
 assert.match(src, /const IDLE_START_MIN = 10;/);
 assert.match(src, /const TIME_WORKERS = 4;/);
 assert.match(src, /const MAX_TIME_TRIES = 1;/);
@@ -19,7 +19,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.8.9");
+assert.equal(entry.version, "1.8.10");
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
 
 function attrOf(tag, name) {
@@ -164,6 +164,8 @@ const patched = src.replace(
     "applyTodayDateOnce();\n    init();\n    startSilentUpdates();\n})();",
     `globalThis.__mem3 = {
         refreshData, forceWindow, loadBoardTimes, timeProgress, queueMissingTimes, parseTimeDetails,
+        idleAssociateIds, idleScan, idleAssociateDebug, idleAssociatesDebug,
+        setBoardPerson(id, rec) { BOARD_PEOPLE[id] = rec; },
         setBoard(ids) { BOARD_IDS = ids.slice(); },
         boardIds() { return BOARD_IDS.slice(); },
         bigsIds() { return BIGS_IDS.slice(); },
@@ -353,6 +355,36 @@ assert.equal(idleAgain.currentlyIdle, true);
 assert.equal(idleAgain.lastFunction.minutes, 12);
 assert.equal(idleAgain.idleMin, 12);
 assert.equal(idleAgain.activeMin, 40);
+
+api.setBoard(["long", "short", "work"]);
+api.setBoardPerson("long", { name: "Long,Ada", login: "along", station: "Customer Returns 1st Half: Station 3-06 | 2nd Half: Station 3-70" });
+api.setTime("long", {
+    hasTime: true, idleMin: 20, clockedMin: 100,
+    lastFunction: { bucket: "indirect", minutes: 14, title: "Labor Track" }
+});
+api.setTime("short", {
+    hasTime: true, idleMin: 4, clockedMin: 80,
+    lastFunction: { bucket: "tot", minutes: 4, title: "Time Off Task" }
+});
+api.setTime("work", {
+    hasTime: true, idleMin: 30, clockedMin: 90,
+    lastFunction: { bucket: "direct", minutes: 40, title: "Primary Grading" }
+});
+assert.equal(JSON.stringify(api.idleAssociateIds()), JSON.stringify(["long"]));
+const scan = api.idleScan();
+assert.equal(JSON.stringify(scan.under10), JSON.stringify(["short"]));
+const one = api.idleAssociateDebug("long");
+assert.equal(one.associate, "Ada Long");
+assert.equal(one.station, "1st Half 3-06 | 2nd Half 3-70");
+assert.equal(one.uph, null);
+assert.equal(one.idlePercent, 20);
+assert.equal(one.idleForMin, 14);
+assert.equal(one.currentlyIdle, true);
+const allIdle = api.idleAssociatesDebug();
+assert.equal(allIdle.count, 1);
+assert.equal(allIdle.under10Count, 1);
+assert.equal(allIdle.associates[0].empId, "long");
+assert.equal(allIdle.under10[0].empId, "short");
 
 try {
     api.setRollup({ "99": { functions: {} } });

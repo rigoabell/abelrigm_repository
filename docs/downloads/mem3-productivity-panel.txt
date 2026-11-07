@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.9
+// @version      1.8.10
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.9';
+    const SCRIPT_VERSION = '1.8.10';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -1527,14 +1527,15 @@
         if (panel) fillIssuePanel(panel);
     }
 
-    function rememberBoardPerson(empId, person, line) {
+    function rememberBoardPerson(empId, person, line, station) {
         if (!empId) return;
         const prev = BOARD_PEOPLE[empId] || {};
         BOARD_PEOPLE[empId] = {
             login: (person && person.login) || prev.login || '',
             name: (person && person.name) || prev.name || '',
             badge: (person && person.badge) || prev.badge || '',
-            line: line || prev.line || ''
+            line: line || prev.line || '',
+            station: station || prev.station || ''
         };
     }
 
@@ -2293,7 +2294,7 @@
                 }
                 const person = IDENTITY.byLogin[found.login];
                 const empId = resolveEmpId(person);
-                if (empId) rememberBoardPerson(empId, person, 'BIGS');
+                if (empId) rememberBoardPerson(empId, person, 'BIGS', rowAssignmentText(tr));
                 if (empId && !seen[empId]) {
                     seen[empId] = true;
                     ids.push(empId);
@@ -3953,8 +3954,11 @@
         const cell = document.createElement('div');
         cell.style.cssText = opts.lead
             ? 'display:flex; flex-direction:column; justify-content:center; gap:2px; ' +
-              'flex:1.15 1 0; min-width:0; margin:0 10px 0 0; padding:6px 10px; ' +
-              'background:#0d1117; border:1px solid #8b949e; border-left:5px solid #8b949e; border-radius:8px;'
+              (opts.stacked
+                  ? 'width:100%; box-sizing:border-box; min-width:0; margin:0; '
+                  : 'flex:1.15 1 0; min-width:0; margin:0 10px 0 0; ') +
+              'padding:6px 10px; background:#0d1117; border:1px solid #8b949e; ' +
+              'border-left:5px solid #8b949e; border-radius:8px;'
             : 'display:flex; flex-direction:column; justify-content:center; gap:1px; ' +
               'flex:1 1 0; min-width:0; padding:2px 8px; border-left:3px solid #30363d;';
 
@@ -4038,6 +4042,194 @@
     }
 
     let summaryWatchAt = 0;
+    let idleListOpen = false;
+
+    function idleStretchMin(time) {
+        const fn = time && time.lastFunction;
+        return fn ? (fn.minutes || 0) : 0;
+    }
+
+    function sortIdleIds(ids) {
+        ids.sort(function (a, b) {
+            const gap = idleStretchMin(LAST_TIME[b]) - idleStretchMin(LAST_TIME[a]);
+            if (gap) return gap;
+            const an = (personForEmp(a).name || personForEmp(a).login || a).toLowerCase();
+            const bn = (personForEmp(b).name || personForEmp(b).login || b).toLowerCase();
+            if (an < bn) return -1;
+            if (an > bn) return 1;
+            return String(a) < String(b) ? -1 : (String(a) > String(b) ? 1 : 0);
+        });
+        return ids;
+    }
+
+    // Idle for the check list starts at 10 minutes on the latest function row.
+    // A shorter indirect or Time Off Task row is the lag after a scan.
+    function idleScan() {
+        const pool = cycleEmpIds();
+        const seen = Object.create(null);
+        const idle = [];
+        const under10 = [];
+        for (let i = 0; i < pool.length; i++) {
+            const id = pool[i];
+            if (!id || seen[id]) continue;
+            seen[id] = true;
+            const time = LAST_TIME[id];
+            const fn = time && time.lastFunction;
+            if (!fn || (fn.bucket !== 'indirect' && fn.bucket !== 'tot')) continue;
+            if (showsIdleNow(time)) idle.push(id);
+            else under10.push(id);
+        }
+        return { idle: sortIdleIds(idle), under10: sortIdleIds(under10) };
+    }
+
+    function idleAssociateIds() {
+        return idleScan().idle;
+    }
+
+    function stationLabel(text) {
+        const raw = String(text || '').replace(/\s+/g, ' ').trim();
+        if (!raw) return '';
+        if (/1st\s*half/i.test(raw) || /station/i.test(raw)) return formatOpenStation(raw);
+        return raw;
+    }
+
+    function idleAssociateDebug(empId) {
+        const person = personForEmp(empId);
+        const time = LAST_TIME[empId];
+        const stats = statsFor(empId);
+        const fn = time && time.lastFunction;
+        let timeUrl = '';
+        try { timeUrl = fclmEmpUrl(empId); } catch (e) { timeUrl = ''; }
+        return {
+            script: SCRIPT_LABEL,
+            version: SCRIPT_VERSION,
+            what: 'idle-associate',
+            capturedAt: new Date().toISOString(),
+            window: windowPreset(ACTIVE_WINDOW).label,
+            associate: person.name || person.login || person.empId,
+            login: person.login,
+            empId: person.empId,
+            station: stationLabel(person.station),
+            stationRaw: person.station || '',
+            line: person.line,
+            uph: stats.hasData ? stats.uph : null,
+            units: stats.hasData ? stats.units : null,
+            idlePercent: idlePercent(time),
+            idleForMin: fn ? fn.minutes : null,
+            idleStartsAtMin: IDLE_START_MIN,
+            lastFunction: fn || null,
+            currentlyIdle: showsIdleNow(time),
+            time: timeSnapshot(time),
+            rollup: rollupSnapshot(empId),
+            timeUrl: timeUrl
+        };
+    }
+
+    function idleAssociatesDebug() {
+        const scan = idleScan();
+        const associates = [];
+        const under10 = [];
+        for (let i = 0; i < scan.idle.length; i++) associates.push(idleAssociateDebug(scan.idle[i]));
+        for (let i = 0; i < scan.under10.length; i++) under10.push(idleAssociateDebug(scan.under10[i]));
+        return {
+            script: SCRIPT_LABEL,
+            version: SCRIPT_VERSION,
+            what: 'idle-associates',
+            capturedAt: new Date().toISOString(),
+            window: windowPreset(ACTIVE_WINDOW).label,
+            rule: 'Latest function row is indirect or Time Off Task for at least 10 minutes. A shorter row is not counted.',
+            count: associates.length,
+            under10Count: under10.length,
+            associates: associates,
+            under10: under10
+        };
+    }
+
+    function idleField(label, value) {
+        const row = document.createElement('div');
+        row.style.cssText = 'font-size:12px; font-weight:650; line-height:1.35;';
+        const name = document.createElement('span');
+        name.textContent = label + ' ';
+        name.style.cssText = 'color:#8b949e; font-weight:700;';
+        const val = document.createElement('span');
+        val.textContent = value;
+        row.appendChild(name);
+        row.appendChild(val);
+        return row;
+    }
+
+    function makeIdleCheckCell() {
+        const scan = idleScan();
+        const cell = document.createElement('div');
+        cell.id = 'mem3-idle-check';
+        cell.style.cssText = 'display:flex; flex-direction:column; align-items:stretch; gap:8px; ' +
+            'width:100%; box-sizing:border-box; margin-top:8px; padding:8px 10px; background:#0d1117; ' +
+            'border:1px solid #8b949e; border-left:5px solid #d29922; border-radius:8px;';
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = idleListOpen ? 'Hide idle' : 'Check idle';
+        btn.style.cssText = 'width:100%; padding:6px 8px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
+            'background:#161b22; border:1px solid #d29922; font:800 13px Segoe UI,system-ui,sans-serif;';
+        btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            idleListOpen = !idleListOpen;
+            const summary = document.getElementById(FLOOR_SUMMARY_ID);
+            if (summary) summary.removeAttribute('data-sig');
+            placeFloorSummary();
+        });
+        cell.appendChild(btn);
+        if (!idleListOpen) return cell;
+
+        const count = document.createElement('div');
+        const n = scan.idle.length;
+        count.textContent = n + (n === 1 ? ' associate idle' : ' associates idle');
+        count.style.cssText = 'font-size:16px; font-weight:800;';
+        cell.appendChild(count);
+
+        const note = document.createElement('div');
+        const lag = scan.under10.length;
+        note.textContent = lag
+            ? (lag + (lag === 1 ? ' associate is' : ' associates are') + ' under 10 minutes and not counted.')
+            : 'Idle starts at 10 minutes on the latest indirect or Time Off Task row.';
+        note.style.cssText = 'font-size:12px; font-weight:600; color:#8b949e;';
+        cell.appendChild(note);
+        cell.appendChild(copyDebugButton('Copy all', idleAssociatesDebug));
+
+        if (!n) {
+            const empty = document.createElement('div');
+            empty.textContent = 'No associate has been idle for 10 minutes.';
+            empty.style.cssText = 'font-size:13px; font-weight:650;';
+            cell.appendChild(empty);
+            return cell;
+        }
+
+        const list = document.createElement('div');
+        list.style.cssText = 'display:flex; flex-direction:column; gap:8px; max-height:70vh; overflow:auto;';
+        for (let i = 0; i < scan.idle.length; i++) {
+            const empId = scan.idle[i];
+            const person = personForEmp(empId);
+            const time = LAST_TIME[empId];
+            const stats = statsFor(empId);
+            const card = document.createElement('div');
+            card.style.cssText = 'background:#161b22; border:1px solid #30363d; border-radius:8px; padding:8px;';
+            const name = document.createElement('div');
+            name.textContent = person.name || person.login || person.empId;
+            name.style.cssText = 'font-size:14px; font-weight:800; margin-bottom:4px;';
+            card.appendChild(name);
+            card.appendChild(idleField('Station', stationLabel(person.station) || '—'));
+            card.appendChild(idleField('UPH', stats.hasData ? (stats.uph > 0 ? stats.uph.toFixed(1) : '0') : '—'));
+            card.appendChild(idleField('Idle', idleLabel(idlePercent(time)) + (idlePercent(time) === null ? '' : '%')));
+            card.appendChild(idleField('Idle for', formatDuration(idleStretchMin(time))));
+            const actions = document.createElement('div');
+            actions.style.cssText = 'margin-top:6px;';
+            actions.appendChild(copyDebugButton('Copy', function () { return idleAssociateDebug(empId); }));
+            card.appendChild(actions);
+            list.appendChild(card);
+        }
+        cell.appendChild(list);
+        return cell;
+    }
 
     function summaryIsMounted() {
         const node = document.getElementById(FLOOR_SUMMARY_ID);
@@ -4087,7 +4279,12 @@
             main.insertBefore(node, main.firstChild);
         }
 
-        const sig = 'v41|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' + data.floorAvg.toFixed(1) + '|' + data.floorUnits + '|' + data.floorRated + '|' +
+        const idleState = idleScan();
+        const sig = 'v42|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
+            (idleListOpen ? 'open' : 'shut') + '|' +
+            idleState.idle.map(function (id) { return id + ':' + Math.round(idleStretchMin(LAST_TIME[id]) * 10); }).join(',') + '|' +
+            idleState.under10.map(function (id) { return id + ':' + Math.round(idleStretchMin(LAST_TIME[id]) * 10); }).join(',') + '|' +
+            data.floorAvg.toFixed(1) + '|' + data.floorUnits + '|' + data.floorRated + '|' +
             (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
             (data.floorOpen || []).join(';') + '|' +
             data.floorStaffed + '|' + (data.floorTotalMin || 0) + '|' + (data.floorIdleMin || 0) + '|' +
@@ -4203,9 +4400,12 @@
         }
 
         const metrics = document.createElement('div');
-        metrics.style.cssText = 'display:flex; align-items:stretch; flex-wrap:nowrap; gap:0; width:100%; min-width:0;';
+        metrics.style.cssText = 'display:flex; align-items:flex-start; flex-wrap:nowrap; gap:0; width:100%; min-width:0;';
 
-        metrics.appendChild(makeSummaryCell({
+        const totalColumn = document.createElement('div');
+        totalColumn.style.cssText = 'display:flex; flex-direction:column; align-items:stretch; ' +
+            'flex:1.15 1 0; min-width:0; margin:0 10px 0 0;';
+        totalColumn.appendChild(makeSummaryCell({
             kicker: 'Total',
             value: data.floorAvg > 0 ? data.floorAvg.toFixed(1) : '\u2014',
             uph: data.floorAvg,
@@ -4215,8 +4415,11 @@
             stations: data.floorStations || 0,
             openStations: data.floorOpen || [],
             lead: true,
+            stacked: true,
             title: 'Average of the odd and even side rates. Total work time and IDLE time are summed once per associate from FCLM Time Details.'
         }));
+        totalColumn.appendChild(makeIdleCheckCell());
+        metrics.appendChild(totalColumn);
 
         for (let i = 0; i < data.lines.length; i++) {
             const line = data.lines[i];
@@ -4310,7 +4513,7 @@
                 const time = timeFor(empId);
                 if (empId) {
                     empIds.push(empId);
-                    rememberBoardPerson(empId, person, panelName);
+                    rememberBoardPerson(empId, person, panelName, rowAssignmentText(tr));
                 }
                 if (stats.hasData) withData++;
                 if (stats.hasData && showsIdle(time)) both++;
@@ -5064,6 +5267,7 @@
             login: login,
             badge: (ident && ident.badge) || board.badge || '',
             line: board.line || '',
+            station: board.station || '',
             clock: clock === 'in' ? 'Clocked in' : (clock === 'out' ? 'Clocked out' : '')
         };
     }
@@ -5439,7 +5643,8 @@
             ['Counts', 'Indirect function time and Time Off Task in the selected window'],
             ['Does not count', 'Active graded time, or time outside the window'],
             ['BIGS stations', 'A station whose name contains BIGS shows that associate’s idle percent on the row. It is left out of every side and out of Total.'],
-            ['IDLE NOW', 'The latest function row is indirect or Time Off Task, and that row has lasted at least 10 minutes. Earlier idle in the window still counts in the percent.']
+            ['IDLE NOW', 'The latest function row is indirect or Time Off Task, and that row has lasted at least 10 minutes. Earlier idle in the window still counts in the percent.'],
+            ['Check idle', 'The cell under Total lists associates idle for at least 10 minutes, with station, UPH, idle percent, and how long that stretch has run. A shorter idle row is not counted.']
         ]));
         card.appendChild(idleSec);
 
