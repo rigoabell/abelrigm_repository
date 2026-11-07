@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-panel.txt", import.meta.url), "utf8");
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.8\.11/);
+assert.match(src, /@version\s+1\.8\.12/);
 assert.match(src, /const IDLE_START_MIN = 10;/);
 assert.match(src, /const TIME_WORKERS = 4;/);
 assert.match(src, /const MAX_TIME_TRIES = 1;/);
@@ -19,7 +19,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.8.11");
+assert.equal(entry.version, "1.8.12");
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
 
 function attrOf(tag, name) {
@@ -356,6 +356,14 @@ assert.equal(idleAgain.lastFunction.minutes, 12);
 assert.equal(idleAgain.idleMin, 12);
 assert.equal(idleAgain.activeMin, 40);
 
+const gradingPath = api.parseTimeDetails(timePage([
+    fnRow("indirect", "C-Returns Processed\u2666Primary Grading", "20:00")
+]));
+assert.equal(gradingPath.currentlyIdle, false);
+assert.equal(gradingPath.lastFunction.bucket, "indirect");
+assert.equal(gradingPath.lastFunction.minutes, 20);
+assert.equal(gradingPath.idleMin, 20);
+
 api.setBoard(["long", "short", "work"]);
 api.setBoardPerson("long", { name: "Long,Ada", login: "along", station: "Customer Returns 1st Half: Station 3-06 | 2nd Half: Station 3-70" });
 api.setTime("long", {
@@ -388,6 +396,15 @@ assert.equal(allIdle.count, 1);
 assert.equal(allIdle.under10Count, 1);
 assert.equal(allIdle.associates[0].empId, "long");
 assert.equal(allIdle.under10[0].empId, "short");
+api.setTime("grade", {
+    hasTime: true, idleMin: 20, clockedMin: 100,
+    lastFunction: { bucket: "indirect", minutes: 28, title: "C-Returns Processed\u2666Primary Grading" }
+});
+api.setBoard(["long", "short", "work", "grade"]);
+assert.equal(JSON.stringify(api.idleAssociateIds()), JSON.stringify(["long"]));
+assert.equal(src.includes("mem3-idle-check"), false);
+assert.match(src, /hrs idle/);
+assert.match(src, /\\uD83D\\uDC41/);
 
 try {
     api.setRollup({ "99": { functions: {} } });

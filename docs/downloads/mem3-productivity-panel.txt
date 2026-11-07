@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.11
+// @version      1.8.12
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.11';
+    const SCRIPT_VERSION = '1.8.12';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -918,25 +918,32 @@
         return 'other';
     }
 
+    // A diamond in the function title is a process path (Primary Grading,
+    // C-Return Bypass, and the rest). That person is working. The idle
+    // percent still counts the row when its class is indirect.
+    function onProcessPath(fn) {
+        return !!(fn && String(fn.title || '').indexOf('\u2666') !== -1);
+    }
+
     // The latest function row is the current stretch. Idle starts once that
-    // stretch has been indirect or Time Off Task for 10 minutes.
+    // stretch has been indirect or Time Off Task for 10 minutes, and the
+    // title is not a process path.
     function showsIdleNow(time) {
         const fn = time && time.lastFunction;
-        if (!fn) return false;
+        if (!fn || onProcessPath(fn)) return false;
         if (fn.bucket !== 'indirect' && fn.bucket !== 'tot') return false;
         return (fn.minutes || 0) >= IDLE_START_MIN;
     }
 
     function idleNowSig(time) {
-        const fn = time && time.lastFunction;
-        const tenths = fn ? Math.round((fn.minutes || 0) * 10) : 0;
-        return (showsIdleNow(time) ? '1' : '0') + ':' + tenths;
+        return showsIdleNow(time) ? '1' : '0';
     }
 
     function idleNowTitle(time) {
         const fn = time && time.lastFunction;
         if (!fn) return '';
         const which = fn.title || fn.bucket;
+        if (onProcessPath(fn)) return 'On a process path. ' + which + ' for ' + formatDuration(fn.minutes) + '.';
         const lead = showsIdleNow(time) ? 'Idle now. ' : 'Not idle yet. ';
         return lead + which + ' for ' + formatDuration(fn.minutes) + '. Idle starts at 10 minutes.';
     }
@@ -3991,13 +3998,35 @@
         const size = opts.lead ? 32 : 22;
         const idlePct = opts.idlePct;
         const ic = idleColor(idlePct);
-        function addMetric(value, unit, color, rank, px) {
+        const scopeIds = opts.empIds || [];
+        const idleCount = idleIdsIn(scopeIds).idle.length;
+        cell.setAttribute('data-summary', opts.summaryKey || '');
+        function viewButton(title, onClick) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.textContent = '\uD83D\uDC41';
+            btn.title = title;
+            btn.setAttribute('aria-label', title);
+            btn.style.cssText = 'padding:0; margin:0; border:0; background:transparent; cursor:pointer; ' +
+                'font-size:14px; line-height:1;';
+            btn.addEventListener('click', function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                onClick();
+            });
+            return btn;
+        }
+        function addMetric(value, unit, color, rank, px, spec) {
             const group = document.createElement('span');
-            group.style.cssText = 'display:inline-flex; align-items:baseline; gap:4px;';
+            group.style.cssText = 'display:inline-flex; align-items:center; gap:4px;';
+            const key = spec && spec.key ? spec.key : '';
+            if (key) group.setAttribute('data-rank-for', key);
             if (rank === 'best') group.className = 'mem3-pulse-best';
             else if (rank === 'worst') group.className = 'mem3-pulse-worst';
+            if (spec && spec.onView) group.appendChild(viewButton(spec.viewTitle || 'View', spec.onView));
             const num = document.createElement('span');
             num.textContent = value;
+            if (key) num.setAttribute('data-metric', key);
             num.style.cssText = 'font-size:' + (px || size) + 'px; font-weight:700; color:' + color +
                 '; font-variant-numeric:tabular-nums;';
             const label = document.createElement('span');
@@ -4007,9 +4036,24 @@
             group.appendChild(label);
             valueRow.appendChild(group);
         }
-        addMetric(opts.value, 'UPH', opts.uph > 0 ? c : '#c9d1d9', opts.uphRank || '');
-        addMetric(idleLabel(idlePct), 'IDLE', ic, opts.idleRank || '');
-        addMetric(formatUnits(opts.units || 0), 'units', '#8b949e', '', opts.lead ? 16 : 13);
+        const scopeLabel = opts.scopeLabel || 'Total';
+        addMetric(opts.value, 'UPH', opts.uph > 0 ? c : '#c9d1d9', opts.uphRank || '', size, {
+            key: 'uph',
+            viewTitle: 'View UPH, lowest first',
+            onView: function () { openRosterPopup(scopeLabel, scopeIds, 'uph'); }
+        });
+        addMetric(idleLabel(idlePct), 'IDLE', ic, opts.idleRank || '', size, {
+            key: 'idle',
+            viewTitle: 'View idle percent, highest first',
+            onView: function () { openRosterPopup(scopeLabel, scopeIds, 'idle'); }
+        });
+        addMetric(String(idleCount), 'idle', idleCount > 0 ? '#f85149' : '#c9d1d9', '', size, {
+            key: 'idleCount',
+            viewTitle: 'View associates idle for 10 minutes',
+            onView: function () { openRosterPopup(scopeLabel, scopeIds, 'idleNow'); }
+        });
+        addMetric(formatUnits(opts.units || 0), 'units', '#8b949e', '', opts.lead ? 16 : 13, { key: 'units' });
+        addMetric(formatDuration(opts.idleMin || 0), 'hrs idle', '#8b949e', '', opts.lead ? 16 : 13, { key: 'idleHours' });
 
         cell.appendChild(titleRow);
         cell.appendChild(valueRow);
@@ -4053,7 +4097,6 @@
     }
 
     let summaryWatchAt = 0;
-    let idleListOpen = false;
 
     function idleStretchMin(time) {
         const fn = time && time.lastFunction;
@@ -4073,24 +4116,89 @@
         return ids;
     }
 
-    // Idle for the check list starts at 10 minutes on the latest function row.
-    // A shorter indirect or Time Off Task row is the lag after a scan.
-    function idleScan() {
-        const pool = cycleEmpIds();
+    function uniqueIds(ids) {
         const seen = Object.create(null);
+        const out = [];
+        const list = ids || [];
+        for (let i = 0; i < list.length; i++) {
+            const id = list[i];
+            if (!id || seen[id]) continue;
+            seen[id] = true;
+            out.push(id);
+        }
+        return out;
+    }
+
+    function lineIdsOf(data) {
+        const ids = [];
+        const lines = (data && data.lines) || [];
+        for (let i = 0; i < lines.length; i++) {
+            const list = lines[i].empIds || [];
+            for (let j = 0; j < list.length; j++) ids.push(list[j]);
+        }
+        return uniqueIds(ids);
+    }
+
+    // Idle starts at 10 minutes on the latest function row.
+    // A shorter indirect or Time Off Task row is the lag after a scan.
+    // A process path (diamond in the title) is work, so it is left out.
+    function idleIdsIn(ids) {
+        const pool = uniqueIds(ids);
         const idle = [];
         const under10 = [];
         for (let i = 0; i < pool.length; i++) {
             const id = pool[i];
-            if (!id || seen[id]) continue;
-            seen[id] = true;
             const time = LAST_TIME[id];
             const fn = time && time.lastFunction;
-            if (!fn || (fn.bucket !== 'indirect' && fn.bucket !== 'tot')) continue;
+            if (!fn || onProcessPath(fn)) continue;
+            if (fn.bucket !== 'indirect' && fn.bucket !== 'tot') continue;
             if (showsIdleNow(time)) idle.push(id);
             else under10.push(id);
         }
         return { idle: sortIdleIds(idle), under10: sortIdleIds(under10) };
+    }
+
+    function idleScan() {
+        return idleIdsIn(BOARD_IDS);
+    }
+
+    function personSortName(id) {
+        const person = personForEmp(id);
+        return (person.name || person.login || id).toLowerCase();
+    }
+
+    function worstUphIds(ids) {
+        const list = uniqueIds(ids);
+        list.sort(function (a, b) {
+            const as = statsFor(a);
+            const bs = statsFor(b);
+            const au = as.hasData ? as.uph : -1;
+            const bu = bs.hasData ? bs.uph : -1;
+            if (au !== bu) return au - bu;
+            const an = personSortName(a);
+            const bn = personSortName(b);
+            if (an < bn) return -1;
+            if (an > bn) return 1;
+            return String(a) < String(b) ? -1 : (String(a) > String(b) ? 1 : 0);
+        });
+        return list;
+    }
+
+    function worstIdleIds(ids) {
+        const list = uniqueIds(ids);
+        list.sort(function (a, b) {
+            const ap = idlePercent(LAST_TIME[a]);
+            const bp = idlePercent(LAST_TIME[b]);
+            const av = ap === null ? -1 : ap;
+            const bv = bp === null ? -1 : bp;
+            if (av !== bv) return bv - av;
+            const an = personSortName(a);
+            const bn = personSortName(b);
+            if (an < bn) return -1;
+            if (an > bn) return 1;
+            return String(a) < String(b) ? -1 : (String(a) > String(b) ? 1 : 0);
+        });
+        return list;
     }
 
     function idleAssociateIds() {
@@ -4148,7 +4256,7 @@
             what: 'idle-associates',
             capturedAt: new Date().toISOString(),
             window: windowPreset(ACTIVE_WINDOW).label,
-            rule: 'Latest function row is indirect or Time Off Task for at least 10 minutes. A shorter row is not counted.',
+            rule: 'Latest function row is indirect or Time Off Task for at least 10 minutes, and the title is not a process path. A shorter row is not counted. A diamond in the title means they are still on a process.',
             count: associates.length,
             under10Count: under10.length,
             associates: associates,
@@ -4169,91 +4277,122 @@
         return row;
     }
 
-    function makeIdleCheckCell() {
-        const scan = idleScan();
-        const cell = document.createElement('div');
-        cell.id = 'mem3-idle-check';
-        cell.style.cssText = 'display:flex; flex-direction:column; justify-content:center; gap:2px; ' +
-            'width:100%; box-sizing:border-box; min-width:0; margin-top:8px; padding:6px 10px; ' +
-            'background:#0d1117; border:1px solid #8b949e; border-left:5px solid #8b949e; border-radius:8px;';
-        const n = scan.idle.length;
-        const kicker = document.createElement('div');
-        kicker.textContent = 'Idle';
-        kicker.style.cssText = 'font-size:14px; letter-spacing:0.08em; text-transform:uppercase; ' +
-            'color:#ffffff; font-weight:800; white-space:nowrap;';
-        const valueRow = document.createElement('div');
-        valueRow.style.cssText = 'display:flex; align-items:baseline; gap:4px; line-height:1.05;';
-        const num = document.createElement('span');
-        num.textContent = String(n);
-        num.style.cssText = 'font-size:32px; font-weight:700; font-variant-numeric:tabular-nums; color:' +
-            (n > 0 ? '#f85149' : '#c9d1d9') + ';';
-        const unit = document.createElement('span');
-        unit.textContent = n === 1 ? 'associate' : 'associates';
-        unit.style.cssText = 'font-size:10px; font-weight:600; color:#8b949e;';
-        valueRow.appendChild(num);
-        valueRow.appendChild(unit);
-        cell.appendChild(kicker);
-        cell.appendChild(valueRow);
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.textContent = idleListOpen ? 'Hide idle' : 'Check idle';
-        btn.style.cssText = 'width:100%; padding:6px 8px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
-            'background:#161b22; border:1px solid #d29922; font:800 13px Segoe UI,system-ui,sans-serif; margin-top:8px;';
-        btn.addEventListener('click', function (e) {
-            e.preventDefault();
-            e.stopPropagation();
-            idleListOpen = !idleListOpen;
-            const summary = document.getElementById(FLOOR_SUMMARY_ID);
-            if (summary) summary.removeAttribute('data-sig');
-            placeFloorSummary();
+    function rosterPeople(ids, mode) {
+        if (mode === 'uph') return worstUphIds(ids);
+        if (mode === 'idle') return worstIdleIds(ids);
+        return idleIdsIn(ids).idle;
+    }
+
+    function rosterDebug(title, ids) {
+        const associates = [];
+        for (let i = 0; i < ids.length; i++) associates.push(idleAssociateDebug(ids[i]));
+        return {
+            script: SCRIPT_LABEL,
+            version: SCRIPT_VERSION,
+            what: 'roster',
+            capturedAt: new Date().toISOString(),
+            window: windowPreset(ACTIVE_WINDOW).label,
+            title: title,
+            count: associates.length,
+            associates: associates
+        };
+    }
+
+    function personCard(empId) {
+        const person = personForEmp(empId);
+        const time = LAST_TIME[empId];
+        const stats = statsFor(empId);
+        const fn = time && time.lastFunction;
+        const card = document.createElement('div');
+        card.style.cssText = 'background:#0d1117; border:1px solid #30363d; border-radius:8px; padding:8px;';
+        const name = document.createElement('div');
+        name.textContent = person.name || person.login || person.empId;
+        name.style.cssText = 'font-size:14px; font-weight:800; margin-bottom:4px;';
+        card.appendChild(name);
+        card.appendChild(idleField('Login', person.login || '\u2014'));
+        card.appendChild(idleField('Station', stationLabel(person.station) || '\u2014'));
+        card.appendChild(idleField('UPH', stats.hasData ? (stats.uph > 0 ? stats.uph.toFixed(1) : '0') : '\u2014'));
+        const pct = idlePercent(time);
+        card.appendChild(idleField('Idle', idleLabel(pct)));
+        if (showsIdleNow(time)) card.appendChild(idleField('Idle for', formatDuration(idleStretchMin(time))));
+        else if (fn) card.appendChild(idleField('Latest', (fn.title || fn.bucket) + ' \u00b7 ' + formatDuration(fn.minutes)));
+        card.appendChild(timeDetailsLink(empId));
+        const actions = document.createElement('div');
+        actions.style.cssText = 'margin-top:6px;';
+        actions.appendChild(copyDebugButton('Copy', function () { return idleAssociateDebug(empId); }));
+        card.appendChild(actions);
+        return card;
+    }
+
+    function openRosterPopup(scopeLabel, ids, mode) {
+        const old = document.getElementById('mem3-roster-popup');
+        if (old) old.remove();
+        const people = rosterPeople(ids, mode);
+        const titles = {
+            uph: 'UPH, lowest first',
+            idle: 'Idle percent, highest first',
+            idleNow: 'Idle for 10 minutes'
+        };
+        const notes = {
+            uph: 'Lowest rate first. Someone with no Primary Grading rate is at the top.',
+            idle: 'Highest idle percent first. The percent is the whole window, not this stretch.',
+            idleNow: 'Latest function row is indirect or Time Off Task for at least 10 minutes. A process path is still working and is left out.'
+        };
+        const headingText = (scopeLabel || 'Total') + ' \u00b7 ' + (titles[mode] || 'Associates');
+        const overlay = document.createElement('div');
+        overlay.id = 'mem3-roster-popup';
+        overlay.style.cssText = 'position:fixed; inset:0; z-index:2147483646; background:rgba(0,0,0,0.55); ' +
+            'display:flex; align-items:flex-start; justify-content:center; padding:32px 16px; ' +
+            'font-family:Segoe UI,system-ui,sans-serif; color:#ffffff;';
+        overlay.addEventListener('click', function (e) {
+            if (e.target === overlay) overlay.remove();
         });
-        cell.appendChild(btn);
-        if (!idleListOpen) return cell;
-
+        const card = document.createElement('div');
+        card.style.cssText = 'width:min(720px, 100%); max-height:calc(100vh - 64px); overflow:auto; ' +
+            'background:#161b22; border:1px solid #30363d; border-radius:12px; padding:18px 18px 8px;';
+        const top = document.createElement('div');
+        top.style.cssText = 'display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:8px;';
+        const headingWrap = document.createElement('div');
+        const heading = document.createElement('div');
+        heading.textContent = headingText;
+        heading.style.cssText = 'font-size:18px; font-weight:800;';
+        const sub = document.createElement('div');
+        sub.textContent = people.length + (people.length === 1 ? ' associate' : ' associates');
+        sub.style.cssText = 'font-size:13px; font-weight:500; color:#c9d1d9; margin-top:4px;';
+        headingWrap.appendChild(heading);
+        headingWrap.appendChild(sub);
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex; gap:8px; flex:0 0 auto;';
+        actions.appendChild(copyDebugButton('Copy all', function () { return rosterDebug(headingText, people); }));
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = 'Close';
+        close.style.cssText = 'padding:6px 12px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
+            'background:#0d1117; border:1px solid #8b949e; font:800 12px Segoe UI,system-ui,sans-serif;';
+        close.addEventListener('click', function () { overlay.remove(); });
+        actions.appendChild(close);
+        top.appendChild(headingWrap);
+        top.appendChild(actions);
+        card.appendChild(top);
         const note = document.createElement('div');
-        const lag = scan.under10.length;
-        note.textContent = lag
-            ? (lag + (lag === 1 ? ' associate is' : ' associates are') + ' under 10 minutes and not counted.')
-            : 'Idle starts at 10 minutes on the latest indirect or Time Off Task row.';
-        note.style.cssText = 'font-size:12px; font-weight:600; color:#8b949e; margin-top:8px;';
-        cell.appendChild(note);
-        cell.appendChild(copyDebugButton('Copy all', idleAssociatesDebug));
-
-        if (!n) {
+        note.textContent = notes[mode] || '';
+        note.style.cssText = 'font-size:12px; font-weight:500; color:#8b949e; margin:0 0 12px;';
+        card.appendChild(note);
+        if (!people.length) {
             const empty = document.createElement('div');
-            empty.textContent = 'No associate has been idle for 10 minutes.';
-            empty.style.cssText = 'font-size:13px; font-weight:650;';
-            cell.appendChild(empty);
-            return cell;
+            empty.textContent = mode === 'idleNow'
+                ? 'No associate has been idle for 10 minutes.'
+                : 'No associates on this list.';
+            empty.style.cssText = 'font-size:13px; font-weight:650; margin-bottom:12px;';
+            card.appendChild(empty);
+        } else {
+            const list = document.createElement('div');
+            list.style.cssText = 'display:flex; flex-direction:column; gap:8px; margin-bottom:12px;';
+            for (let i = 0; i < people.length; i++) list.appendChild(personCard(people[i]));
+            card.appendChild(list);
         }
-
-        const list = document.createElement('div');
-        list.style.cssText = 'display:flex; flex-direction:column; gap:8px; max-height:70vh; overflow:auto;';
-        for (let i = 0; i < scan.idle.length; i++) {
-            const empId = scan.idle[i];
-            const person = personForEmp(empId);
-            const time = LAST_TIME[empId];
-            const stats = statsFor(empId);
-            const card = document.createElement('div');
-            card.style.cssText = 'background:#161b22; border:1px solid #30363d; border-radius:8px; padding:8px;';
-            const name = document.createElement('div');
-            name.textContent = person.name || person.login || person.empId;
-            name.style.cssText = 'font-size:14px; font-weight:800; margin-bottom:4px;';
-            card.appendChild(name);
-            card.appendChild(idleField('Login', person.login || '—'));
-            card.appendChild(idleField('Station', stationLabel(person.station) || '—'));
-            card.appendChild(idleField('UPH', stats.hasData ? (stats.uph > 0 ? stats.uph.toFixed(1) : '0') : '—'));
-            card.appendChild(idleField('Idle', idleLabel(idlePercent(time)) + (idlePercent(time) === null ? '' : '%')));
-            card.appendChild(idleField('Idle for', formatDuration(idleStretchMin(time))));
-            card.appendChild(timeDetailsLink(empId));
-            const actions = document.createElement('div');
-            actions.style.cssText = 'margin-top:6px;';
-            actions.appendChild(copyDebugButton('Copy', function () { return idleAssociateDebug(empId); }));
-            card.appendChild(actions);
-            list.appendChild(card);
-        }
-        cell.appendChild(list);
-        return cell;
+        overlay.appendChild(card);
+        document.body.appendChild(overlay);
     }
 
     function summaryIsMounted() {
@@ -4273,6 +4412,78 @@
         if (now - summaryWatchAt < 2000) return;
         summaryWatchAt = now;
         render();
+    }
+
+    function summaryStructureSig(data) {
+        return 'v43|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
+            (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
+            (data.floorOpen || []).join(';') + '|' +
+            data.floorStaffed + '|' + (data.asOf || '') + '|' +
+            (data.lines || []).map(function (l) {
+                return l.name + ':' + l.withData + ':' + l.staffed + ':' +
+                    (l.signed || 0) + '/' + (l.stations || 0) + ':' +
+                    (l.openStations || []).join(';') + ':' + (l.empIds || []).join('.');
+            }).join(',');
+    }
+
+    function summaryCellByKey(node, key) {
+        const cells = node.querySelectorAll('[data-summary]');
+        for (let i = 0; i < cells.length; i++) {
+            if (cells[i].getAttribute('data-summary') === key) return cells[i];
+        }
+        return null;
+    }
+
+    function paintSummaryMetrics(node, data) {
+        const ranks = extremeRanks(data.lines);
+        function paint(key, spec) {
+            const cell = summaryCellByKey(node, key);
+            if (!cell) return false;
+            function num(metric, text, color) {
+                const el = cell.querySelector('[data-metric="' + metric + '"]');
+                if (!el) return;
+                if (el.textContent !== text) el.textContent = text;
+                if (color) el.style.color = color;
+            }
+            function rank(metric, which) {
+                const el = cell.querySelector('[data-rank-for="' + metric + '"]');
+                if (!el) return;
+                el.classList.remove('mem3-pulse-best', 'mem3-pulse-worst');
+                if (which === 'best') el.classList.add('mem3-pulse-best');
+                else if (which === 'worst') el.classList.add('mem3-pulse-worst');
+            }
+            num('uph', spec.uphText, spec.uph > 0 ? uphColor(spec.uph) : '#c9d1d9');
+            rank('uph', spec.uphRank || '');
+            num('idle', idleLabel(spec.idlePct), idleColor(spec.idlePct));
+            rank('idle', spec.idleRank || '');
+            num('idleCount', String(spec.idleCount), spec.idleCount > 0 ? '#f85149' : '#c9d1d9');
+            num('units', formatUnits(spec.units || 0), '#8b949e');
+            num('idleHours', formatDuration(spec.idleMin || 0), '#8b949e');
+            return true;
+        }
+        const totalIds = lineIdsOf(data);
+        if (!paint('total', {
+            uphText: data.floorAvg > 0 ? data.floorAvg.toFixed(1) : '\u2014',
+            uph: data.floorAvg,
+            idlePct: sideIdlePct(data.floorIdleMin || 0, data.floorClockedMin || 0),
+            idleCount: idleIdsIn(totalIds).idle.length,
+            units: data.floorUnits || 0,
+            idleMin: data.floorIdleMin || 0
+        })) return false;
+        for (let i = 0; i < data.lines.length; i++) {
+            const line = data.lines[i];
+            if (!paint(line.name, {
+                uphText: line.avgUph > 0 ? line.avgUph.toFixed(1) : '\u2014',
+                uph: line.avgUph,
+                uphRank: metricRank(shownUph(line), ranks.bestUph, ranks.worstUph),
+                idlePct: sideIdlePct(line.idleMin || 0, line.clockedMin || 0),
+                idleRank: metricRank(shownIdle(line), ranks.bestIdle, ranks.worstIdle),
+                idleCount: idleIdsIn(line.empIds || []).idle.length,
+                units: line.totalUnits || 0,
+                idleMin: line.idleMin || 0
+            })) return false;
+        }
+        return true;
     }
 
     function placeFloorSummary(summary) {
@@ -4304,26 +4515,14 @@
             main.insertBefore(node, main.firstChild);
         }
 
-        const idleState = idleScan();
-        const sig = 'v42|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
-            (idleListOpen ? 'open' : 'shut') + '|' +
-            idleState.idle.map(function (id) { return id + ':' + Math.round(idleStretchMin(LAST_TIME[id]) * 10); }).join(',') + '|' +
-            idleState.under10.map(function (id) { return id + ':' + Math.round(idleStretchMin(LAST_TIME[id]) * 10); }).join(',') + '|' +
-            data.floorAvg.toFixed(1) + '|' + data.floorUnits + '|' + data.floorRated + '|' +
-            (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
-            (data.floorOpen || []).join(';') + '|' +
-            data.floorStaffed + '|' + (data.floorTotalMin || 0) + '|' + (data.floorIdleMin || 0) + '|' +
-            (data.floorClockedMin || 0) + '|' +
-            data.asOf + '|' + data.lines.map(function (l) {
-                return l.name + ':' + l.avgUph.toFixed(1) + ':' + l.totalUnits + ':' + l.withData + ':' + l.staffed +
-                    ':' + (l.totalMin || 0) + ':' + (l.idleMin || 0) + ':' + (l.clockedMin || 0) +
-                    ':' + (l.both || 0) + ':' + (l.signed || 0) + '/' + (l.stations || 0) +
-                    ':' + (l.openStations || []).join(';');
-            }).join(',');
+        const sig = summaryStructureSig(data);
         if (node.getAttribute('data-sig') === sig && node.firstChild) {
-            paintProgress();
-            return;
+            if (paintSummaryMetrics(node, data)) {
+                paintProgress();
+                return;
+            }
         }
+        node.setAttribute('data-sig', sig);
         const actions = ensureSummaryActions();
         if (actions.parentElement) actions.remove();
 
@@ -4427,32 +4626,35 @@
         const metrics = document.createElement('div');
         metrics.style.cssText = 'display:flex; align-items:flex-start; flex-wrap:nowrap; gap:0; width:100%; min-width:0;';
 
-        const totalColumn = document.createElement('div');
-        totalColumn.style.cssText = 'display:flex; flex-direction:column; align-items:stretch; ' +
-            'flex:1.15 1 0; min-width:0; margin:0 10px 0 0;';
-        totalColumn.appendChild(makeSummaryCell({
+        const totalIds = lineIdsOf(data);
+        metrics.appendChild(makeSummaryCell({
+            summaryKey: 'total',
+            scopeLabel: 'Total',
+            empIds: totalIds,
             kicker: 'Total',
             value: data.floorAvg > 0 ? data.floorAvg.toFixed(1) : '\u2014',
             uph: data.floorAvg,
             units: data.floorUnits || 0,
+            idleMin: data.floorIdleMin || 0,
             idlePct: sideIdlePct(data.floorIdleMin || 0, data.floorClockedMin || 0),
             signed: data.floorSigned || 0,
             stations: data.floorStations || 0,
             openStations: data.floorOpen || [],
             lead: true,
-            stacked: true,
             title: 'Average of the odd and even side rates. Total work time and IDLE time are summed once per associate from FCLM Time Details.'
         }));
-        totalColumn.appendChild(makeIdleCheckCell());
-        metrics.appendChild(totalColumn);
 
         for (let i = 0; i < data.lines.length; i++) {
             const line = data.lines[i];
             metrics.appendChild(makeSummaryCell({
+                summaryKey: line.name,
+                scopeLabel: panelTitle(line.name),
+                empIds: line.empIds || [],
                 kicker: panelTitle(line.name),
                 value: line.avgUph > 0 ? line.avgUph.toFixed(1) : '\u2014',
                 uph: line.avgUph,
                 units: line.totalUnits || 0,
+                idleMin: line.idleMin || 0,
                 idlePct: sideIdlePct(line.idleMin || 0, line.clockedMin || 0),
                 uphRank: metricRank(shownUph(line), ranks.bestUph, ranks.worstUph),
                 idleRank: metricRank(shownIdle(line), ranks.bestIdle, ranks.worstIdle),
@@ -4537,7 +4739,7 @@
                 const stats = statsFor(empId);
                 const time = timeFor(empId);
                 if (empId) {
-                    empIds.push(empId);
+                    if (empIds.indexOf(empId) === -1) empIds.push(empId);
                     rememberBoardPerson(empId, person, panelName, rowAssignmentText(tr));
                 }
                 if (stats.hasData) withData++;
@@ -4960,7 +5162,8 @@
                     both: s.both,
                     stations: s.crStations,
                     signed: s.crSigned,
-                    openStations: s.openStations || []
+                    openStations: s.openStations || [],
+                    empIds: s.empIds || []
                 });
                 DEBUG.perLine[keys[i]] = lineStats[lineStats.length - 1];
                 if (s.avgUph > 0) avgList.push(s.avgUph);
@@ -5659,8 +5862,10 @@
             ['Counts', 'Indirect function time and Time Off Task in the selected window'],
             ['Does not count', 'Active graded time, or time outside the window'],
             ['BIGS stations', 'A station whose name contains BIGS shows that associate’s idle percent on the row. It is left out of every side and out of Total.'],
-            ['IDLE NOW', 'The latest function row is indirect or Time Off Task, and that row has lasted at least 10 minutes. Earlier idle in the window still counts in the percent.'],
-            ['Check idle', 'The cell under Total lists associates idle for at least 10 minutes, with station, UPH, idle percent, and how long that stretch has run. A shorter idle row is not counted.']
+            ['IDLE NOW', 'The latest function row is indirect or Time Off Task, and that row has lasted at least 10 minutes. A process path, the diamond in the function title, is still working. Earlier idle in the window still counts in the percent.'],
+            ['Idle count', 'The number under the idle percent is how many associates on that side, or on the whole floor for Total, have been idle for at least 10 minutes. The eye on the left opens that list.'],
+            ['View', 'The eye left of UPH lists that side from the lowest rate. The eye left of the idle percent lists it from the highest idle percent. Total does the same for everyone on the lines.'],
+            ['Hours idle', 'Under units, the idle hours are the indirect time plus Time Off Task already in the idle percent.']
         ]));
         card.appendChild(idleSec);
 
