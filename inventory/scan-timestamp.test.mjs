@@ -191,7 +191,8 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.9\.33/);
+assert.match(src, /@version\s+2\.9\.34/);
+assert.match(src, /\.x \{[^}]*background: #b42318/);
 
 const bulk = [];
 for (let i = 0; i < 3000; i++) {
