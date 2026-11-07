@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.19
+// @version      1.8.20
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.19';
+    const SCRIPT_VERSION = '1.8.20';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -4268,7 +4268,13 @@
             units: stats.hasData ? stats.units : null,
             idlePercent: idlePercent(time),
             idleForMin: fn ? fn.minutes : null,
+            idleHours: time && time.hasTime ? (Number(time.idleMin) || 0) / 60 : null,
             idleStartsAtMin: IDLE_START_MIN,
+            clock: person.clock,
+            shownAs: showsIdleNow(time, empId)
+                ? ('Idle for ' + formatDuration(idleStretchMin(time)))
+                : 'Not currently in Idle Time.',
+            why: idleNowReason(time, empId),
             lastFunction: fn || null,
             currentlyIdle: showsIdleNow(time, empId),
             time: timeSnapshot(time, empId),
@@ -4351,6 +4357,18 @@
             }
         }
         return stored;
+    }
+
+    function idleNowReason(time, empId) {
+        const fn = time && time.lastFunction;
+        if (isClockedOut(empId)) return 'Latest punch is clocked out, so they are not counted as idle now.';
+        if (!fn) return 'No function row was read from Time Details.';
+        const mins = fn.minutes || 0;
+        const lead = 'Latest function row is ' + (fn.bucket || 'unknown') + ', ' +
+            formatDuration(mins) + ', title ' + (fn.title || '') + '.';
+        if (fn.bucket !== 'indirect' && fn.bucket !== 'tot') return lead + ' That row is not indirect or Time Off Task.';
+        if (mins < IDLE_START_MIN) return lead + ' That is under 10 minutes, so they are not counted as idle now.';
+        return lead + ' Idle for uses this one row. It is not the idle total for the window.';
     }
 
     function idleHoursLabel(minutes) {
@@ -4451,6 +4469,9 @@
             info.appendChild(quiet);
         }
         info.appendChild(timeDetailsLink(empId));
+        const copy = copyDebugButton('Copy debug', function () { return idleAssociateDebug(empId); });
+        copy.style.marginTop = '6px';
+        info.appendChild(copy);
         card.appendChild(photoWrap);
         card.appendChild(info);
         return card;
