@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.18
+// @version      1.8.19
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.18';
+    const SCRIPT_VERSION = '1.8.19';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -4432,8 +4432,14 @@
             stats.hasData ? uphColor(stats.uph) : '#8b949e'
         ));
         const pct = idlePercent(time);
-        const idleValue = idleLabel(pct) + (time && time.hasTime ? ' ' + idleHoursLabel(time.idleMin) : '');
-        info.appendChild(idleField('Idle', idleValue, idleColor(pct)));
+        const idleRow = idleField('Idle', idleLabel(pct), idleColor(pct));
+        if (time && time.hasTime) {
+            const hours = document.createElement('span');
+            hours.textContent = ' ' + idleHoursLabel(time.idleMin);
+            hours.style.color = '#ffffff';
+            idleRow.appendChild(hours);
+        }
+        info.appendChild(idleRow);
         if (showsIdleNow(time, empId)) {
             const stretch = idleField('Idle for', formatDuration(idleStretchMin(time)));
             stretch.appendChild(idleNowYield());
