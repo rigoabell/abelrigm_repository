@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.15
+// @version      1.8.16
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.15';
+    const SCRIPT_VERSION = '1.8.16';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -1133,7 +1133,7 @@
         let fallback = null;
         for (let i = 0; i < nodes.length; i++) {
             const el = nodes[i];
-            const bg = window.getComputedStyle(el).backgroundImage || '';
+            const bg = window.getComputedStyle ? (window.getComputedStyle(el).backgroundImage || '') : '';
             if (!bg || bg === 'none') continue;
             if (bg.indexOf('badgephotos') !== -1) return el;
             if (!fallback && isAvatarBox(el)) fallback = el;
@@ -1146,6 +1146,24 @@
             if (ir.width >= 18 && ir.height >= 18 && ir.width <= 96 && ir.height <= 96) return img;
         }
         return null;
+    }
+
+    function cssImageUrl(value) {
+        const match = /url\(\s*(['"]?)(.*?)\1\s*\)/i.exec(String(value || ''));
+        return match ? match[2] : '';
+    }
+
+    function badgePhotoUrl(el) {
+        if (!el) return '';
+        if (String(el.tagName || '').toUpperCase() === 'IMG') {
+            const src = el.getAttribute('src') || el.src || '';
+            if (src) return src;
+        }
+        const inline = el.style && el.style.backgroundImage;
+        const fromInline = cssImageUrl(inline);
+        if (fromInline) return fromInline;
+        if (!window.getComputedStyle) return '';
+        return cssImageUrl(window.getComputedStyle(el).backgroundImage || '');
     }
 
     const CLOCK_PHOTO_PX = 32;
@@ -1548,7 +1566,7 @@
         if (panel) fillIssuePanel(panel);
     }
 
-    function rememberBoardPerson(empId, person, line, station) {
+    function rememberBoardPerson(empId, person, line, station, photo) {
         if (!empId) return;
         const prev = BOARD_PEOPLE[empId] || {};
         BOARD_PEOPLE[empId] = {
@@ -1556,7 +1574,8 @@
             name: (person && person.name) || prev.name || '',
             badge: (person && person.badge) || prev.badge || '',
             line: line || prev.line || '',
-            station: station || prev.station || ''
+            station: station || prev.station || '',
+            photo: photo || prev.photo || ''
         };
     }
 
@@ -2324,7 +2343,7 @@
                 }
                 const person = IDENTITY.byLogin[found.login];
                 const empId = resolveEmpId(person);
-                if (empId) rememberBoardPerson(empId, person, 'BIGS', rowAssignmentText(tr));
+                if (empId) rememberBoardPerson(empId, person, 'BIGS', rowAssignmentText(tr), badgePhotoUrl(avatarEl(tr)));
                 if (empId && !seen[empId]) {
                     seen[empId] = true;
                     ids.push(empId);
@@ -4313,29 +4332,62 @@
         };
     }
 
+    function photoForEmp(empId) {
+        const stored = (BOARD_PEOPLE[empId] && BOARD_PEOPLE[empId].photo) || '';
+        const login = String((personForEmp(empId).login) || '').toLowerCase();
+        if (!login) return stored;
+        const tables = document.querySelectorAll('table');
+        for (let t = 0; t < tables.length; t++) {
+            const table = tables[t];
+            if (table.closest && table.closest('#' + FLOOR_SUMMARY_ID)) continue;
+            const trs = tableRows(table);
+            for (let i = 0; i < trs.length; i++) {
+                const found = findLoginInRow(trs[i]);
+                if (!found || found.login !== login) continue;
+                const url = badgePhotoUrl(avatarEl(trs[i]));
+                if (!url) continue;
+                if (BOARD_PEOPLE[empId]) BOARD_PEOPLE[empId].photo = url;
+                return url;
+            }
+        }
+        return stored;
+    }
+
     function personCard(empId) {
         const person = personForEmp(empId);
         const time = LAST_TIME[empId];
         const stats = statsFor(empId);
         const fn = time && time.lastFunction;
         const card = document.createElement('div');
-        card.style.cssText = 'background:#0d1117; border:1px solid #30363d; border-radius:8px; padding:8px;';
+        card.style.cssText = 'display:flex; align-items:center; gap:8px; background:#0d1117; ' +
+            'border:1px solid #30363d; border-radius:8px; padding:8px;';
+        const photo = document.createElement('div');
+        photo.setAttribute('data-mem3-photo', '1');
+        photo.setAttribute('aria-hidden', 'true');
+        const photoUrl = photoForEmp(empId);
+        photo.style.cssText = 'flex:0 0 32px; width:32px; height:32px; border-radius:50%; ' +
+            'background:#21262d center/cover no-repeat;';
+        if (photoUrl) photo.style.backgroundImage = 'url("' + String(photoUrl).replace(/"/g, '') + '")';
+        const info = document.createElement('div');
+        info.style.cssText = 'flex:1 1 auto; min-width:0;';
         const name = document.createElement('div');
         name.textContent = person.name || person.login || person.empId;
         name.style.cssText = 'font-size:14px; font-weight:800; margin-bottom:4px;';
-        card.appendChild(name);
-        card.appendChild(idleField('Login', person.login || '\u2014'));
-        card.appendChild(idleField('Station', stationLabel(person.station) || '\u2014'));
-        card.appendChild(idleField(
+        info.appendChild(name);
+        info.appendChild(idleField('Login', person.login || '\u2014'));
+        info.appendChild(idleField('Station', stationLabel(person.station) || '\u2014'));
+        info.appendChild(idleField(
             'UPH',
             stats.hasData ? (stats.uph > 0 ? stats.uph.toFixed(1) : '0') : '\u2014',
             stats.hasData ? uphColor(stats.uph) : '#8b949e'
         ));
         const pct = idlePercent(time);
-        card.appendChild(idleField('Idle', idleLabel(pct), idleColor(pct)));
-        if (showsIdleNow(time, empId)) card.appendChild(idleField('Idle for', formatDuration(idleStretchMin(time))));
-        else if (fn) card.appendChild(idleField('Latest', (fn.title || fn.bucket) + ' \u00b7 ' + formatDuration(fn.minutes)));
-        card.appendChild(timeDetailsLink(empId));
+        info.appendChild(idleField('Idle', idleLabel(pct), idleColor(pct)));
+        if (showsIdleNow(time, empId)) info.appendChild(idleField('Idle for', formatDuration(idleStretchMin(time))));
+        else if (fn) info.appendChild(idleField('Latest', (fn.title || fn.bucket) + ' \u00b7 ' + formatDuration(fn.minutes)));
+        info.appendChild(timeDetailsLink(empId));
+        card.appendChild(photo);
+        card.appendChild(info);
         return card;
     }
 
@@ -4754,7 +4806,7 @@
                 const time = timeFor(empId);
                 if (empId) {
                     if (empIds.indexOf(empId) === -1) empIds.push(empId);
-                    rememberBoardPerson(empId, person, panelName, rowAssignmentText(tr));
+                    rememberBoardPerson(empId, person, panelName, rowAssignmentText(tr), badgePhotoUrl(avatarEl(tr)));
                 }
                 if (stats.hasData) withData++;
                 if (stats.hasData && showsIdle(time)) both++;

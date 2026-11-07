@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-panel.txt", import.meta.url), "utf8");
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.8\.15/);
+assert.match(src, /@version\s+1\.8\.16/);
 assert.match(src, /const IDLE_START_MIN = 10;/);
 assert.match(src, /const TIME_WORKERS = 4;/);
 assert.match(src, /const MAX_TIME_TRIES = 1;/);
@@ -19,7 +19,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.8.15");
+assert.equal(entry.version, "1.8.16");
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
 
 function attrOf(tag, name) {
@@ -415,6 +415,8 @@ assert.match(src, /hrs idle/);
 assert.match(src, /ASSOCIATES IDLE/);
 assert.match(src, /data-view', 'eye'/);
 assert.match(src, /fill="#ffffff"/);
+assert.match(src, /data-mem3-photo/);
+assert.match(src, /flex:0 0 32px/);
 
 try {
     api.setRollup({ "99": { functions: {} } });
