@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.10
+// @version      1.8.11
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.10';
+    const SCRIPT_VERSION = '1.8.11';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -857,6 +857,17 @@
             '&warehouseId=' + WAREHOUSE +
             '&startTime=' + encodeURIComponent(w.startLink) +
             '&endTime=' + encodeURIComponent(w.endLink);
+    }
+
+    function timeDetailsLink(empId) {
+        const link = document.createElement('a');
+        link.href = fclmEmpUrl(empId);
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.textContent = 'Open FCLM Time Details';
+        link.style.cssText = 'display:inline-block; margin-top:6px; font-size:12px; color:#58a6ff; text-decoration:underline;';
+        link.addEventListener('click', function (e) { e.stopPropagation(); });
+        return link;
     }
 
     // Clock rows are total work time. Idle is indirect time plus Time Off Task.
@@ -4162,14 +4173,32 @@
         const scan = idleScan();
         const cell = document.createElement('div');
         cell.id = 'mem3-idle-check';
-        cell.style.cssText = 'display:flex; flex-direction:column; align-items:stretch; gap:8px; ' +
-            'width:100%; box-sizing:border-box; margin-top:8px; padding:8px 10px; background:#0d1117; ' +
-            'border:1px solid #8b949e; border-left:5px solid #d29922; border-radius:8px;';
+        cell.style.cssText = 'display:flex; flex-direction:column; justify-content:center; gap:2px; ' +
+            'width:100%; box-sizing:border-box; min-width:0; margin-top:8px; padding:6px 10px; ' +
+            'background:#0d1117; border:1px solid #8b949e; border-left:5px solid #8b949e; border-radius:8px;';
+        const n = scan.idle.length;
+        const kicker = document.createElement('div');
+        kicker.textContent = 'Idle';
+        kicker.style.cssText = 'font-size:14px; letter-spacing:0.08em; text-transform:uppercase; ' +
+            'color:#ffffff; font-weight:800; white-space:nowrap;';
+        const valueRow = document.createElement('div');
+        valueRow.style.cssText = 'display:flex; align-items:baseline; gap:4px; line-height:1.05;';
+        const num = document.createElement('span');
+        num.textContent = String(n);
+        num.style.cssText = 'font-size:32px; font-weight:700; font-variant-numeric:tabular-nums; color:' +
+            (n > 0 ? '#f85149' : '#c9d1d9') + ';';
+        const unit = document.createElement('span');
+        unit.textContent = n === 1 ? 'associate' : 'associates';
+        unit.style.cssText = 'font-size:10px; font-weight:600; color:#8b949e;';
+        valueRow.appendChild(num);
+        valueRow.appendChild(unit);
+        cell.appendChild(kicker);
+        cell.appendChild(valueRow);
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.textContent = idleListOpen ? 'Hide idle' : 'Check idle';
         btn.style.cssText = 'width:100%; padding:6px 8px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
-            'background:#161b22; border:1px solid #d29922; font:800 13px Segoe UI,system-ui,sans-serif;';
+            'background:#161b22; border:1px solid #d29922; font:800 13px Segoe UI,system-ui,sans-serif; margin-top:8px;';
         btn.addEventListener('click', function (e) {
             e.preventDefault();
             e.stopPropagation();
@@ -4181,18 +4210,12 @@
         cell.appendChild(btn);
         if (!idleListOpen) return cell;
 
-        const count = document.createElement('div');
-        const n = scan.idle.length;
-        count.textContent = n + (n === 1 ? ' associate idle' : ' associates idle');
-        count.style.cssText = 'font-size:16px; font-weight:800;';
-        cell.appendChild(count);
-
         const note = document.createElement('div');
         const lag = scan.under10.length;
         note.textContent = lag
             ? (lag + (lag === 1 ? ' associate is' : ' associates are') + ' under 10 minutes and not counted.')
             : 'Idle starts at 10 minutes on the latest indirect or Time Off Task row.';
-        note.style.cssText = 'font-size:12px; font-weight:600; color:#8b949e;';
+        note.style.cssText = 'font-size:12px; font-weight:600; color:#8b949e; margin-top:8px;';
         cell.appendChild(note);
         cell.appendChild(copyDebugButton('Copy all', idleAssociatesDebug));
 
@@ -4217,10 +4240,12 @@
             name.textContent = person.name || person.login || person.empId;
             name.style.cssText = 'font-size:14px; font-weight:800; margin-bottom:4px;';
             card.appendChild(name);
+            card.appendChild(idleField('Login', person.login || '—'));
             card.appendChild(idleField('Station', stationLabel(person.station) || '—'));
             card.appendChild(idleField('UPH', stats.hasData ? (stats.uph > 0 ? stats.uph.toFixed(1) : '0') : '—'));
             card.appendChild(idleField('Idle', idleLabel(idlePercent(time)) + (idlePercent(time) === null ? '' : '%')));
             card.appendChild(idleField('Idle for', formatDuration(idleStretchMin(time))));
+            card.appendChild(timeDetailsLink(empId));
             const actions = document.createElement('div');
             actions.style.cssText = 'margin-top:6px;';
             actions.appendChild(copyDebugButton('Copy', function () { return idleAssociateDebug(empId); }));
@@ -4626,16 +4651,7 @@
         box.dataset.login = person && person.login ? person.login : '';
         ensurePopupClock(box, person, empId);
 
-        if (empId) {
-            const link = document.createElement('a');
-            link.href = fclmEmpUrl(empId);
-            link.target = '_blank';
-            link.rel = 'noopener';
-            link.textContent = 'Open FCLM Time Details';
-            link.style.cssText = 'display:inline-block; margin-top:6px; font-size:12px; color:#58a6ff; text-decoration:underline;';
-            link.addEventListener('click', function (e) { e.stopPropagation(); });
-            box.appendChild(link);
-        }
+        if (empId) box.appendChild(timeDetailsLink(empId));
 
         if (!unassigning) {
             const dbg = document.createElement('button');
