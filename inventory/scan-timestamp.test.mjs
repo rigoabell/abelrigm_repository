@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, dashboardHtml, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -188,13 +188,10 @@ assert.deepEqual(
 const locationOnly = api.recordsFromBook({ sheets: book.sheets.filter((sheet) => sheet.name !== "Dashboard") });
 assert.equal(locationOnly.length, 3);
 
-const dash = api.dashboardHtml([eol, line], "abelrigm");
-assert.match(dash, /LOCATIONS/);
-assert.match(dash, /SCANS/);
-assert.match(dash, /csX1234/);
-assert.match(dash, /L3 Even/);
-assert.equal(dash.includes("BY PARENT"), false);
-assert.equal(dash.includes("<svg"), false);
+assert.match(src, /OUTER LOCATION/);
+assert.equal(src.includes('id="dashboard"'), false);
+assert.equal(src.includes("function dashboardHtml"), false);
+assert.match(src, /@version\s+2\.9\.33/);
 
 const bulk = [];
 for (let i = 0; i < 3000; i++) {
@@ -344,6 +341,5 @@ const parentOnly = api.parseDetailsText(
 assert.equal(parentOnly.outerLocation, "rcCRetStations");
 assert.equal(parentOnly.parentContainer, "rcCRetStations");
 assert.match(src, /<div class="brand-by">developed by abelrigm<\/div>/);
-assert.match(src, /@version\s+2\.9\.32/);
 
 console.log("scan timestamp tests passed");

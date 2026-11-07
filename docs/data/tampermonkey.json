@@ -445,7 +445,7 @@
     "category": "Peculiar",
     "summary": "Scan containers and save each operator’s daily dashboard, plus a day-shift and a night-shift EOL workbook.",
     "detail": "Scanning stays in the userscript. Each lookup is saved to the Line Flush Records folder for that operator. The Dashboard sheet has the totals and every container. Each location that was scanned also gets its own sheet. Every container row includes the time it was scanned. EOL scans also update LineFlush_EOL for that shift: day is 6:00 AM–5:59 PM and night is 6:00 PM–5:59 AM. The Summary sheet reads left to right across the whole shift, the halves, the quarters, and the hour windows, grouped by EOL and dropzone. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. The team install updates from the peculiar-line-flush repository.",
-    "version": "2.9.32",
+    "version": "2.9.33",
     "runsOn": "aft-aging-inventory.na.aftx.amazonoperations.app, peculiar-inventory-na.aka.corp.amazon.com",
     "file": "downloads/peculiar-line-flush.txt",
     "downloadName": "Peculiar Line Flush (abelrigm).txt"
