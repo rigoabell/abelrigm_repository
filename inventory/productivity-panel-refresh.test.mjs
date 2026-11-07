@@ -5,7 +5,8 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-panel.txt", import.meta.url), "utf8");
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.8\.6/);
+assert.match(src, /@version\s+1\.9\.0/);
+assert.match(src, /const IDLE_START_MIN = 11;/);
 assert.match(src, /const TIME_WORKERS = 4;/);
 assert.match(src, /const MAX_TIME_TRIES = 1;/);
 assert.equal(src.includes("TIME_PASS_GAP_MS"), false);
@@ -18,29 +19,63 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.8.6");
+assert.equal(entry.version, "1.9.0");
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
+
+function attrOf(tag, name) {
+    const match = new RegExp(name + "\\s*=\\s*\"([^\"]*)\"", "i").exec(tag);
+    return match ? match[1] : "";
+}
+
+function textOf(html) {
+    return String(html || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function elements(html, tagName) {
+    const re = new RegExp("<" + tagName + "\\b([^>]*)>([\\s\\S]*?)</" + tagName + ">", "gi");
+    const out = [];
+    let match;
+    while ((match = re.exec(html))) out.push({ attrs: match[1], inner: match[2] });
+    return out;
+}
 
 function DOMParser() {}
 DOMParser.prototype.parseFromString = function (html) {
     const text = String(html || "");
-    const hasClock = text.includes("clock-seg");
     const title = /<title>([^<]*)<\/title>/.exec(text);
     const titleEl = title ? { textContent: title[1] } : null;
-    const row = {
-        getAttribute(name) { return name === "class" ? "clock-seg on-clock" : ""; },
-        textContent: "1:00",
-        querySelectorAll(sel) {
-            if (sel === "td.rightAlign") return [{ textContent: "1:00" }];
-            return [];
-        },
-        querySelector() { return { textContent: "work" }; }
-    };
+    const rows = elements(text, "tr").map((tr) => {
+        const className = attrOf(tr.attrs, "class");
+        const cells = elements(tr.inner, "td").map((td) => {
+            const cellClass = attrOf(td.attrs, "class");
+            return {
+                className: cellClass,
+                textContent: textOf(td.inner),
+                getAttribute(name) { return name === "class" ? cellClass : ""; }
+            };
+        });
+        return {
+            className,
+            textContent: textOf(tr.inner),
+            getAttribute(name) { return name === "class" ? className : ""; },
+            querySelectorAll(sel) {
+                if (sel === "td.rightAlign") {
+                    return cells.filter((cell) => cell.className.split(/\s+/).includes("rightAlign"));
+                }
+                return [];
+            },
+            querySelector(sel) {
+                if (sel === "td") return cells[0] || null;
+                return null;
+            }
+        };
+    });
     return {
         getElementById() { return null; },
         querySelectorAll(sel) {
-            if (sel === "tr.clock-seg" && hasClock) return [row];
-            return [];
+            const token = sel === "tr.clock-seg" ? "clock-seg" : (sel === "tr.function-seg" ? "function-seg" : "");
+            if (!token) return [];
+            return rows.filter((row) => row.className.split(/\s+/).includes(token));
         },
         querySelector(sel) {
             if (sel === "title") return titleEl;
@@ -128,13 +163,16 @@ sandbox.unsafeWindow = sandbox;
 const patched = src.replace(
     "applyTodayDateOnce();\n    init();\n    startSilentUpdates();\n})();",
     `globalThis.__mem3 = {
-        refreshData, forceWindow, loadBoardTimes, timeProgress, queueMissingTimes,
+        refreshData, forceWindow, loadBoardTimes, timeProgress, queueMissingTimes, parseTimeDetails,
+        idleAssociateIds, idleScan, idleAssociateDebug, idleAssociatesDebug,
+        setBoardPerson(id, rec) { BOARD_PEOPLE[id] = rec; },
         setBoard(ids) { BOARD_IDS = ids.slice(); },
         boardIds() { return BOARD_IDS.slice(); },
         bigsIds() { return BIGS_IDS.slice(); },
         decorateBigs() { decorateBigsStations(); },
         setPerson(rec) { storeIdentity(rec); },
         setTime(id, rec) { LAST_TIME[id] = rec; },
+        setClock(id, cls) { CLOCK.byKey[String(id).toLowerCase()] = { cls: cls, ts: Date.now() }; },
         setRollup(map) { LAST_ROLLUP = map; LAST_ROLLUP_AT = new Date(); },
         rollupKeys() { return Object.keys(LAST_ROLLUP); },
         time(id) { return LAST_TIME[id] || null; },
@@ -274,6 +312,128 @@ async function flush() {
     }
 }
 
+function timePage(rows) {
+    return "<html><title>Time Details</title>" +
+        "<tr class=\"clock-seg on-clock\"><td class=\"rightAlign\">2:00:00</td></tr>" +
+        rows.join("") +
+        "</html>";
+}
+
+function fnRow(cls, title, duration) {
+    return "<tr class=\"function-seg " + cls + "\"><td>" + title + "</td><td class=\"rightAlign\">" + duration + "</td></tr>";
+}
+
+const underTen = api.parseTimeDetails(timePage([
+    fnRow("indirect", "Labor Track", "9:30")
+]));
+assert.equal(underTen.currentlyIdle, false);
+assert.equal(underTen.lastFunction.bucket, "indirect");
+assert.ok(underTen.lastFunction.minutes < 10);
+assert.ok(Math.abs(underTen.idleMin - 9.5) < 0.001);
+
+const atTen = api.parseTimeDetails(timePage([
+    fnRow("timeOffTask", "Time Off Task", "10:00")
+]));
+assert.equal(atTen.currentlyIdle, false);
+assert.equal(atTen.lastFunction.bucket, "tot");
+assert.equal(atTen.idleMin, 10);
+assert.equal(atTen.totMin, 10);
+
+const backToWork = api.parseTimeDetails(timePage([
+    fnRow("indirect", "Labor Track", "20:00"),
+    fnRow("direct", "Primary Grading \u2666 Customer Returns", "40:00")
+]));
+assert.equal(backToWork.currentlyIdle, false);
+assert.equal(backToWork.lastFunction.bucket, "direct");
+assert.equal(backToWork.idleMin, 20);
+assert.equal(backToWork.activeMin, 40);
+
+const idleAgain = api.parseTimeDetails(timePage([
+    fnRow("direct", "Primary Grading \u2666 Customer Returns", "40:00"),
+    fnRow("indirect", "Labor Track", "12:00")
+]));
+assert.equal(idleAgain.currentlyIdle, true);
+assert.equal(idleAgain.lastFunction.minutes, 12);
+assert.equal(idleAgain.idleMin, 12);
+assert.equal(idleAgain.activeMin, 40);
+
+const gradingPath = api.parseTimeDetails(timePage([
+    fnRow("indirect", "C-Returns Processed\u2666Primary Grading", "20:00")
+]));
+assert.equal(gradingPath.currentlyIdle, true);
+assert.equal(gradingPath.lastFunction.bucket, "indirect");
+assert.equal(gradingPath.lastFunction.minutes, 20);
+assert.equal(gradingPath.idleMin, 20);
+
+const tenAndAHalf = api.parseTimeDetails(timePage([
+    fnRow("indirect", "Labor Track", "10:30")
+]));
+assert.equal(tenAndAHalf.lastFunction.minutes, 10.5);
+assert.equal(tenAndAHalf.currentlyIdle, false);
+
+const eleven = api.parseTimeDetails(timePage([
+    fnRow("indirect", "Labor Track", "11:00")
+]));
+assert.equal(eleven.lastFunction.minutes, 11);
+assert.equal(eleven.currentlyIdle, true);
+
+api.setBoard(["long", "short", "work"]);
+api.setBoardPerson("long", { name: "Long,Ada", login: "along", station: "Customer Returns 1st Half: Station 3-06 | 2nd Half: Station 3-70" });
+api.setTime("long", {
+    hasTime: true, idleMin: 20, clockedMin: 100,
+    lastFunction: { bucket: "indirect", minutes: 14, title: "Labor Track" }
+});
+api.setTime("short", {
+    hasTime: true, idleMin: 4, clockedMin: 80,
+    lastFunction: { bucket: "tot", minutes: 4, title: "Time Off Task" }
+});
+api.setTime("work", {
+    hasTime: true, idleMin: 30, clockedMin: 90,
+    lastFunction: { bucket: "direct", minutes: 40, title: "Primary Grading" }
+});
+assert.equal(JSON.stringify(api.idleAssociateIds()), JSON.stringify(["long"]));
+const scan = api.idleScan();
+assert.equal(JSON.stringify(scan.under10), JSON.stringify(["short"]));
+const one = api.idleAssociateDebug("long");
+assert.equal(one.associate, "Ada Long");
+assert.equal(one.station, "1st Half 3-06 | 2nd Half 3-70");
+assert.equal(one.uph, null);
+assert.equal(one.idlePercent, 20);
+assert.equal(one.idleForMin, 14);
+assert.equal(one.currentlyIdle, true);
+assert.equal(one.login, "along");
+assert.match(one.timeUrl, /employeeId=long/);
+assert.match(one.timeUrl, /warehouseId=MEM3/);
+const allIdle = api.idleAssociatesDebug();
+assert.equal(allIdle.count, 1);
+assert.equal(allIdle.under10Count, 1);
+assert.equal(allIdle.associates[0].empId, "long");
+assert.equal(allIdle.under10[0].empId, "short");
+api.setTime("grade", {
+    hasTime: true, idleMin: 20, clockedMin: 100,
+    lastFunction: { bucket: "indirect", minutes: 28, title: "C-Returns Processed\u2666Primary Grading" }
+});
+api.setBoard(["long", "short", "work", "grade"]);
+assert.equal(JSON.stringify(api.idleAssociateIds()), JSON.stringify(["grade", "long"]));
+api.setClock("long", "out");
+assert.equal(JSON.stringify(api.idleAssociateIds()), JSON.stringify(["grade"]));
+assert.equal(api.idleAssociateDebug("long").currentlyIdle, false);
+api.setClock("long", "in");
+assert.equal(JSON.stringify(api.idleAssociateIds()), JSON.stringify(["grade", "long"]));
+assert.equal(src.includes("mem3-idle-check"), false);
+assert.match(src, /id = 'mem3-idle-progress'/);
+assert.match(src, /IDLE percent ' \+ p\.done/);
+assert.match(src, /hrs idle/);
+assert.match(src, /ASSOCIATES IDLE/);
+assert.match(src, /data-view', 'eye'/);
+assert.match(src, /fill="#ffffff"/);
+assert.match(src, /data-mem3-photo/);
+assert.match(src, /CLOCK_PHOTO_PX \* 3/);
+assert.match(src, /mem3-popup-clock-ring/);
+assert.match(src, /Hours of Idle Time/);
+assert.match(src, /Not currently in Idle Time\./);
+assert.equal(src.includes("copyDebugButton('Copy debug', function () { return idleAssociateDebug(empId); })"), false);
+
 try {
     api.setRollup({ "99": { functions: {} } });
     api.setBoard(["a", "b", "c", "d"]);
@@ -312,11 +472,11 @@ try {
     const failed = api.refreshData();
     await failed;
     await flush();
-    assert.ok(detailsStarted > beforeFail);
+    assert.equal(detailsStarted, beforeFail);
     assert.equal(api.rollupKeys().includes("99"), true);
     const afterFail = api.time("a") || api.time("b");
     assert.equal(afterFail.hasTime, true);
-    assert.equal(afterFail.gaveUp, true);
+    assert.equal(afterFail.gaveUp, false);
 
     api.stop();
     api.setDown(true);
