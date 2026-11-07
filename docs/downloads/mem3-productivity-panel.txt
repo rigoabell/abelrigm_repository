@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.8
+// @version      1.8.9
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.8';
+    const SCRIPT_VERSION = '1.8.9';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -185,6 +185,7 @@
     const WINDOW_GROUPS = ['Shift', 'Halves', 'Quarters', 'Fast starts'];
     let ACTIVE_WINDOW = 'all';
     const REFRESH_MS = 5 * 60 * 1000;
+    const IDLE_START_MIN = 10;
     const TIME_WORKERS = 4;
     const UPH_TARGET = 30;
 
@@ -898,6 +899,37 @@
         return cells.length ? (cells[cells.length - 1].textContent || '').trim() : '';
     }
 
+    function functionBucket(cls, title) {
+        const c = String(cls || '').toLowerCase();
+        if (c.indexOf('timeofftask') !== -1 || c.indexOf('time-off-task') !== -1) return 'tot';
+        if (c.indexOf('indirect') !== -1) return 'indirect';
+        if (String(title || '').indexOf('\u2666') !== -1) return 'direct';
+        return 'other';
+    }
+
+    // The latest function row is the current stretch. Idle starts once that
+    // stretch has been indirect or Time Off Task for 10 minutes.
+    function showsIdleNow(time) {
+        const fn = time && time.lastFunction;
+        if (!fn) return false;
+        if (fn.bucket !== 'indirect' && fn.bucket !== 'tot') return false;
+        return (fn.minutes || 0) >= IDLE_START_MIN;
+    }
+
+    function idleNowSig(time) {
+        const fn = time && time.lastFunction;
+        const tenths = fn ? Math.round((fn.minutes || 0) * 10) : 0;
+        return (showsIdleNow(time) ? '1' : '0') + ':' + tenths;
+    }
+
+    function idleNowTitle(time) {
+        const fn = time && time.lastFunction;
+        if (!fn) return '';
+        const which = fn.title || fn.bucket;
+        const lead = showsIdleNow(time) ? 'Idle now. ' : 'Not idle yet. ';
+        return lead + which + ' for ' + formatDuration(fn.minutes) + '. Idle starts at 10 minutes.';
+    }
+
     function parseTimeDetails(html) {
         const doc = new DOMParser().parseFromString(html, 'text/html');
         let totalMin = 0, idleMin = 0, paidMin = 0, offMin = 0, totMin = 0, activeMin = 0;
@@ -910,14 +942,16 @@
             else if (cls.indexOf('on-clock') !== -1 || cls.indexOf('clockpaid') !== -1 || cls.indexOf('paid') !== -1) paidMin += minutes;
         }
         const fns = doc.querySelectorAll('tr.function-seg');
+        let lastFunction = null;
         for (let i = 0; i < fns.length; i++) {
             const cls = (fns[i].getAttribute('class') || '').toLowerCase();
             const title = ((fns[i].querySelector('td') || {}).textContent || '').trim();
             const minutes = parseDuration(lastRightAlign(fns[i]));
-            const isTot = cls.indexOf('timeofftask') !== -1 || cls.indexOf('time-off-task') !== -1;
-            if (isTot) { totMin += minutes; idleMin += minutes; }
-            else if (cls.indexOf('indirect') !== -1) idleMin += minutes;
-            else if (title.indexOf('\u2666') !== -1) activeMin += minutes;
+            const bucket = functionBucket(cls, title);
+            if (bucket === 'tot') { totMin += minutes; idleMin += minutes; }
+            else if (bucket === 'indirect') idleMin += minutes;
+            else if (bucket === 'direct') activeMin += minutes;
+            lastFunction = { title: title.slice(0, 120), bucket: bucket, minutes: minutes };
         }
         const titleEl = doc.querySelector('title');
         return {
@@ -936,7 +970,9 @@
             sawFunction: html.indexOf('function-seg') !== -1,
             pageTitle: titleEl ? (titleEl.textContent || '').trim().slice(0, 120) : '',
             error: null,
-            noData: clocks.length === 0 && /time details/i.test(titleEl ? titleEl.textContent || '' : '')
+            noData: clocks.length === 0 && /time details/i.test(titleEl ? titleEl.textContent || '' : ''),
+            lastFunction: lastFunction,
+            currentlyIdle: showsIdleNow({ lastFunction: lastFunction })
         };
     }
 
@@ -2166,10 +2202,16 @@
         const rateText = !known ? '?' : (stats.hasData ? ((stats.uph > 0 ? stats.uph.toFixed(1) : '0') + ' UPH') : uphGapText());
         const pct = idlePercent(time);
         const idleText = noTime ? windowGapText() : (idleLabel(pct) + ' IDLE');
-        wrap.title = rateText + ' \u00b7 ' + (noTime ? windowGapText() : timeText(time));
+        const nowTitle = idleNowTitle(time);
+        wrap.title = rateText + ' \u00b7 ' + (noTime ? windowGapText() : timeText(time)) + (nowTitle ? ' \u00b7 ' + nowTitle : '');
         wrap.appendChild(makePill(rateText, color, 16.5));
         wrap.appendChild(makePill(idleText, noTime ? '#8b949e' : idleColor(pct), 16.5));
-        wrap.setAttribute('data-sig', (known ? '1' : '0') + '|' + rateText + '|' + idleText);
+        if (showsIdleNow(time)) {
+            const now = makePill('IDLE NOW', '#f85149', 16.5);
+            now.className = 'mem3-idle-now';
+            wrap.appendChild(now);
+        }
+        wrap.setAttribute('data-sig', (known ? '1' : '0') + '|' + rateText + '|' + idleText + '|' + idleNowSig(time));
         return wrap;
     }
 
@@ -2193,9 +2235,15 @@
         const noTime = !!(time && time.noData);
         const pct = idlePercent(time);
         const idleText = noTime ? windowGapText() : (idleLabel(pct) + ' IDLE');
-        wrap.title = noTime ? windowGapText() : timeText(time);
+        const nowTitle = idleNowTitle(time);
+        wrap.title = (noTime ? windowGapText() : timeText(time)) + (nowTitle ? ' \u00b7 ' + nowTitle : '');
         wrap.appendChild(makePill(idleText, noTime ? '#8b949e' : idleColor(pct), 16.5));
-        wrap.setAttribute('data-sig', idleText);
+        if (showsIdleNow(time)) {
+            const now = makePill('IDLE NOW', '#f85149', 16.5);
+            now.className = 'mem3-idle-now';
+            wrap.appendChild(now);
+        }
+        wrap.setAttribute('data-sig', idleText + '|' + idleNowSig(time));
         return wrap;
     }
 
@@ -4794,8 +4842,10 @@
                         if (!badge) return true;
                         const empId = resolveEmpId(IDENTITY.byLogin[found.login]);
                         const sig = badge.getAttribute('data-sig') || '';
+                        const rowTime = empId ? LAST_TIME[empId] : null;
                         if (sig.indexOf(expectedRateText(empId)) === -1) return true;
-                        if (sig.indexOf(expectedIdleText(empId ? LAST_TIME[empId] : null)) === -1) return true;
+                        if (sig.indexOf(expectedIdleText(rowTime)) === -1) return true;
+                        if (sig.slice(sig.lastIndexOf('|') + 1) !== idleNowSig(rowTime)) return true;
                     }
                 }
             }
@@ -4812,7 +4862,8 @@
                     const badge = tr.querySelector('.' + BIGS_IDLE_CLASS);
                     if (!badge) return true;
                     const empId = resolveEmpId(IDENTITY.byLogin[found.login]);
-                    if ((badge.getAttribute('data-sig') || '') !== expectedIdleText(empId ? LAST_TIME[empId] : null)) return true;
+                    const bigsTime = empId ? LAST_TIME[empId] : null;
+                    if ((badge.getAttribute('data-sig') || '') !== expectedIdleText(bigsTime) + '|' + idleNowSig(bigsTime)) return true;
                 }
             }
         } catch (e) {
@@ -5035,7 +5086,9 @@
             sawClock: !!record.sawClock,
             sawFunction: !!record.sawFunction,
             pageTitle: record.pageTitle || '',
-            fetchedAt: record.fetchedAt || 0
+            fetchedAt: record.fetchedAt || 0,
+            lastFunction: record.lastFunction || null,
+            currentlyIdle: showsIdleNow(record)
         };
     }
 
@@ -5385,7 +5438,8 @@
             ['Formula', 'Indirect time + Time Off Task, divided by paid time clocked in'],
             ['Counts', 'Indirect function time and Time Off Task in the selected window'],
             ['Does not count', 'Active graded time, or time outside the window'],
-            ['BIGS stations', 'A station whose name contains BIGS shows that associate’s idle percent on the row. It is left out of every side and out of Total.']
+            ['BIGS stations', 'A station whose name contains BIGS shows that associate’s idle percent on the row. It is left out of every side and out of Total.'],
+            ['IDLE NOW', 'The latest function row is indirect or Time Off Task, and that row has lasted at least 10 minutes. Earlier idle in the window still counts in the percent.']
         ]));
         card.appendChild(idleSec);
 

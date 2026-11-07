@@ -5,7 +5,8 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-panel.txt", import.meta.url), "utf8");
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.8\.6/);
+assert.match(src, /@version\s+1\.8\.9/);
+assert.match(src, /const IDLE_START_MIN = 10;/);
 assert.match(src, /const TIME_WORKERS = 4;/);
 assert.match(src, /const MAX_TIME_TRIES = 1;/);
 assert.equal(src.includes("TIME_PASS_GAP_MS"), false);
@@ -18,29 +19,63 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.8.6");
+assert.equal(entry.version, "1.8.9");
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
+
+function attrOf(tag, name) {
+    const match = new RegExp(name + "\\s*=\\s*\"([^\"]*)\"", "i").exec(tag);
+    return match ? match[1] : "";
+}
+
+function textOf(html) {
+    return String(html || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function elements(html, tagName) {
+    const re = new RegExp("<" + tagName + "\\b([^>]*)>([\\s\\S]*?)</" + tagName + ">", "gi");
+    const out = [];
+    let match;
+    while ((match = re.exec(html))) out.push({ attrs: match[1], inner: match[2] });
+    return out;
+}
 
 function DOMParser() {}
 DOMParser.prototype.parseFromString = function (html) {
     const text = String(html || "");
-    const hasClock = text.includes("clock-seg");
     const title = /<title>([^<]*)<\/title>/.exec(text);
     const titleEl = title ? { textContent: title[1] } : null;
-    const row = {
-        getAttribute(name) { return name === "class" ? "clock-seg on-clock" : ""; },
-        textContent: "1:00",
-        querySelectorAll(sel) {
-            if (sel === "td.rightAlign") return [{ textContent: "1:00" }];
-            return [];
-        },
-        querySelector() { return { textContent: "work" }; }
-    };
+    const rows = elements(text, "tr").map((tr) => {
+        const className = attrOf(tr.attrs, "class");
+        const cells = elements(tr.inner, "td").map((td) => {
+            const cellClass = attrOf(td.attrs, "class");
+            return {
+                className: cellClass,
+                textContent: textOf(td.inner),
+                getAttribute(name) { return name === "class" ? cellClass : ""; }
+            };
+        });
+        return {
+            className,
+            textContent: textOf(tr.inner),
+            getAttribute(name) { return name === "class" ? className : ""; },
+            querySelectorAll(sel) {
+                if (sel === "td.rightAlign") {
+                    return cells.filter((cell) => cell.className.split(/\s+/).includes("rightAlign"));
+                }
+                return [];
+            },
+            querySelector(sel) {
+                if (sel === "td") return cells[0] || null;
+                return null;
+            }
+        };
+    });
     return {
         getElementById() { return null; },
         querySelectorAll(sel) {
-            if (sel === "tr.clock-seg" && hasClock) return [row];
-            return [];
+            const token = sel === "tr.clock-seg" ? "clock-seg" : (sel === "tr.function-seg" ? "function-seg" : "");
+            if (!token) return [];
+            return rows.filter((row) => row.className.split(/\s+/).includes(token));
         },
         querySelector(sel) {
             if (sel === "title") return titleEl;
@@ -128,7 +163,7 @@ sandbox.unsafeWindow = sandbox;
 const patched = src.replace(
     "applyTodayDateOnce();\n    init();\n    startSilentUpdates();\n})();",
     `globalThis.__mem3 = {
-        refreshData, forceWindow, loadBoardTimes, timeProgress, queueMissingTimes,
+        refreshData, forceWindow, loadBoardTimes, timeProgress, queueMissingTimes, parseTimeDetails,
         setBoard(ids) { BOARD_IDS = ids.slice(); },
         boardIds() { return BOARD_IDS.slice(); },
         bigsIds() { return BIGS_IDS.slice(); },
@@ -273,6 +308,51 @@ async function flush() {
         await new Promise((resolve) => realSetTimeout(resolve, 0));
     }
 }
+
+function timePage(rows) {
+    return "<html><title>Time Details</title>" +
+        "<tr class=\"clock-seg on-clock\"><td class=\"rightAlign\">2:00:00</td></tr>" +
+        rows.join("") +
+        "</html>";
+}
+
+function fnRow(cls, title, duration) {
+    return "<tr class=\"function-seg " + cls + "\"><td>" + title + "</td><td class=\"rightAlign\">" + duration + "</td></tr>";
+}
+
+const underTen = api.parseTimeDetails(timePage([
+    fnRow("indirect", "Labor Track", "9:30")
+]));
+assert.equal(underTen.currentlyIdle, false);
+assert.equal(underTen.lastFunction.bucket, "indirect");
+assert.ok(underTen.lastFunction.minutes < 10);
+assert.ok(Math.abs(underTen.idleMin - 9.5) < 0.001);
+
+const atTen = api.parseTimeDetails(timePage([
+    fnRow("timeOffTask", "Time Off Task", "10:00")
+]));
+assert.equal(atTen.currentlyIdle, true);
+assert.equal(atTen.lastFunction.bucket, "tot");
+assert.equal(atTen.idleMin, 10);
+assert.equal(atTen.totMin, 10);
+
+const backToWork = api.parseTimeDetails(timePage([
+    fnRow("indirect", "Labor Track", "20:00"),
+    fnRow("direct", "Primary Grading \u2666 Customer Returns", "40:00")
+]));
+assert.equal(backToWork.currentlyIdle, false);
+assert.equal(backToWork.lastFunction.bucket, "direct");
+assert.equal(backToWork.idleMin, 20);
+assert.equal(backToWork.activeMin, 40);
+
+const idleAgain = api.parseTimeDetails(timePage([
+    fnRow("direct", "Primary Grading \u2666 Customer Returns", "40:00"),
+    fnRow("indirect", "Labor Track", "12:00")
+]));
+assert.equal(idleAgain.currentlyIdle, true);
+assert.equal(idleAgain.lastFunction.minutes, 12);
+assert.equal(idleAgain.idleMin, 12);
+assert.equal(idleAgain.activeMin, 40);
 
 try {
     api.setRollup({ "99": { functions: {} } });
