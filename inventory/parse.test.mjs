@@ -59,8 +59,10 @@ assert.equal(grouped.containerTypes.find((row) => row.name === "bin,").container
 const typedOnly = query(whole, { containerType: "Bin dash", groupings: [{ name: "Bin dash", prefix: "bin-" }] });
 assert.equal(typedOnly.lines, 3);
 
+assert.equal(thresholdStatus(2, 5), "approaching");
 assert.equal(thresholdStatus(3, 5), "approaching");
 assert.equal(thresholdStatus(4, 5), "approaching");
+assert.equal(thresholdStatus(1.9, 5), "early");
 assert.equal(thresholdStatus(4.2, 5), "at");
 assert.equal(thresholdStatus(5, 5), "at");
 assert.equal(thresholdStatus(5.01, 5), "diot");

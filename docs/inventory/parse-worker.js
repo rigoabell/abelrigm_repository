@@ -1,4 +1,4 @@
-import { createDatasetParser } from "./engine.js";
+import { createDatasetParser } from "./engine.js?v=approaching-3";
 
 self.onmessage = async (event) => {
   const file = event.data.file;

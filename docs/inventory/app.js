@@ -1,4 +1,4 @@
-import { asinCsv, assignmentPackage, containerTypeCsv, detailCsv, diotOverageText, INVENTORY_THRESHOLD_RATE, locationStatusCsv, query, rollupCsv, sortMatch, STATUS_LABEL, thresholdStatus, valueAt, normalizeGroupings } from "./engine.js";
+import { asinCsv, assignmentPackage, containerTypeCsv, detailCsv, diotOverageText, INVENTORY_THRESHOLD_RATE, locationStatusCsv, query, rollupCsv, sortMatch, STATUS_LABEL, thresholdStatus, valueAt, normalizeGroupings } from "./engine.js?v=approaching-3";
 import { assignmentEpochAction, loadSavedFile } from "./github-save.js";
 import { loadSharedInventory, readUploadUrl, uploadSharedFile } from "./shared-file.js";
 import { assignmentWorkbook } from "./xlsx.js";
@@ -157,7 +157,7 @@ function startParse(file, kind, generation) {
     worker = null;
   }
   try {
-    worker = new Worker(new URL("./parse-worker.js", import.meta.url), { type: "module" });
+    worker = new Worker(new URL("./parse-worker.js?v=approaching-3", import.meta.url), { type: "module" });
   } catch (error) {
     parseOnPage(file, kind, generation);
     return;
@@ -187,7 +187,7 @@ function startParse(file, kind, generation) {
 }
 
 async function parseOnPage(file, kind, generation) {
-  const { createDatasetParser } = await import("./engine.js");
+  const { createDatasetParser } = await import("./engine.js?v=approaching-3");
   const parser = createDatasetParser({
     onProgress(rows) {
       setProgress(rows, file.size, file.size);
@@ -515,7 +515,7 @@ function renderSummary() {
   const cards = [
     ["diot", "DIOT", "Past the threshold"],
     ["at", "At", "Less than 1 day before"],
-    ["approaching", "Approaching", "1–2 days before"],
+    ["approaching", "Approaching", "1–3 days before"],
   ];
   const units = siteUnits || { diot: 0, at: 0, approaching: 0 };
   const overage = diotOverageText(units.diot, inventoryThreshold());

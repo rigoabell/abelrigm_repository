@@ -14,7 +14,7 @@ Central hub for the work: portfolio, tools built, and notes.
   - **Toolkit** lists tools built and ready to download.
   - **Inventory** opens a large inventory CSV in the browser. Average Age and
     Average Threshold are the ASIN’s age and threshold. The desk groups containers
-    as Approaching (1–2 days before), At (less than 1 day before), or DIOT (past
+    as Approaching (1–3 days before), At (less than 1 day before), or DIOT (past
     the threshold), and lists them by outer location. The shared copy lives in
     `docs/inventory/data/` (see `manifest.json`; one `latest.csv`, or `part-000`
     and following parts in order). Dropping a CSV publishes that copy through
