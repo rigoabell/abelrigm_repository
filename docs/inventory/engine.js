@@ -497,7 +497,7 @@ export function thresholdStatus(age, threshold) {
   const before = threshold - age;
   if (before < 0) return "diot";
   if (before < 1) return "at";
-  if (before <= 2) return "approaching";
+  if (before <= 3) return "approaching";
   return "early";
 }
 

@@ -33,7 +33,7 @@
       <h1>Warehouse Inventory Desk</h1>
       <p class="page-hero-sub">
         Open a current-inventory CSV. Average Age and Average Threshold are the ASIN’s age and threshold.
-        Approaching is 1–2 days before the threshold, At is less than 1 day before it, and DIOT is past it.
+        Approaching is 1–3 days before the threshold, At is less than 1 day before it, and DIOT is past it.
         The inventory threshold is 0.5% of the site’s total units, and every DIOT count shows how far those units sit from it.
         Dropping a new CSV replaces the shared inventory file and clears every assignment. Anyone who opens this desk gets that file.
       </p>
@@ -85,7 +85,7 @@
               </div>
               <div class="inv-group" id="status-filter">
                 <h3>Threshold</h3>
-                <label class="inv-check"><input type="checkbox" data-status="approaching" checked /> <span><b>Approaching</b> · 1–2 days before</span></label>
+                <label class="inv-check"><input type="checkbox" data-status="approaching" checked /> <span><b>Approaching</b> · 1–3 days before</span></label>
                 <label class="inv-check"><input type="checkbox" data-status="at" checked /> <span><b>At</b> · less than 1 day before</span></label>
                 <label class="inv-check"><input type="checkbox" data-status="diot" checked /> <span><b>DIOT</b> · past the threshold<small id="diot-overage"></small></span></label>
                 <label class="inv-check"><input type="checkbox" data-status="early" /> <span><b>More than 2 days out</b></span></label>
@@ -240,6 +240,6 @@
 
   <script src="../assets/config.js"></script>
   <script src="../assets/site.js"></script>
-  <script type="module" src="app.js?v=site-units"></script>
+  <script type="module" src="app.js?v=approaching-3"></script>
 </body>
 </html>
