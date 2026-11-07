@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.12
+// @version      1.8.13
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.12';
+    const SCRIPT_VERSION = '1.8.13';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -918,19 +918,12 @@
         return 'other';
     }
 
-    // A diamond in the function title is a process path (Primary Grading,
-    // C-Return Bypass, and the rest). That person is working. The idle
-    // percent still counts the row when its class is indirect.
-    function onProcessPath(fn) {
-        return !!(fn && String(fn.title || '').indexOf('\u2666') !== -1);
-    }
-
     // The latest function row is the current stretch. Idle starts once that
-    // stretch has been indirect or Time Off Task for 10 minutes, and the
-    // title is not a process path.
+    // stretch has been indirect or Time Off Task for 10 minutes. A diamond in
+    // the title is still that stretch, so it counts the same way.
     function showsIdleNow(time) {
         const fn = time && time.lastFunction;
-        if (!fn || onProcessPath(fn)) return false;
+        if (!fn) return false;
         if (fn.bucket !== 'indirect' && fn.bucket !== 'tot') return false;
         return (fn.minutes || 0) >= IDLE_START_MIN;
     }
@@ -943,7 +936,6 @@
         const fn = time && time.lastFunction;
         if (!fn) return '';
         const which = fn.title || fn.bucket;
-        if (onProcessPath(fn)) return 'On a process path. ' + which + ' for ' + formatDuration(fn.minutes) + '.';
         const lead = showsIdleNow(time) ? 'Idle now. ' : 'Not idle yet. ';
         return lead + which + ' for ' + formatDuration(fn.minutes) + '. Idle starts at 10 minutes.';
     }
@@ -1359,11 +1351,17 @@
         return (TIME_TRIES[empId] || 0) >= MAX_TIME_TRIES;
     }
 
+    // One read per associate. A later 5-minute rate refresh leaves that idle
+    // percent where it is. Reload and a window change clear the cache first.
     function needsTimeThisCycle(empId) {
         const t = LAST_TIME[empId];
+        if (t && (timeSettled(t) || t.gaveUp)) return false;
         if ((TIME_TRIES[empId] || 0) >= MAX_TIME_TRIES) return false;
-        if (t && t.cycle === refreshCycle && (timeSettled(t) || t.gaveUp)) return false;
         return true;
+    }
+
+    function timePassOpen() {
+        return !!(DEBUG.timeLoad && DEBUG.timeLoad.finished === false);
     }
 
     function idlePercent(t) {
@@ -1660,7 +1658,10 @@
             maxTries: MAX_TIME_TRIES
         };
         pullNew();
-        if (!ids.length) return;
+        if (!ids.length) {
+            if (DEBUG.timeLoad) DEBUG.timeLoad.finished = true;
+            return;
+        }
         TIME_LOADING = true;
         const worker = async function () {
             while (gen === timeGeneration && !FCLM_DOWN) {
@@ -1689,8 +1690,14 @@
             if (DEBUG.timeLoad) DEBUG.timeLoad.finished = true;
             render();
         } catch (e) {
-            if (DEBUG.timeLoad) DEBUG.timeLoad.error = e.message;
-            if (gen === timeGeneration) settleUnfinished(ids);
+            if (DEBUG.timeLoad) {
+                DEBUG.timeLoad.error = e.message;
+                DEBUG.timeLoad.finished = true;
+            }
+            if (gen === timeGeneration) {
+                settleUnfinished(ids);
+                render();
+            }
         } finally {
             TIME_LOADING = false;
             if (!pagesHeld()) pumpRefresh();
@@ -1937,14 +1944,7 @@
 
     function paintProgress() {
         const el = document.getElementById('mem3-idle-progress');
-        if (!el) return;
-        const p = timeProgress();
-        const label = el.querySelector('[data-label]');
-        const fill = el.querySelector('[data-fill]');
-        const pct = p.total ? Math.min(100, Math.round((p.done / p.total) * 100)) : 0;
-        if (label) label.textContent = p.total ? ('IDLE percent ' + p.done + ' / ' + p.total) : 'IDLE percent';
-        if (fill) fill.style.width = pct + '%';
-        el.style.display = (p.total > 0 && p.done < p.total) ? 'block' : 'none';
+        if (el) el.remove();
         paintIssueIcon();
     }
 
@@ -4004,11 +4004,13 @@
         function viewButton(title, onClick) {
             const btn = document.createElement('button');
             btn.type = 'button';
-            btn.textContent = '\uD83D\uDC41';
             btn.title = title;
             btn.setAttribute('aria-label', title);
-            btn.style.cssText = 'padding:0; margin:0; border:0; background:transparent; cursor:pointer; ' +
-                'font-size:14px; line-height:1;';
+            btn.setAttribute('data-view', 'eye');
+            btn.style.cssText = 'padding:0; margin:0; border:0; background:transparent; cursor:pointer; line-height:0;';
+            btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">' +
+                '<path fill="#ffffff" d="M12 5c-5 0-9.3 3.1-11 7 1.7 3.9 6 7 11 7s9.3-3.1 11-7c-1.7-3.9-6-7-11-7zm0 11.5a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"/>' +
+                '<circle cx="12" cy="12" r="2.2" fill="#161b22"/></svg>';
             btn.addEventListener('click', function (e) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -4047,7 +4049,7 @@
             viewTitle: 'View idle percent, highest first',
             onView: function () { openRosterPopup(scopeLabel, scopeIds, 'idle'); }
         });
-        addMetric(String(idleCount), 'idle', idleCount > 0 ? '#f85149' : '#c9d1d9', '', size, {
+        addMetric(String(idleCount), 'ASSOCIATES IDLE', idleCount > 0 ? '#f85149' : '#c9d1d9', '', size, {
             key: 'idleCount',
             viewTitle: 'View associates idle for 10 minutes',
             onView: function () { openRosterPopup(scopeLabel, scopeIds, 'idleNow'); }
@@ -4141,7 +4143,6 @@
 
     // Idle starts at 10 minutes on the latest function row.
     // A shorter indirect or Time Off Task row is the lag after a scan.
-    // A process path (diamond in the title) is work, so it is left out.
     function idleIdsIn(ids) {
         const pool = uniqueIds(ids);
         const idle = [];
@@ -4150,7 +4151,7 @@
             const id = pool[i];
             const time = LAST_TIME[id];
             const fn = time && time.lastFunction;
-            if (!fn || onProcessPath(fn)) continue;
+            if (!fn) continue;
             if (fn.bucket !== 'indirect' && fn.bucket !== 'tot') continue;
             if (showsIdleNow(time)) idle.push(id);
             else under10.push(id);
@@ -4256,7 +4257,7 @@
             what: 'idle-associates',
             capturedAt: new Date().toISOString(),
             window: windowPreset(ACTIVE_WINDOW).label,
-            rule: 'Latest function row is indirect or Time Off Task for at least 10 minutes, and the title is not a process path. A shorter row is not counted. A diamond in the title means they are still on a process.',
+            rule: 'Latest function row is indirect or Time Off Task for at least 10 minutes. A shorter row is not counted. A diamond in the title is still that stretch.',
             count: associates.length,
             under10Count: under10.length,
             associates: associates,
@@ -4264,7 +4265,7 @@
         };
     }
 
-    function idleField(label, value) {
+    function idleField(label, value, color) {
         const row = document.createElement('div');
         row.style.cssText = 'font-size:12px; font-weight:650; line-height:1.35;';
         const name = document.createElement('span');
@@ -4272,6 +4273,7 @@
         name.style.cssText = 'color:#8b949e; font-weight:700;';
         const val = document.createElement('span');
         val.textContent = value;
+        if (color) val.style.color = color;
         row.appendChild(name);
         row.appendChild(val);
         return row;
@@ -4311,16 +4313,16 @@
         card.appendChild(name);
         card.appendChild(idleField('Login', person.login || '\u2014'));
         card.appendChild(idleField('Station', stationLabel(person.station) || '\u2014'));
-        card.appendChild(idleField('UPH', stats.hasData ? (stats.uph > 0 ? stats.uph.toFixed(1) : '0') : '\u2014'));
+        card.appendChild(idleField(
+            'UPH',
+            stats.hasData ? (stats.uph > 0 ? stats.uph.toFixed(1) : '0') : '\u2014',
+            stats.hasData ? uphColor(stats.uph) : '#8b949e'
+        ));
         const pct = idlePercent(time);
-        card.appendChild(idleField('Idle', idleLabel(pct)));
+        card.appendChild(idleField('Idle', idleLabel(pct), idleColor(pct)));
         if (showsIdleNow(time)) card.appendChild(idleField('Idle for', formatDuration(idleStretchMin(time))));
         else if (fn) card.appendChild(idleField('Latest', (fn.title || fn.bucket) + ' \u00b7 ' + formatDuration(fn.minutes)));
         card.appendChild(timeDetailsLink(empId));
-        const actions = document.createElement('div');
-        actions.style.cssText = 'margin-top:6px;';
-        actions.appendChild(copyDebugButton('Copy', function () { return idleAssociateDebug(empId); }));
-        card.appendChild(actions);
         return card;
     }
 
@@ -4336,7 +4338,7 @@
         const notes = {
             uph: 'Lowest rate first. Someone with no Primary Grading rate is at the top.',
             idle: 'Highest idle percent first. The percent is the whole window, not this stretch.',
-            idleNow: 'Latest function row is indirect or Time Off Task for at least 10 minutes. A process path is still working and is left out.'
+            idleNow: 'Latest function row is indirect or Time Off Task for at least 10 minutes.'
         };
         const headingText = (scopeLabel || 'Total') + ' \u00b7 ' + (titles[mode] || 'Associates');
         const overlay = document.createElement('div');
@@ -4363,7 +4365,6 @@
         headingWrap.appendChild(sub);
         const actions = document.createElement('div');
         actions.style.cssText = 'display:flex; gap:8px; flex:0 0 auto;';
-        actions.appendChild(copyDebugButton('Copy all', function () { return rosterDebug(headingText, people); }));
         const close = document.createElement('button');
         close.type = 'button';
         close.textContent = 'Close';
@@ -4415,7 +4416,7 @@
     }
 
     function summaryStructureSig(data) {
-        return 'v43|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
+        return 'v44|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
             (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
             (data.floorOpen || []).join(';') + '|' +
             data.floorStaffed + '|' + (data.asOf || '') + '|' +
@@ -4454,11 +4455,15 @@
             }
             num('uph', spec.uphText, spec.uph > 0 ? uphColor(spec.uph) : '#c9d1d9');
             rank('uph', spec.uphRank || '');
-            num('idle', idleLabel(spec.idlePct), idleColor(spec.idlePct));
-            rank('idle', spec.idleRank || '');
-            num('idleCount', String(spec.idleCount), spec.idleCount > 0 ? '#f85149' : '#c9d1d9');
             num('units', formatUnits(spec.units || 0), '#8b949e');
-            num('idleHours', formatDuration(spec.idleMin || 0), '#8b949e');
+            // The one idle read paints these once, when that pass finishes.
+            // Writing them as each page returns makes the percent climb.
+            if (!timePassOpen()) {
+                num('idle', idleLabel(spec.idlePct), idleColor(spec.idlePct));
+                rank('idle', spec.idleRank || '');
+                num('idleCount', String(spec.idleCount), spec.idleCount > 0 ? '#f85149' : '#c9d1d9');
+                num('idleHours', formatDuration(spec.idleMin || 0), '#8b949e');
+            }
             return true;
         }
         const totalIds = lineIdsOf(data);
@@ -4670,14 +4675,6 @@
 
         node.appendChild(metrics);
         header.appendChild(actions);
-
-        const progress = document.createElement('div');
-        progress.id = 'mem3-idle-progress';
-        progress.style.cssText = 'flex:1 0 100%; margin-top:8px; display:none;';
-        progress.innerHTML = '<div data-label style="font-size:11px; color:#8b949e; font-weight:600; margin-bottom:4px;">IDLE</div>' +
-            '<div style="height:6px; background:#0d1117; border-radius:99px; overflow:hidden;">' +
-            '<div data-fill style="height:100%; width:0; background:#58a6ff;"></div></div>';
-        node.appendChild(progress);
         paintProgress();
         node.setAttribute('data-sig', sig);
     }
@@ -4779,7 +4776,7 @@
             lineBadge.setAttribute('data-sig', lineSig);
             const existingLine = firstH.querySelector('.' + SECTION_BADGE_CLASS);
             if (!existingLine) firstH.appendChild(lineBadge);
-            else if (existingLine.getAttribute('data-sig') !== lineSig) {
+            else if (!timePassOpen() && existingLine.getAttribute('data-sig') !== lineSig) {
                 existingLine.parentNode.replaceChild(lineBadge, existingLine);
             }
         }
@@ -5390,7 +5387,6 @@
                 scheduleRollupRetry();
             }
             refreshCycle++;
-            resetTimeTries();
             lastIdentified = null;
             render();
             if (gen !== refreshGeneration) return;
@@ -5703,7 +5699,7 @@
         top.appendChild(actions);
         card.appendChild(top);
         const note = document.createElement('div');
-        note.textContent = 'These are the associates whose time page failed, came back empty, or had to be tried again. The bar can still reach 100% after that. Copy all includes every associate on the board, not only this list.';
+        note.textContent = 'These are the associates whose time page failed or came back empty. Copy all includes every associate on the board, not only this list.';
         note.style.cssText = 'font-size:12px; font-weight:500; color:#8b949e; margin:0 0 12px;';
         card.appendChild(note);
         const list = document.createElement('div');
@@ -5862,8 +5858,8 @@
             ['Counts', 'Indirect function time and Time Off Task in the selected window'],
             ['Does not count', 'Active graded time, or time outside the window'],
             ['BIGS stations', 'A station whose name contains BIGS shows that associate’s idle percent on the row. It is left out of every side and out of Total.'],
-            ['IDLE NOW', 'The latest function row is indirect or Time Off Task, and that row has lasted at least 10 minutes. A process path, the diamond in the function title, is still working. Earlier idle in the window still counts in the percent.'],
-            ['Idle count', 'The number under the idle percent is how many associates on that side, or on the whole floor for Total, have been idle for at least 10 minutes. The eye on the left opens that list.'],
+            ['IDLE NOW', 'The latest function row is indirect or Time Off Task, and that row has lasted at least 10 minutes. A diamond in the function title is still that stretch. A shorter row is the lag after a scan. Earlier idle in the window still counts in the percent.'],
+            ['ASSOCIATES IDLE', 'The number under the idle percent is how many associates on that side, or on the whole floor for Total, have been idle for at least 10 minutes. The white eye on the left opens that list.'],
             ['View', 'The eye left of UPH lists that side from the lowest rate. The eye left of the idle percent lists it from the highest idle percent. Total does the same for everyone on the lines.'],
             ['Hours idle', 'Under units, the idle hours are the indirect time plus Time Off Task already in the idle percent.']
         ]));
@@ -5895,7 +5891,7 @@
 
         const times = infoSection('Time frames');
         const timeNote = document.createElement('div');
-        timeNote.textContent = 'Days start at 6:00 AM. Nights start at 6:00 PM and use the same gaps. All shift is 6:00–5:59 (11 hr 59 min). UPH and IDLE refresh together every 5 minutes. Picking a window reloads both right away.';
+        timeNote.textContent = 'Days start at 6:00 AM. Nights start at 6:00 PM and use the same gaps. All shift is 6:00–5:59 (11 hr 59 min). UPH refreshes every 5 minutes. The idle percent is read once per associate. Reload, or picking a window, reads it again.';
         timeNote.style.cssText = 'font-size:13px; font-weight:500; margin-bottom:8px;';
         times.appendChild(timeNote);
         times.appendChild(infoRows([

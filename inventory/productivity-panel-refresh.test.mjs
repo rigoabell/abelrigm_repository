@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-panel.txt", import.meta.url), "utf8");
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.8\.12/);
+assert.match(src, /@version\s+1\.8\.13/);
 assert.match(src, /const IDLE_START_MIN = 10;/);
 assert.match(src, /const TIME_WORKERS = 4;/);
 assert.match(src, /const MAX_TIME_TRIES = 1;/);
@@ -19,7 +19,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.8.12");
+assert.equal(entry.version, "1.8.13");
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
 
 function attrOf(tag, name) {
@@ -359,7 +359,7 @@ assert.equal(idleAgain.activeMin, 40);
 const gradingPath = api.parseTimeDetails(timePage([
     fnRow("indirect", "C-Returns Processed\u2666Primary Grading", "20:00")
 ]));
-assert.equal(gradingPath.currentlyIdle, false);
+assert.equal(gradingPath.currentlyIdle, true);
 assert.equal(gradingPath.lastFunction.bucket, "indirect");
 assert.equal(gradingPath.lastFunction.minutes, 20);
 assert.equal(gradingPath.idleMin, 20);
@@ -401,10 +401,13 @@ api.setTime("grade", {
     lastFunction: { bucket: "indirect", minutes: 28, title: "C-Returns Processed\u2666Primary Grading" }
 });
 api.setBoard(["long", "short", "work", "grade"]);
-assert.equal(JSON.stringify(api.idleAssociateIds()), JSON.stringify(["long"]));
+assert.equal(JSON.stringify(api.idleAssociateIds()), JSON.stringify(["grade", "long"]));
 assert.equal(src.includes("mem3-idle-check"), false);
+assert.equal(src.includes("IDLE percent ' + p.done"), false);
 assert.match(src, /hrs idle/);
-assert.match(src, /\\uD83D\\uDC41/);
+assert.match(src, /ASSOCIATES IDLE/);
+assert.match(src, /data-view', 'eye'/);
+assert.match(src, /fill="#ffffff"/);
 
 try {
     api.setRollup({ "99": { functions: {} } });
@@ -444,11 +447,11 @@ try {
     const failed = api.refreshData();
     await failed;
     await flush();
-    assert.ok(detailsStarted > beforeFail);
+    assert.equal(detailsStarted, beforeFail);
     assert.equal(api.rollupKeys().includes("99"), true);
     const afterFail = api.time("a") || api.time("b");
     assert.equal(afterFail.hasTime, true);
-    assert.equal(afterFail.gaveUp, true);
+    assert.equal(afterFail.gaveUp, false);
 
     api.stop();
     api.setDown(true);
