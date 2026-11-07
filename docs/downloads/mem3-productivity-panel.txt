@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.7
+// @version      1.8.8
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.7';
+    const SCRIPT_VERSION = '1.8.8';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -3957,11 +3957,11 @@
 
     function ensureSummaryActions() {
         let actions = document.getElementById('mem3-summary-actions');
-        if (actions && actions.getAttribute('data-mem3-probe') !== 'all-v56') actions.remove();
-        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'all-v56') return actions;
+        if (actions && actions.getAttribute('data-mem3-probe') !== 'issues-v188') actions.remove();
+        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'issues-v188') return actions;
         actions = document.createElement('div');
         actions.id = 'mem3-summary-actions';
-        actions.setAttribute('data-mem3-probe', 'all-v56');
+        actions.setAttribute('data-mem3-probe', 'issues-v188');
         actions.style.cssText = 'display:flex; gap:6px; align-items:flex-start; flex-wrap:wrap;';
         function actionButton(label, border) {
             const btn = document.createElement('button');
@@ -3972,12 +3972,6 @@
                 'color:#ffffff; background:#0d1117; border:1px solid ' + border + '; white-space:nowrap;';
             return btn;
         }
-        const unassignBtn = actionButton('Unassign all', '#f85149');
-        unassignBtn.addEventListener('click', function (e) {
-            e.preventDefault();
-            e.stopPropagation();
-            askUnassignAll(unassignBtn);
-        });
         const copyBtn = actionButton('Copy debug', '#30363d');
         copyBtn.addEventListener('click', function (e) {
             e.preventDefault();
@@ -3990,7 +3984,7 @@
                 setTimeout(function () { copyBtn.textContent = 'Copy debug'; }, 2000);
             });
         });
-        actions.appendChild(unassignBtn);
+        actions.appendChild(makeIssueButton());
         actions.appendChild(copyBtn);
         return actions;
     }
@@ -4091,7 +4085,6 @@
         nameRow.appendChild(nameEl);
         nameRow.appendChild(versionEl);
         nameRow.appendChild(makeInfoButton());
-        nameRow.appendChild(makeIssueButton());
         titleWrap.appendChild(nameRow);
         titleWrap.appendChild(byline);
         header.appendChild(titleWrap);
@@ -5113,14 +5106,12 @@
         const btn = document.getElementById('mem3-time-issues');
         if (btn) {
             const n = issueIds().length;
-            btn.textContent = n ? ('! ' + n) : '!';
+            btn.textContent = n ? ('Time issues ' + n) : 'Time issues';
             btn.title = n
                 ? (n + (n === 1 ? ' associate' : ' associates') + ' had trouble loading time')
                 : 'No time issues this refresh. Click to copy every associate.';
             btn.style.borderColor = n ? '#d29922' : '#8b949e';
             btn.style.color = n ? '#d29922' : '#ffffff';
-            btn.style.width = n ? 'auto' : '18px';
-            btn.style.padding = n ? '0 6px' : '0';
         }
     }
 
@@ -5251,11 +5242,11 @@
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.id = 'mem3-time-issues';
-        btn.textContent = '!';
+        btn.textContent = 'Time issues';
         btn.title = 'Associates whose time page had trouble';
-        btn.style.cssText = 'height:18px; width:18px; padding:0; border-radius:50%; cursor:pointer; ' +
-            'border:1px solid #8b949e; background:#0d1117; color:#ffffff; ' +
-            'font:800 11px Segoe UI,system-ui,sans-serif; line-height:16px;';
+        btn.style.cssText = 'flex:0 0 auto; padding:4px 8px; border-radius:8px; cursor:pointer; ' +
+            'font:800 11px Segoe UI,system-ui,sans-serif; letter-spacing:0.03em; text-transform:uppercase; ' +
+            'color:#ffffff; background:#0d1117; border:1px solid #8b949e; white-space:nowrap;';
         btn.addEventListener('click', function (e) {
             e.preventDefault();
             e.stopPropagation();
