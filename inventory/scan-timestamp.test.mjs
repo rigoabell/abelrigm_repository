@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, dashboardHtml, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, fileDate, mergeShiftRecords };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -188,13 +188,36 @@ assert.deepEqual(
 const locationOnly = api.recordsFromBook({ sheets: book.sheets.filter((sheet) => sheet.name !== "Dashboard") });
 assert.equal(locationOnly.length, 3);
 
-const dash = api.dashboardHtml([eol, line], "abelrigm");
-assert.match(dash, /LOCATIONS/);
-assert.match(dash, /SCANS/);
-assert.match(dash, /csX1234/);
-assert.match(dash, /L3 Even/);
-assert.equal(dash.includes("BY PARENT"), false);
-assert.equal(dash.includes("<svg"), false);
+assert.match(src, /OUTER LOCATION/);
+assert.equal(src.includes('id="dashboard"'), false);
+assert.equal(src.includes("function dashboardHtml"), false);
+assert.match(src, /@version\s+2\.9\.35/);
+assert.equal(api.fileDate("2026-11-07 22:00:00"), "2026-11-07");
+assert.equal(api.fileDate("2026-11-08 00:01:00"), "2026-11-07");
+assert.equal(api.fileDate("2026-11-08 05:59:00"), "2026-11-07");
+assert.equal(api.fileDate("2026-11-08 06:00:00"), "2026-11-08");
+const nightScan = {
+  location: "EOL 1",
+  parent: "rcCRetStations",
+  container: "tsNight",
+  age: "1d",
+  status: "Good",
+  units: "1",
+  scannedAt: "2026-11-07 22:00:00",
+};
+const afterMidnight = { ...nightScan, container: "tsAfter", scannedAt: "2026-11-08 00:01:00" };
+const mergedNight = api.mergeShiftRecords(
+  [nightScan, afterMidnight],
+  [nightScan, afterMidnight],
+  "2026-11-08",
+  "Night",
+  "2026-11-07"
+);
+assert.deepEqual(
+  [...mergedNight.map((rec) => rec.container)],
+  ["tsNight", "tsAfter"]
+);
+assert.match(src, /\.x \{[^}]*background: #b42318/);
 
 const bulk = [];
 for (let i = 0; i < 3000; i++) {
@@ -332,5 +355,17 @@ const earlyContainers = [...nightBook.sheets.find((sheet) => sheet.name === "jki
 assert.deepEqual(nightContainers, ["tsNight"]);
 assert.deepEqual(earlyContainers, ["tsEarly"]);
 assert.equal(nightBook.sheets.some((sheet) => [...sheet.rows].some((row) => [...row].includes("tsA"))), false);
+
+const withOuter = api.parseDetailsText(
+  "tsREF922111 [TOTE]\nTotal units\n6\nOldest Units Age\n0d 23h 32m\nOuter Location\npaA100 [STORAGE] [PICK]\nParent Container\nrcCRetStations [RECEIVE_LANE]\n"
+);
+assert.equal(withOuter.outerLocation, "paA100");
+assert.equal(api.outerLocationLabel(withOuter), "paA100");
+const parentOnly = api.parseDetailsText(
+  "tsREF922111 [TOTE]\nTotal units\n6\nOldest Units Age\n0d 23h 32m\nParent Container\nrcCRetStations [RECEIVE_LANE]\n"
+);
+assert.equal(parentOnly.outerLocation, "rcCRetStations");
+assert.equal(parentOnly.parentContainer, "rcCRetStations");
+assert.match(src, /<div class="brand-by">developed by abelrigm<\/div>/);
 
 console.log("scan timestamp tests passed");
