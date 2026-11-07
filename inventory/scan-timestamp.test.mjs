@@ -343,5 +343,7 @@ const parentOnly = api.parseDetailsText(
 );
 assert.equal(parentOnly.outerLocation, "rcCRetStations");
 assert.equal(parentOnly.parentContainer, "rcCRetStations");
+assert.match(src, /<div class="brand-by">developed by abelrigm<\/div>/);
+assert.match(src, /@version\s+2\.9\.32/);
 
 console.log("scan timestamp tests passed");

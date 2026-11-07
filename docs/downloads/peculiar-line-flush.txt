@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.31
+// @version      2.9.32
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
@@ -46,7 +46,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.31";
+  const VERSION = "2.9.32";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2557,10 +2557,18 @@
           overflow: hidden; text-overflow: ellipsis; max-width: 110px;
         }
         .brand {
-          flex: 0 0 auto; white-space: nowrap;
-          font-size: 12px; font-weight: 800; color: #111111; line-height: 1.15;
+          flex: 0 0 auto; display: flex; flex-direction: column;
+          color: #111111; line-height: 1.15;
         }
-        .brand span { font-weight: 700; }
+        .brand-title {
+          white-space: nowrap;
+          font-size: 12px; font-weight: 800;
+        }
+        .brand-title span { font-weight: 700; }
+        .brand-by {
+          font-size: 9px; font-weight: 600; letter-spacing: .01em;
+          opacity: .72; white-space: nowrap;
+        }
         .lamps { display: flex; gap: 4px; flex: 0 0 auto; }
         .lamp {
           display: flex; align-items: center; gap: 4px;
@@ -2926,7 +2934,7 @@
         <div class="backdrop" id="backdrop"></div>
         <div class="modal" id="modal">
           <div class="bar">
-            <div class="brand">${SCRIPT_NAME} <span>${VERSION}</span></div>
+            <div class="brand"><div class="brand-title">${SCRIPT_NAME} <span>${VERSION}</span></div><div class="brand-by">developed by abelrigm</div></div>
             <div class="who" id="opTitle" title="${SCRIPT_NAME} ${VERSION}">Operator</div>
             <div class="lamps">
               <div class="lamp" id="lampPec" title="Inventory page"><span class="dot"></span>Page</div>
