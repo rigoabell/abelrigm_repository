@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, fileDate, mergeShiftRecords };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -191,7 +191,32 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.9\.34/);
+assert.match(src, /@version\s+2\.9\.35/);
+assert.equal(api.fileDate("2026-11-07 22:00:00"), "2026-11-07");
+assert.equal(api.fileDate("2026-11-08 00:01:00"), "2026-11-07");
+assert.equal(api.fileDate("2026-11-08 05:59:00"), "2026-11-07");
+assert.equal(api.fileDate("2026-11-08 06:00:00"), "2026-11-08");
+const nightScan = {
+  location: "EOL 1",
+  parent: "rcCRetStations",
+  container: "tsNight",
+  age: "1d",
+  status: "Good",
+  units: "1",
+  scannedAt: "2026-11-07 22:00:00",
+};
+const afterMidnight = { ...nightScan, container: "tsAfter", scannedAt: "2026-11-08 00:01:00" };
+const mergedNight = api.mergeShiftRecords(
+  [nightScan, afterMidnight],
+  [nightScan, afterMidnight],
+  "2026-11-08",
+  "Night",
+  "2026-11-07"
+);
+assert.deepEqual(
+  [...mergedNight.map((rec) => rec.container)],
+  ["tsNight", "tsAfter"]
+);
 assert.match(src, /\.x \{[^}]*background: #b42318/);
 
 const bulk = [];
