@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.14
+// @version      1.8.15
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.14';
+    const SCRIPT_VERSION = '1.8.15';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -920,23 +920,32 @@
 
     // The latest function row is the current stretch. Idle starts once that
     // stretch has been indirect or Time Off Task for 10 minutes. A diamond in
-    // the title is still that stretch, so it counts the same way.
-    function showsIdleNow(time) {
+    // the title is still that stretch, so it counts the same way. Someone
+    // whose latest punch is out is not idle.
+    function isClockedOut(empId) {
+        if (!empId) return false;
+        return clockFor(personForEmp(empId), empId) === 'out';
+    }
+
+    function showsIdleNow(time, empId) {
+        if (isClockedOut(empId)) return false;
         const fn = time && time.lastFunction;
         if (!fn) return false;
         if (fn.bucket !== 'indirect' && fn.bucket !== 'tot') return false;
         return (fn.minutes || 0) >= IDLE_START_MIN;
     }
 
-    function idleNowSig(time) {
-        return showsIdleNow(time) ? '1' : '0';
+    function idleNowSig(time, empId) {
+        if (isClockedOut(empId)) return 'out';
+        return showsIdleNow(time, empId) ? '1' : '0';
     }
 
-    function idleNowTitle(time) {
+    function idleNowTitle(time, empId) {
+        if (isClockedOut(empId)) return 'Clocked out.';
         const fn = time && time.lastFunction;
         if (!fn) return '';
         const which = fn.title || fn.bucket;
-        const lead = showsIdleNow(time) ? 'Idle now. ' : 'Not idle yet. ';
+        const lead = showsIdleNow(time, empId) ? 'Idle now. ' : 'Not idle yet. ';
         return lead + which + ' for ' + formatDuration(fn.minutes) + '. Idle starts at 10 minutes.';
     }
 
@@ -1940,7 +1949,14 @@
 
     function paintProgress() {
         const el = document.getElementById('mem3-idle-progress');
-        if (el) el.remove();
+        if (!el) return;
+        const p = timeProgress();
+        const label = el.querySelector('[data-label]');
+        const fill = el.querySelector('[data-fill]');
+        const pct = p.total ? Math.min(100, Math.round((p.done / p.total) * 100)) : 0;
+        if (label) label.textContent = p.total ? ('IDLE percent ' + p.done + ' / ' + p.total) : 'IDLE percent';
+        if (fill) fill.style.width = pct + '%';
+        el.style.display = (p.total > 0 && p.done < p.total) ? 'block' : 'none';
         paintIssueIcon();
     }
 
@@ -2208,7 +2224,7 @@
         for (let i = 0; i < nodes.length; i++) nodes[i].remove();
     }
 
-    function makeBadge(stats, known, time) {
+    function makeBadge(stats, known, time, empId) {
         const wrap = document.createElement('span');
         wrap.className = DECOR_CLASS;
         wrap.style.cssText = 'display:inline-flex; align-items:center; gap:6px; margin-left:8px; vertical-align:middle;';
@@ -2217,21 +2233,21 @@
         const rateText = !known ? '?' : (stats.hasData ? ((stats.uph > 0 ? stats.uph.toFixed(1) : '0') + ' UPH') : uphGapText());
         const pct = idlePercent(time);
         const idleText = noTime ? windowGapText() : (idleLabel(pct) + ' IDLE');
-        const nowTitle = idleNowTitle(time);
+        const nowTitle = idleNowTitle(time, empId);
         wrap.title = rateText + ' \u00b7 ' + (noTime ? windowGapText() : timeText(time)) + (nowTitle ? ' \u00b7 ' + nowTitle : '');
         wrap.appendChild(makePill(rateText, color, 16.5));
         wrap.appendChild(makePill(idleText, noTime ? '#8b949e' : idleColor(pct), 16.5));
-        if (showsIdleNow(time)) {
+        if (showsIdleNow(time, empId)) {
             const now = makePill('IDLE NOW', '#f85149', 16.5);
             now.className = 'mem3-idle-now';
             wrap.appendChild(now);
         }
-        wrap.setAttribute('data-sig', (known ? '1' : '0') + '|' + rateText + '|' + idleText + '|' + idleNowSig(time));
+        wrap.setAttribute('data-sig', (known ? '1' : '0') + '|' + rateText + '|' + idleText + '|' + idleNowSig(time, empId));
         return wrap;
     }
 
-    function placeRowBadge(tr, found, stats, known, time) {
-        const badge = makeBadge(stats, known, time);
+    function placeRowBadge(tr, found, stats, known, time, empId) {
+        const badge = makeBadge(stats, known, time, empId);
         const sig = badge.getAttribute('data-sig');
         const existing = tr.querySelector('.' + DECOR_CLASS);
         if (existing && existing.getAttribute('data-sig') === sig) return;
@@ -2243,27 +2259,27 @@
         return /\bbigs\b/i.test(String(text || ''));
     }
 
-    function makeBigsIdleBadge(time) {
+    function makeBigsIdleBadge(time, empId) {
         const wrap = document.createElement('span');
         wrap.className = BIGS_IDLE_CLASS;
         wrap.style.cssText = 'display:inline-flex; align-items:center; gap:6px; margin-left:8px; vertical-align:middle;';
         const noTime = !!(time && time.noData);
         const pct = idlePercent(time);
         const idleText = noTime ? windowGapText() : (idleLabel(pct) + ' IDLE');
-        const nowTitle = idleNowTitle(time);
+        const nowTitle = idleNowTitle(time, empId);
         wrap.title = (noTime ? windowGapText() : timeText(time)) + (nowTitle ? ' \u00b7 ' + nowTitle : '');
         wrap.appendChild(makePill(idleText, noTime ? '#8b949e' : idleColor(pct), 16.5));
-        if (showsIdleNow(time)) {
+        if (showsIdleNow(time, empId)) {
             const now = makePill('IDLE NOW', '#f85149', 16.5);
             now.className = 'mem3-idle-now';
             wrap.appendChild(now);
         }
-        wrap.setAttribute('data-sig', idleText + '|' + idleNowSig(time));
+        wrap.setAttribute('data-sig', idleText + '|' + idleNowSig(time, empId));
         return wrap;
     }
 
-    function placeBigsIdle(tr, found, time) {
-        const badge = makeBigsIdleBadge(time);
+    function placeBigsIdle(tr, found, time, empId) {
+        const badge = makeBigsIdleBadge(time, empId);
         const sig = badge.getAttribute('data-sig');
         const existing = tr.querySelector('.' + BIGS_IDLE_CLASS);
         if (existing && existing.getAttribute('data-sig') === sig) return;
@@ -2313,7 +2329,7 @@
                     seen[empId] = true;
                     ids.push(empId);
                 }
-                placeBigsIdle(tr, found, timeFor(empId));
+                placeBigsIdle(tr, found, timeFor(empId), empId);
             }
         }
         BIGS_IDS = ids;
@@ -4147,9 +4163,10 @@
             const id = pool[i];
             const time = LAST_TIME[id];
             const fn = time && time.lastFunction;
+            if (isClockedOut(id)) continue;
             if (!fn) continue;
             if (fn.bucket !== 'indirect' && fn.bucket !== 'tot') continue;
-            if (showsIdleNow(time)) idle.push(id);
+            if (showsIdleNow(time, id)) idle.push(id);
             else under10.push(id);
         }
         return { idle: sortIdleIds(idle), under10: sortIdleIds(under10) };
@@ -4234,8 +4251,8 @@
             idleForMin: fn ? fn.minutes : null,
             idleStartsAtMin: IDLE_START_MIN,
             lastFunction: fn || null,
-            currentlyIdle: showsIdleNow(time),
-            time: timeSnapshot(time),
+            currentlyIdle: showsIdleNow(time, empId),
+            time: timeSnapshot(time, empId),
             rollup: rollupSnapshot(empId),
             timeUrl: timeUrl
         };
@@ -4253,7 +4270,7 @@
             what: 'idle-associates',
             capturedAt: new Date().toISOString(),
             window: windowPreset(ACTIVE_WINDOW).label,
-            rule: 'Latest function row is indirect or Time Off Task for at least 10 minutes. A shorter row is not counted. A diamond in the title is still that stretch.',
+            rule: 'Latest function row is indirect or Time Off Task for at least 10 minutes. A shorter row is not counted. A diamond in the title is still that stretch. A clocked-out associate is not counted.',
             count: associates.length,
             under10Count: under10.length,
             associates: associates,
@@ -4316,7 +4333,7 @@
         ));
         const pct = idlePercent(time);
         card.appendChild(idleField('Idle', idleLabel(pct), idleColor(pct)));
-        if (showsIdleNow(time)) card.appendChild(idleField('Idle for', formatDuration(idleStretchMin(time))));
+        if (showsIdleNow(time, empId)) card.appendChild(idleField('Idle for', formatDuration(idleStretchMin(time))));
         else if (fn) card.appendChild(idleField('Latest', (fn.title || fn.bucket) + ' \u00b7 ' + formatDuration(fn.minutes)));
         card.appendChild(timeDetailsLink(empId));
         return card;
@@ -4334,7 +4351,7 @@
         const notes = {
             uph: 'Lowest rate first. Someone with no Primary Grading rate is at the top.',
             idle: 'Highest idle percent first. The percent is the whole window, not this stretch.',
-            idleNow: 'Latest function row is indirect or Time Off Task for at least 10 minutes.'
+            idleNow: 'Latest function row is indirect or Time Off Task for at least 10 minutes. Clocked-out associates are left out.'
         };
         const headingText = (scopeLabel || 'Total') + ' \u00b7 ' + (titles[mode] || 'Associates');
         const overlay = document.createElement('div');
@@ -4412,7 +4429,7 @@
     }
 
     function summaryStructureSig(data) {
-        return 'v45|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
+        return 'v46|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
             (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
             (data.floorOpen || []).join(';') + '|' +
             data.floorStaffed + '|' + (data.asOf || '') + '|' +
@@ -4667,6 +4684,14 @@
 
         node.appendChild(metrics);
         header.appendChild(actions);
+
+        const progress = document.createElement('div');
+        progress.id = 'mem3-idle-progress';
+        progress.style.cssText = 'flex:1 0 100%; margin-top:8px; display:none;';
+        progress.innerHTML = '<div data-label style="font-size:11px; color:#8b949e; font-weight:600; margin-bottom:4px;">IDLE</div>' +
+            '<div style="height:6px; background:#0d1117; border-radius:99px; overflow:hidden;">' +
+            '<div data-fill style="height:100%; width:0; background:#58a6ff;"></div></div>';
+        node.appendChild(progress);
         paintProgress();
         node.setAttribute('data-sig', sig);
     }
@@ -4752,7 +4777,7 @@
                     });
                 }
 
-                placeRowBadge(tr, found, stats, !!empId, time);
+                placeRowBadge(tr, found, stats, !!empId, time, empId);
             }
         }
 
@@ -5256,7 +5281,7 @@
                         const rowTime = empId ? LAST_TIME[empId] : null;
                         if (sig.indexOf(expectedRateText(empId)) === -1) return true;
                         if (sig.indexOf(expectedIdleText(rowTime)) === -1) return true;
-                        if (sig.slice(sig.lastIndexOf('|') + 1) !== idleNowSig(rowTime)) return true;
+                        if (sig.slice(sig.lastIndexOf('|') + 1) !== idleNowSig(rowTime, empId)) return true;
                     }
                 }
             }
@@ -5274,7 +5299,7 @@
                     if (!badge) return true;
                     const empId = resolveEmpId(IDENTITY.byLogin[found.login]);
                     const bigsTime = empId ? LAST_TIME[empId] : null;
-                    if ((badge.getAttribute('data-sig') || '') !== expectedIdleText(bigsTime) + '|' + idleNowSig(bigsTime)) return true;
+                    if ((badge.getAttribute('data-sig') || '') !== expectedIdleText(bigsTime) + '|' + idleNowSig(bigsTime, empId)) return true;
                 }
             }
         } catch (e) {
@@ -5479,7 +5504,7 @@
         };
     }
 
-    function timeSnapshot(record) {
+    function timeSnapshot(record, empId) {
         if (!record) return null;
         return {
             hasTime: !!record.hasTime,
@@ -5499,7 +5524,7 @@
             pageTitle: record.pageTitle || '',
             fetchedAt: record.fetchedAt || 0,
             lastFunction: record.lastFunction || null,
-            currentlyIdle: showsIdleNow(record)
+            currentlyIdle: showsIdleNow(record, empId)
         };
     }
 
@@ -5530,7 +5555,7 @@
             finished: timeFinished(empId),
             inFlight: !!TIME_IN_FLIGHT[empId],
             tries: TIME_TRIES[empId] || 0,
-            time: timeSnapshot(LAST_TIME[empId]),
+            time: timeSnapshot(LAST_TIME[empId], empId),
             rollup: rollupSnapshot(empId),
             timeUrl: timeUrl
         };
@@ -5850,7 +5875,7 @@
             ['Counts', 'Indirect function time and Time Off Task in the selected window'],
             ['Does not count', 'Active graded time, or time outside the window'],
             ['BIGS stations', 'A station whose name contains BIGS shows that associate’s idle percent on the row. It is left out of every side and out of Total.'],
-            ['IDLE NOW', 'The latest function row is indirect or Time Off Task, and that row has lasted at least 10 minutes. A diamond in the function title is still that stretch. A shorter row is the lag after a scan. Earlier idle in the window still counts in the percent.'],
+            ['IDLE NOW', 'The latest function row is indirect or Time Off Task, and that row has lasted at least 10 minutes. A diamond in the function title is still that stretch. A shorter row is the lag after a scan. Someone who is clocked out is not counted. Earlier idle in the window still counts in the percent.'],
             ['ASSOCIATES IDLE', 'The number under the idle percent is how many associates on that side, or on the whole floor for Total, have been idle for at least 10 minutes. The white eye on the left opens that list.'],
             ['View', 'The eye left of UPH lists that side from the lowest rate. The eye left of the idle percent lists it from the highest idle percent. Total does the same for everyone on the lines.'],
             ['Hours idle', 'Under units, the idle hours are the indirect time plus Time Off Task already in the idle percent.']

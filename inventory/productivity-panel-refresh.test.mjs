@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-panel.txt", import.meta.url), "utf8");
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.8\.14/);
+assert.match(src, /@version\s+1\.8\.15/);
 assert.match(src, /const IDLE_START_MIN = 10;/);
 assert.match(src, /const TIME_WORKERS = 4;/);
 assert.match(src, /const MAX_TIME_TRIES = 1;/);
@@ -19,7 +19,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.8.14");
+assert.equal(entry.version, "1.8.15");
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
 
 function attrOf(tag, name) {
@@ -172,6 +172,7 @@ const patched = src.replace(
         decorateBigs() { decorateBigsStations(); },
         setPerson(rec) { storeIdentity(rec); },
         setTime(id, rec) { LAST_TIME[id] = rec; },
+        setClock(id, cls) { CLOCK.byKey[String(id).toLowerCase()] = { cls: cls, ts: Date.now() }; },
         setRollup(map) { LAST_ROLLUP = map; LAST_ROLLUP_AT = new Date(); },
         rollupKeys() { return Object.keys(LAST_ROLLUP); },
         time(id) { return LAST_TIME[id] || null; },
@@ -402,8 +403,14 @@ api.setTime("grade", {
 });
 api.setBoard(["long", "short", "work", "grade"]);
 assert.equal(JSON.stringify(api.idleAssociateIds()), JSON.stringify(["grade", "long"]));
+api.setClock("long", "out");
+assert.equal(JSON.stringify(api.idleAssociateIds()), JSON.stringify(["grade"]));
+assert.equal(api.idleAssociateDebug("long").currentlyIdle, false);
+api.setClock("long", "in");
+assert.equal(JSON.stringify(api.idleAssociateIds()), JSON.stringify(["grade", "long"]));
 assert.equal(src.includes("mem3-idle-check"), false);
-assert.equal(src.includes("IDLE percent ' + p.done"), false);
+assert.match(src, /id = 'mem3-idle-progress'/);
+assert.match(src, /IDLE percent ' \+ p\.done/);
 assert.match(src, /hrs idle/);
 assert.match(src, /ASSOCIATES IDLE/);
 assert.match(src, /data-view', 'eye'/);
