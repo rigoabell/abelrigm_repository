@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, dashboardHtml, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, dashboardHtml, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -332,5 +332,16 @@ const earlyContainers = [...nightBook.sheets.find((sheet) => sheet.name === "jki
 assert.deepEqual(nightContainers, ["tsNight"]);
 assert.deepEqual(earlyContainers, ["tsEarly"]);
 assert.equal(nightBook.sheets.some((sheet) => [...sheet.rows].some((row) => [...row].includes("tsA"))), false);
+
+const withOuter = api.parseDetailsText(
+  "tsREF922111 [TOTE]\nTotal units\n6\nOldest Units Age\n0d 23h 32m\nOuter Location\npaA100 [STORAGE] [PICK]\nParent Container\nrcCRetStations [RECEIVE_LANE]\n"
+);
+assert.equal(withOuter.outerLocation, "paA100");
+assert.equal(api.outerLocationLabel(withOuter), "paA100");
+const parentOnly = api.parseDetailsText(
+  "tsREF922111 [TOTE]\nTotal units\n6\nOldest Units Age\n0d 23h 32m\nParent Container\nrcCRetStations [RECEIVE_LANE]\n"
+);
+assert.equal(parentOnly.outerLocation, "rcCRetStations");
+assert.equal(parentOnly.parentContainer, "rcCRetStations");
 
 console.log("scan timestamp tests passed");
