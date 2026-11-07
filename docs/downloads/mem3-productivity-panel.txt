@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.13
+// @version      1.8.14
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.13';
+    const SCRIPT_VERSION = '1.8.14';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -1358,10 +1358,6 @@
         if (t && (timeSettled(t) || t.gaveUp)) return false;
         if ((TIME_TRIES[empId] || 0) >= MAX_TIME_TRIES) return false;
         return true;
-    }
-
-    function timePassOpen() {
-        return !!(DEBUG.timeLoad && DEBUG.timeLoad.finished === false);
     }
 
     function idlePercent(t) {
@@ -4416,7 +4412,7 @@
     }
 
     function summaryStructureSig(data) {
-        return 'v44|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
+        return 'v45|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
             (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
             (data.floorOpen || []).join(';') + '|' +
             data.floorStaffed + '|' + (data.asOf || '') + '|' +
@@ -4456,14 +4452,10 @@
             num('uph', spec.uphText, spec.uph > 0 ? uphColor(spec.uph) : '#c9d1d9');
             rank('uph', spec.uphRank || '');
             num('units', formatUnits(spec.units || 0), '#8b949e');
-            // The one idle read paints these once, when that pass finishes.
-            // Writing them as each page returns makes the percent climb.
-            if (!timePassOpen()) {
-                num('idle', idleLabel(spec.idlePct), idleColor(spec.idlePct));
-                rank('idle', spec.idleRank || '');
-                num('idleCount', String(spec.idleCount), spec.idleCount > 0 ? '#f85149' : '#c9d1d9');
-                num('idleHours', formatDuration(spec.idleMin || 0), '#8b949e');
-            }
+            num('idle', idleLabel(spec.idlePct), idleColor(spec.idlePct));
+            rank('idle', spec.idleRank || '');
+            num('idleCount', String(spec.idleCount), spec.idleCount > 0 ? '#f85149' : '#c9d1d9');
+            num('idleHours', formatDuration(spec.idleMin || 0), '#8b949e');
             return true;
         }
         const totalIds = lineIdsOf(data);
@@ -4776,7 +4768,7 @@
             lineBadge.setAttribute('data-sig', lineSig);
             const existingLine = firstH.querySelector('.' + SECTION_BADGE_CLASS);
             if (!existingLine) firstH.appendChild(lineBadge);
-            else if (!timePassOpen() && existingLine.getAttribute('data-sig') !== lineSig) {
+            else if (existingLine.getAttribute('data-sig') !== lineSig) {
                 existingLine.parentNode.replaceChild(lineBadge, existingLine);
             }
         }
