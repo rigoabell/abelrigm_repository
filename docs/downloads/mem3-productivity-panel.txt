@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.20
+// @version      1.8.21
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.20';
+    const SCRIPT_VERSION = '1.8.21';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -185,7 +185,7 @@
     const WINDOW_GROUPS = ['Shift', 'Halves', 'Quarters', 'Fast starts'];
     let ACTIVE_WINDOW = 'all';
     const REFRESH_MS = 5 * 60 * 1000;
-    const IDLE_START_MIN = 10;
+    const IDLE_START_MIN = 11;
     const TIME_WORKERS = 4;
     const UPH_TARGET = 30;
 
@@ -919,7 +919,7 @@
     }
 
     // The latest function row is the current stretch. Idle starts once that
-    // stretch has been indirect or Time Off Task for 10 minutes. A diamond in
+    // stretch has been indirect or Time Off Task for 11 minutes. A diamond in
     // the title is still that stretch, so it counts the same way. Someone
     // whose latest punch is out is not idle.
     function isClockedOut(empId) {
@@ -946,7 +946,7 @@
         if (!fn) return '';
         const which = fn.title || fn.bucket;
         const lead = showsIdleNow(time, empId) ? 'Idle now. ' : 'Not idle yet. ';
-        return lead + which + ' for ' + formatDuration(fn.minutes) + '. Idle starts at 10 minutes.';
+        return lead + which + ' for ' + formatDuration(fn.minutes) + '. Idle starts at ' + IDLE_START_MIN + ' minutes.';
     }
 
     function parseTimeDetails(html) {
@@ -4082,7 +4082,7 @@
         });
         addMetric(String(idleCount), 'ASSOCIATES IDLE', idleCount > 0 ? '#f85149' : '#c9d1d9', '', size, {
             key: 'idleCount',
-            viewTitle: 'View associates idle for 10 minutes',
+            viewTitle: 'View associates idle for 11 minutes',
             onView: function () { openRosterPopup(scopeLabel, scopeIds, 'idleNow'); }
         });
         addMetric(formatUnits(opts.units || 0), 'units', '#8b949e', '', opts.lead ? 16 : 13, { key: 'units' });
@@ -4172,7 +4172,7 @@
         return uniqueIds(ids);
     }
 
-    // Idle starts at 10 minutes on the latest function row.
+    // Idle starts at 11 minutes on the latest function row.
     // A shorter indirect or Time Off Task row is the lag after a scan.
     function idleIdsIn(ids) {
         const pool = uniqueIds(ids);
@@ -4295,7 +4295,7 @@
             what: 'idle-associates',
             capturedAt: new Date().toISOString(),
             window: windowPreset(ACTIVE_WINDOW).label,
-            rule: 'Latest function row is indirect or Time Off Task for at least 10 minutes. A shorter row is not counted. A diamond in the title is still that stretch. A clocked-out associate is not counted.',
+            rule: 'Latest function row is indirect or Time Off Task for at least 11 minutes. A shorter row is not counted. A diamond in the title is still that stretch. A clocked-out associate is not counted.',
             count: associates.length,
             under10Count: under10.length,
             associates: associates,
@@ -4367,7 +4367,7 @@
         const lead = 'Latest function row is ' + (fn.bucket || 'unknown') + ', ' +
             formatDuration(mins) + ', title ' + (fn.title || '') + '.';
         if (fn.bucket !== 'indirect' && fn.bucket !== 'tot') return lead + ' That row is not indirect or Time Off Task.';
-        if (mins < IDLE_START_MIN) return lead + ' That is under 10 minutes, so they are not counted as idle now.';
+        if (mins < IDLE_START_MIN) return lead + ' That is under ' + IDLE_START_MIN + ' minutes, so they are not counted as idle now.';
         return lead + ' Idle for uses this one row. It is not the idle total for the window.';
     }
 
@@ -4469,9 +4469,6 @@
             info.appendChild(quiet);
         }
         info.appendChild(timeDetailsLink(empId));
-        const copy = copyDebugButton('Copy debug', function () { return idleAssociateDebug(empId); });
-        copy.style.marginTop = '6px';
-        info.appendChild(copy);
         card.appendChild(photoWrap);
         card.appendChild(info);
         return card;
@@ -4484,12 +4481,12 @@
         const titles = {
             uph: 'UPH, lowest first',
             idle: 'Idle percent, highest first',
-            idleNow: 'Idle for 10 minutes'
+            idleNow: 'Idle for 11 minutes'
         };
         const notes = {
             uph: 'Lowest rate first. Someone with no Primary Grading rate is at the top.',
             idle: 'Highest idle percent first. The percent is the whole window, not this stretch.',
-            idleNow: 'Latest function row is indirect or Time Off Task for at least 10 minutes. Clocked-out associates are left out.'
+            idleNow: 'Latest function row is indirect or Time Off Task for at least 11 minutes. Clocked-out associates are left out.'
         };
         const headingText = (scopeLabel || 'Total') + ' \u00b7 ' + (titles[mode] || 'Associates');
         installPulseStyles();
@@ -4534,7 +4531,7 @@
         if (!people.length) {
             const empty = document.createElement('div');
             empty.textContent = mode === 'idleNow'
-                ? 'No associate has been idle for 10 minutes.'
+                ? 'No associate has been idle for 11 minutes.'
                 : 'No associates on this list.';
             empty.style.cssText = 'font-size:13px; font-weight:650; margin-bottom:12px;';
             card.appendChild(empty);
@@ -6015,8 +6012,8 @@
             ['Counts', 'Indirect function time and Time Off Task in the selected window'],
             ['Does not count', 'Active graded time, or time outside the window'],
             ['BIGS stations', 'A station whose name contains BIGS shows that associate’s idle percent on the row. It is left out of every side and out of Total.'],
-            ['IDLE NOW', 'The latest function row is indirect or Time Off Task, and that row has lasted at least 10 minutes. A diamond in the function title is still that stretch. A shorter row is the lag after a scan. Someone who is clocked out is not counted. Earlier idle in the window still counts in the percent.'],
-            ['ASSOCIATES IDLE', 'The number under the idle percent is how many associates on that side, or on the whole floor for Total, have been idle for at least 10 minutes. The white eye on the left opens that list.'],
+            ['IDLE NOW', 'The latest function row is indirect or Time Off Task, and that row has lasted at least 11 minutes. A diamond in the function title is still that stretch. A shorter row is the lag after a scan. Someone who is clocked out is not counted. Earlier idle in the window still counts in the percent.'],
+            ['ASSOCIATES IDLE', 'The number under the idle percent is how many associates on that side, or on the whole floor for Total, have been idle for at least 11 minutes. The white eye on the left opens that list.'],
             ['View', 'The eye left of UPH lists that side from the lowest rate. The eye left of the idle percent lists it from the highest idle percent. Total does the same for everyone on the lines.'],
             ['Hours idle', 'Under units, the idle hours are the indirect time plus Time Off Task already in the idle percent.']
         ]));
