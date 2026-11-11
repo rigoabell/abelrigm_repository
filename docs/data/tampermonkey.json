@@ -476,9 +476,9 @@
     "id": "quicksight-pending-engagements",
     "name": "QuickSight Pending Engagements (abelrigm)",
     "category": "QuickSight",
-    "summary": "Collect pending engagements, select rows, and copy that table.",
-    "detail": "A panel for the AP3X and IDNM pending-engagements visuals. Each recorded row can be selected. Keep clocked in selects the associates who are clocked in and clears the rest, leaving every row in the table. Copy selected copies only those rows.",
-    "version": "2.5.3",
+    "summary": "Collect pending engagements, select rows, and copy those logins.",
+    "detail": "A panel for the AP3X and IDNM pending-engagements visuals. Each recorded row can be selected. Keep clocked in selects the associates who are clocked in and clears the rest, leaving every row in the table. Copy selected logins copies the checked login names, one per line. Copy selected copies only those rows.",
+    "version": "2.5.4",
     "runsOn": "quicksight.aws.amazon.com",
     "file": "downloads/quicksight-pending-engagements.txt",
     "downloadName": "QuickSight Pending Engagements (abelrigm).txt"

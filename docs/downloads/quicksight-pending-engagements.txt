@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         QuickSight Pending Engagements (abelrigm)
 // @namespace    https://github.com/ap3x/quicksight-pending-engagements
-// @version      2.5.3
-// @description  Collect AP3X and IDNM Pending Engagements; select rows, copy that selection, and mark who is clocked in
+// @version      2.5.4
+// @description  Collect AP3X and IDNM Pending Engagements; select rows, copy those logins, and mark who is clocked in
 // @author       AP3X
 // @match        https://*.quicksight.aws.amazon.com/*
 // @match        https://quicksight.aws.amazon.com/*
@@ -17,7 +17,7 @@
 (function () {
   'use strict';
 
-  const SCRIPT = { name: 'QuickSight Pending Engagements', version: '2.5.3' };
+  const SCRIPT = { name: 'QuickSight Pending Engagements', version: '2.5.4' };
   const PREFERRED_VISUAL_TITLE = 'Pending Engagements';
   const KNOWN_BLOCK_ID =
     'block-ed0061b1-143a-4b06-adf5-8bbe28d30023_b9469711-c34c-4bc1-8ae8-827b8fe8ceca';
@@ -1680,6 +1680,11 @@
     }
     return { selected, leftOut };
   }
+
+  function selectedLoginList(logins, selected) {
+    const picked = new Set(selected || []);
+    return (logins || []).filter((login) => picked.has(login));
+  }
   /* core:end */
 
   async function keepClockedInOnly() {
@@ -1775,6 +1780,7 @@
         <div class="qs-pe-attr-actions">
           <button type="button" class="qstd-title-btn" data-qstd-panel="clocked-in">Keep clocked in</button>
           <button type="button" class="qstd-title-btn" data-qstd-panel="copy-logins">Copy visible logins</button>
+          <button type="button" class="qstd-title-btn" data-qstd-panel="copy-selected-logins">Copy selected logins</button>
           <button type="button" class="qstd-title-btn" data-qstd-panel="copy">Copy table</button>
           <button type="button" class="qstd-title-btn" data-qstd-panel="copy-selected">Copy selected</button>
         </div>
@@ -1815,8 +1821,12 @@
         toast(ok ? `Copied ${logins.length} visible logins` : 'Copy failed', !ok);
         return;
       }
+      if (action === 'copy-selected-logins') {
+        await copySelectedLogins();
+        return;
+      }
       if (action === 'copy-selected') {
-        const logins = orderedRecordedLogins().filter((login) => STATE.selectedLogins.has(login));
+        const logins = selectedLoginList(orderedRecordedLogins(), STATE.selectedLogins);
         if (!logins.length) {
           toast('Select at least one row', true);
           return;
@@ -1920,14 +1930,17 @@
     }
     const clockBtn = panel.querySelector('[data-qstd-panel="clocked-in"]');
     const copyLoginsBtn = panel.querySelector('[data-qstd-panel="copy-logins"]');
+    const copySelectedLoginsBtn = panel.querySelector('[data-qstd-panel="copy-selected-logins"]');
     const copyBtn = panel.querySelector('[data-qstd-panel="copy"]');
     const copySelectedBtn = panel.querySelector('[data-qstd-panel="copy-selected"]');
     if (clockBtn) {
       clockBtn.disabled = STATE.attrCollecting || STATE.clockFiltering || !n;
     }
     if (copyLoginsBtn) copyLoginsBtn.disabled = getVisiblePanelLogins().length === 0;
+    if (copySelectedLoginsBtn) copySelectedLoginsBtn.disabled = selectedCount === 0;
     if (copyBtn) copyBtn.disabled = !n;
     if (copySelectedBtn) copySelectedBtn.disabled = selectedCount === 0;
+    updateTitleCopyButtons(getLockedBlockId());
     if (STATE.clockFiltering) foot.textContent = `Checking FCLM clock status for ${n}…`;
     else if (STATE.attrCollecting) foot.textContent = `Recording ${n}/${total}…`;
     else if (!n) foot.textContent = 'No records yet';
@@ -2077,6 +2090,17 @@
     toast(`Recorded attributes for ${STATE.attrByLogin.size} logins`);
   }
 
+  async function copySelectedLogins() {
+    const logins = selectedLoginList(orderedRecordedLogins(), STATE.selectedLogins);
+    if (!logins.length) {
+      toast('Select at least one row', true);
+      return;
+    }
+    const ok = await copyText(logins.join('\n'));
+    if (ok) flashPanelCopied();
+    toast(ok ? `Copied ${logins.length} selected logins` : 'Copy failed', !ok);
+  }
+
   async function copyDfLogins() {
     const blockId = getLockedBlockId();
     const logins = getDfLogins(blockId);
@@ -2106,6 +2130,7 @@
     wrap.className = 'qstd-title-btns';
     wrap.innerHTML = `
       <button type="button" class="qstd-title-btn" data-qstd-copy="all">Copy All Logins</button>
+      <button type="button" class="qstd-title-btn" data-qstd-copy="selected">Copy selected logins</button>
       <button type="button" class="qstd-title-btn" data-qstd-copy="df">Copy D/F Logins</button>
       <button type="button" class="qstd-title-btn" data-qstd-copy="debug">Copy Debug</button>
     `;
@@ -2118,6 +2143,7 @@
       e.stopPropagation();
       if (btn.dataset.qstdCopy === 'df') copyDfLogins();
       else if (btn.dataset.qstdCopy === 'debug') copyScriptDebug();
+      else if (btn.dataset.qstdCopy === 'selected') copySelectedLogins();
       else copyAllLogins();
     });
   }
@@ -2130,11 +2156,14 @@
     const wrap = blockEl.querySelector('.qstd-title-btns');
     if (!wrap) return;
     const allBtn = wrap.querySelector('[data-qstd-copy="all"]');
+    const selectedBtn = wrap.querySelector('[data-qstd-copy="selected"]');
     const dfBtn = wrap.querySelector('[data-qstd-copy="df"]');
     const debugBtn = wrap.querySelector('[data-qstd-copy="debug"]');
     const busy = STATE.collecting || STATE.attrCollecting || STATE.clockFiltering;
     const hasLogins = countCachedLogins(blockId) > 0;
+    const selectedCount = selectedLoginList(orderedRecordedLogins(), STATE.selectedLogins).length;
     if (allBtn) allBtn.disabled = busy || !hasLogins;
+    if (selectedBtn) selectedBtn.disabled = selectedCount === 0;
     if (dfBtn) dfBtn.disabled = busy || getDfLogins(blockId).length === 0;
     if (debugBtn) debugBtn.disabled = false;
   }
