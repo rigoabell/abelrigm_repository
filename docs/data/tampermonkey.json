@@ -121,6 +121,17 @@
     "downloadName": "FC Menu secure login helper (abelrigm).txt"
   },
   {
+    "id": "aft-menu-maask-it-login",
+    "name": "AFT Menu MAASK bypass (abelrigm)",
+    "category": "FC Menu",
+    "summary": "Skip the MAASK sign-in, choose IT Service Login, and type MEM3.",
+    "detail": "On the MAASK authentication page, opens the IT login chooser and clicks IT Service Login. The menu then continues to the location page on its own. There, the script types MEM3 into the location box and presses Enter.",
+    "version": "1.0.0",
+    "runsOn": "oidc.prod.na.maask.amazonoperations.com, *.cloudfront.net/idp-selection, menu.na.aft.amazonoperations.app",
+    "file": "downloads/aft-menu-maask-it-login.txt",
+    "downloadName": "AFT Menu MAASK bypass (abelrigm).txt"
+  },
+  {
     "id": "fc-quality-inventory-adjustments-week-filter-mem3",
     "name": "FC Quality — inventory adjustments week filter (MEM3) (abelrigm)",
     "category": "FC Quality",

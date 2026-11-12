@@ -1,0 +1,372 @@
+// ==UserScript==
+// @name         AFT Menu MAASK bypass (abelrigm)
+// @namespace    https://github.com/rigoabell/abelrigm_repository
+// @version      1.0.0
+// @description  Skip the MAASK sign-in, click IT Service Login, and type MEM3 on the location page.
+// @author       abelrigm
+// @match        https://oidc.prod.na.maask.amazonoperations.com/authentication*
+// @match        https://*.maask.amazonoperations.com/authentication*
+// @match        https://*.cloudfront.net/idp-selection*
+// @match        https://menu.na.aft.amazonoperations.app/*
+// @run-at       document-start
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @noframes
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  /**
+   * Sample IdP chooser from a MAASK handoff. Used when this tab has not already
+   * opened a chooser. A chooser opened earlier in the same browser is preferred,
+   * because its nonce belongs to that login.
+   */
+  const IDP_SELECTION_URL = 'https://d34wrqb3xn2znf.cloudfront.net/idp-selection?redirect_uri=https%3A%2F%2Fmenu.na.aft.amazonoperations.app%2Fdo%2Fmfa%2Flogin&nonce=5f50a80c5db87e9cc23b0bc2124a6b6de1e21c0b83cd318714aff390c61ec6fb&scope=openid+tenantId%3A1545ed74-d2cd-11ec-9d64-0242ac120002&client_id=fc-menu-prod-na&state&response_type=code&otp&user_code&authorize_url=https%3A%2F%2Fprod.us-east-1.federated-auth.aft.a2z.com%2F1545ed74-d2cd-11ec-9d64-0242ac120002%2Fauthorize&data=%5B%7B%22id%22%3A%22amazon-federate-prod%22%2C%22displayString%22%3A%22IT+Service+Login%22%7D%2C%7B%22id%22%3A%22maask-prod-na%22%2C%22displayString%22%3A%22Login+with+MAASK%22%7D%5D&code_challenge&code_challenge_method&referrer=https%3A%2F%2Fmenu.na.aft.amazonoperations.app%2Fmidway%2Flogin&ui_locales=en_US';
+
+  const LOCATION_CODE = 'MEM3';
+  const CHAR_DELAY_MS = 18;
+  const ENTER_DELAY_MS = 250;
+  const REDIRECT_GAP_MS = 15000;
+  const WATCH_MS = 180000;
+  const STAMP_KEY = 'aftMenu.maaskRedirectAt';
+  const IDP_KEY = 'aftMenu.idpSelectionUrl';
+  const IT_LABEL = 'IT Service Login';
+
+  function parseUrl(href) {
+    try {
+      return new URL(href);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function isMaaskAuth(href) {
+    const url = parseUrl(href);
+    if (!url) return false;
+    const host = url.hostname.toLowerCase();
+    const maaskHost = host === 'maask.amazonoperations.com' || host.endsWith('.maask.amazonoperations.com');
+    if (!maaskHost || host.indexOf('oidc.') !== 0) return false;
+    return /\/authentication(?:\/|$)/i.test(url.pathname);
+  }
+
+  function isIdpSelection(href) {
+    const url = parseUrl(href);
+    if (!url) return false;
+    const host = url.hostname.toLowerCase();
+    const cloudfront = host === 'cloudfront.net' || host.endsWith('.cloudfront.net');
+    return cloudfront && /^\/idp-selection\/?$/i.test(url.pathname);
+  }
+
+  function isLocationPage(href) {
+    const url = parseUrl(href);
+    if (!url) return false;
+    return url.hostname.toLowerCase() === 'menu.na.aft.amazonoperations.app' && /^\/location\/?$/i.test(url.pathname);
+  }
+
+  function isMenuHost(href) {
+    const url = parseUrl(href);
+    return !!(url && url.hostname.toLowerCase() === 'menu.na.aft.amazonoperations.app');
+  }
+
+  function shouldRedirect(href, storage, now) {
+    if (!isMaaskAuth(href)) return false;
+    const last = Number(storage.getItem(STAMP_KEY) || 0);
+    if (!Number.isFinite(last)) return true;
+    return now - last >= REDIRECT_GAP_MS;
+  }
+
+  function markRedirect(storage, now) {
+    storage.setItem(STAMP_KEY, String(now));
+  }
+
+  function rememberIdp(href, storage) {
+    if (!isIdpSelection(href)) return;
+    storage.setItem(IDP_KEY, href);
+  }
+
+  function idpTarget(storage) {
+    const saved = storage.getItem(IDP_KEY) || '';
+    if (isIdpSelection(saved)) return saved;
+    return IDP_SELECTION_URL;
+  }
+
+  function labelOf(el) {
+    return String((el && (el.innerText || el.textContent)) || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function clickItServiceLogin(root) {
+    let clicked = false;
+
+    function visit(el) {
+      if (clicked || !el) return;
+      if (labelOf(el) !== IT_LABEL) return;
+      const button = (typeof el.closest === 'function' && el.closest('alchemy-button, button, a, [role="button"]')) || el;
+      const buttonLabel = labelOf(button);
+      if (buttonLabel !== IT_LABEL || /MAASK/i.test(buttonLabel)) return;
+      if (button.dataset && button.dataset.aftItLogin === '1') {
+        clicked = true;
+        return;
+      }
+      if (button.dataset) button.dataset.aftItLogin = '1';
+      let target = button;
+      if (button.shadowRoot && typeof button.shadowRoot.querySelector === 'function') {
+        const inner = button.shadowRoot.querySelector('button, a, [role="button"]');
+        if (inner) target = inner;
+      }
+      if (typeof target.click === 'function') target.click();
+      clicked = true;
+    }
+
+    function walk(node) {
+      if (clicked || !node || typeof node.querySelectorAll !== 'function') return;
+      const nodes = node.querySelectorAll('alchemy-button, button, a, [role="button"], span.button__label');
+      let i;
+      for (i = 0; i < nodes.length; i++) {
+        visit(nodes[i]);
+        if (clicked) return;
+        if (nodes[i].shadowRoot) walk(nodes[i].shadowRoot);
+        if (clicked) return;
+      }
+    }
+
+    walk(root);
+    return clicked;
+  }
+
+  function sleep(ms) {
+    return new Promise(function (resolve) {
+      setTimeout(resolve, ms);
+    });
+  }
+
+  function setNativeValue(el, value) {
+    const proto = el && Object.getPrototypeOf(el);
+    const desc = (proto && Object.getOwnPropertyDescriptor(proto, 'value'))
+      || (typeof HTMLInputElement !== 'undefined' && Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value'));
+    if (desc && desc.set) desc.set.call(el, value);
+    else el.value = value;
+    try {
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, data: String(value).slice(-1), inputType: 'insertText' }));
+    } catch (e) {
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  async function typeInto(el, text, options) {
+    const wait = options && options.sleep ? options.sleep : sleep;
+    const write = options && options.setValue ? options.setValue : setNativeValue;
+    if (el && typeof el.focus === 'function') {
+      try {
+        el.focus();
+      } catch (e) {
+        /* The location box can reject focus while the modal is opening. */
+      }
+    }
+    write(el, '');
+    let i;
+    for (i = 0; i < text.length; i++) {
+      write(el, text.slice(0, i + 1));
+      await wait(CHAR_DELAY_MS);
+    }
+  }
+
+  function pressEnter(el) {
+    const types = ['keydown', 'keypress', 'keyup'];
+    let i;
+    for (i = 0; i < types.length; i++) {
+      let ev;
+      try {
+        ev = new KeyboardEvent(types[i], {
+          key: 'Enter',
+          code: 'Enter',
+          keyCode: 13,
+          which: 13,
+          bubbles: true,
+          cancelable: true
+        });
+      } catch (e) {
+        ev = new Event(types[i], { bubbles: true, cancelable: true });
+      }
+      try {
+        el.dispatchEvent(ev);
+      } catch (e2) {
+        /* Ignore a dispatcher that rejects synthetic keys. */
+      }
+    }
+  }
+
+  const api = {
+    IDP_SELECTION_URL: IDP_SELECTION_URL,
+    LOCATION_CODE: LOCATION_CODE,
+    STAMP_KEY: STAMP_KEY,
+    IDP_KEY: IDP_KEY,
+    REDIRECT_GAP_MS: REDIRECT_GAP_MS,
+    isMaaskAuth: isMaaskAuth,
+    isIdpSelection: isIdpSelection,
+    isLocationPage: isLocationPage,
+    shouldRedirect: shouldRedirect,
+    markRedirect: markRedirect,
+    rememberIdp: rememberIdp,
+    idpTarget: idpTarget,
+    clickItServiceLogin: clickItServiceLogin,
+    typeInto: typeInto,
+    pressEnter: pressEnter
+  };
+
+  const scope = typeof globalThis !== 'undefined' ? globalThis : {};
+  if (scope.__aftMenuNoBoot) {
+    scope.__aftMenu = api;
+    return;
+  }
+
+  function pageStorage() {
+    return {
+      getItem: function (key) {
+        try {
+          if (typeof GM_getValue === 'function') {
+            const value = GM_getValue(key, null);
+            if (value == null || value === '') return null;
+            return String(value);
+          }
+        } catch (e) {
+          /* Fall through to sessionStorage. */
+        }
+        try {
+          return sessionStorage.getItem(key);
+        } catch (e2) {
+          return null;
+        }
+      },
+      setItem: function (key, value) {
+        try {
+          if (typeof GM_setValue === 'function') {
+            GM_setValue(key, String(value));
+            return;
+          }
+        } catch (e) {
+          /* Fall through to sessionStorage. */
+        }
+        try {
+          sessionStorage.setItem(key, String(value));
+        } catch (e2) {
+          /* Storage can be blocked. The sample chooser URL still works. */
+        }
+      }
+    };
+  }
+
+  function watchItServiceLogin() {
+    const tryClick = function () {
+      try {
+        if (!document.documentElement) return false;
+        if (clickItServiceLogin(document)) {
+          console.log('[AFT Menu] clicked IT Service Login');
+          return true;
+        }
+      } catch (e) {
+        console.log('[AFT Menu] IT Service Login click failed', e);
+      }
+      return false;
+    };
+
+    const arm = function () {
+      if (tryClick()) return;
+      if (!document.documentElement) return;
+      const obs = new MutationObserver(function () {
+        if (tryClick()) obs.disconnect();
+      });
+      obs.observe(document.documentElement, { childList: true, subtree: true });
+      const timer = setInterval(function () {
+        if (tryClick()) {
+          clearInterval(timer);
+          obs.disconnect();
+        }
+      }, 200);
+      setTimeout(function () {
+        clearInterval(timer);
+        obs.disconnect();
+      }, WATCH_MS);
+    };
+
+    if (document.documentElement) arm();
+    else document.addEventListener('DOMContentLoaded', arm, { once: true });
+  }
+
+  async function typeAndEnter(el) {
+    console.log('[AFT Menu] typing ' + LOCATION_CODE);
+    await typeInto(el, LOCATION_CODE);
+    await sleep(ENTER_DELAY_MS);
+    pressEnter(el);
+  }
+
+  function watchLocation() {
+    let typing = false;
+    const tick = function () {
+      if (typing || !isLocationPage(location.href) || !document.querySelector) return false;
+      const el = document.querySelector('#qlInput');
+      if (!el) return false;
+      if (el.dataset && el.dataset.aftMem3Typed === '1') return true;
+      typing = true;
+      if (el.dataset) el.dataset.aftMem3Typed = '1';
+      typeAndEnter(el).then(function () {
+        typing = false;
+      }).catch(function (err) {
+        typing = false;
+        if (el.dataset) delete el.dataset.aftMem3Typed;
+        console.log('[AFT Menu] location type failed', err);
+      });
+      return false;
+    };
+
+    const arm = function () {
+      if (!document.documentElement) return;
+      tick();
+      const obs = new MutationObserver(function () {
+        if (tick()) obs.disconnect();
+      });
+      obs.observe(document.documentElement, { childList: true, subtree: true });
+      const timer = setInterval(function () {
+        if (tick()) {
+          clearInterval(timer);
+          obs.disconnect();
+        }
+      }, 300);
+      window.addEventListener('popstate', tick);
+      setTimeout(function () {
+        clearInterval(timer);
+        obs.disconnect();
+      }, WATCH_MS);
+    };
+
+    if (document.documentElement) arm();
+    else document.addEventListener('DOMContentLoaded', arm, { once: true });
+  }
+
+  try {
+    const store = pageStorage();
+    const href = location.href;
+
+    if (isMaaskAuth(href)) {
+      const now = Date.now();
+      if (shouldRedirect(href, store, now)) {
+        markRedirect(store, now);
+        const target = idpTarget(store);
+        console.log('[AFT Menu] leaving MAASK for the IT login chooser');
+        location.replace(target);
+      }
+      return;
+    }
+
+    if (isIdpSelection(href)) {
+      rememberIdp(href, store);
+      watchItServiceLogin();
+      return;
+    }
+
+    if (isMenuHost(href)) watchLocation();
+  } catch (e) {
+    console.log('[AFT Menu] boot failed', e);
+  }
+})();
