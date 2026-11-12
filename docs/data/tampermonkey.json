@@ -110,6 +110,17 @@
     "downloadName": "Productivity Panel (abelrigm).txt"
   },
   {
+    "id": "mem3-control-tower-ps-board",
+    "name": "MEM3 Control Tower - PS Board (abelrigm)",
+    "category": "Control Tower",
+    "summary": "Open a problem-solve sheet for the people in CRET Problem Solve.",
+    "detail": "On MEM3 assignments, a PS board button sits on the CRET Problem Solve group and stays out of the productivity panel. The sheet places each associate on the line map, with the B station stacked on the split side, and on Audit PS, Grey Totes, Gatekeeper, Bigs PS, Add-Ins, and Exceptions. It follows the group as assignments change. Anyone whose station is not on the sheet is listed under it.",
+    "version": "1.0.0",
+    "runsOn": "beta.control-tower.meta.amazon.dev, control-tower.meta.amazon.dev",
+    "file": "downloads/mem3-control-tower-ps-board.txt",
+    "downloadName": "MEM3 Control Tower - PS Board (abelrigm).txt"
+  },
+  {
     "id": "fc-menu-secure-login-helper",
     "name": "FC Menu secure login helper (abelrigm)",
     "category": "FC Menu",

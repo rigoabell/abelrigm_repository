@@ -1,0 +1,596 @@
+// ==UserScript==
+// @name         MEM3 Control Tower - PS Board (abelrigm)
+// @namespace    https://mem3.amazon.local/
+// @version      1.0.0
+// @description  Button on CRET Problem Solve that opens a sheet and places each associate on the problem-solve map.
+// @author       abelrigm
+// @match        https://beta.control-tower.meta.amazon.dev/*
+// @match        https://beta.control-tower.meta.amazon.dev/MEM3/*
+// @match        https://beta.control-tower.meta.amazon.dev/MEM3/assignments*
+// @match        https://control-tower.meta.amazon.dev/*
+// @match        https://control-tower.meta.amazon.dev/MEM3/*
+// @match        https://control-tower.meta.amazon.dev/MEM3/assignments*
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // Sits beside the productivity panel. It only reads the CRET Problem Solve
+    // table and draws its own sheet. The button stays outside the heading so
+    // the panel and line-pairs scripts still see the group name alone.
+    //
+    // Lines 1 and 3 split Even into A (front) and B (stacked behind).
+    // Lines 2 and 4 split Odd the same way. The other side is a single station.
+
+    const BTN_ID = 'mem3-ps-board-btn';
+    const POPUP_ID = 'mem3-ps-board';
+    const PANEL_JUNK = '.mem3-uph-badge, .mem3-line-avg-badge, .mem3-popup-uph, .mem3-popup-clock, .mem3-popup-idle, .mem3-yield';
+
+    const LINES = [
+        [
+            { id: '1-even-b', label: '1 Even B', col: 2, row: 1 },
+            { id: '1-odd', label: '1 Odd', col: 1, row: 2 },
+            { id: '1-even-a', label: '1 Even A', col: 2, row: 2 }
+        ],
+        [
+            { id: '2-odd-b', label: '2 Odd B', col: 1, row: 1 },
+            { id: '2-odd-a', label: '2 Odd A', col: 1, row: 2 },
+            { id: '2-even', label: '2 Even', col: 2, row: 2 }
+        ],
+        [
+            { id: '3-even-b', label: '3 Even B', col: 2, row: 1 },
+            { id: '3-odd', label: '3 Odd', col: 1, row: 2 },
+            { id: '3-even-a', label: '3 Even A', col: 2, row: 2 }
+        ],
+        [
+            { id: '4-odd-b', label: '4 Odd B', col: 1, row: 1 },
+            { id: '4-odd-a', label: '4 Odd A', col: 1, row: 2 },
+            { id: '4-even', label: '4 Even', col: 2, row: 2 }
+        ]
+    ];
+
+    const SUPPORT = [
+        { id: 'audit', label: 'Audit PS' },
+        { id: 'grey', label: 'Grey Totes' },
+        { id: 'gate', label: 'Gatekeeper' },
+        { id: 'blank-1', label: '', blank: true },
+        { id: 'bigs', label: 'Bigs PS' },
+        { id: 'addins', label: 'Add-Ins' },
+        { id: 'exceptions', label: 'Exceptions' },
+        { id: 'blank-2', label: '', blank: true }
+    ];
+
+    const SLOT_SET = Object.create(null);
+    for (let line = 0; line < LINES.length; line++) {
+        for (let s = 0; s < LINES[line].length; s++) SLOT_SET[LINES[line][s].id] = true;
+    }
+    for (let s = 0; s < SUPPORT.length; s++) {
+        if (!SUPPORT[s].blank) SLOT_SET[SUPPORT[s].id] = true;
+    }
+
+    const NOT_LOGIN = {
+        assignment: true, employee: true, cret: true, crets: true, problem: true, solve: true,
+        odd: true, even: true, see: true, ps: true, pa: true, the: true, and: true,
+        idle: true, uph: true, avg: true, bigs: true, audit: true, audits: true,
+        line: true, priority: true
+    };
+
+    function sheetDate(date) {
+        const month = date.getMonth() + 1;
+        const day = date.getDate();
+        function pad(n) { return n < 10 ? '0' + n : String(n); }
+        return pad(month) + '/' + pad(day) + '/' + date.getFullYear();
+    }
+
+    function sheetShift(date) {
+        const hour = date.getHours();
+        if (hour >= 6 && hour < 18) return 'Days';
+        return 'Nights';
+    }
+
+    function lineSlotId(line, side, letter) {
+        const splitSide = (line === '1' || line === '3') ? 'even' : 'odd';
+        if (side !== splitSide) return line + '-' + side;
+        return line + '-' + side + '-' + (letter === 'b' ? 'b' : 'a');
+    }
+
+    function slotIdFromAssignment(text) {
+        // The process name and the station are often separate lines. textContent
+        // glues them, so "Solve" and "Audit" can arrive with no space between.
+        const main = String(text || '')
+            .replace(/\s+/g, ' ')
+            .replace(/crets?\s*problem\s*solve/ig, ' ')
+            .split('|')[0];
+        const cret = main.match(/cret\s*([1-4])\s*(odd|even)\s*([ab])?\b/i)
+            || main.match(/\b([1-4])\s*(odd|even)\s*([ab])?\b/i);
+        if (cret) return lineSlotId(cret[1], cret[2].toLowerCase(), (cret[3] || '').toLowerCase());
+        const t = main.toLowerCase();
+        if (/\baudits?\b/.test(t)) return 'audit';
+        if (/\bgr[ae]y\s*totes?\b/.test(t)) return 'grey';
+        if (/\bgate\s*keepers?\b/.test(t)) return 'gate';
+        if (/\bbigs\b/.test(t)) return 'bigs';
+        if (/\badd[\s-]*ins?\b/.test(t)) return 'addins';
+        if (/\bexceptions?\b/.test(t)) return 'exceptions';
+        return '';
+    }
+
+    function shortAssignment(text) {
+        return String(text || '')
+            .replace(/\s+/g, ' ')
+            .replace(/crets?\s*problem\s*solve/ig, ' ')
+            .replace(/\s*\|\s*/g, ' · ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function textWithBreaks(el) {
+        const clone = cleanClone(el);
+        const doc = clone.ownerDocument || (typeof document !== 'undefined' ? document : null);
+        if (clone.querySelectorAll && doc && doc.createTextNode) {
+            const breaks = clone.querySelectorAll('br, div, p, li');
+            for (let i = 0; i < breaks.length; i++) {
+                const node = breaks[i];
+                if (!node.parentNode) continue;
+                node.parentNode.insertBefore(doc.createTextNode(' '), node);
+            }
+        }
+        return (clone.textContent || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function placePeople(people) {
+        const slots = Object.create(null);
+        const extra = [];
+        const seen = Object.create(null);
+        for (let i = 0; i < people.length; i++) {
+            const person = people[i] || {};
+            const login = String(person.login || '').trim();
+            if (!login) continue;
+            const id = slotIdFromAssignment(person.assignment);
+            const key = login.toLowerCase() + '@' + id;
+            if (seen[key]) continue;
+            seen[key] = true;
+            if (!id || !SLOT_SET[id]) {
+                extra.push({ login: login, assignment: shortAssignment(person.assignment) });
+                continue;
+            }
+            if (!slots[id]) slots[id] = [];
+            slots[id].push(login);
+        }
+        return { slots: slots, extra: extra };
+    }
+
+    function cleanClone(el) {
+        const clone = el.cloneNode(true);
+        if (clone.querySelectorAll) {
+            const junk = clone.querySelectorAll(PANEL_JUNK);
+            for (let i = 0; i < junk.length; i++) junk[i].remove();
+        }
+        return clone;
+    }
+
+    function looksLikeLogin(text) {
+        return /^[a-z][a-z0-9._-]{1,31}$/i.test(text) && text.length >= 3;
+    }
+
+    function loginFromText(text) {
+        const trimmed = String(text || '').replace(/\s+/g, ' ').trim();
+        if (looksLikeLogin(trimmed) && !NOT_LOGIN[trimmed.toLowerCase()]) return trimmed;
+        const tokens = trimmed.toLowerCase().match(/[a-z][a-z0-9._-]{2,31}/g) || [];
+        for (let i = 0; i < tokens.length; i++) {
+            if (NOT_LOGIN[tokens[i]]) continue;
+            if (looksLikeLogin(tokens[i])) return tokens[i];
+        }
+        return '';
+    }
+
+    function headingText(el) {
+        const clone = cleanClone(el);
+        return (clone.textContent || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function isProblemSolveHeading(el) {
+        return /\bcret\s+problem\s+solve\b/i.test(headingText(el));
+    }
+
+    function findTable(heading) {
+        let el = heading;
+        for (let i = 0; i < 8 && el; i++) {
+            if (el !== heading && el.querySelector) {
+                const table = el.querySelector('table');
+                if (table) return table;
+            }
+            el = el.parentElement;
+        }
+        let sib = heading.nextElementSibling;
+        for (let i = 0; i < 4 && sib; i++) {
+            if (sib.tagName === 'TABLE') return sib;
+            if (sib.querySelector) {
+                const table = sib.querySelector('table');
+                if (table) return table;
+            }
+            sib = sib.nextElementSibling;
+        }
+        return null;
+    }
+
+    function findGroup() {
+        if (typeof document === 'undefined' || !document.querySelectorAll) return null;
+        const all = document.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"]');
+        let fallback = null;
+        for (let i = 0; i < all.length; i++) {
+            if (!isProblemSolveHeading(all[i])) continue;
+            if (!fallback) fallback = all[i];
+            if (findTable(all[i])) return all[i];
+        }
+        return fallback;
+    }
+
+    function cellText(el) {
+        return textWithBreaks(el);
+    }
+
+    function rowLogin(tr) {
+        const cells = tr.querySelectorAll('td');
+        const cell = cells.length ? cells[cells.length - 1] : tr;
+        const clone = cleanClone(cell);
+        const anchors = clone.querySelectorAll ? clone.querySelectorAll('a') : [];
+        for (let i = 0; i < anchors.length; i++) {
+            const fromText = loginFromText(anchors[i].textContent);
+            if (fromText) return fromText;
+            if (anchors[i].getAttribute) {
+                const fromTitle = loginFromText(anchors[i].getAttribute('title') || anchors[i].getAttribute('aria-label'));
+                if (fromTitle) return fromTitle;
+            }
+        }
+        return loginFromText(clone.textContent);
+    }
+
+    function readPeople(table) {
+        const people = [];
+        if (!table || !table.querySelectorAll) return people;
+        const rows = table.querySelectorAll('tbody tr');
+        for (let i = 0; i < rows.length; i++) {
+            const tr = rows[i];
+            const cells = tr.querySelectorAll('td');
+            if (!cells.length) continue;
+            const assignment = cellText(cells[0]);
+            if (!assignment || /^assignment$/i.test(assignment)) continue;
+            people.push({
+                login: rowLogin(tr),
+                assignment: assignment
+            });
+        }
+        return people;
+    }
+
+    function readGroup() {
+        const heading = findGroup();
+        const table = heading ? findTable(heading) : null;
+        const people = readPeople(table);
+        return {
+            heading: heading,
+            people: people,
+            placed: placePeople(people),
+            staffed: people.filter(function (person) { return String(person.login || '').trim(); }).length
+        };
+    }
+
+    const SHEET_CSS = '' +
+        ':host { all: initial; }' +
+        '.backdrop { position:fixed; inset:0; display:flex; align-items:flex-start; justify-content:center;' +
+        ' overflow:auto; background:rgba(15, 23, 36, 0.45); font-family:Segoe UI, system-ui, sans-serif; }' +
+        '.frame { position:relative; width:min(1080px, calc(100% - 48px)); margin:36px 0 48px; }' +
+        '.sheet { padding:26px 28px 22px; background:#fff; color:#1d3b64; box-shadow:0 16px 50px rgba(15, 23, 36, 0.28); }' +
+        '.top { display:flex; justify-content:space-between; align-items:flex-start; gap:24px; }' +
+        '.title { margin:0; font-size:22px; font-weight:800; letter-spacing:0.04em; color:#1d3b64; }' +
+        '.meta { display:flex; flex-direction:column; align-items:flex-end; gap:8px; font-size:13px;' +
+        ' font-weight:700; letter-spacing:0.06em; text-transform:uppercase; white-space:nowrap; }' +
+        '.fill { display:inline-block; min-width:88px; margin-left:6px; padding:0 8px 1px; border-bottom:1px solid #1d3b64;' +
+        ' font-weight:700; letter-spacing:0; text-transform:none; text-align:center; }' +
+        '.floor { display:flex; gap:22px; margin-top:26px; }' +
+        '.cluster { flex:1 1 0; min-width:0; display:grid; grid-template-columns:1fr 1fr; grid-template-rows:auto auto;' +
+        ' column-gap:8px; row-gap:8px; align-items:stretch; }' +
+        '.support { display:grid; grid-template-columns:repeat(4, 1fr); column-gap:28px; row-gap:32px; margin-top:36px; }' +
+        '.slot { border:1px solid #c5d3e0; background:#fff; min-width:0; }' +
+        '.slot-head { min-height:28px; padding:5px 6px; background:#8eafd0; color:#1d3b64; font-size:13px; font-weight:700;' +
+        ' text-align:center; line-height:1.2; }' +
+        '.slot-body { min-height:72px; padding:6px 4px; background:#fbfcfe; display:flex; flex-direction:column;' +
+        ' align-items:center; justify-content:center; gap:3px; }' +
+        '.name { font-size:14px; font-weight:700; color:#1a2332; text-align:center; line-height:1.25; word-break:break-word; }' +
+        '.extra { margin-top:22px; padding-top:12px; border-top:1px solid #d5deea; }' +
+        '.extra-title { font-size:12px; font-weight:800; letter-spacing:0.05em; text-transform:uppercase; color:#5d7190; }' +
+        '.extra-row { margin-top:4px; font-size:14px; font-weight:650; color:#1a2332; }' +
+        '.note { margin-top:14px; font-size:13px; font-weight:650; color:#5d7190; }' +
+        '.close { position:absolute; top:-12px; right:-12px; width:28px; height:28px; border:1px solid #c5d3e0; border-radius:6px;' +
+        ' background:#fff; color:#1d3b64; font:700 18px Segoe UI, system-ui, sans-serif; cursor:pointer; line-height:1; }' +
+        '.close:hover { background:#eef3f8; }' +
+        '@media (max-width: 800px) { .floor { flex-wrap:wrap; } .cluster { flex:1 1 240px; }' +
+        ' .support { grid-template-columns:1fr 1fr; } .top { flex-direction:column; } .meta { align-items:flex-start; } }';
+
+    function slotBox(slot) {
+        const box = document.createElement('div');
+        box.className = 'slot';
+        box.setAttribute('data-slot', slot.id);
+        if (slot.col) box.style.gridColumn = String(slot.col);
+        if (slot.row) box.style.gridRow = String(slot.row);
+        const head = document.createElement('div');
+        head.className = 'slot-head';
+        head.textContent = slot.label || '';
+        const body = document.createElement('div');
+        body.className = 'slot-body';
+        body.setAttribute('data-body', '');
+        box.appendChild(head);
+        box.appendChild(body);
+        return box;
+    }
+
+    function buildSheet(shadow) {
+        const style = document.createElement('style');
+        style.textContent = SHEET_CSS;
+        const backdrop = document.createElement('div');
+        backdrop.className = 'backdrop';
+        const frame = document.createElement('div');
+        frame.className = 'frame';
+        const sheet = document.createElement('div');
+        sheet.className = 'sheet';
+        sheet.setAttribute('role', 'dialog');
+        sheet.setAttribute('aria-label', 'Problem solve assignments');
+
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'close';
+        close.setAttribute('aria-label', 'Close');
+        close.textContent = '\u00d7';
+
+        const top = document.createElement('div');
+        top.className = 'top';
+        const title = document.createElement('div');
+        title.className = 'title';
+        title.textContent = 'PROBLEM SOLVE ASSIGNMENTS';
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.appendChild(metaLine('Date', 'date'));
+        meta.appendChild(metaLine('Shift', 'shift'));
+        top.appendChild(title);
+        top.appendChild(meta);
+
+        const floor = document.createElement('div');
+        floor.className = 'floor';
+        for (let line = 0; line < LINES.length; line++) {
+            const cluster = document.createElement('div');
+            cluster.className = 'cluster';
+            for (let s = 0; s < LINES[line].length; s++) cluster.appendChild(slotBox(LINES[line][s]));
+            floor.appendChild(cluster);
+        }
+
+        const support = document.createElement('div');
+        support.className = 'support';
+        for (let s = 0; s < SUPPORT.length; s++) support.appendChild(slotBox(SUPPORT[s]));
+
+        const extra = document.createElement('div');
+        extra.className = 'extra';
+        extra.setAttribute('data-extra', '');
+        extra.hidden = true;
+
+        const note = document.createElement('div');
+        note.className = 'note';
+        note.setAttribute('data-note', '');
+        note.hidden = true;
+
+        sheet.appendChild(top);
+        sheet.appendChild(floor);
+        sheet.appendChild(support);
+        sheet.appendChild(extra);
+        sheet.appendChild(note);
+        frame.appendChild(close);
+        frame.appendChild(sheet);
+        backdrop.appendChild(frame);
+        shadow.appendChild(style);
+        shadow.appendChild(backdrop);
+
+        backdrop.addEventListener('click', function (event) {
+            if (event.target === backdrop) closeBoard();
+        });
+        frame.addEventListener('click', function (event) { event.stopPropagation(); });
+        close.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            closeBoard();
+        });
+    }
+
+    function metaLine(label, key) {
+        const row = document.createElement('div');
+        row.appendChild(document.createTextNode(label + ':'));
+        const fill = document.createElement('span');
+        fill.className = 'fill';
+        fill.setAttribute('data-' + key, '');
+        row.appendChild(fill);
+        return row;
+    }
+
+    function fillBody(body, names) {
+        const sig = names.join('\n');
+        if (body.getAttribute('data-sig') === sig) return;
+        body.setAttribute('data-sig', sig);
+        body.textContent = '';
+        for (let i = 0; i < names.length; i++) {
+            const name = document.createElement('div');
+            name.className = 'name';
+            name.textContent = names[i];
+            body.appendChild(name);
+        }
+    }
+
+    function paint(group) {
+        const host = document.getElementById(POPUP_ID);
+        if (!host || !host.shadowRoot) return;
+        const shadow = host.shadowRoot;
+        const now = new Date();
+        const dateEl = shadow.querySelector('[data-date]');
+        const shiftEl = shadow.querySelector('[data-shift]');
+        if (dateEl) dateEl.textContent = sheetDate(now);
+        if (shiftEl) shiftEl.textContent = sheetShift(now);
+        const boxes = shadow.querySelectorAll('[data-slot]');
+        for (let i = 0; i < boxes.length; i++) {
+            const id = boxes[i].getAttribute('data-slot');
+            const body = boxes[i].querySelector('[data-body]');
+            if (!body) continue;
+            fillBody(body, group.placed.slots[id] || []);
+        }
+        const extra = shadow.querySelector('[data-extra]');
+        if (extra) {
+            const rows = group.placed.extra;
+            const sig = rows.map(function (row) { return row.login + '|' + row.assignment; }).join('\n');
+            if (extra.getAttribute('data-sig') !== sig) {
+                extra.setAttribute('data-sig', sig);
+                extra.textContent = '';
+                if (rows.length) {
+                    const title = document.createElement('div');
+                    title.className = 'extra-title';
+                    title.textContent = 'Not on the sheet';
+                    extra.appendChild(title);
+                    for (let i = 0; i < rows.length; i++) {
+                        const row = document.createElement('div');
+                        row.className = 'extra-row';
+                        row.textContent = rows[i].assignment
+                            ? (rows[i].login + ' \u2014 ' + rows[i].assignment)
+                            : rows[i].login;
+                        extra.appendChild(row);
+                    }
+                }
+            }
+            extra.hidden = rows.length === 0;
+        }
+        const note = shadow.querySelector('[data-note]');
+        if (note) {
+            const missing = !group.heading;
+            note.hidden = !missing;
+            note.textContent = missing ? 'CRET Problem Solve is not on this page right now.' : '';
+        }
+    }
+
+    function openBoard() {
+        if (typeof document === 'undefined' || !document.body) return;
+        let host = document.getElementById(POPUP_ID);
+        if (!host) {
+            host = document.createElement('div');
+            host.id = POPUP_ID;
+            host.style.cssText = 'position:fixed; inset:0; z-index:2147483640;';
+            const shadow = host.attachShadow({ mode: 'open' });
+            buildSheet(shadow);
+            document.body.appendChild(host);
+        }
+        paint(readGroup());
+        const btn = document.getElementById(BTN_ID);
+        if (btn) btn.setAttribute('aria-expanded', 'true');
+    }
+
+    function closeBoard() {
+        const host = typeof document !== 'undefined' && document.getElementById(POPUP_ID);
+        if (host) host.remove();
+        const btn = typeof document !== 'undefined' && document.getElementById(BTN_ID);
+        if (btn) btn.setAttribute('aria-expanded', 'false');
+    }
+
+    function buttonLabel(staffed) {
+        return staffed ? ('PS board \u00b7 ' + staffed) : 'PS board';
+    }
+
+    function ensureButton(heading, staffed) {
+        const host = heading.parentElement || heading;
+        let btn = document.getElementById(BTN_ID);
+        if (!btn) {
+            btn = document.createElement('button');
+            btn.id = BTN_ID;
+            btn.type = 'button';
+            btn.className = 'mem3-ps-board-btn';
+            btn.setAttribute('aria-expanded', document.getElementById(POPUP_ID) ? 'true' : 'false');
+            btn.title = 'Open the problem solve sheet for the people in this group';
+            btn.style.cssText = 'display:inline-flex; align-items:center; margin:0 0 0 8px; padding:4px 10px;' +
+                ' border-radius:8px; border:1px solid #8eafd0; background:#f4f8fc; color:#1d3b64;' +
+                ' font:700 12px Segoe UI, system-ui, sans-serif; cursor:pointer; vertical-align:middle; white-space:nowrap;';
+            btn.addEventListener('click', function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+                if (document.getElementById(POPUP_ID)) closeBoard();
+                else openBoard();
+            });
+        }
+        const label = buttonLabel(staffed);
+        if (btn.textContent !== label) btn.textContent = label;
+        if (btn.parentElement !== host || btn.previousElementSibling !== heading) {
+            if (heading.nextSibling) host.insertBefore(btn, heading.nextSibling);
+            else host.appendChild(btn);
+        }
+    }
+
+    let pending = false;
+    function schedule() {
+        if (pending) return;
+        pending = true;
+        setTimeout(function () {
+            pending = false;
+            tick();
+        }, 200);
+    }
+
+    function tick() {
+        const group = readGroup();
+        if (group.heading) ensureButton(group.heading, group.staffed);
+        else {
+            const btn = document.getElementById(BTN_ID);
+            if (btn) btn.remove();
+        }
+        if (document.getElementById(POPUP_ID)) paint(group);
+    }
+
+    function onKey(event) {
+        if (event.key === 'Escape') closeBoard();
+    }
+
+    function boot() {
+        if (typeof document === 'undefined' || !document || typeof document.querySelectorAll !== 'function') return;
+        if (!document.body) {
+            document.addEventListener('DOMContentLoaded', boot);
+            return;
+        }
+        document.addEventListener('keydown', onKey);
+        tick();
+        setInterval(tick, 1500);
+        if (typeof MutationObserver === 'function') {
+            const observer = new MutationObserver(function (records) {
+                for (let i = 0; i < records.length; i++) {
+                    const node = records[i].target;
+                    const el = node && node.nodeType === 1 ? node : (node && node.parentElement);
+                    if (!el || !el.closest) {
+                        schedule();
+                        return;
+                    }
+                    if (el.closest('#' + POPUP_ID) || el.id === BTN_ID || el.closest('#' + BTN_ID)) continue;
+                    schedule();
+                    return;
+                }
+            });
+            observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+        }
+    }
+
+    const root = typeof globalThis !== 'undefined' ? globalThis : window;
+    if (root.__PS_BOARD_EXPORT) {
+        root.__psBoard = {
+            slotIdFromAssignment: slotIdFromAssignment,
+            placePeople: placePeople,
+            sheetShift: sheetShift,
+            sheetDate: sheetDate,
+            shortAssignment: shortAssignment,
+            readPeople: readPeople,
+            lines: LINES,
+            support: SUPPORT
+        };
+    }
+    if (root.__mem3PsBoardInstalled) return;
+    root.__mem3PsBoardInstalled = true;
+    if (!root.__PS_BOARD_EXPORT) boot();
+})();
