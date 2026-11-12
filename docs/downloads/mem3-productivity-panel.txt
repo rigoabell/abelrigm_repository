@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.7
+// @version      1.9.1
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -36,7 +36,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.7';
+    const SCRIPT_VERSION = '1.9.1';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -191,6 +191,7 @@
     const WINDOW_GROUPS = ['Shift', 'Halves', 'Quarters', 'Fast starts'];
     let ACTIVE_WINDOW = 'all';
     const REFRESH_MS = 5 * 60 * 1000;
+    const IDLE_START_MIN = 11;
     const TIME_WORKERS = 4;
     const UPH_TARGET = 30;
 
@@ -864,10 +865,23 @@
             '&endTime=' + encodeURIComponent(w.endLink);
     }
 
+    function timeDetailsLink(empId) {
+        const link = document.createElement('a');
+        link.href = fclmEmpUrl(empId);
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.textContent = 'Open FCLM Time Details';
+        link.style.cssText = 'display:inline-block; margin-top:6px; font-size:12px; color:#58a6ff; text-decoration:underline;';
+        link.addEventListener('click', function (e) { e.stopPropagation(); });
+        return link;
+    }
+
     // Clock rows are total work time. Idle is indirect time plus Time Off Task.
     let LAST_TIME = Object.create(null);
     const TIME_IN_FLIGHT = Object.create(null);
     const TIME_TRIES = Object.create(null);
+    const TIME_ISSUES = Object.create(null);
+    const BOARD_PEOPLE = Object.create(null);
     const MAX_TIME_TRIES = 1;
     let TIME_LOADING = false;
     let SUPPRESS_ENSURE = false;
@@ -902,6 +916,45 @@
         return cells.length ? (cells[cells.length - 1].textContent || '').trim() : '';
     }
 
+    function functionBucket(cls, title) {
+        const c = String(cls || '').toLowerCase();
+        if (c.indexOf('timeofftask') !== -1 || c.indexOf('time-off-task') !== -1) return 'tot';
+        if (c.indexOf('indirect') !== -1) return 'indirect';
+        if (String(title || '').indexOf('\u2666') !== -1) return 'direct';
+        return 'other';
+    }
+
+    // The latest function row is the current stretch. Idle starts once that
+    // stretch has been indirect or Time Off Task for 11 minutes. A diamond in
+    // the title is still that stretch, so it counts the same way. Someone
+    // whose latest punch is out is not idle.
+    function isClockedOut(empId) {
+        if (!empId) return false;
+        return clockFor(personForEmp(empId), empId) === 'out';
+    }
+
+    function showsIdleNow(time, empId) {
+        if (isClockedOut(empId)) return false;
+        const fn = time && time.lastFunction;
+        if (!fn) return false;
+        if (fn.bucket !== 'indirect' && fn.bucket !== 'tot') return false;
+        return (fn.minutes || 0) >= IDLE_START_MIN;
+    }
+
+    function idleNowSig(time, empId) {
+        if (isClockedOut(empId)) return 'out';
+        return showsIdleNow(time, empId) ? '1' : '0';
+    }
+
+    function idleNowTitle(time, empId) {
+        if (isClockedOut(empId)) return 'Clocked out.';
+        const fn = time && time.lastFunction;
+        if (!fn) return '';
+        const which = fn.title || fn.bucket;
+        const lead = showsIdleNow(time, empId) ? 'Idle now. ' : 'Not idle yet. ';
+        return lead + which + ' for ' + formatDuration(fn.minutes) + '. Idle starts at ' + IDLE_START_MIN + ' minutes.';
+    }
+
     function parseTimeDetails(html) {
         const doc = new DOMParser().parseFromString(html, 'text/html');
         let totalMin = 0, idleMin = 0, paidMin = 0, offMin = 0, totMin = 0, activeMin = 0;
@@ -914,14 +967,16 @@
             else if (cls.indexOf('on-clock') !== -1 || cls.indexOf('clockpaid') !== -1 || cls.indexOf('paid') !== -1) paidMin += minutes;
         }
         const fns = doc.querySelectorAll('tr.function-seg');
+        let lastFunction = null;
         for (let i = 0; i < fns.length; i++) {
             const cls = (fns[i].getAttribute('class') || '').toLowerCase();
             const title = ((fns[i].querySelector('td') || {}).textContent || '').trim();
             const minutes = parseDuration(lastRightAlign(fns[i]));
-            const isTot = cls.indexOf('timeofftask') !== -1 || cls.indexOf('time-off-task') !== -1;
-            if (isTot) { totMin += minutes; idleMin += minutes; }
-            else if (cls.indexOf('indirect') !== -1) idleMin += minutes;
-            else if (title.indexOf('\u2666') !== -1) activeMin += minutes;
+            const bucket = functionBucket(cls, title);
+            if (bucket === 'tot') { totMin += minutes; idleMin += minutes; }
+            else if (bucket === 'indirect') idleMin += minutes;
+            else if (bucket === 'direct') activeMin += minutes;
+            lastFunction = { title: title.slice(0, 120), bucket: bucket, minutes: minutes };
         }
         const titleEl = doc.querySelector('title');
         return {
@@ -940,7 +995,9 @@
             sawFunction: html.indexOf('function-seg') !== -1,
             pageTitle: titleEl ? (titleEl.textContent || '').trim().slice(0, 120) : '',
             error: null,
-            noData: clocks.length === 0 && /time details/i.test(titleEl ? titleEl.textContent || '' : '')
+            noData: clocks.length === 0 && /time details/i.test(titleEl ? titleEl.textContent || '' : ''),
+            lastFunction: lastFunction,
+            currentlyIdle: showsIdleNow({ lastFunction: lastFunction })
         };
     }
 
@@ -1082,7 +1139,7 @@
         let fallback = null;
         for (let i = 0; i < nodes.length; i++) {
             const el = nodes[i];
-            const bg = window.getComputedStyle(el).backgroundImage || '';
+            const bg = window.getComputedStyle ? (window.getComputedStyle(el).backgroundImage || '') : '';
             if (!bg || bg === 'none') continue;
             if (bg.indexOf('badgephotos') !== -1) return el;
             if (!fallback && isAvatarBox(el)) fallback = el;
@@ -1095,6 +1152,24 @@
             if (ir.width >= 18 && ir.height >= 18 && ir.width <= 96 && ir.height <= 96) return img;
         }
         return null;
+    }
+
+    function cssImageUrl(value) {
+        const match = /url\(\s*(['"]?)(.*?)\1\s*\)/i.exec(String(value || ''));
+        return match ? match[2] : '';
+    }
+
+    function badgePhotoUrl(el) {
+        if (!el) return '';
+        if (String(el.tagName || '').toUpperCase() === 'IMG') {
+            const src = el.getAttribute('src') || el.src || '';
+            if (src) return src;
+        }
+        const inline = el.style && el.style.backgroundImage;
+        const fromInline = cssImageUrl(inline);
+        if (fromInline) return fromInline;
+        if (!window.getComputedStyle) return '';
+        return cssImageUrl(window.getComputedStyle(el).backgroundImage || '');
     }
 
     const CLOCK_PHOTO_PX = 32;
@@ -1309,10 +1384,12 @@
         return (TIME_TRIES[empId] || 0) >= MAX_TIME_TRIES;
     }
 
+    // One read per associate. A later 5-minute rate refresh leaves that idle
+    // percent where it is. Reload and a window change clear the cache first.
     function needsTimeThisCycle(empId) {
         const t = LAST_TIME[empId];
+        if (t && (timeSettled(t) || t.gaveUp)) return false;
         if ((TIME_TRIES[empId] || 0) >= MAX_TIME_TRIES) return false;
-        if (t && t.cycle === refreshCycle && (timeSettled(t) || t.gaveUp)) return false;
         return true;
     }
 
@@ -1342,14 +1419,20 @@
         TIME_IN_FLIGHT[empId] = true;
         let last = null;
         let html = '';
+        let aborted = false;
+        function stopForNewCycle() {
+            if (gen == null || gen === timeGeneration) return false;
+            aborted = true;
+            return true;
+        }
         try {
             while (triesLeft(empId)) {
-                if (gen != null && gen !== timeGeneration) return;
+                if (stopForNewCycle()) return;
                 TIME_TRIES[empId] = (TIME_TRIES[empId] || 0) + 1;
                 const n = TIME_TRIES[empId];
                 try {
                     html = await gmFetch(fclmEmpUrl(empId));
-                    if (gen != null && gen !== timeGeneration) return;
+                    if (stopForNewCycle()) return;
                     last = parseTimeDetails(html);
                     html = '';
                     last.tries = n;
@@ -1359,21 +1442,24 @@
                     }
                 } catch (e) {
                     html = '';
-                    if (gen != null && gen !== timeGeneration) return;
+                    if (stopForNewCycle()) return;
                     last = {
                         hasTime: false, totalMin: 0, idleMin: 0, clockedMin: 0,
                         error: e.message, tries: n, sawClock: false
                     };
                     if (FCLM_DOWN) break;
                 }
-                if (gen != null && gen !== timeGeneration) return;
+                if (stopForNewCycle()) return;
                 if (triesLeft(empId)) await sleep(500);
             }
-            if (gen != null && gen !== timeGeneration) return;
+            if (stopForNewCycle()) return;
             if (last) rememberTime(empId, last);
         } finally {
             html = '';
             delete TIME_IN_FLIGHT[empId];
+            if (aborted && (TIME_TRIES[empId] || 0) > 0) {
+                noteTimeIssue(empId, 'Lookup was interrupted', { try: TIME_TRIES[empId] || 0 });
+            }
             noteTimeProgress();
             if (!pagesHeld()) pumpRefresh();
         }
@@ -1436,6 +1522,7 @@
             prev.cycle = refreshCycle;
             prev.gaveUp = true;
             if (record && record.tries) prev.tries = record.tries;
+            recordTimeIssue(empId, record, true);
             if (DEBUG.timeLoad) DEBUG.timeLoad.done = (DEBUG.timeLoad.done || 0) + 1;
             scheduleLivePaint();
             return;
@@ -1445,6 +1532,7 @@
         record.fetchedAt = Date.now();
         record.gaveUp = !incomingGood;
         LAST_TIME[empId] = record;
+        recordTimeIssue(empId, record, false);
         if (!DEBUG.timeSample) {
             DEBUG.timeSample = {
                 empId: empId,
@@ -1473,6 +1561,69 @@
     function resetTimeTries() {
         const tried = Object.keys(TIME_TRIES);
         for (let i = 0; i < tried.length; i++) delete TIME_TRIES[tried[i]];
+        clearTimeIssues();
+    }
+
+    function clearTimeIssues() {
+        const keys = Object.keys(TIME_ISSUES);
+        for (let i = 0; i < keys.length; i++) delete TIME_ISSUES[keys[i]];
+        paintIssueIcon();
+        const panel = document.getElementById('mem3-time-issues-panel');
+        if (panel) fillIssuePanel(panel);
+    }
+
+    function rememberBoardPerson(empId, person, line, station, photo) {
+        if (!empId) return;
+        const prev = BOARD_PEOPLE[empId] || {};
+        BOARD_PEOPLE[empId] = {
+            login: (person && person.login) || prev.login || '',
+            name: (person && person.name) || prev.name || '',
+            badge: (person && person.badge) || prev.badge || '',
+            line: line || prev.line || '',
+            station: station || prev.station || '',
+            photo: photo || prev.photo || ''
+        };
+    }
+
+    function noteTimeIssue(empId, reason, extra) {
+        if (!empId || !reason) return;
+        let row = TIME_ISSUES[empId];
+        if (!row) {
+            row = { empId: String(empId), reasons: [], attempts: [], firstAt: new Date().toISOString() };
+            TIME_ISSUES[empId] = row;
+        }
+        if (row.reasons.indexOf(reason) === -1) row.reasons.push(reason);
+        if (extra && row.attempts.length < 8) row.attempts.push(extra);
+        row.updatedAt = new Date().toISOString();
+        paintIssueIcon();
+        const panel = document.getElementById('mem3-time-issues-panel');
+        if (panel) fillIssuePanel(panel);
+    }
+
+    function recordTimeIssue(empId, record, keptEarlier) {
+        if (!empId || !record) return;
+        const tries = record.tries || TIME_TRIES[empId] || 1;
+        let reason = '';
+        if (keptEarlier) reason = 'Kept the earlier time because the new page failed';
+        else if (record.error) reason = record.error;
+        else if (timeFound(record) && !(record.clockedMin > 0)) reason = 'Clock rows had no minutes';
+        else if (!timeFound(record) && !record.noData) reason = 'Time Details page had no clock rows';
+        else if (tries > 1) reason = 'Resolved on try ' + tries;
+        else return;
+        noteTimeIssue(empId, reason, {
+            try: tries,
+            error: record.error || '',
+            pageTitle: record.pageTitle || '',
+            sawClock: !!record.sawClock,
+            hasTime: !!record.hasTime,
+            noData: !!record.noData,
+            clockedMin: record.clockedMin || 0,
+            idleMin: record.idleMin || 0
+        });
+    }
+
+    function issueIds() {
+        return Object.keys(TIME_ISSUES);
     }
 
     function settleUnfinished(ids) {
@@ -1537,7 +1688,10 @@
             maxTries: MAX_TIME_TRIES
         };
         pullNew();
-        if (!ids.length) return;
+        if (!ids.length) {
+            if (DEBUG.timeLoad) DEBUG.timeLoad.finished = true;
+            return;
+        }
         TIME_LOADING = true;
         const worker = async function () {
             while (gen === timeGeneration && !FCLM_DOWN) {
@@ -1566,8 +1720,14 @@
             if (DEBUG.timeLoad) DEBUG.timeLoad.finished = true;
             render();
         } catch (e) {
-            if (DEBUG.timeLoad) DEBUG.timeLoad.error = e.message;
-            if (gen === timeGeneration) settleUnfinished(ids);
+            if (DEBUG.timeLoad) {
+                DEBUG.timeLoad.error = e.message;
+                DEBUG.timeLoad.finished = true;
+            }
+            if (gen === timeGeneration) {
+                settleUnfinished(ids);
+                render();
+            }
         } finally {
             TIME_LOADING = false;
             if (!pagesHeld()) pumpRefresh();
@@ -1822,6 +1982,7 @@
         if (label) label.textContent = p.total ? ('IDLE percent ' + p.done + ' / ' + p.total) : 'IDLE percent';
         if (fill) fill.style.width = pct + '%';
         el.style.display = (p.total > 0 && p.done < p.total) ? 'block' : 'none';
+        paintIssueIcon();
     }
 
     let progressTimer = null;
@@ -2088,7 +2249,7 @@
         for (let i = 0; i < nodes.length; i++) nodes[i].remove();
     }
 
-    function makeBadge(stats, known, time) {
+    function makeBadge(stats, known, time, empId) {
         const wrap = document.createElement('span');
         wrap.className = DECOR_CLASS;
         wrap.style.cssText = 'display:inline-flex; align-items:center; gap:6px; margin-left:8px; vertical-align:middle;';
@@ -2097,15 +2258,21 @@
         const rateText = !known ? '?' : (stats.hasData ? ((stats.uph > 0 ? stats.uph.toFixed(1) : '0') + ' UPH') : uphGapText());
         const pct = idlePercent(time);
         const idleText = noTime ? windowGapText() : (idleLabel(pct) + ' IDLE');
-        wrap.title = rateText + ' \u00b7 ' + (noTime ? windowGapText() : timeText(time));
+        const nowTitle = idleNowTitle(time, empId);
+        wrap.title = rateText + ' \u00b7 ' + (noTime ? windowGapText() : timeText(time)) + (nowTitle ? ' \u00b7 ' + nowTitle : '');
         wrap.appendChild(makePill(rateText, color, 16.5));
         wrap.appendChild(makePill(idleText, noTime ? '#8b949e' : idleColor(pct), 16.5));
-        wrap.setAttribute('data-sig', (known ? '1' : '0') + '|' + rateText + '|' + idleText);
+        if (showsIdleNow(time, empId)) {
+            const now = makePill('IDLE NOW', '#f85149', 16.5);
+            now.className = 'mem3-idle-now';
+            wrap.appendChild(now);
+        }
+        wrap.setAttribute('data-sig', (known ? '1' : '0') + '|' + rateText + '|' + idleText + '|' + idleNowSig(time, empId));
         return wrap;
     }
 
-    function placeRowBadge(tr, found, stats, known, time) {
-        const badge = makeBadge(stats, known, time);
+    function placeRowBadge(tr, found, stats, known, time, empId) {
+        const badge = makeBadge(stats, known, time, empId);
         const sig = badge.getAttribute('data-sig');
         const existing = tr.querySelector('.' + DECOR_CLASS);
         if (existing && existing.getAttribute('data-sig') === sig) return;
@@ -2117,21 +2284,27 @@
         return /\bbigs\b/i.test(String(text || ''));
     }
 
-    function makeBigsIdleBadge(time) {
+    function makeBigsIdleBadge(time, empId) {
         const wrap = document.createElement('span');
         wrap.className = BIGS_IDLE_CLASS;
         wrap.style.cssText = 'display:inline-flex; align-items:center; gap:6px; margin-left:8px; vertical-align:middle;';
         const noTime = !!(time && time.noData);
         const pct = idlePercent(time);
         const idleText = noTime ? windowGapText() : (idleLabel(pct) + ' IDLE');
-        wrap.title = noTime ? windowGapText() : timeText(time);
+        const nowTitle = idleNowTitle(time, empId);
+        wrap.title = (noTime ? windowGapText() : timeText(time)) + (nowTitle ? ' \u00b7 ' + nowTitle : '');
         wrap.appendChild(makePill(idleText, noTime ? '#8b949e' : idleColor(pct), 16.5));
-        wrap.setAttribute('data-sig', idleText);
+        if (showsIdleNow(time, empId)) {
+            const now = makePill('IDLE NOW', '#f85149', 16.5);
+            now.className = 'mem3-idle-now';
+            wrap.appendChild(now);
+        }
+        wrap.setAttribute('data-sig', idleText + '|' + idleNowSig(time, empId));
         return wrap;
     }
 
-    function placeBigsIdle(tr, found, time) {
-        const badge = makeBigsIdleBadge(time);
+    function placeBigsIdle(tr, found, time, empId) {
+        const badge = makeBigsIdleBadge(time, empId);
         const sig = badge.getAttribute('data-sig');
         const existing = tr.querySelector('.' + BIGS_IDLE_CLASS);
         if (existing && existing.getAttribute('data-sig') === sig) return;
@@ -2174,12 +2347,14 @@
                     if (leftover) leftover.remove();
                     continue;
                 }
-                const empId = resolveEmpId(IDENTITY.byLogin[found.login]);
+                const person = IDENTITY.byLogin[found.login];
+                const empId = resolveEmpId(person);
+                if (empId) rememberBoardPerson(empId, person, 'BIGS', rowAssignmentText(tr), badgePhotoUrl(avatarEl(tr)));
                 if (empId && !seen[empId]) {
                     seen[empId] = true;
                     ids.push(empId);
                 }
-                placeBigsIdle(tr, found, timeFor(empId));
+                placeBigsIdle(tr, found, timeFor(empId), empId);
             }
         }
         BIGS_IDS = ids;
@@ -3834,8 +4009,11 @@
         const cell = document.createElement('div');
         cell.style.cssText = opts.lead
             ? 'display:flex; flex-direction:column; justify-content:center; gap:2px; ' +
-              'flex:1.15 1 0; min-width:0; margin:0 10px 0 0; padding:6px 10px; ' +
-              'background:#0d1117; border:1px solid #8b949e; border-left:5px solid #8b949e; border-radius:8px;'
+              (opts.stacked
+                  ? 'width:100%; box-sizing:border-box; min-width:0; margin:0; '
+                  : 'flex:1.15 1 0; min-width:0; margin:0 10px 0 0; ') +
+              'padding:6px 10px; background:#0d1117; border:1px solid #8b949e; ' +
+              'border-left:5px solid #8b949e; border-radius:8px;'
             : 'display:flex; flex-direction:column; justify-content:center; gap:1px; ' +
               'flex:1 1 0; min-width:0; padding:2px 8px; border-left:3px solid #30363d;';
 
@@ -3857,13 +4035,37 @@
         const size = opts.lead ? 32 : 22;
         const idlePct = opts.idlePct;
         const ic = idleColor(idlePct);
-        function addMetric(value, unit, color, rank, px) {
+        const scopeIds = opts.empIds || [];
+        const idleCount = idleIdsIn(scopeIds).idle.length;
+        cell.setAttribute('data-summary', opts.summaryKey || '');
+        function viewButton(title, onClick) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.title = title;
+            btn.setAttribute('aria-label', title);
+            btn.setAttribute('data-view', 'eye');
+            btn.style.cssText = 'padding:0; margin:0; border:0; background:transparent; cursor:pointer; line-height:0;';
+            btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">' +
+                '<path fill="#ffffff" d="M12 5c-5 0-9.3 3.1-11 7 1.7 3.9 6 7 11 7s9.3-3.1 11-7c-1.7-3.9-6-7-11-7zm0 11.5a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z"/>' +
+                '<circle cx="12" cy="12" r="2.2" fill="#161b22"/></svg>';
+            btn.addEventListener('click', function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                onClick();
+            });
+            return btn;
+        }
+        function addMetric(value, unit, color, rank, px, spec) {
             const group = document.createElement('span');
-            group.style.cssText = 'display:inline-flex; align-items:baseline; gap:4px;';
+            group.style.cssText = 'display:inline-flex; align-items:center; gap:4px;';
+            const key = spec && spec.key ? spec.key : '';
+            if (key) group.setAttribute('data-rank-for', key);
             if (rank === 'best') group.className = 'mem3-pulse-best';
             else if (rank === 'worst') group.className = 'mem3-pulse-worst';
+            if (spec && spec.onView) group.appendChild(viewButton(spec.viewTitle || 'View', spec.onView));
             const num = document.createElement('span');
             num.textContent = value;
+            if (key) num.setAttribute('data-metric', key);
             num.style.cssText = 'font-size:' + (px || size) + 'px; font-weight:700; color:' + color +
                 '; font-variant-numeric:tabular-nums;';
             const label = document.createElement('span');
@@ -3873,9 +4075,24 @@
             group.appendChild(label);
             valueRow.appendChild(group);
         }
-        addMetric(opts.value, 'UPH', opts.uph > 0 ? c : '#c9d1d9', opts.uphRank || '');
-        addMetric(idleLabel(idlePct), 'IDLE', ic, opts.idleRank || '');
-        addMetric(formatUnits(opts.units || 0), 'units', '#8b949e', '', opts.lead ? 16 : 13);
+        const scopeLabel = opts.scopeLabel || 'Total';
+        addMetric(opts.value, 'UPH', opts.uph > 0 ? c : '#c9d1d9', opts.uphRank || '', size, {
+            key: 'uph',
+            viewTitle: 'View UPH, lowest first',
+            onView: function () { openRosterPopup(scopeLabel, scopeIds, 'uph'); }
+        });
+        addMetric(idleLabel(idlePct), 'IDLE', ic, opts.idleRank || '', size, {
+            key: 'idle',
+            viewTitle: 'View idle percent, highest first',
+            onView: function () { openRosterPopup(scopeLabel, scopeIds, 'idle'); }
+        });
+        addMetric(String(idleCount), 'ASSOCIATES IDLE', idleCount > 0 ? '#f85149' : '#c9d1d9', '', size, {
+            key: 'idleCount',
+            viewTitle: 'View associates idle for 11 minutes',
+            onView: function () { openRosterPopup(scopeLabel, scopeIds, 'idleNow'); }
+        });
+        addMetric(formatUnits(opts.units || 0), 'units', '#8b949e', '', opts.lead ? 16 : 13, { key: 'units' });
+        addMetric(formatDuration(opts.idleMin || 0), 'hrs idle', '#8b949e', '', opts.lead ? 16 : 13, { key: 'idleHours' });
 
         cell.appendChild(titleRow);
         cell.appendChild(valueRow);
@@ -3886,11 +4103,11 @@
 
     function ensureSummaryActions() {
         let actions = document.getElementById('mem3-summary-actions');
-        if (actions && actions.getAttribute('data-mem3-probe') !== 'all-v56') actions.remove();
-        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'all-v56') return actions;
+        if (actions && actions.getAttribute('data-mem3-probe') !== 'issues-v188') actions.remove();
+        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'issues-v188') return actions;
         actions = document.createElement('div');
         actions.id = 'mem3-summary-actions';
-        actions.setAttribute('data-mem3-probe', 'all-v56');
+        actions.setAttribute('data-mem3-probe', 'issues-v188');
         actions.style.cssText = 'display:flex; gap:6px; align-items:flex-start; flex-wrap:wrap;';
         function actionButton(label, border) {
             const btn = document.createElement('button');
@@ -3901,12 +4118,6 @@
                 'color:#ffffff; background:#0d1117; border:1px solid ' + border + '; white-space:nowrap;';
             return btn;
         }
-        const unassignBtn = actionButton('Unassign all', '#f85149');
-        unassignBtn.addEventListener('click', function (e) {
-            e.preventDefault();
-            e.stopPropagation();
-            askUnassignAll(unassignBtn);
-        });
         const copyBtn = actionButton('Copy debug', '#30363d');
         copyBtn.addEventListener('click', function (e) {
             e.preventDefault();
@@ -3919,12 +4130,426 @@
                 setTimeout(function () { copyBtn.textContent = 'Copy debug'; }, 2000);
             });
         });
-        actions.appendChild(unassignBtn);
+        actions.appendChild(makeIssueButton());
         actions.appendChild(copyBtn);
         return actions;
     }
 
     let summaryWatchAt = 0;
+
+    function idleStretchMin(time) {
+        const fn = time && time.lastFunction;
+        return fn ? (fn.minutes || 0) : 0;
+    }
+
+    function sortIdleIds(ids) {
+        ids.sort(function (a, b) {
+            const gap = idleStretchMin(LAST_TIME[b]) - idleStretchMin(LAST_TIME[a]);
+            if (gap) return gap;
+            const an = (personForEmp(a).name || personForEmp(a).login || a).toLowerCase();
+            const bn = (personForEmp(b).name || personForEmp(b).login || b).toLowerCase();
+            if (an < bn) return -1;
+            if (an > bn) return 1;
+            return String(a) < String(b) ? -1 : (String(a) > String(b) ? 1 : 0);
+        });
+        return ids;
+    }
+
+    function uniqueIds(ids) {
+        const seen = Object.create(null);
+        const out = [];
+        const list = ids || [];
+        for (let i = 0; i < list.length; i++) {
+            const id = list[i];
+            if (!id || seen[id]) continue;
+            seen[id] = true;
+            out.push(id);
+        }
+        return out;
+    }
+
+    function lineIdsOf(data) {
+        const ids = [];
+        const lines = (data && data.lines) || [];
+        for (let i = 0; i < lines.length; i++) {
+            const list = lines[i].empIds || [];
+            for (let j = 0; j < list.length; j++) ids.push(list[j]);
+        }
+        return uniqueIds(ids);
+    }
+
+    // Idle starts at 11 minutes on the latest function row.
+    // A shorter indirect or Time Off Task row is the lag after a scan.
+    function idleIdsIn(ids) {
+        const pool = uniqueIds(ids);
+        const idle = [];
+        const under10 = [];
+        for (let i = 0; i < pool.length; i++) {
+            const id = pool[i];
+            const time = LAST_TIME[id];
+            const fn = time && time.lastFunction;
+            if (isClockedOut(id)) continue;
+            if (!fn) continue;
+            if (fn.bucket !== 'indirect' && fn.bucket !== 'tot') continue;
+            if (showsIdleNow(time, id)) idle.push(id);
+            else under10.push(id);
+        }
+        return { idle: sortIdleIds(idle), under10: sortIdleIds(under10) };
+    }
+
+    function idleScan() {
+        return idleIdsIn(BOARD_IDS);
+    }
+
+    function personSortName(id) {
+        const person = personForEmp(id);
+        return (person.name || person.login || id).toLowerCase();
+    }
+
+    function worstUphIds(ids) {
+        const list = uniqueIds(ids);
+        list.sort(function (a, b) {
+            const as = statsFor(a);
+            const bs = statsFor(b);
+            const au = as.hasData ? as.uph : -1;
+            const bu = bs.hasData ? bs.uph : -1;
+            if (au !== bu) return au - bu;
+            const an = personSortName(a);
+            const bn = personSortName(b);
+            if (an < bn) return -1;
+            if (an > bn) return 1;
+            return String(a) < String(b) ? -1 : (String(a) > String(b) ? 1 : 0);
+        });
+        return list;
+    }
+
+    function worstIdleIds(ids) {
+        const list = uniqueIds(ids);
+        list.sort(function (a, b) {
+            const ap = idlePercent(LAST_TIME[a]);
+            const bp = idlePercent(LAST_TIME[b]);
+            const av = ap === null ? -1 : ap;
+            const bv = bp === null ? -1 : bp;
+            if (av !== bv) return bv - av;
+            const an = personSortName(a);
+            const bn = personSortName(b);
+            if (an < bn) return -1;
+            if (an > bn) return 1;
+            return String(a) < String(b) ? -1 : (String(a) > String(b) ? 1 : 0);
+        });
+        return list;
+    }
+
+    function idleAssociateIds() {
+        return idleScan().idle;
+    }
+
+    function stationLabel(text) {
+        const raw = String(text || '').replace(/\s+/g, ' ').trim();
+        if (!raw) return '';
+        if (/1st\s*half/i.test(raw) || /station/i.test(raw)) return formatOpenStation(raw);
+        return raw;
+    }
+
+    function idleAssociateDebug(empId) {
+        const person = personForEmp(empId);
+        const time = LAST_TIME[empId];
+        const stats = statsFor(empId);
+        const fn = time && time.lastFunction;
+        let timeUrl = '';
+        try { timeUrl = fclmEmpUrl(empId); } catch (e) { timeUrl = ''; }
+        return {
+            script: SCRIPT_LABEL,
+            version: SCRIPT_VERSION,
+            what: 'idle-associate',
+            capturedAt: new Date().toISOString(),
+            window: windowPreset(ACTIVE_WINDOW).label,
+            associate: person.name || person.login || person.empId,
+            login: person.login,
+            empId: person.empId,
+            station: stationLabel(person.station),
+            stationRaw: person.station || '',
+            line: person.line,
+            uph: stats.hasData ? stats.uph : null,
+            units: stats.hasData ? stats.units : null,
+            idlePercent: idlePercent(time),
+            idleForMin: fn ? fn.minutes : null,
+            idleHours: time && time.hasTime ? (Number(time.idleMin) || 0) / 60 : null,
+            idleStartsAtMin: IDLE_START_MIN,
+            clock: person.clock,
+            shownAs: showsIdleNow(time, empId)
+                ? ('Idle for ' + formatDuration(idleStretchMin(time)))
+                : 'Not currently in Idle Time.',
+            why: idleNowReason(time, empId),
+            lastFunction: fn || null,
+            currentlyIdle: showsIdleNow(time, empId),
+            time: timeSnapshot(time, empId),
+            rollup: rollupSnapshot(empId),
+            timeUrl: timeUrl
+        };
+    }
+
+    function idleAssociatesDebug() {
+        const scan = idleScan();
+        const associates = [];
+        const under10 = [];
+        for (let i = 0; i < scan.idle.length; i++) associates.push(idleAssociateDebug(scan.idle[i]));
+        for (let i = 0; i < scan.under10.length; i++) under10.push(idleAssociateDebug(scan.under10[i]));
+        return {
+            script: SCRIPT_LABEL,
+            version: SCRIPT_VERSION,
+            what: 'idle-associates',
+            capturedAt: new Date().toISOString(),
+            window: windowPreset(ACTIVE_WINDOW).label,
+            rule: 'Latest function row is indirect or Time Off Task for at least 11 minutes. A shorter row is not counted. A diamond in the title is still that stretch. A clocked-out associate is not counted.',
+            count: associates.length,
+            under10Count: under10.length,
+            associates: associates,
+            under10: under10
+        };
+    }
+
+    function idleField(label, value, color) {
+        const row = document.createElement('div');
+        row.style.cssText = 'font-size:12px; font-weight:650; line-height:1.35;';
+        const name = document.createElement('span');
+        name.textContent = label + ' ';
+        name.style.cssText = 'color:#8b949e; font-weight:700;';
+        const val = document.createElement('span');
+        val.textContent = value;
+        if (color) val.style.color = color;
+        row.appendChild(name);
+        row.appendChild(val);
+        return row;
+    }
+
+    function rosterPeople(ids, mode) {
+        if (mode === 'uph') return worstUphIds(ids);
+        if (mode === 'idle') return worstIdleIds(ids);
+        return idleIdsIn(ids).idle;
+    }
+
+    function rosterDebug(title, ids) {
+        const associates = [];
+        for (let i = 0; i < ids.length; i++) associates.push(idleAssociateDebug(ids[i]));
+        return {
+            script: SCRIPT_LABEL,
+            version: SCRIPT_VERSION,
+            what: 'roster',
+            capturedAt: new Date().toISOString(),
+            window: windowPreset(ACTIVE_WINDOW).label,
+            title: title,
+            count: associates.length,
+            associates: associates
+        };
+    }
+
+    function photoForEmp(empId) {
+        const stored = (BOARD_PEOPLE[empId] && BOARD_PEOPLE[empId].photo) || '';
+        const login = String((personForEmp(empId).login) || '').toLowerCase();
+        if (!login) return stored;
+        const tables = document.querySelectorAll('table');
+        for (let t = 0; t < tables.length; t++) {
+            const table = tables[t];
+            if (table.closest && table.closest('#' + FLOOR_SUMMARY_ID)) continue;
+            const trs = tableRows(table);
+            for (let i = 0; i < trs.length; i++) {
+                const found = findLoginInRow(trs[i]);
+                if (!found || found.login !== login) continue;
+                const url = badgePhotoUrl(avatarEl(trs[i]));
+                if (!url) continue;
+                if (BOARD_PEOPLE[empId]) BOARD_PEOPLE[empId].photo = url;
+                return url;
+            }
+        }
+        return stored;
+    }
+
+    function idleNowReason(time, empId) {
+        const fn = time && time.lastFunction;
+        if (isClockedOut(empId)) return 'Latest punch is clocked out, so they are not counted as idle now.';
+        if (!fn) return 'No function row was read from Time Details.';
+        const mins = fn.minutes || 0;
+        const lead = 'Latest function row is ' + (fn.bucket || 'unknown') + ', ' +
+            formatDuration(mins) + ', title ' + (fn.title || '') + '.';
+        if (fn.bucket !== 'indirect' && fn.bucket !== 'tot') return lead + ' That row is not indirect or Time Off Task.';
+        if (mins < IDLE_START_MIN) return lead + ' That is under ' + IDLE_START_MIN + ' minutes, so they are not counted as idle now.';
+        return lead + ' Idle for uses this one row. It is not the idle total for the window.';
+    }
+
+    function idleHoursLabel(minutes) {
+        const hours = (Number(minutes) || 0) / 60;
+        return '(' + hours.toFixed(2) + ' Hours of Idle Time)';
+    }
+
+    function idleNowYield() {
+        const mark = document.createElement('span');
+        mark.className = 'mem3-yield-mark';
+        mark.title = 'Idle now';
+        mark.style.marginLeft = '6px';
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('viewBox', '0 0 24 22');
+        svg.setAttribute('width', '16');
+        svg.setAttribute('height', '15');
+        svg.setAttribute('aria-hidden', 'true');
+        const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+        poly.setAttribute('points', '12,1.2 22.6,20.8 1.4,20.8');
+        poly.setAttribute('fill', '#f85149');
+        const bar = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        bar.setAttribute('x', '10.7');
+        bar.setAttribute('y', '7');
+        bar.setAttribute('width', '2.6');
+        bar.setAttribute('height', '7');
+        bar.setAttribute('rx', '0.6');
+        bar.setAttribute('fill', '#0d1117');
+        const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        dot.setAttribute('cx', '12');
+        dot.setAttribute('cy', '17.2');
+        dot.setAttribute('r', '1.35');
+        dot.setAttribute('fill', '#0d1117');
+        svg.appendChild(poly);
+        svg.appendChild(bar);
+        svg.appendChild(dot);
+        mark.appendChild(svg);
+        return mark;
+    }
+
+    function personCard(empId) {
+        const person = personForEmp(empId);
+        const time = LAST_TIME[empId];
+        const stats = statsFor(empId);
+        const card = document.createElement('div');
+        card.style.cssText = 'display:flex; align-items:center; gap:8px; background:#0d1117; ' +
+            'border:1px solid #30363d; border-radius:8px; padding:8px;';
+        const photoPx = CLOCK_PHOTO_PX * 3;
+        const ringPx = CLOCK_RING_PX * 3;
+        const photoWrap = document.createElement('div');
+        photoWrap.style.cssText = 'flex:0 0 auto; padding:' + ringPx + 'px; line-height:0;';
+        const photo = document.createElement('div');
+        photo.setAttribute('data-mem3-photo', '1');
+        const photoUrl = photoForEmp(empId);
+        photo.style.cssText = 'position:relative; width:' + photoPx + 'px; height:' + photoPx + 'px; ' +
+            'border-radius:50%; background:#21262d center/cover no-repeat;';
+        if (photoUrl) photo.style.backgroundImage = 'url("' + String(photoUrl).replace(/"/g, '') + '")';
+        const clock = clockLabel(person.clockStatus);
+        if (clock) {
+            photo.title = clock.text;
+            const ring = document.createElement('span');
+            ring.className = 'mem3-popup-clock-ring';
+            ring.style.cssText = 'position:absolute; inset:0; width:100%; height:100%; box-sizing:border-box; ' +
+                'border-radius:50%; pointer-events:none; border:0; background:transparent; ' +
+                'box-shadow:0 0 0 ' + ringPx + 'px ' + clock.color + ';';
+            photo.appendChild(ring);
+        }
+        photoWrap.appendChild(photo);
+        const info = document.createElement('div');
+        info.style.cssText = 'flex:1 1 auto; min-width:0;';
+        const name = document.createElement('div');
+        name.textContent = person.name || person.login || person.empId;
+        name.style.cssText = 'font-size:14px; font-weight:800; margin-bottom:4px;';
+        info.appendChild(name);
+        info.appendChild(idleField('Login', person.login || '\u2014'));
+        info.appendChild(idleField('Station', stationLabel(person.station) || '\u2014'));
+        info.appendChild(idleField(
+            'UPH',
+            stats.hasData ? (stats.uph > 0 ? stats.uph.toFixed(1) : '0') : '\u2014',
+            stats.hasData ? uphColor(stats.uph) : '#8b949e'
+        ));
+        const pct = idlePercent(time);
+        const idleRow = idleField('Idle', idleLabel(pct), idleColor(pct));
+        if (time && time.hasTime) {
+            const hours = document.createElement('span');
+            hours.textContent = ' ' + idleHoursLabel(time.idleMin);
+            hours.style.color = '#ffffff';
+            idleRow.appendChild(hours);
+        }
+        info.appendChild(idleRow);
+        if (showsIdleNow(time, empId)) {
+            const stretch = idleField('Idle for', formatDuration(idleStretchMin(time)));
+            stretch.appendChild(idleNowYield());
+            info.appendChild(stretch);
+        } else {
+            const quiet = document.createElement('div');
+            quiet.textContent = 'Not currently in Idle Time.';
+            quiet.style.cssText = 'font-size:12px; font-weight:650; line-height:1.35;';
+            info.appendChild(quiet);
+        }
+        info.appendChild(timeDetailsLink(empId));
+        card.appendChild(photoWrap);
+        card.appendChild(info);
+        return card;
+    }
+
+    function openRosterPopup(scopeLabel, ids, mode) {
+        const old = document.getElementById('mem3-roster-popup');
+        if (old) old.remove();
+        const people = rosterPeople(ids, mode);
+        const titles = {
+            uph: 'UPH, lowest first',
+            idle: 'Idle percent, highest first',
+            idleNow: 'Idle for 11 minutes'
+        };
+        const notes = {
+            uph: 'Lowest rate first. Someone with no Primary Grading rate is at the top.',
+            idle: 'Highest idle percent first. The percent is the whole window, not this stretch.',
+            idleNow: 'Latest function row is indirect or Time Off Task for at least 11 minutes. Clocked-out associates are left out.'
+        };
+        const headingText = (scopeLabel || 'Total') + ' \u00b7 ' + (titles[mode] || 'Associates');
+        installPulseStyles();
+        const overlay = document.createElement('div');
+        overlay.id = 'mem3-roster-popup';
+        overlay.style.cssText = 'position:fixed; inset:0; z-index:2147483646; background:rgba(0,0,0,0.55); ' +
+            'display:flex; align-items:flex-start; justify-content:center; padding:32px 16px; ' +
+            'font-family:Segoe UI,system-ui,sans-serif; color:#ffffff;';
+        overlay.addEventListener('click', function (e) {
+            if (e.target === overlay) overlay.remove();
+        });
+        const card = document.createElement('div');
+        card.style.cssText = 'width:min(720px, 100%); max-height:calc(100vh - 64px); overflow:auto; ' +
+            'background:#161b22; border:1px solid #30363d; border-radius:12px; padding:18px 18px 8px;';
+        const top = document.createElement('div');
+        top.style.cssText = 'display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:8px;';
+        const headingWrap = document.createElement('div');
+        const heading = document.createElement('div');
+        heading.textContent = headingText;
+        heading.style.cssText = 'font-size:18px; font-weight:800;';
+        const sub = document.createElement('div');
+        sub.textContent = people.length + (people.length === 1 ? ' associate' : ' associates');
+        sub.style.cssText = 'font-size:13px; font-weight:500; color:#c9d1d9; margin-top:4px;';
+        headingWrap.appendChild(heading);
+        headingWrap.appendChild(sub);
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex; gap:8px; flex:0 0 auto;';
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = 'Close';
+        close.style.cssText = 'padding:6px 12px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
+            'background:#0d1117; border:1px solid #8b949e; font:800 12px Segoe UI,system-ui,sans-serif;';
+        close.addEventListener('click', function () { overlay.remove(); });
+        actions.appendChild(close);
+        top.appendChild(headingWrap);
+        top.appendChild(actions);
+        card.appendChild(top);
+        const note = document.createElement('div');
+        note.textContent = notes[mode] || '';
+        note.style.cssText = 'font-size:12px; font-weight:500; color:#8b949e; margin:0 0 12px;';
+        card.appendChild(note);
+        if (!people.length) {
+            const empty = document.createElement('div');
+            empty.textContent = mode === 'idleNow'
+                ? 'No associate has been idle for 11 minutes.'
+                : 'No associates on this list.';
+            empty.style.cssText = 'font-size:13px; font-weight:650; margin-bottom:12px;';
+            card.appendChild(empty);
+        } else {
+            const list = document.createElement('div');
+            list.style.cssText = 'display:flex; flex-direction:column; gap:8px; margin-bottom:12px;';
+            for (let i = 0; i < people.length; i++) list.appendChild(personCard(people[i]));
+            card.appendChild(list);
+        }
+        overlay.appendChild(card);
+        document.body.appendChild(overlay);
+    }
 
     function summaryIsMounted() {
         const node = document.getElementById(FLOOR_SUMMARY_ID);
@@ -3943,6 +4568,78 @@
         if (now - summaryWatchAt < 2000) return;
         summaryWatchAt = now;
         render();
+    }
+
+    function summaryStructureSig(data) {
+        return 'v46|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
+            (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
+            (data.floorOpen || []).join(';') + '|' +
+            data.floorStaffed + '|' + (data.asOf || '') + '|' +
+            (data.lines || []).map(function (l) {
+                return l.name + ':' + l.withData + ':' + l.staffed + ':' +
+                    (l.signed || 0) + '/' + (l.stations || 0) + ':' +
+                    (l.openStations || []).join(';') + ':' + (l.empIds || []).join('.');
+            }).join(',');
+    }
+
+    function summaryCellByKey(node, key) {
+        const cells = node.querySelectorAll('[data-summary]');
+        for (let i = 0; i < cells.length; i++) {
+            if (cells[i].getAttribute('data-summary') === key) return cells[i];
+        }
+        return null;
+    }
+
+    function paintSummaryMetrics(node, data) {
+        const ranks = extremeRanks(data.lines);
+        function paint(key, spec) {
+            const cell = summaryCellByKey(node, key);
+            if (!cell) return false;
+            function num(metric, text, color) {
+                const el = cell.querySelector('[data-metric="' + metric + '"]');
+                if (!el) return;
+                if (el.textContent !== text) el.textContent = text;
+                if (color) el.style.color = color;
+            }
+            function rank(metric, which) {
+                const el = cell.querySelector('[data-rank-for="' + metric + '"]');
+                if (!el) return;
+                el.classList.remove('mem3-pulse-best', 'mem3-pulse-worst');
+                if (which === 'best') el.classList.add('mem3-pulse-best');
+                else if (which === 'worst') el.classList.add('mem3-pulse-worst');
+            }
+            num('uph', spec.uphText, spec.uph > 0 ? uphColor(spec.uph) : '#c9d1d9');
+            rank('uph', spec.uphRank || '');
+            num('units', formatUnits(spec.units || 0), '#8b949e');
+            num('idle', idleLabel(spec.idlePct), idleColor(spec.idlePct));
+            rank('idle', spec.idleRank || '');
+            num('idleCount', String(spec.idleCount), spec.idleCount > 0 ? '#f85149' : '#c9d1d9');
+            num('idleHours', formatDuration(spec.idleMin || 0), '#8b949e');
+            return true;
+        }
+        const totalIds = lineIdsOf(data);
+        if (!paint('total', {
+            uphText: data.floorAvg > 0 ? data.floorAvg.toFixed(1) : '\u2014',
+            uph: data.floorAvg,
+            idlePct: sideIdlePct(data.floorIdleMin || 0, data.floorClockedMin || 0),
+            idleCount: idleIdsIn(totalIds).idle.length,
+            units: data.floorUnits || 0,
+            idleMin: data.floorIdleMin || 0
+        })) return false;
+        for (let i = 0; i < data.lines.length; i++) {
+            const line = data.lines[i];
+            if (!paint(line.name, {
+                uphText: line.avgUph > 0 ? line.avgUph.toFixed(1) : '\u2014',
+                uph: line.avgUph,
+                uphRank: metricRank(shownUph(line), ranks.bestUph, ranks.worstUph),
+                idlePct: sideIdlePct(line.idleMin || 0, line.clockedMin || 0),
+                idleRank: metricRank(shownIdle(line), ranks.bestIdle, ranks.worstIdle),
+                idleCount: idleIdsIn(line.empIds || []).idle.length,
+                units: line.totalUnits || 0,
+                idleMin: line.idleMin || 0
+            })) return false;
+        }
+        return true;
     }
 
     function placeFloorSummary(summary) {
@@ -3974,21 +4671,14 @@
             main.insertBefore(node, main.firstChild);
         }
 
-        const sig = 'v41|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' + data.floorAvg.toFixed(1) + '|' + data.floorUnits + '|' + data.floorRated + '|' +
-            (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
-            (data.floorOpen || []).join(';') + '|' +
-            data.floorStaffed + '|' + (data.floorTotalMin || 0) + '|' + (data.floorIdleMin || 0) + '|' +
-            (data.floorClockedMin || 0) + '|' +
-            data.asOf + '|' + data.lines.map(function (l) {
-                return l.name + ':' + l.avgUph.toFixed(1) + ':' + l.totalUnits + ':' + l.withData + ':' + l.staffed +
-                    ':' + (l.totalMin || 0) + ':' + (l.idleMin || 0) + ':' + (l.clockedMin || 0) +
-                    ':' + (l.both || 0) + ':' + (l.signed || 0) + '/' + (l.stations || 0) +
-                    ':' + (l.openStations || []).join(';');
-            }).join(',');
+        const sig = summaryStructureSig(data);
         if (node.getAttribute('data-sig') === sig && node.firstChild) {
-            paintProgress();
-            return;
+            if (paintSummaryMetrics(node, data)) {
+                paintProgress();
+                return;
+            }
         }
+        node.setAttribute('data-sig', sig);
         const actions = ensureSummaryActions();
         if (actions.parentElement) actions.remove();
 
@@ -4090,13 +4780,18 @@
         }
 
         const metrics = document.createElement('div');
-        metrics.style.cssText = 'display:flex; align-items:stretch; flex-wrap:nowrap; gap:0; width:100%; min-width:0;';
+        metrics.style.cssText = 'display:flex; align-items:flex-start; flex-wrap:nowrap; gap:0; width:100%; min-width:0;';
 
+        const totalIds = lineIdsOf(data);
         metrics.appendChild(makeSummaryCell({
+            summaryKey: 'total',
+            scopeLabel: 'Total',
+            empIds: totalIds,
             kicker: 'Total',
             value: data.floorAvg > 0 ? data.floorAvg.toFixed(1) : '\u2014',
             uph: data.floorAvg,
             units: data.floorUnits || 0,
+            idleMin: data.floorIdleMin || 0,
             idlePct: sideIdlePct(data.floorIdleMin || 0, data.floorClockedMin || 0),
             signed: data.floorSigned || 0,
             stations: data.floorStations || 0,
@@ -4108,10 +4803,14 @@
         for (let i = 0; i < data.lines.length; i++) {
             const line = data.lines[i];
             metrics.appendChild(makeSummaryCell({
+                summaryKey: line.name,
+                scopeLabel: panelTitle(line.name),
+                empIds: line.empIds || [],
                 kicker: panelTitle(line.name),
                 value: line.avgUph > 0 ? line.avgUph.toFixed(1) : '\u2014',
                 uph: line.avgUph,
                 units: line.totalUnits || 0,
+                idleMin: line.idleMin || 0,
                 idlePct: sideIdlePct(line.idleMin || 0, line.clockedMin || 0),
                 uphRank: metricRank(shownUph(line), ranks.bestUph, ranks.worstUph),
                 idleRank: metricRank(shownIdle(line), ranks.bestIdle, ranks.worstIdle),
@@ -4195,7 +4894,10 @@
                 const empId = resolveEmpId(person);
                 const stats = statsFor(empId);
                 const time = timeFor(empId);
-                if (empId) empIds.push(empId);
+                if (empId) {
+                    if (empIds.indexOf(empId) === -1) empIds.push(empId);
+                    rememberBoardPerson(empId, person, panelName, rowAssignmentText(tr), badgePhotoUrl(avatarEl(tr)));
+                }
                 if (stats.hasData) withData++;
                 if (stats.hasData && showsIdle(time)) both++;
                 if (stats.uph > 0) { uphList.push(stats.uph); totalUnits += stats.units; }
@@ -4217,7 +4919,7 @@
                     });
                 }
 
-                placeRowBadge(tr, found, stats, !!empId, time);
+                placeRowBadge(tr, found, stats, !!empId, time, empId);
             }
         }
 
@@ -4307,16 +5009,7 @@
         box.dataset.login = person && person.login ? person.login : '';
         ensurePopupClock(box, person, empId);
 
-        if (empId) {
-            const link = document.createElement('a');
-            link.href = fclmEmpUrl(empId);
-            link.target = '_blank';
-            link.rel = 'noopener';
-            link.textContent = 'Open FCLM Time Details';
-            link.style.cssText = 'display:inline-block; margin-top:6px; font-size:12px; color:#58a6ff; text-decoration:underline;';
-            link.addEventListener('click', function (e) { e.stopPropagation(); });
-            box.appendChild(link);
-        }
+        if (empId) box.appendChild(timeDetailsLink(empId));
 
         if (!unassigning) {
             const dbg = document.createElement('button');
@@ -4625,7 +5318,8 @@
                     both: s.both,
                     stations: s.crStations,
                     signed: s.crSigned,
-                    openStations: s.openStations || []
+                    openStations: s.openStations || [],
+                    empIds: s.empIds || []
                 });
                 DEBUG.perLine[keys[i]] = lineStats[lineStats.length - 1];
                 if (s.avgUph > 0) avgList.push(s.avgUph);
@@ -4726,8 +5420,10 @@
                         if (!badge) return true;
                         const empId = resolveEmpId(IDENTITY.byLogin[found.login]);
                         const sig = badge.getAttribute('data-sig') || '';
+                        const rowTime = empId ? LAST_TIME[empId] : null;
                         if (sig.indexOf(expectedRateText(empId)) === -1) return true;
-                        if (sig.indexOf(expectedIdleText(empId ? LAST_TIME[empId] : null)) === -1) return true;
+                        if (sig.indexOf(expectedIdleText(rowTime)) === -1) return true;
+                        if (sig.slice(sig.lastIndexOf('|') + 1) !== idleNowSig(rowTime, empId)) return true;
                     }
                 }
             }
@@ -4744,7 +5440,8 @@
                     const badge = tr.querySelector('.' + BIGS_IDLE_CLASS);
                     if (!badge) return true;
                     const empId = resolveEmpId(IDENTITY.byLogin[found.login]);
-                    if ((badge.getAttribute('data-sig') || '') !== expectedIdleText(empId ? LAST_TIME[empId] : null)) return true;
+                    const bigsTime = empId ? LAST_TIME[empId] : null;
+                    if ((badge.getAttribute('data-sig') || '') !== expectedIdleText(bigsTime) + '|' + idleNowSig(bigsTime, empId)) return true;
                 }
             }
         } catch (e) {
@@ -4849,7 +5546,6 @@
                 scheduleRollupRetry();
             }
             refreshCycle++;
-            resetTimeTries();
             lastIdentified = null;
             render();
             if (gen !== refreshGeneration) return;
@@ -4930,6 +5626,265 @@
             setTimeout(showAssignments, 300);
             setTimeout(showAssignments, 1200);
         }, true);
+    }
+
+    function personForEmp(empId) {
+        const board = BOARD_PEOPLE[empId] || {};
+        const ident = IDENTITY.byId[empId] || (board.login ? IDENTITY.byLogin[board.login] : null);
+        const raw = (ident && ident.name) || board.name || '';
+        const pretty = swapPersonName(raw) || raw;
+        const login = (ident && ident.login) || board.login || '';
+        const clock = clockFor(ident, empId);
+        return {
+            empId: String(empId),
+            name: pretty,
+            login: login,
+            badge: (ident && ident.badge) || board.badge || '',
+            line: board.line || '',
+            station: board.station || '',
+            clock: clock === 'in' ? 'Clocked in' : (clock === 'out' ? 'Clocked out' : ''),
+            clockStatus: clock
+        };
+    }
+
+    function timeSnapshot(record, empId) {
+        if (!record) return null;
+        return {
+            hasTime: !!record.hasTime,
+            noData: !!record.noData,
+            gaveUp: !!record.gaveUp,
+            error: record.error || '',
+            tries: record.tries || 0,
+            cycle: record.cycle || 0,
+            totalMin: record.totalMin || 0,
+            idleMin: record.idleMin || 0,
+            clockedMin: record.clockedMin || 0,
+            paidMin: record.paidMin || 0,
+            clockRows: record.clockRows || 0,
+            functionRows: record.functionRows || 0,
+            sawClock: !!record.sawClock,
+            sawFunction: !!record.sawFunction,
+            pageTitle: record.pageTitle || '',
+            fetchedAt: record.fetchedAt || 0,
+            lastFunction: record.lastFunction || null,
+            currentlyIdle: showsIdleNow(record, empId)
+        };
+    }
+
+    function rollupSnapshot(empId) {
+        const entry = LAST_ROLLUP[empId];
+        if (!entry || !entry.functions) return null;
+        const names = Object.keys(entry.functions);
+        const out = {};
+        for (let i = 0; i < names.length && i < 12; i++) {
+            const slot = entry.functions[names[i]] || {};
+            out[names[i]] = { uph: slot.uph || 0, units: slot.units || 0 };
+        }
+        return out;
+    }
+
+    function associateDebug(empId) {
+        const person = personForEmp(empId);
+        let timeUrl = '';
+        try { timeUrl = fclmEmpUrl(empId); } catch (e) { timeUrl = ''; }
+        return {
+            script: SCRIPT_LABEL,
+            version: SCRIPT_VERSION,
+            what: 'associate',
+            capturedAt: new Date().toISOString(),
+            window: windowPreset(ACTIVE_WINDOW).label,
+            person: person,
+            issue: TIME_ISSUES[empId] || null,
+            finished: timeFinished(empId),
+            inFlight: !!TIME_IN_FLIGHT[empId],
+            tries: TIME_TRIES[empId] || 0,
+            time: timeSnapshot(LAST_TIME[empId], empId),
+            rollup: rollupSnapshot(empId),
+            timeUrl: timeUrl
+        };
+    }
+
+    function allAssociatesDebug() {
+        const ids = cycleEmpIds();
+        const associates = [];
+        for (let i = 0; i < ids.length; i++) associates.push(associateDebug(ids[i]));
+        return {
+            script: SCRIPT_LABEL,
+            version: SCRIPT_VERSION,
+            what: 'all-associates',
+            capturedAt: new Date().toISOString(),
+            window: windowPreset(ACTIVE_WINDOW).label,
+            progress: timeProgress(),
+            issueCount: issueIds().length,
+            associates: associates
+        };
+    }
+
+    function sortedIssueIds() {
+        const ids = issueIds();
+        ids.sort(function (a, b) {
+            const pa = personForEmp(a);
+            const pb = personForEmp(b);
+            const an = (pa.name || pa.login || a).toLowerCase();
+            const bn = (pb.name || pb.login || b).toLowerCase();
+            if (an < bn) return -1;
+            if (an > bn) return 1;
+            return String(a) < String(b) ? -1 : (String(a) > String(b) ? 1 : 0);
+        });
+        return ids;
+    }
+
+    function paintIssueIcon() {
+        const btn = document.getElementById('mem3-time-issues');
+        if (btn) {
+            const n = issueIds().length;
+            btn.textContent = n ? ('Time issues ' + n) : 'Time issues';
+            btn.title = n
+                ? (n + (n === 1 ? ' associate' : ' associates') + ' had trouble loading time')
+                : 'No time issues this refresh. Click to copy every associate.';
+            btn.style.borderColor = n ? '#d29922' : '#8b949e';
+            btn.style.color = n ? '#d29922' : '#ffffff';
+        }
+    }
+
+    function copyDebugButton(label, build) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = label;
+        btn.style.cssText = 'flex:0 0 auto; padding:6px 10px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
+            'background:#0d1117; border:1px solid #58a6ff; font:800 12px Segoe UI,system-ui,sans-serif;';
+        btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            copyText(JSON.stringify(build(), null, 2)).then(function () {
+                btn.textContent = 'Copied';
+                setTimeout(function () { btn.textContent = label; }, 1200);
+            }).catch(function () {
+                btn.textContent = 'Copy failed';
+                setTimeout(function () { btn.textContent = label; }, 1500);
+            });
+        });
+        return btn;
+    }
+
+    function fillIssuePanel(overlay) {
+        const list = overlay.querySelector('[data-issue-list]');
+        const countEl = overlay.querySelector('[data-issue-count]');
+        if (!list) return;
+        const ids = sortedIssueIds();
+        if (countEl) {
+            countEl.textContent = ids.length
+                ? (ids.length + (ids.length === 1 ? ' associate needed another look.' : ' associates needed another look.'))
+                : 'No time issues this refresh.';
+        }
+        while (list.firstChild) list.removeChild(list.firstChild);
+        if (!ids.length) {
+            const empty = document.createElement('div');
+            empty.textContent = 'Everyone who was looked up came back clean. Copy all still includes every associate on the board.';
+            empty.style.cssText = 'font-size:13px; font-weight:500; color:#c9d1d9;';
+            list.appendChild(empty);
+            return;
+        }
+        for (let i = 0; i < ids.length; i++) {
+            const empId = ids[i];
+            const person = personForEmp(empId);
+            const issue = TIME_ISSUES[empId];
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex; align-items:flex-start; justify-content:space-between; gap:12px; ' +
+                'background:#0d1117; border:1px solid #30363d; border-radius:8px; padding:10px 12px; margin-bottom:8px;';
+            const text = document.createElement('div');
+            text.style.cssText = 'min-width:0;';
+            const name = document.createElement('div');
+            name.textContent = person.name || person.login || person.empId;
+            name.style.cssText = 'font-size:14px; font-weight:800;';
+            const meta = document.createElement('div');
+            const bits = [];
+            if (person.login) bits.push(person.login);
+            if (person.line) bits.push(person.line);
+            if (person.clock) bits.push(person.clock);
+            bits.push(person.empId);
+            meta.textContent = bits.join(' · ');
+            meta.style.cssText = 'font-size:12px; font-weight:600; color:#8b949e; margin-top:2px;';
+            const why = document.createElement('div');
+            why.textContent = issue && issue.reasons ? issue.reasons.join(' · ') : '';
+            why.style.cssText = 'font-size:13px; font-weight:600; color:#d29922; margin-top:4px;';
+            text.appendChild(name);
+            text.appendChild(meta);
+            text.appendChild(why);
+            row.appendChild(text);
+            row.appendChild(copyDebugButton('Copy', function () { return associateDebug(empId); }));
+            list.appendChild(row);
+        }
+    }
+
+    function openIssuePanel() {
+        const old = document.getElementById('mem3-time-issues-panel');
+        if (old) {
+            old.remove();
+            return;
+        }
+        const overlay = document.createElement('div');
+        overlay.id = 'mem3-time-issues-panel';
+        overlay.style.cssText = 'position:fixed; inset:0; z-index:2147483646; background:rgba(0,0,0,0.55); ' +
+            'display:flex; align-items:flex-start; justify-content:center; padding:32px 16px; ' +
+            'font-family:Segoe UI,system-ui,sans-serif; color:#ffffff;';
+        overlay.addEventListener('click', function (e) {
+            if (e.target === overlay) overlay.remove();
+        });
+        const card = document.createElement('div');
+        card.style.cssText = 'width:min(720px, 100%); max-height:calc(100vh - 64px); overflow:auto; ' +
+            'background:#161b22; border:1px solid #30363d; border-radius:12px; padding:18px 18px 8px;';
+        const top = document.createElement('div');
+        top.style.cssText = 'display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:8px;';
+        const headingWrap = document.createElement('div');
+        const heading = document.createElement('div');
+        heading.textContent = 'Time issues';
+        heading.style.cssText = 'font-size:18px; font-weight:800;';
+        const sub = document.createElement('div');
+        sub.setAttribute('data-issue-count', '1');
+        sub.style.cssText = 'font-size:13px; font-weight:500; color:#c9d1d9; margin-top:4px;';
+        headingWrap.appendChild(heading);
+        headingWrap.appendChild(sub);
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex; gap:8px; flex:0 0 auto;';
+        actions.appendChild(copyDebugButton('Copy all', allAssociatesDebug));
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = 'Close';
+        close.style.cssText = 'padding:6px 12px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
+            'background:#0d1117; border:1px solid #8b949e; font:800 12px Segoe UI,system-ui,sans-serif;';
+        close.addEventListener('click', function () { overlay.remove(); });
+        actions.appendChild(close);
+        top.appendChild(headingWrap);
+        top.appendChild(actions);
+        card.appendChild(top);
+        const note = document.createElement('div');
+        note.textContent = 'These are the associates whose time page failed or came back empty. Copy all includes every associate on the board, not only this list.';
+        note.style.cssText = 'font-size:12px; font-weight:500; color:#8b949e; margin:0 0 12px;';
+        card.appendChild(note);
+        const list = document.createElement('div');
+        list.setAttribute('data-issue-list', '1');
+        card.appendChild(list);
+        overlay.appendChild(card);
+        document.body.appendChild(overlay);
+        fillIssuePanel(overlay);
+    }
+
+    function makeIssueButton() {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.id = 'mem3-time-issues';
+        btn.textContent = 'Time issues';
+        btn.title = 'Associates whose time page had trouble';
+        btn.style.cssText = 'flex:0 0 auto; padding:4px 8px; border-radius:8px; cursor:pointer; ' +
+            'font:800 11px Segoe UI,system-ui,sans-serif; letter-spacing:0.03em; text-transform:uppercase; ' +
+            'color:#ffffff; background:#0d1117; border:1px solid #8b949e; white-space:nowrap;';
+        btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            openIssuePanel();
+        });
+        return btn;
     }
 
     function makeInfoButton() {
@@ -5062,7 +6017,11 @@
             ['Formula', 'Indirect time + Time Off Task, divided by paid time clocked in'],
             ['Counts', 'Indirect function time and Time Off Task in the selected window'],
             ['Does not count', 'Active graded time, or time outside the window'],
-            ['BIGS stations', 'A station whose name contains BIGS shows that associate’s idle percent on the row. It is left out of every side and out of Total.']
+            ['BIGS stations', 'A station whose name contains BIGS shows that associate’s idle percent on the row. It is left out of every side and out of Total.'],
+            ['IDLE NOW', 'The latest function row is indirect or Time Off Task, and that row has lasted at least 11 minutes. A diamond in the function title is still that stretch. A shorter row is the lag after a scan. Someone who is clocked out is not counted. Earlier idle in the window still counts in the percent.'],
+            ['ASSOCIATES IDLE', 'The number under the idle percent is how many associates on that side, or on the whole floor for Total, have been idle for at least 11 minutes. The white eye on the left opens that list.'],
+            ['View', 'The eye left of UPH lists that side from the lowest rate. The eye left of the idle percent lists it from the highest idle percent. Total does the same for everyone on the lines.'],
+            ['Hours idle', 'Under units, the idle hours are the indirect time plus Time Off Task already in the idle percent.']
         ]));
         card.appendChild(idleSec);
 
@@ -5092,7 +6051,7 @@
 
         const times = infoSection('Time frames');
         const timeNote = document.createElement('div');
-        timeNote.textContent = 'Days start at 6:00 AM. Nights start at 6:00 PM and use the same gaps. All shift is 6:00–5:59 (11 hr 59 min). UPH and IDLE refresh together every 5 minutes. Picking a window reloads both right away.';
+        timeNote.textContent = 'Days start at 6:00 AM. Nights start at 6:00 PM and use the same gaps. All shift is 6:00–5:59 (11 hr 59 min). UPH refreshes every 5 minutes. The idle percent is read once per associate. Reload, or picking a window, reads it again.';
         timeNote.style.cssText = 'font-size:13px; font-weight:500; margin-bottom:8px;';
         times.appendChild(timeNote);
         times.appendChild(infoRows([

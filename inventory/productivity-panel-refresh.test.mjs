@@ -5,7 +5,8 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-panel.txt", import.meta.url), "utf8");
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.8\.7/);
+assert.match(src, /@version\s+1\.9\.1/);
+assert.match(src, /gist\.githubusercontent\.com\/rigoabell\/60993861e496361e9d79fd5465de2973\/raw\/MEM3-Productivity-Panel\.user\.js/);
 assert.match(src, /oidc\.prod\.na\.maask\.amazonoperations\.com\/authentication/);
 assert.match(src, /menu\.na\.aft\.amazonoperations\.app/);
 assert.match(src, /function runMenuLoginAssist/);
@@ -24,7 +25,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.8.7");
+assert.equal(entry.version, "1.9.1");
 assert.match(entry.detail, /types MEM3/);
 assert.match(entry.runsOn, /menu\.na\.aft\.amazonoperations\.app/);
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
@@ -320,11 +321,10 @@ try {
     const failed = api.refreshData();
     await failed;
     await flush();
-    assert.ok(detailsStarted > beforeFail);
+    assert.equal(detailsStarted, beforeFail);
     assert.equal(api.rollupKeys().includes("99"), true);
     const afterFail = api.time("a") || api.time("b");
     assert.equal(afterFail.hasTime, true);
-    assert.equal(afterFail.gaveUp, true);
 
     api.stop();
     api.setDown(true);

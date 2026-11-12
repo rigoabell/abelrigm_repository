@@ -3,7 +3,8 @@ import fs from "node:fs";
 import vm from "node:vm";
 
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
-assert.match(src, /@version\s+2\.9\.29/);
+assert.match(src, /@version\s+2\.9\.36/);
+assert.match(src, /raw\.githubusercontent\.com\/rigoabell\/peculiar-line-flush\/main\/peculiar-line-flush\.user\.js/);
 assert.match(src, /oidc\.prod\.na\.maask\.amazonoperations\.com\/authentication/);
 assert.match(src, /menu\.na\.aft\.amazonoperations\.app/);
 assert.match(src, /function runMenuLoginAssist/);
@@ -12,7 +13,7 @@ assert.match(src, /MENU_LOCATION_CODE = "MEM3"/);
 assert.match(src, /d34wrqb3xn2znf\.cloudfront\.net\/idp-selection/);
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, dashboardHtml, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -194,14 +195,6 @@ assert.deepEqual(
 
 const locationOnly = api.recordsFromBook({ sheets: book.sheets.filter((sheet) => sheet.name !== "Dashboard") });
 assert.equal(locationOnly.length, 3);
-
-const dash = api.dashboardHtml([eol, line], "abelrigm");
-assert.match(dash, /LOCATIONS/);
-assert.match(dash, /SCANS/);
-assert.match(dash, /csX1234/);
-assert.match(dash, /L3 Even/);
-assert.equal(dash.includes("BY PARENT"), false);
-assert.equal(dash.includes("<svg"), false);
 
 const bulk = [];
 for (let i = 0; i < 3000; i++) {
