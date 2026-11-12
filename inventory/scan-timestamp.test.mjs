@@ -3,8 +3,10 @@ import fs from "node:fs";
 import vm from "node:vm";
 
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
+const published = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.user.js", import.meta.url), "utf8");
+assert.equal(published, src);
 assert.match(src, /@version\s+2\.9\.36/);
-assert.match(src, /raw\.githubusercontent\.com\/rigoabell\/peculiar-line-flush\/main\/peculiar-line-flush\.user\.js/);
+assert.match(src, /raw\.githubusercontent\.com\/rigoabell\/abelrigm_repository\/main\/docs\/downloads\/peculiar-line-flush\.user\.js/);
 assert.match(src, /oidc\.prod\.na\.maask\.amazonoperations\.com\/authentication/);
 assert.match(src, /menu\.na\.aft\.amazonoperations\.app/);
 assert.match(src, /function runMenuLoginAssist/);

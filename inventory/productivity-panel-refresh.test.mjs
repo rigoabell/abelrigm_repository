@@ -3,10 +3,12 @@ import fs from "node:fs";
 import vm from "node:vm";
 
 const src = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-panel.txt", import.meta.url), "utf8");
+const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-panel.user.js", import.meta.url), "utf8");
+assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
 assert.match(src, /@version\s+1\.9\.1/);
-assert.match(src, /gist\.githubusercontent\.com\/rigoabell\/60993861e496361e9d79fd5465de2973\/raw\/MEM3-Productivity-Panel\.user\.js/);
+assert.match(src, /raw\.githubusercontent\.com\/rigoabell\/abelrigm_repository\/main\/docs\/downloads\/mem3-productivity-panel\.user\.js/);
 assert.match(src, /oidc\.prod\.na\.maask\.amazonoperations\.com\/authentication/);
 assert.match(src, /menu\.na\.aft\.amazonoperations\.app/);
 assert.match(src, /function runMenuLoginAssist/);
