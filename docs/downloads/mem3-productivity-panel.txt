@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.6
+// @version      1.8.7
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -11,6 +11,10 @@
 // @match        https://beta.control-tower.meta.amazon.dev/MEM3/assignments*
 // @match        https://control-tower.meta.amazon.dev/*
 // @match        https://control-tower.meta.amazon.dev/MEM3/*
+// @match        https://oidc.prod.na.maask.amazonoperations.com/authentication*
+// @match        https://*.maask.amazonoperations.com/authentication*
+// @match        https://*.cloudfront.net/idp-selection*
+// @match        https://menu.na.aft.amazonoperations.app/*
 // @connect      fclm-portal.amazon.com
 // @connect      midway-auth.amazon.com
 // @connect      midway.amazon.com
@@ -22,6 +26,8 @@
 // @grant        GM_setClipboard
 // @grant        GM_openInTab
 // @grant        unsafeWindow
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -30,7 +36,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.6';
+    const SCRIPT_VERSION = '1.8.7';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -5483,6 +5489,331 @@
         setInterval(repairBoard, 1000);
     }
 
+    const MENU_IDP_SELECTION_URL = 'https://d34wrqb3xn2znf.cloudfront.net/idp-selection?redirect_uri=https%3A%2F%2Fmenu.na.aft.amazonoperations.app%2Fdo%2Fmfa%2Flogin&nonce=5f50a80c5db87e9cc23b0bc2124a6b6de1e21c0b83cd318714aff390c61ec6fb&scope=openid+tenantId%3A1545ed74-d2cd-11ec-9d64-0242ac120002&client_id=fc-menu-prod-na&state&response_type=code&otp&user_code&authorize_url=https%3A%2F%2Fprod.us-east-1.federated-auth.aft.a2z.com%2F1545ed74-d2cd-11ec-9d64-0242ac120002%2Fauthorize&data=%5B%7B%22id%22%3A%22amazon-federate-prod%22%2C%22displayString%22%3A%22IT+Service+Login%22%7D%2C%7B%22id%22%3A%22maask-prod-na%22%2C%22displayString%22%3A%22Login+with+MAASK%22%7D%5D&code_challenge&code_challenge_method&referrer=https%3A%2F%2Fmenu.na.aft.amazonoperations.app%2Fmidway%2Flogin&ui_locales=en_US';
+    const MENU_LOCATION_CODE = 'MEM3';
+    const MENU_CHAR_DELAY_MS = 18;
+    const MENU_ENTER_DELAY_MS = 250;
+    const MENU_REDIRECT_GAP_MS = 15000;
+    const MENU_WATCH_MS = 180000;
+    const MENU_STAMP_KEY = 'aftMenu.maaskRedirectAt';
+    const MENU_IDP_KEY = 'aftMenu.idpSelectionUrl';
+    const MENU_IT_LABEL = 'IT Service Login';
+
+    function menuParseUrl(href) {
+        if (typeof URL !== 'function') return null;
+        try {
+            return new URL(href);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function isMaaskAuthPage(href) {
+        const value = String(href || '');
+        if (value.indexOf('maask.amazonoperations.com') === -1) return false;
+        const url = menuParseUrl(value);
+        if (!url) return false;
+        const host = url.hostname.toLowerCase();
+        const maaskHost = host === 'maask.amazonoperations.com' || host.endsWith('.maask.amazonoperations.com');
+        if (!maaskHost || host.indexOf('oidc.') !== 0) return false;
+        return /\/authentication(?:\/|$)/i.test(url.pathname);
+    }
+
+    function isMenuIdpSelection(href) {
+        const value = String(href || '');
+        if (value.indexOf('cloudfront.net') === -1 || value.indexOf('idp-selection') === -1) return false;
+        const url = menuParseUrl(value);
+        if (!url) return false;
+        const pageHost = url.hostname.toLowerCase();
+        const cloudfront = pageHost === 'cloudfront.net' || pageHost.endsWith('.cloudfront.net');
+        return cloudfront && /^\/idp-selection\/?$/i.test(url.pathname);
+    }
+
+    function isMenuLocationPage(href) {
+        const value = String(href || '');
+        if (value.indexOf('menu.na.aft.amazonoperations.app') === -1) return false;
+        const url = menuParseUrl(value);
+        if (!url) return false;
+        return url.hostname.toLowerCase() === 'menu.na.aft.amazonoperations.app' && /^\/location\/?$/i.test(url.pathname);
+    }
+
+    function isMenuHost(href) {
+        const value = String(href || '');
+        if (value.indexOf('menu.na.aft.amazonoperations.app') === -1) return false;
+        const url = menuParseUrl(value);
+        return !!(url && url.hostname.toLowerCase() === 'menu.na.aft.amazonoperations.app');
+    }
+
+    function menuStorage() {
+        return {
+            getItem: function (key) {
+                try {
+                    if (typeof GM_getValue === 'function') {
+                        const value = GM_getValue(key, null);
+                        if (value == null || value === '') return null;
+                        return String(value);
+                    }
+                } catch (e) {
+                    /* Fall through to sessionStorage. */
+                }
+                try {
+                    return sessionStorage.getItem(key);
+                } catch (e2) {
+                    return null;
+                }
+            },
+            setItem: function (key, value) {
+                try {
+                    if (typeof GM_setValue === 'function') {
+                        GM_setValue(key, String(value));
+                        return;
+                    }
+                } catch (e) {
+                    /* Fall through to sessionStorage. */
+                }
+                try {
+                    sessionStorage.setItem(key, String(value));
+                } catch (e2) {
+                    /* Storage can be blocked. The sample chooser URL still works. */
+                }
+            }
+        };
+    }
+
+    function menuShouldRedirect(href, storage, now) {
+        if (!isMaaskAuthPage(href)) return false;
+        const last = Number(storage.getItem(MENU_STAMP_KEY) || 0);
+        if (!Number.isFinite(last)) return true;
+        return now - last >= MENU_REDIRECT_GAP_MS;
+    }
+
+    function menuRememberIdp(href, storage) {
+        if (!isMenuIdpSelection(href)) return;
+        storage.setItem(MENU_IDP_KEY, href);
+    }
+
+    function menuIdpTarget(storage) {
+        const saved = storage.getItem(MENU_IDP_KEY) || '';
+        if (isMenuIdpSelection(saved)) return saved;
+        return MENU_IDP_SELECTION_URL;
+    }
+
+    function menuLabelOf(el) {
+        return String((el && (el.innerText || el.textContent)) || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function clickItServiceLogin(root) {
+        let clicked = false;
+        function visit(el) {
+            if (clicked || !el) return;
+            if (menuLabelOf(el) !== MENU_IT_LABEL) return;
+            const button = (typeof el.closest === 'function' && el.closest('alchemy-button, button, a, [role="button"]')) || el;
+            const buttonLabel = menuLabelOf(button);
+            if (buttonLabel !== MENU_IT_LABEL || /MAASK/i.test(buttonLabel)) return;
+            if (button.dataset && (button.dataset.aftItLogin === '1' || button.dataset.plfItLogin === '1')) {
+                clicked = true;
+                return;
+            }
+            if (button.dataset) {
+                button.dataset.aftItLogin = '1';
+                button.dataset.plfItLogin = '1';
+            }
+            let target = button;
+            if (button.shadowRoot && typeof button.shadowRoot.querySelector === 'function') {
+                const inner = button.shadowRoot.querySelector('button, a, [role="button"]');
+                if (inner) target = inner;
+            }
+            if (typeof target.click === 'function') target.click();
+            clicked = true;
+        }
+        function walk(node) {
+            if (clicked || !node || typeof node.querySelectorAll !== 'function') return;
+            const nodes = node.querySelectorAll('alchemy-button, button, a, [role="button"], span.button__label');
+            let i;
+            for (i = 0; i < nodes.length; i++) {
+                visit(nodes[i]);
+                if (clicked) return;
+                if (nodes[i].shadowRoot) walk(nodes[i].shadowRoot);
+                if (clicked) return;
+            }
+        }
+        walk(root);
+        return clicked;
+    }
+
+    function watchItServiceLogin() {
+        const tryClick = function () {
+            try {
+                if (!document.documentElement) return false;
+                if (clickItServiceLogin(document)) {
+                    console.log('[Productivity Panel] clicked IT Service Login');
+                    return true;
+                }
+            } catch (e) {
+                console.log('[Productivity Panel] IT Service Login click failed', e);
+            }
+            return false;
+        };
+        const arm = function () {
+            if (tryClick()) return;
+            if (!document.documentElement) return;
+            const obs = new MutationObserver(function () {
+                if (tryClick()) obs.disconnect();
+            });
+            obs.observe(document.documentElement, { childList: true, subtree: true });
+            const timer = setInterval(function () {
+                if (tryClick()) {
+                    clearInterval(timer);
+                    obs.disconnect();
+                }
+            }, 200);
+            setTimeout(function () {
+                clearInterval(timer);
+                obs.disconnect();
+            }, MENU_WATCH_MS);
+        };
+        if (document.documentElement) arm();
+        else document.addEventListener('DOMContentLoaded', arm, { once: true });
+    }
+
+    function menuSleep(ms) {
+        return new Promise(function (resolve) {
+            setTimeout(resolve, ms);
+        });
+    }
+
+    function menuSetNativeValue(el, value) {
+        const proto = el && Object.getPrototypeOf(el);
+        const desc = (proto && Object.getOwnPropertyDescriptor(proto, 'value'))
+            || (typeof HTMLInputElement !== 'undefined' && Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value'));
+        if (desc && desc.set) desc.set.call(el, value);
+        else el.value = value;
+        try {
+            el.dispatchEvent(new InputEvent('input', { bubbles: true, data: String(value).slice(-1), inputType: 'insertText' }));
+        } catch (e) {
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    async function menuTypeInto(el, text) {
+        if (el && typeof el.focus === 'function') {
+            try {
+                el.focus();
+            } catch (e) {
+                /* The location box can reject focus while the modal is opening. */
+            }
+        }
+        menuSetNativeValue(el, '');
+        let i;
+        for (i = 0; i < text.length; i++) {
+            menuSetNativeValue(el, text.slice(0, i + 1));
+            await menuSleep(MENU_CHAR_DELAY_MS);
+        }
+    }
+
+    function menuPressEnter(el) {
+        const types = ['keydown', 'keypress', 'keyup'];
+        let i;
+        for (i = 0; i < types.length; i++) {
+            let ev;
+            try {
+                ev = new KeyboardEvent(types[i], {
+                    key: 'Enter',
+                    code: 'Enter',
+                    keyCode: 13,
+                    which: 13,
+                    bubbles: true,
+                    cancelable: true
+                });
+            } catch (e) {
+                ev = new Event(types[i], { bubbles: true, cancelable: true });
+            }
+            try {
+                el.dispatchEvent(ev);
+            } catch (e2) {
+                /* Ignore a dispatcher that rejects synthetic keys. */
+            }
+        }
+    }
+
+    async function menuTypeAndEnter(el) {
+        console.log('[Productivity Panel] typing ' + MENU_LOCATION_CODE);
+        await menuTypeInto(el, MENU_LOCATION_CODE);
+        await menuSleep(MENU_ENTER_DELAY_MS);
+        menuPressEnter(el);
+    }
+
+    function watchMenuLocation() {
+        let typing = false;
+        const tick = function () {
+            if (typing || !isMenuLocationPage(location.href) || !document.querySelector) return false;
+            const el = document.querySelector('#qlInput');
+            if (!el) return false;
+            if (el.dataset && el.dataset.aftMem3Typed === '1') return true;
+            typing = true;
+            if (el.dataset) el.dataset.aftMem3Typed = '1';
+            menuTypeAndEnter(el).then(function () {
+                typing = false;
+            }).catch(function (err) {
+                typing = false;
+                if (el.dataset) delete el.dataset.aftMem3Typed;
+                console.log('[Productivity Panel] location type failed', err);
+            });
+            return false;
+        };
+        const arm = function () {
+            if (!document.documentElement) return;
+            tick();
+            const obs = new MutationObserver(function () {
+                if (tick()) obs.disconnect();
+            });
+            obs.observe(document.documentElement, { childList: true, subtree: true });
+            const timer = setInterval(function () {
+                if (tick()) {
+                    clearInterval(timer);
+                    obs.disconnect();
+                }
+            }, 300);
+            window.addEventListener('popstate', tick);
+            setTimeout(function () {
+                clearInterval(timer);
+                obs.disconnect();
+            }, MENU_WATCH_MS);
+        };
+        if (document.documentElement) arm();
+        else document.addEventListener('DOMContentLoaded', arm, { once: true });
+    }
+
+    function runMenuLoginAssist() {
+        try {
+            const href = location.href;
+            if (isMaaskAuthPage(href)) {
+                const store = menuStorage();
+                const now = Date.now();
+                if (menuShouldRedirect(href, store, now)) {
+                    store.setItem(MENU_STAMP_KEY, String(now));
+                    console.log('[Productivity Panel] leaving MAASK for the IT login chooser');
+                    location.replace(menuIdpTarget(store));
+                }
+                return true;
+            }
+            if (isMenuIdpSelection(href)) {
+                menuRememberIdp(href, menuStorage());
+                watchItServiceLogin();
+                return true;
+            }
+            if (isMenuHost(href)) {
+                watchMenuLocation();
+                return true;
+            }
+        } catch (e) {
+            console.log('[Productivity Panel] menu login assist failed', e);
+        }
+        return false;
+    }
+
+    if (runMenuLoginAssist()) return;
     applyTodayDateOnce();
     init();
     startSilentUpdates();

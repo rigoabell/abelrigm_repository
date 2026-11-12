@@ -5,7 +5,13 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-panel.txt", import.meta.url), "utf8");
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.8\.6/);
+assert.match(src, /@version\s+1\.8\.7/);
+assert.match(src, /oidc\.prod\.na\.maask\.amazonoperations\.com\/authentication/);
+assert.match(src, /menu\.na\.aft\.amazonoperations\.app/);
+assert.match(src, /function runMenuLoginAssist/);
+assert.match(src, /#qlInput/);
+assert.match(src, /MENU_LOCATION_CODE = 'MEM3'/);
+assert.match(src, /IT Service Login/);
 assert.match(src, /const TIME_WORKERS = 4;/);
 assert.match(src, /const MAX_TIME_TRIES = 1;/);
 assert.equal(src.includes("TIME_PASS_GAP_MS"), false);
@@ -18,7 +24,9 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.8.6");
+assert.equal(entry.version, "1.8.7");
+assert.match(entry.detail, /types MEM3/);
+assert.match(entry.runsOn, /menu\.na\.aft\.amazonoperations\.app/);
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
 
 function DOMParser() {}
