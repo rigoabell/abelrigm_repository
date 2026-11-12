@@ -3,6 +3,13 @@ import fs from "node:fs";
 import vm from "node:vm";
 
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
+assert.match(src, /@version\s+2\.9\.29/);
+assert.match(src, /oidc\.prod\.na\.maask\.amazonoperations\.com\/authentication/);
+assert.match(src, /menu\.na\.aft\.amazonoperations\.app/);
+assert.match(src, /function runMenuLoginAssist/);
+assert.match(src, /#qlInput/);
+assert.match(src, /MENU_LOCATION_CODE = "MEM3"/);
+assert.match(src, /d34wrqb3xn2znf\.cloudfront\.net\/idp-selection/);
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
   "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, dashboardHtml, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx };\n})();\n"
