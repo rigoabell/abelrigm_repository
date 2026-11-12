@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.8.6
+// @version      1.8.8
 // @updateURL    https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @downloadURL  https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -30,7 +30,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.8.6';
+    const SCRIPT_VERSION = '1.8.8';
     const SCRIPT_UPDATE_URL = 'https://gist.githubusercontent.com/rigoabell/60993861e496361e9d79fd5465de2973/raw/MEM3-Productivity-Panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -862,6 +862,8 @@
     let LAST_TIME = Object.create(null);
     const TIME_IN_FLIGHT = Object.create(null);
     const TIME_TRIES = Object.create(null);
+    const TIME_ISSUES = Object.create(null);
+    const BOARD_PEOPLE = Object.create(null);
     const MAX_TIME_TRIES = 1;
     let TIME_LOADING = false;
     let SUPPRESS_ENSURE = false;
@@ -1336,14 +1338,20 @@
         TIME_IN_FLIGHT[empId] = true;
         let last = null;
         let html = '';
+        let aborted = false;
+        function stopForNewCycle() {
+            if (gen == null || gen === timeGeneration) return false;
+            aborted = true;
+            return true;
+        }
         try {
             while (triesLeft(empId)) {
-                if (gen != null && gen !== timeGeneration) return;
+                if (stopForNewCycle()) return;
                 TIME_TRIES[empId] = (TIME_TRIES[empId] || 0) + 1;
                 const n = TIME_TRIES[empId];
                 try {
                     html = await gmFetch(fclmEmpUrl(empId));
-                    if (gen != null && gen !== timeGeneration) return;
+                    if (stopForNewCycle()) return;
                     last = parseTimeDetails(html);
                     html = '';
                     last.tries = n;
@@ -1353,21 +1361,24 @@
                     }
                 } catch (e) {
                     html = '';
-                    if (gen != null && gen !== timeGeneration) return;
+                    if (stopForNewCycle()) return;
                     last = {
                         hasTime: false, totalMin: 0, idleMin: 0, clockedMin: 0,
                         error: e.message, tries: n, sawClock: false
                     };
                     if (FCLM_DOWN) break;
                 }
-                if (gen != null && gen !== timeGeneration) return;
+                if (stopForNewCycle()) return;
                 if (triesLeft(empId)) await sleep(500);
             }
-            if (gen != null && gen !== timeGeneration) return;
+            if (stopForNewCycle()) return;
             if (last) rememberTime(empId, last);
         } finally {
             html = '';
             delete TIME_IN_FLIGHT[empId];
+            if (aborted && (TIME_TRIES[empId] || 0) > 0) {
+                noteTimeIssue(empId, 'Lookup was interrupted', { try: TIME_TRIES[empId] || 0 });
+            }
             noteTimeProgress();
             if (!pagesHeld()) pumpRefresh();
         }
@@ -1430,6 +1441,7 @@
             prev.cycle = refreshCycle;
             prev.gaveUp = true;
             if (record && record.tries) prev.tries = record.tries;
+            recordTimeIssue(empId, record, true);
             if (DEBUG.timeLoad) DEBUG.timeLoad.done = (DEBUG.timeLoad.done || 0) + 1;
             scheduleLivePaint();
             return;
@@ -1439,6 +1451,7 @@
         record.fetchedAt = Date.now();
         record.gaveUp = !incomingGood;
         LAST_TIME[empId] = record;
+        recordTimeIssue(empId, record, false);
         if (!DEBUG.timeSample) {
             DEBUG.timeSample = {
                 empId: empId,
@@ -1467,6 +1480,67 @@
     function resetTimeTries() {
         const tried = Object.keys(TIME_TRIES);
         for (let i = 0; i < tried.length; i++) delete TIME_TRIES[tried[i]];
+        clearTimeIssues();
+    }
+
+    function clearTimeIssues() {
+        const keys = Object.keys(TIME_ISSUES);
+        for (let i = 0; i < keys.length; i++) delete TIME_ISSUES[keys[i]];
+        paintIssueIcon();
+        const panel = document.getElementById('mem3-time-issues-panel');
+        if (panel) fillIssuePanel(panel);
+    }
+
+    function rememberBoardPerson(empId, person, line) {
+        if (!empId) return;
+        const prev = BOARD_PEOPLE[empId] || {};
+        BOARD_PEOPLE[empId] = {
+            login: (person && person.login) || prev.login || '',
+            name: (person && person.name) || prev.name || '',
+            badge: (person && person.badge) || prev.badge || '',
+            line: line || prev.line || ''
+        };
+    }
+
+    function noteTimeIssue(empId, reason, extra) {
+        if (!empId || !reason) return;
+        let row = TIME_ISSUES[empId];
+        if (!row) {
+            row = { empId: String(empId), reasons: [], attempts: [], firstAt: new Date().toISOString() };
+            TIME_ISSUES[empId] = row;
+        }
+        if (row.reasons.indexOf(reason) === -1) row.reasons.push(reason);
+        if (extra && row.attempts.length < 8) row.attempts.push(extra);
+        row.updatedAt = new Date().toISOString();
+        paintIssueIcon();
+        const panel = document.getElementById('mem3-time-issues-panel');
+        if (panel) fillIssuePanel(panel);
+    }
+
+    function recordTimeIssue(empId, record, keptEarlier) {
+        if (!empId || !record) return;
+        const tries = record.tries || TIME_TRIES[empId] || 1;
+        let reason = '';
+        if (keptEarlier) reason = 'Kept the earlier time because the new page failed';
+        else if (record.error) reason = record.error;
+        else if (timeFound(record) && !(record.clockedMin > 0)) reason = 'Clock rows had no minutes';
+        else if (!timeFound(record) && !record.noData) reason = 'Time Details page had no clock rows';
+        else if (tries > 1) reason = 'Resolved on try ' + tries;
+        else return;
+        noteTimeIssue(empId, reason, {
+            try: tries,
+            error: record.error || '',
+            pageTitle: record.pageTitle || '',
+            sawClock: !!record.sawClock,
+            hasTime: !!record.hasTime,
+            noData: !!record.noData,
+            clockedMin: record.clockedMin || 0,
+            idleMin: record.idleMin || 0
+        });
+    }
+
+    function issueIds() {
+        return Object.keys(TIME_ISSUES);
     }
 
     function settleUnfinished(ids) {
@@ -1816,6 +1890,7 @@
         if (label) label.textContent = p.total ? ('IDLE percent ' + p.done + ' / ' + p.total) : 'IDLE percent';
         if (fill) fill.style.width = pct + '%';
         el.style.display = (p.total > 0 && p.done < p.total) ? 'block' : 'none';
+        paintIssueIcon();
     }
 
     let progressTimer = null;
@@ -2168,7 +2243,9 @@
                     if (leftover) leftover.remove();
                     continue;
                 }
-                const empId = resolveEmpId(IDENTITY.byLogin[found.login]);
+                const person = IDENTITY.byLogin[found.login];
+                const empId = resolveEmpId(person);
+                if (empId) rememberBoardPerson(empId, person, 'BIGS');
                 if (empId && !seen[empId]) {
                     seen[empId] = true;
                     ids.push(empId);
@@ -3880,11 +3957,11 @@
 
     function ensureSummaryActions() {
         let actions = document.getElementById('mem3-summary-actions');
-        if (actions && actions.getAttribute('data-mem3-probe') !== 'all-v56') actions.remove();
-        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'all-v56') return actions;
+        if (actions && actions.getAttribute('data-mem3-probe') !== 'issues-v188') actions.remove();
+        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'issues-v188') return actions;
         actions = document.createElement('div');
         actions.id = 'mem3-summary-actions';
-        actions.setAttribute('data-mem3-probe', 'all-v56');
+        actions.setAttribute('data-mem3-probe', 'issues-v188');
         actions.style.cssText = 'display:flex; gap:6px; align-items:flex-start; flex-wrap:wrap;';
         function actionButton(label, border) {
             const btn = document.createElement('button');
@@ -3895,12 +3972,6 @@
                 'color:#ffffff; background:#0d1117; border:1px solid ' + border + '; white-space:nowrap;';
             return btn;
         }
-        const unassignBtn = actionButton('Unassign all', '#f85149');
-        unassignBtn.addEventListener('click', function (e) {
-            e.preventDefault();
-            e.stopPropagation();
-            askUnassignAll(unassignBtn);
-        });
         const copyBtn = actionButton('Copy debug', '#30363d');
         copyBtn.addEventListener('click', function (e) {
             e.preventDefault();
@@ -3913,7 +3984,7 @@
                 setTimeout(function () { copyBtn.textContent = 'Copy debug'; }, 2000);
             });
         });
-        actions.appendChild(unassignBtn);
+        actions.appendChild(makeIssueButton());
         actions.appendChild(copyBtn);
         return actions;
     }
@@ -4189,7 +4260,10 @@
                 const empId = resolveEmpId(person);
                 const stats = statsFor(empId);
                 const time = timeFor(empId);
-                if (empId) empIds.push(empId);
+                if (empId) {
+                    empIds.push(empId);
+                    rememberBoardPerson(empId, person, panelName);
+                }
                 if (stats.hasData) withData++;
                 if (stats.hasData && showsIdle(time)) both++;
                 if (stats.uph > 0) { uphList.push(stats.uph); totalUnits += stats.units; }
@@ -4924,6 +4998,261 @@
             setTimeout(showAssignments, 300);
             setTimeout(showAssignments, 1200);
         }, true);
+    }
+
+    function personForEmp(empId) {
+        const board = BOARD_PEOPLE[empId] || {};
+        const ident = IDENTITY.byId[empId] || (board.login ? IDENTITY.byLogin[board.login] : null);
+        const raw = (ident && ident.name) || board.name || '';
+        const pretty = swapPersonName(raw) || raw;
+        const login = (ident && ident.login) || board.login || '';
+        const clock = clockFor(ident, empId);
+        return {
+            empId: String(empId),
+            name: pretty,
+            login: login,
+            badge: (ident && ident.badge) || board.badge || '',
+            line: board.line || '',
+            clock: clock === 'in' ? 'Clocked in' : (clock === 'out' ? 'Clocked out' : '')
+        };
+    }
+
+    function timeSnapshot(record) {
+        if (!record) return null;
+        return {
+            hasTime: !!record.hasTime,
+            noData: !!record.noData,
+            gaveUp: !!record.gaveUp,
+            error: record.error || '',
+            tries: record.tries || 0,
+            cycle: record.cycle || 0,
+            totalMin: record.totalMin || 0,
+            idleMin: record.idleMin || 0,
+            clockedMin: record.clockedMin || 0,
+            paidMin: record.paidMin || 0,
+            clockRows: record.clockRows || 0,
+            functionRows: record.functionRows || 0,
+            sawClock: !!record.sawClock,
+            sawFunction: !!record.sawFunction,
+            pageTitle: record.pageTitle || '',
+            fetchedAt: record.fetchedAt || 0
+        };
+    }
+
+    function rollupSnapshot(empId) {
+        const entry = LAST_ROLLUP[empId];
+        if (!entry || !entry.functions) return null;
+        const names = Object.keys(entry.functions);
+        const out = {};
+        for (let i = 0; i < names.length && i < 12; i++) {
+            const slot = entry.functions[names[i]] || {};
+            out[names[i]] = { uph: slot.uph || 0, units: slot.units || 0 };
+        }
+        return out;
+    }
+
+    function associateDebug(empId) {
+        const person = personForEmp(empId);
+        let timeUrl = '';
+        try { timeUrl = fclmEmpUrl(empId); } catch (e) { timeUrl = ''; }
+        return {
+            script: SCRIPT_LABEL,
+            version: SCRIPT_VERSION,
+            what: 'associate',
+            capturedAt: new Date().toISOString(),
+            window: windowPreset(ACTIVE_WINDOW).label,
+            person: person,
+            issue: TIME_ISSUES[empId] || null,
+            finished: timeFinished(empId),
+            inFlight: !!TIME_IN_FLIGHT[empId],
+            tries: TIME_TRIES[empId] || 0,
+            time: timeSnapshot(LAST_TIME[empId]),
+            rollup: rollupSnapshot(empId),
+            timeUrl: timeUrl
+        };
+    }
+
+    function allAssociatesDebug() {
+        const ids = cycleEmpIds();
+        const associates = [];
+        for (let i = 0; i < ids.length; i++) associates.push(associateDebug(ids[i]));
+        return {
+            script: SCRIPT_LABEL,
+            version: SCRIPT_VERSION,
+            what: 'all-associates',
+            capturedAt: new Date().toISOString(),
+            window: windowPreset(ACTIVE_WINDOW).label,
+            progress: timeProgress(),
+            issueCount: issueIds().length,
+            associates: associates
+        };
+    }
+
+    function sortedIssueIds() {
+        const ids = issueIds();
+        ids.sort(function (a, b) {
+            const pa = personForEmp(a);
+            const pb = personForEmp(b);
+            const an = (pa.name || pa.login || a).toLowerCase();
+            const bn = (pb.name || pb.login || b).toLowerCase();
+            if (an < bn) return -1;
+            if (an > bn) return 1;
+            return String(a) < String(b) ? -1 : (String(a) > String(b) ? 1 : 0);
+        });
+        return ids;
+    }
+
+    function paintIssueIcon() {
+        const btn = document.getElementById('mem3-time-issues');
+        if (btn) {
+            const n = issueIds().length;
+            btn.textContent = n ? ('Time issues ' + n) : 'Time issues';
+            btn.title = n
+                ? (n + (n === 1 ? ' associate' : ' associates') + ' had trouble loading time')
+                : 'No time issues this refresh. Click to copy every associate.';
+            btn.style.borderColor = n ? '#d29922' : '#8b949e';
+            btn.style.color = n ? '#d29922' : '#ffffff';
+        }
+    }
+
+    function copyDebugButton(label, build) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = label;
+        btn.style.cssText = 'flex:0 0 auto; padding:6px 10px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
+            'background:#0d1117; border:1px solid #58a6ff; font:800 12px Segoe UI,system-ui,sans-serif;';
+        btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            copyText(JSON.stringify(build(), null, 2)).then(function () {
+                btn.textContent = 'Copied';
+                setTimeout(function () { btn.textContent = label; }, 1200);
+            }).catch(function () {
+                btn.textContent = 'Copy failed';
+                setTimeout(function () { btn.textContent = label; }, 1500);
+            });
+        });
+        return btn;
+    }
+
+    function fillIssuePanel(overlay) {
+        const list = overlay.querySelector('[data-issue-list]');
+        const countEl = overlay.querySelector('[data-issue-count]');
+        if (!list) return;
+        const ids = sortedIssueIds();
+        if (countEl) {
+            countEl.textContent = ids.length
+                ? (ids.length + (ids.length === 1 ? ' associate needed another look.' : ' associates needed another look.'))
+                : 'No time issues this refresh.';
+        }
+        while (list.firstChild) list.removeChild(list.firstChild);
+        if (!ids.length) {
+            const empty = document.createElement('div');
+            empty.textContent = 'Everyone who was looked up came back clean. Copy all still includes every associate on the board.';
+            empty.style.cssText = 'font-size:13px; font-weight:500; color:#c9d1d9;';
+            list.appendChild(empty);
+            return;
+        }
+        for (let i = 0; i < ids.length; i++) {
+            const empId = ids[i];
+            const person = personForEmp(empId);
+            const issue = TIME_ISSUES[empId];
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex; align-items:flex-start; justify-content:space-between; gap:12px; ' +
+                'background:#0d1117; border:1px solid #30363d; border-radius:8px; padding:10px 12px; margin-bottom:8px;';
+            const text = document.createElement('div');
+            text.style.cssText = 'min-width:0;';
+            const name = document.createElement('div');
+            name.textContent = person.name || person.login || person.empId;
+            name.style.cssText = 'font-size:14px; font-weight:800;';
+            const meta = document.createElement('div');
+            const bits = [];
+            if (person.login) bits.push(person.login);
+            if (person.line) bits.push(person.line);
+            if (person.clock) bits.push(person.clock);
+            bits.push(person.empId);
+            meta.textContent = bits.join(' · ');
+            meta.style.cssText = 'font-size:12px; font-weight:600; color:#8b949e; margin-top:2px;';
+            const why = document.createElement('div');
+            why.textContent = issue && issue.reasons ? issue.reasons.join(' · ') : '';
+            why.style.cssText = 'font-size:13px; font-weight:600; color:#d29922; margin-top:4px;';
+            text.appendChild(name);
+            text.appendChild(meta);
+            text.appendChild(why);
+            row.appendChild(text);
+            row.appendChild(copyDebugButton('Copy', function () { return associateDebug(empId); }));
+            list.appendChild(row);
+        }
+    }
+
+    function openIssuePanel() {
+        const old = document.getElementById('mem3-time-issues-panel');
+        if (old) {
+            old.remove();
+            return;
+        }
+        const overlay = document.createElement('div');
+        overlay.id = 'mem3-time-issues-panel';
+        overlay.style.cssText = 'position:fixed; inset:0; z-index:2147483646; background:rgba(0,0,0,0.55); ' +
+            'display:flex; align-items:flex-start; justify-content:center; padding:32px 16px; ' +
+            'font-family:Segoe UI,system-ui,sans-serif; color:#ffffff;';
+        overlay.addEventListener('click', function (e) {
+            if (e.target === overlay) overlay.remove();
+        });
+        const card = document.createElement('div');
+        card.style.cssText = 'width:min(720px, 100%); max-height:calc(100vh - 64px); overflow:auto; ' +
+            'background:#161b22; border:1px solid #30363d; border-radius:12px; padding:18px 18px 8px;';
+        const top = document.createElement('div');
+        top.style.cssText = 'display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:8px;';
+        const headingWrap = document.createElement('div');
+        const heading = document.createElement('div');
+        heading.textContent = 'Time issues';
+        heading.style.cssText = 'font-size:18px; font-weight:800;';
+        const sub = document.createElement('div');
+        sub.setAttribute('data-issue-count', '1');
+        sub.style.cssText = 'font-size:13px; font-weight:500; color:#c9d1d9; margin-top:4px;';
+        headingWrap.appendChild(heading);
+        headingWrap.appendChild(sub);
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex; gap:8px; flex:0 0 auto;';
+        actions.appendChild(copyDebugButton('Copy all', allAssociatesDebug));
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = 'Close';
+        close.style.cssText = 'padding:6px 12px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
+            'background:#0d1117; border:1px solid #8b949e; font:800 12px Segoe UI,system-ui,sans-serif;';
+        close.addEventListener('click', function () { overlay.remove(); });
+        actions.appendChild(close);
+        top.appendChild(headingWrap);
+        top.appendChild(actions);
+        card.appendChild(top);
+        const note = document.createElement('div');
+        note.textContent = 'These are the associates whose time page failed, came back empty, or had to be tried again. The bar can still reach 100% after that. Copy all includes every associate on the board, not only this list.';
+        note.style.cssText = 'font-size:12px; font-weight:500; color:#8b949e; margin:0 0 12px;';
+        card.appendChild(note);
+        const list = document.createElement('div');
+        list.setAttribute('data-issue-list', '1');
+        card.appendChild(list);
+        overlay.appendChild(card);
+        document.body.appendChild(overlay);
+        fillIssuePanel(overlay);
+    }
+
+    function makeIssueButton() {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.id = 'mem3-time-issues';
+        btn.textContent = 'Time issues';
+        btn.title = 'Associates whose time page had trouble';
+        btn.style.cssText = 'flex:0 0 auto; padding:4px 8px; border-radius:8px; cursor:pointer; ' +
+            'font:800 11px Segoe UI,system-ui,sans-serif; letter-spacing:0.03em; text-transform:uppercase; ' +
+            'color:#ffffff; background:#0d1117; border:1px solid #8b949e; white-space:nowrap;';
+        btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            openIssuePanel();
+        });
+        return btn;
     }
 
     function makeInfoButton() {
