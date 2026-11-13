@@ -7,7 +7,9 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.9/);
+assert.match(src, /@version\s+1\.9\.10/);
+assert.match(src, /data-time-row/);
+assert.match(src, /placeholder = '00:00'/);
 assert.match(src, /data-mem3-leaving-early/);
 assert.match(src, /Leaving Early/);
 assert.match(src, /Unassign Early Outs/);
@@ -44,7 +46,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.9");
+assert.equal(entry.version, "1.9.10");
 assert.match(entry.detail, /types MEM3/);
 assert.match(entry.runsOn, /menu\.na\.aft\.amazonoperations\.app/);
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
@@ -517,7 +519,7 @@ try {
     const moved = api.addLeaving(leaving, "wilrayni", 13 * 60 + 30, "CRET 2 Even", new Date(2026, 10, 13, 11, 40));
     assert.equal(moved.updated, true);
     assert.equal(moved.previous, "12:00 PM");
-    assert.equal(moved.row.said, "1:30 PM");
+    assert.equal(moved.row.said, "01:30 PM");
     assert.equal(moved.row.history.length, 2);
     assert.equal(moved.row.history[0].said, "12:00 PM");
     assert.equal(api.dueLeaving(shiftRows, noon).length, 0);

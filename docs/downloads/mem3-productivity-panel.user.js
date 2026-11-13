@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.9
+// @version      1.9.10
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -37,7 +37,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.9';
+    const SCRIPT_VERSION = '1.9.10';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -6499,7 +6499,35 @@
         const suffix = hour >= 12 ? 'PM' : 'AM';
         hour = hour % 12;
         if (hour === 0) hour = 12;
-        return hour + ':' + leavingPad(minute) + ' ' + suffix;
+        return leavingPad(hour) + ':' + leavingPad(minute) + ' ' + suffix;
+    }
+
+    function maskLeaveTime(text) {
+        const raw = String(text || '');
+        if (raw.indexOf(':') !== -1) {
+            const bits = raw.split(':');
+            const hour = bits[0].replace(/\D/g, '').slice(0, 2);
+            const minute = (bits[1] || '').replace(/\D/g, '').slice(0, 2);
+            return hour + ':' + minute;
+        }
+        const digits = raw.replace(/\D/g, '').slice(0, 4);
+        if (digits.length <= 2) return digits;
+        return digits.slice(0, 2) + ':' + digits.slice(2);
+    }
+
+    function finishLeaveTime(text) {
+        const raw = String(text || '');
+        if (raw.indexOf(':') !== -1) {
+            const bits = raw.split(':');
+            const hour = bits[0].replace(/\D/g, '').slice(0, 2);
+            const minute = (bits[1] || '').replace(/\D/g, '').slice(0, 2);
+            if (!hour && !minute) return '';
+            return hour.padStart(2, '0') + ':' + minute.padStart(2, '0');
+        }
+        const digits = raw.replace(/\D/g, '').slice(0, 4);
+        if (!digits) return '';
+        if (digits.length <= 2) return digits.padStart(2, '0') + ':00';
+        return digits.slice(0, 2) + ':' + digits.slice(2).padStart(2, '0');
     }
 
     function clockText(date) {
@@ -6911,7 +6939,12 @@
         ask.textContent = 'What time are they leaving? Saved on this computer.';
         ask.style.cssText = 'font-size:12px; color:#8b949e; margin-bottom:8px;';
         const form = document.createElement('div');
-        form.style.cssText = 'display:flex; gap:6px; flex-wrap:wrap;';
+        form.style.cssText = 'display:flex; flex-direction:column; gap:6px;';
+        const loginRow = document.createElement('div');
+        loginRow.style.cssText = 'display:flex; gap:6px; flex-wrap:wrap;';
+        const timeRow = document.createElement('div');
+        timeRow.setAttribute('data-time-row', '');
+        timeRow.style.cssText = 'display:flex; gap:6px; flex-wrap:nowrap; align-items:center;';
         const by = document.createElement('input');
         by.setAttribute('data-by', '');
         by.placeholder = 'Your login';
@@ -6924,11 +6957,14 @@
         login.style.cssText = leavingFieldStyle();
         const time = document.createElement('input');
         time.setAttribute('data-time', '');
-        time.placeholder = '12:00';
-        time.style.cssText = leavingFieldStyle() + ' flex:0 1 90px;';
+        time.setAttribute('inputmode', 'numeric');
+        time.setAttribute('maxlength', '5');
+        time.setAttribute('autocomplete', 'off');
+        time.placeholder = '00:00';
+        time.style.cssText = leavingFieldStyle() + ' flex:0 0 76px; width:76px;';
         const half = document.createElement('select');
         half.setAttribute('data-half', '');
-        half.style.cssText = leavingFieldStyle() + ' flex:0 0 72px;';
+        half.style.cssText = leavingFieldStyle() + ' flex:0 0 72px; width:72px;';
         const am = document.createElement('option');
         am.value = 'AM';
         am.textContent = 'AM';
@@ -6951,9 +6987,11 @@
         function submit() {
             const actor = String(by.value || '').trim().toLowerCase();
             const who = String(login.value || '').trim().toLowerCase();
-            const saidMin = parseLeaveTime(
-                String(time.value || '').replace(/\s*(am|pm)\s*$/i, '') + ' ' + (half.value || 'PM')
-            );
+            const typed = finishLeaveTime(time.value);
+            time.value = typed;
+            const saidMin = /^\d{2}:\d{2}$/.test(typed)
+                ? parseLeaveTime(typed + ' ' + (half.value || 'PM'))
+                : null;
             if (!looksLikeLogin(actor)) {
                 setLeavingStatus('Enter your login.');
                 return;
@@ -6963,7 +7001,7 @@
                 return;
             }
             if (saidMin == null) {
-                setLeavingStatus('Enter a time like 12:00 PM.');
+                setLeavingStatus('Enter a time like 12:00.');
                 return;
             }
             saveActor(actor);
@@ -6998,6 +7036,14 @@
         login.addEventListener('keydown', function (event) {
             if (event.key === 'Enter') submit();
         });
+        time.addEventListener('input', function () {
+            const next = maskLeaveTime(time.value);
+            if (time.value !== next) time.value = next;
+        });
+        time.addEventListener('blur', function () {
+            const next = finishLeaveTime(time.value);
+            if (/^\d{2}:\d{2}$/.test(next)) time.value = next;
+        });
         time.addEventListener('keydown', function (event) {
             if (event.key === 'Enter') submit();
         });
@@ -7006,12 +7052,14 @@
             event.stopPropagation();
             closeLeavingOverlay(LEAVING_ID);
         });
-        form.appendChild(by);
-        form.appendChild(login);
-        form.appendChild(time);
-        form.appendChild(half);
-        form.appendChild(mark);
-        form.appendChild(close);
+        loginRow.appendChild(by);
+        loginRow.appendChild(login);
+        timeRow.appendChild(time);
+        timeRow.appendChild(half);
+        timeRow.appendChild(mark);
+        timeRow.appendChild(close);
+        form.appendChild(loginRow);
+        form.appendChild(timeRow);
         const status = document.createElement('div');
         status.setAttribute('data-leaving-status', '');
         status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
