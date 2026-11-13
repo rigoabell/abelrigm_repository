@@ -319,6 +319,17 @@
     "downloadName": "FCLM Hide Regional Banner (abelrigm).txt"
   },
   {
+    "id": "fclm-highlighter",
+    "name": "FCLM Highlighter (abelrigm)",
+    "category": "FCLM",
+    "summary": "Highlight selected FCLM rows and copy a debug snapshot of the page.",
+    "detail": "On Process Path Rollup and the node report, row checkboxes highlight the selection, color ratio-to-plan, and can hide unchecked rows. Copy debug copies how the page was recognized, the saved highlight ids, and the row structure.",
+    "version": "2.1",
+    "runsOn": "fclm-portal.amazon.com",
+    "file": "downloads/fclm-highlighter.txt",
+    "downloadName": "FCLM Highlighter (abelrigm).txt"
+  },
+  {
     "id": "fclm-login-idle-time-abelrigm",
     "name": "FCLM Login Idle Time (abelrigm)",
     "category": "FCLM",
