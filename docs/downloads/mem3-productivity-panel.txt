@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.15
+// @version      1.9.16
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -24,6 +24,7 @@
 // @connect      gist.github.com
 // @connect      api.github.com
 // @connect      raw.githubusercontent.com
+// @connect      extendsclass.com
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setClipboard
 // @grant        GM_openInTab
@@ -38,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.15';
+    const SCRIPT_VERSION = '1.9.16';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -6489,14 +6490,13 @@
     const LEAVING_KEY = 'mem3-leaving-v1';
     const ACTOR_KEY = 'mem3-leaving-actor';
     const LEAVING_POLL_MS = 20000;
-    const LEAVING_GIST_FILE = 'mem3-leaving.json';
-    let LEAVING_GIST_ID = '';
-    let LEAVING_GIST_TOKEN = '';
+    const LEAVING_SHARE_URL = 'https://extendsclass.com/api/json-storage/bin/edfeccc';
     let leavingShareChain = Promise.resolve();
+    let leavingShareError = '';
     let leavingBusy = false;
     let leavingHeld = false;
 
-    // Local to this browser. A later update can point the same rows at a shared gist.
+    // Every install reads and writes this same list, so a mark on one computer shows on the others.
     function leavingPad(n) {
         return n < 10 ? '0' + n : String(n);
     }
@@ -6629,16 +6629,41 @@
 
     function saveLeaving(doc) {
         saveLeavingLocal(doc);
-        if (leavingShareOn()) publishLeaving(doc);
+        if (leavingShareOn()) return publishLeaving(doc);
+        return Promise.resolve(doc);
     }
 
     function leavingShareOn() {
-        return !!(LEAVING_GIST_ID && LEAVING_GIST_TOKEN && typeof GM_xmlhttpRequest === 'function');
+        return !!(LEAVING_SHARE_URL && typeof GM_xmlhttpRequest === 'function');
     }
 
-    function enableLeavingShare(id, token) {
-        LEAVING_GIST_ID = String(id || '');
-        LEAVING_GIST_TOKEN = String(token || '');
+    function enableLeavingShare() {
+        // Sharing is already on for every install.
+    }
+
+    function parseSharedBody(text) {
+        const raw = String(text || '').replace(/^\uFEFF/, '');
+        const start = raw.indexOf('{');
+        if (start < 0) throw new Error('shared list');
+        let depth = 0;
+        let inStr = false;
+        let esc = false;
+        for (let i = start; i < raw.length; i++) {
+            const ch = raw.charAt(i);
+            if (inStr) {
+                if (esc) esc = false;
+                else if (ch === '\\') esc = true;
+                else if (ch === '"') inStr = false;
+                continue;
+            }
+            if (ch === '"') inStr = true;
+            else if (ch === '{') depth += 1;
+            else if (ch === '}') {
+                depth -= 1;
+                if (depth === 0) return JSON.parse(raw.slice(start, i + 1));
+            }
+        }
+        throw new Error('shared list');
     }
 
     function leavingStatusRank(status) {
@@ -6740,45 +6765,43 @@
         return JSON.stringify(copy);
     }
 
-    function gistRequest(method, extra) {
+    function shareRequest(method, extra) {
         const headers = {
-            Authorization: 'Bearer ' + LEAVING_GIST_TOKEN,
-            Accept: 'application/vnd.github+json',
-            'Content-Type': 'application/json'
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-cache',
+            Pragma: 'no-cache'
         };
         if (extra && extra.baseRev != null) headers['X-Leaving-Base'] = String(extra.baseRev);
+        let url = LEAVING_SHARE_URL;
+        if (method === 'GET') url += '?t=' + Date.now();
         return new Promise(function (resolve, reject) {
             GM_xmlhttpRequest({
                 method: method,
-                url: 'https://api.github.com/gists/' + LEAVING_GIST_ID,
+                url: url,
                 headers: headers,
-                data: extra && extra.body ? JSON.stringify(extra.body) : undefined,
+                data: extra && extra.doc ? JSON.stringify(extra.doc) : undefined,
                 timeout: 20000,
                 onload: function (res) { resolve(res || {}); },
-                onerror: function () { reject(new Error('gist')); },
-                ontimeout: function () { reject(new Error('gist timeout')); }
+                onerror: function () { reject(new Error('shared list')); },
+                ontimeout: function () { reject(new Error('shared list timeout')); }
             });
         });
     }
 
     function readSharedLeaving() {
-        return gistRequest('GET').then(function (res) {
-            if (!res || res.status < 200 || res.status >= 300) throw new Error('gist read');
-            const payload = JSON.parse(res.responseText || '{}');
-            const file = payload.files && payload.files[LEAVING_GIST_FILE];
-            if (!file || !file.content) return emptyLeaving();
-            const doc = JSON.parse(file.content);
+        return shareRequest('GET').then(function (res) {
+            if (!res || res.status < 200 || res.status >= 300) throw new Error('shared list read');
+            const doc = parseSharedBody(res.responseText || '');
             if (!doc || !doc.shifts) return emptyLeaving();
             return doc;
         });
     }
 
     function writeSharedLeaving(doc, baseRev) {
-        const body = { files: {} };
-        body.files[LEAVING_GIST_FILE] = { content: JSON.stringify(doc) };
-        return gistRequest('PATCH', { body: body, baseRev: baseRev }).then(function (res) {
+        return shareRequest('PUT', { doc: doc, baseRev: baseRev }).then(function (res) {
             if (res && res.status === 409) return { conflict: true };
-            if (!res || res.status < 200 || res.status >= 300) throw new Error('gist write');
+            if (!res || res.status < 200 || res.status >= 300) throw new Error('shared list write');
             return { conflict: false };
         });
     }
@@ -6808,6 +6831,12 @@
         if (!leavingShareOn()) return Promise.resolve(doc);
         const job = leavingShareChain.then(function () {
             return publishLeavingOnce(doc, 0);
+        }).then(function (next) {
+            leavingShareError = '';
+            return next;
+        }, function (err) {
+            leavingShareError = err && err.message ? err.message : 'shared list failed';
+            throw err;
         });
         leavingShareChain = job.then(function (next) { return next; }, function () { return null; });
         return job;
@@ -6952,6 +6981,21 @@
         for (let i = 0; i < nodes.length; i++) nodes[i].textContent = text || '';
     }
 
+    function watchLeavingShare(text, pending) {
+        if (!pending || !pending.then) return;
+        pending.then(function () {
+            const nodes = document.querySelectorAll('[data-leaving-status]');
+            for (let i = 0; i < nodes.length; i++) {
+                if (nodes[i].textContent === text) nodes[i].textContent = text + ' Other computers can see it.';
+            }
+        }, function () {
+            const nodes = document.querySelectorAll('[data-leaving-status]');
+            for (let i = 0; i < nodes.length; i++) {
+                if (nodes[i].textContent === text) nodes[i].textContent = text + ' Saved here. The other computers did not get it.';
+            }
+        });
+    }
+
     function holdLeaving(on) {
         const root = document.documentElement;
         if (!root || !root.setAttribute) return;
@@ -7008,6 +7052,9 @@
             at: now.toISOString(),
             shiftId: id,
             actor: loadActor(),
+            share: leavingShareOn(),
+            shareError: leavingShareError,
+            rev: doc.rev || 0,
             leavingBusy: leavingBusy,
             unassigning: unassigning,
             psHold: psBoardHolding(),
@@ -7170,6 +7217,7 @@
     function startLeaving() {
         if (!isAssignmentsPage() || !document.body) return;
         paintEarlyLog();
+        refreshLeaving();
         setInterval(function () { refreshLeaving(); }, LEAVING_POLL_MS);
     }
 
@@ -7257,8 +7305,10 @@
                     const current = loadLeaving();
                     const cleared = clearMarkedLeave(current, row.id, actor, new Date());
                     if (!cleared) return;
-                    saveLeaving(current);
-                    setLeavingStatus('Cleared ' + cleared.login + '.');
+                    const shared = saveLeaving(current);
+                    const clearedText = 'Cleared ' + cleared.login + '.';
+                    setLeavingStatus(clearedText);
+                    watchLeavingShare(clearedText, shared);
                     paintEarlyLog();
                 });
                 line.appendChild(clear);
@@ -7302,7 +7352,7 @@
         title.textContent = 'Leaving Early';
         title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif; margin-bottom:4px;';
         const ask = document.createElement('div');
-        ask.textContent = 'Who is leaving this shift, and when.';
+        ask.textContent = 'Who is leaving this shift. The same list is on every computer running this script.';
         ask.style.cssText = 'font-size:12px; color:#8b949e; margin-bottom:8px;';
         const by = document.createElement('input');
         by.setAttribute('data-by', '');
@@ -7355,6 +7405,11 @@
         card.appendChild(actions);
         document.body.appendChild(card);
         paintEarlyLog();
+        pullLeaving().then(function () {
+            paintEarlyLog();
+        }).catch(function () {
+            setLeavingStatus('Showing this computer. The shared list did not load.');
+        });
     }
 
     function closeLeavingOverlay(id) {
@@ -7396,7 +7451,7 @@
         title.textContent = 'Leaving Early';
         title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif; margin-bottom:4px;';
         const ask = document.createElement('div');
-        ask.textContent = 'What time are they leaving? Saved on this computer.';
+        ask.textContent = 'What time are they leaving? Every computer running this script sees this list.';
         ask.style.cssText = 'font-size:12px; color:#8b949e; margin-bottom:8px;';
         const form = document.createElement('div');
         form.style.cssText = 'display:flex; flex-direction:column; gap:6px;';
@@ -7483,15 +7538,16 @@
                 previous: result.previous || '', station: station || '',
                 summary: result.updated ? 'updated' : (result.added ? 'marked' : 'already marked')
             });
-            saveLeaving(doc);
+            const shared = saveLeaving(doc);
             paintEarlyLog();
+            let markedText = who + ' is already marked at ' + result.row.said + '.';
             if (result.updated) {
-                setLeavingStatus('Updated ' + who + ' from ' + result.previous + ' to ' + result.row.said + '.');
+                markedText = 'Updated ' + who + ' from ' + result.previous + ' to ' + result.row.said + '.';
             } else if (result.added) {
-                setLeavingStatus('Marked ' + who + ' at ' + result.row.said + (station ? ' from ' + station : '') + '.');
-            } else {
-                setLeavingStatus(who + ' is already marked at ' + result.row.said + '.');
+                markedText = 'Marked ' + who + ' at ' + result.row.said + (station ? ' from ' + station : '') + '.';
             }
+            setLeavingStatus(markedText);
+            watchLeavingShare(markedText, shared);
             if (result.added || result.updated) login.value = '';
         }
         mark.addEventListener('click', function (event) {

@@ -18,12 +18,20 @@ let failNext = 0;
 
 function handle(opts) {
     const base = Number((opts.headers && (opts.headers["X-Leaving-Base"] || opts.headers["x-leaving-base"])) || 0);
+    if (!opts.url || opts.url.indexOf("https://extendsclass.com/api/json-storage/bin/edfeccc") !== 0) {
+        opts.onload({ status: 404, responseText: "" });
+        return;
+    }
     if (opts.method === "GET") {
         const content = gist.text || JSON.stringify({ shifts: {}, rev: 0 });
         opts.onload({
             status: 200,
-            responseText: JSON.stringify({ files: { "mem3-leaving.json": { content: content } } })
+            responseText: content + "<!doctype html><html></html>"
         });
+        return;
+    }
+    if (opts.method !== "PUT") {
+        opts.onload({ status: 405, responseText: "" });
         return;
     }
     if (failNext > 0) {
@@ -31,9 +39,8 @@ function handle(opts) {
         opts.onload({ status: 409, responseText: "" });
         return;
     }
-    const body = JSON.parse(opts.data);
-    const content = body.files["mem3-leaving.json"].content;
-    const doc = JSON.parse(content);
+    const doc = JSON.parse(opts.data);
+    const content = opts.data;
     if (base !== gist.rev || doc.rev !== gist.rev + 1) {
         opts.onload({ status: 409, responseText: "" });
         return;

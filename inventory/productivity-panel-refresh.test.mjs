@@ -7,7 +7,9 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.15/);
+assert.match(src, /@version\s+1\.9\.16/);
+assert.match(src, /extendsclass\.com\/api\/json-storage\/bin\/edfeccc/);
+assert.match(src, /Every computer running this script sees this list/);
 assert.match(src, /function cleanStationText/);
 assert.match(src, /Copy early debug/);
 assert.match(src, /function collectEarlyDebug/);
@@ -29,7 +31,7 @@ assert.match(src, /const LEAVING_POLL_MS = 20000;/);
 assert.match(src, /LEAVING_ID = 'mem3-leaving-panel'/);
 assert.match(src, /What time are they leaving/);
 assert.match(src, /recordActivity\(/);
-assert.match(src, /Saved on this computer/);
+assert.equal(src.includes("Saved on this computer"), false);
 assert.match(src, /function psBoardHolding/);
 assert.match(src, /data-mem3-ps-hold/);
 assert.match(src, /raw\.githubusercontent\.com\/rigoabell\/abelrigm_repository\/main\/docs\/downloads\/mem3-productivity-panel\.user\.js/);
@@ -51,7 +53,8 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.15");
+assert.equal(entry.version, "1.9.16");
+assert.match(entry.detail, /shares one leaving list/);
 assert.match(entry.detail, /types MEM3/);
 assert.match(entry.runsOn, /menu\.na\.aft\.amazonoperations\.app/);
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
