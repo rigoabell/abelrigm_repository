@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.16
+// @version      1.9.17
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.16';
+    const SCRIPT_VERSION = '1.9.17';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -7345,12 +7345,14 @@
         const card = document.createElement('div');
         card.id = 'mem3-leaving-list';
         card.style.cssText = 'position:fixed; left:50%; top:50%; transform:translate(-50%, -50%); z-index:2147483647; ' +
-            'width:min(520px, calc(100vw - 24px)); max-height:min(70vh, 560px); overflow:auto; padding:12px; ' +
-            'border-radius:10px; background:#161b22; color:#fff; border:1px solid #30363d; ' +
+            'width:min(520px, calc(100vw - 24px)); max-height:min(70vh, 560px); overflow:hidden; padding:12px; ' +
+            'display:flex; flex-direction:column; border-radius:10px; background:#161b22; color:#fff; border:1px solid #30363d; ' +
             'box-shadow:0 8px 24px rgba(0,0,0,.45); font-family:Segoe UI,system-ui,sans-serif;';
+        const header = document.createElement('div');
+        header.style.cssText = 'display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:4px;';
         const title = document.createElement('div');
         title.textContent = 'Leaving Early';
-        title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif; margin-bottom:4px;';
+        title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif;';
         const ask = document.createElement('div');
         ask.textContent = 'Who is leaving this shift. The same list is on every computer running this script.';
         ask.style.cssText = 'font-size:12px; color:#8b949e; margin-bottom:8px;';
@@ -7366,8 +7368,10 @@
         const status = document.createElement('div');
         status.setAttribute('data-leaving-status', '');
         status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
+        const scroller = document.createElement('div');
+        scroller.style.cssText = 'overflow:auto; min-height:0; flex:1 1 auto;';
         const actions = document.createElement('div');
-        actions.style.cssText = 'display:flex; gap:6px; margin-top:8px;';
+        actions.style.cssText = 'display:flex; gap:6px; margin-top:8px; flex:0 0 auto;';
         const debug = document.createElement('button');
         debug.type = 'button';
         debug.textContent = 'Copy early debug';
@@ -7387,7 +7391,7 @@
         const close = document.createElement('button');
         close.type = 'button';
         close.textContent = 'Close';
-        close.style.cssText = 'padding:7px 10px; border-radius:6px; border:1px solid #8b949e; ' +
+        close.style.cssText = 'flex:0 0 auto; padding:7px 10px; border-radius:6px; border:1px solid #8b949e; ' +
             'background:#0d1117; color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
         close.addEventListener('click', function (event) {
             event.preventDefault();
@@ -7395,13 +7399,15 @@
             closeLeavingOverlay('mem3-leaving-list');
         });
         actions.appendChild(debug);
-        actions.appendChild(close);
-        card.appendChild(title);
+        header.appendChild(title);
+        header.appendChild(close);
+        scroller.appendChild(list);
+        scroller.appendChild(activity);
+        scroller.appendChild(status);
+        card.appendChild(header);
         card.appendChild(ask);
         card.appendChild(by);
-        card.appendChild(list);
-        card.appendChild(activity);
-        card.appendChild(status);
+        card.appendChild(scroller);
         card.appendChild(actions);
         document.body.appendChild(card);
         paintEarlyLog();

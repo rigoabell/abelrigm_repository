@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.16/);
+assert.match(src, /@version\s+1\.9\.17/);
 assert.match(src, /extendsclass\.com\/api\/json-storage\/bin\/edfeccc/);
 assert.match(src, /Every computer running this script sees this list/);
 assert.match(src, /function cleanStationText/);
@@ -53,7 +53,10 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.16");
+assert.equal(entry.version, "1.9.17");
+const leavingList = src.slice(src.indexOf("function openLeavingList"), src.indexOf("function closeLeavingOverlay"));
+assert.ok(leavingList.indexOf("header.appendChild(close)") !== -1);
+assert.ok(leavingList.indexOf("card.appendChild(header)") < leavingList.indexOf("card.appendChild(scroller)"));
 assert.match(entry.detail, /shares one leaving list/);
 assert.match(entry.detail, /types MEM3/);
 assert.match(entry.runsOn, /menu\.na\.aft\.amazonoperations\.app/);
