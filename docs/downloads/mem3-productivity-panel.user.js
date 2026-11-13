@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.25
+// @version      1.9.26
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.25';
+    const SCRIPT_VERSION = '1.9.26';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -1391,11 +1391,10 @@
         return (TIME_TRIES[empId] || 0) >= MAX_TIME_TRIES;
     }
 
-    // A full recalc marks saved rows as refreshing so idle is read again.
-    // A failed read keeps the last good number. Someone new has no row yet.
+    // A full recalc deletes saved rows first. Someone new has no row yet
+    // and is read with everyone else on the next pass.
     function needsTimeThisCycle(empId) {
         const t = LAST_TIME[empId];
-        if (t && t.refreshing) return true;
         if (t && (timeSettled(t) || t.gaveUp)) return false;
         if ((TIME_TRIES[empId] || 0) >= MAX_TIME_TRIES) return false;
         return true;
@@ -1523,25 +1522,14 @@
     }
 
     function rememberTime(empId, record) {
-        const prev = LAST_TIME[empId];
-        const incomingGood = !!(record && (timeFound(record) || record.noData));
-        const prevGood = !!(prev && timeFound(prev));
-        if (prevGood && !incomingGood) {
-            prev.cycle = refreshCycle;
-            prev.gaveUp = true;
-            prev.refreshing = false;
-            if (record && record.tries) prev.tries = record.tries;
-            recordTimeIssue(empId, record, true);
-            if (DEBUG.timeLoad) DEBUG.timeLoad.done = (DEBUG.timeLoad.done || 0) + 1;
-            scheduleLivePaint();
-            return;
-        }
         if (!record) return;
+        const incomingGood = !!(timeFound(record) || record.noData);
         record.cycle = refreshCycle;
         record.fetchedAt = Date.now();
         record.gaveUp = !incomingGood;
+        record.refreshing = false;
         LAST_TIME[empId] = record;
-        recordTimeIssue(empId, record, false);
+        recordTimeIssue(empId, record);
         if (!DEBUG.timeSample) {
             DEBUG.timeSample = {
                 empId: empId,
@@ -1609,12 +1597,11 @@
         if (panel) fillIssuePanel(panel);
     }
 
-    function recordTimeIssue(empId, record, keptEarlier) {
+    function recordTimeIssue(empId, record) {
         if (!empId || !record) return;
         const tries = record.tries || TIME_TRIES[empId] || 1;
         let reason = '';
-        if (keptEarlier) reason = 'Kept the earlier time because the new page failed';
-        else if (record.error) reason = record.error;
+        if (record.error) reason = record.error;
         else if (timeFound(record) && !(record.clockedMin > 0)) reason = 'Clock rows had no minutes';
         else if (!timeFound(record) && !record.noData) reason = 'Time Details page had no clock rows';
         else if (tries > 1) reason = 'Resolved on try ' + tries;
@@ -4844,7 +4831,9 @@
         node.appendChild(caption);
         if (!LAST_ROLLUP_AT) {
             const miss = document.createElement('div');
-            miss.textContent = 'No UPH \u2014 sign in to Midway, then Reload';
+            miss.textContent = refreshBusy
+                ? 'Recalculating UPH and idle'
+                : 'No UPH \u2014 sign in to Midway, then Reload';
             miss.style.cssText = 'font:700 12px Segoe UI,system-ui,sans-serif; color:#d29922;';
             node.appendChild(miss);
         }
@@ -5621,12 +5610,17 @@
         refreshClockTimer = setInterval(paintRefreshCountdown, 1000);
     }
 
-    function reopenTimesForRefresh() {
-        resetTimeTries();
-        const ids = Object.keys(LAST_TIME);
-        for (let i = 0; i < ids.length; i++) {
-            if (LAST_TIME[ids[i]]) LAST_TIME[ids[i]].refreshing = true;
-        }
+    // Drop every rate and idle time before the new pages come back,
+    // so the panel paints empty and then fills from this pass only.
+    function wipePanelForRefresh() {
+        clearTimeCache();
+        LAST_ROLLUP = {};
+        LAST_ROLLUP_AT = null;
+        DEBUG.rollupSize = 0;
+        DEBUG.rollupFunctions = null;
+        DEBUG.rollupParse = null;
+        lastIdentified = null;
+        try { clearDecorations(); } catch (e) { /* the board may not be up yet */ }
     }
 
     function scheduleNextRefresh() {
@@ -5660,10 +5654,11 @@
         const gen = ++refreshGeneration;
         refreshBusy = true;
         refreshDue = false;
-        reopenTimesForRefresh();
+        wipePanelForRefresh();
         scheduleNextRefresh();
         paintRefreshCountdown();
         try {
+            try { render(); } catch (e0) { /* an empty paint can wait for the new pages */ }
             if (!identityLoaded) await loadIdentities();
             if (gen !== refreshGeneration) return;
             let next = null;
@@ -5675,7 +5670,7 @@
                 warn('refresh failed:', e);
             }
             if (gen !== refreshGeneration) return;
-            if (next && (Object.keys(next).length || !Object.keys(LAST_ROLLUP).length)) {
+            if (next) {
                 LAST_ROLLUP = next;
                 LAST_ROLLUP_AT = new Date();
                 rollupRetryN = 0;
@@ -5683,7 +5678,7 @@
                     clearTimeout(rollupRetryTimer);
                     rollupRetryTimer = null;
                 }
-            } else if (!Object.keys(LAST_ROLLUP).length) {
+            } else {
                 scheduleRollupRetry();
             }
             refreshCycle++;
@@ -6193,7 +6188,7 @@
 
         const times = infoSection('Time frames');
         const timeNote = document.createElement('div');
-        timeNote.textContent = 'Days start at 6:00 AM. Nights start at 6:00 PM and use the same gaps. All shift is 6:00–5:59 (11 hr 59 min). UPH refreshes every 5 minutes. The idle percent is read once per associate. Reload, or picking a window, reads it again.';
+        timeNote.textContent = 'Days start at 6:00 AM. Nights start at 6:00 PM and use the same gaps. All shift is 6:00–5:59 (11 hr 59 min). Each recalculation clears the rates and idle times on the panel, then reads everyone again. Reload, or picking a window, starts that pass immediately.';
         timeNote.style.cssText = 'font-size:13px; font-weight:500; margin-bottom:8px;';
         times.appendChild(timeNote);
         times.appendChild(infoRows([

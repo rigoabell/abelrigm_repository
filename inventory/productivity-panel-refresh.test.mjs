@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.25/);
+assert.match(src, /@version\s+1\.9\.26/);
 assert.match(src, /data-mem3-refresh-count/);
 assert.match(src, /data-mem3-refresh-every/);
 assert.match(src, /minute \+ ' min'/);
@@ -74,10 +74,12 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.25");
+assert.equal(entry.version, "1.9.26");
 const leavingList = src.slice(src.indexOf("function openLeavingList"), src.indexOf("function closeLeavingOverlay"));
 assert.ok(leavingList.indexOf("header.appendChild(close)") !== -1);
 assert.ok(leavingList.indexOf("card.appendChild(header)") < leavingList.indexOf("card.appendChild(scroller)"));
+assert.match(entry.detail, /clears every rate and idle time/);
+assert.equal(entry.detail.includes("keeps the last good number"), false);
 assert.match(entry.detail, /shares one leaving list/);
 assert.match(entry.detail, /types MEM3/);
 assert.match(entry.runsOn, /menu\.na\.aft\.amazonoperations\.app/);
@@ -341,9 +343,12 @@ async function flush() {
 
 try {
     api.setRollup({ "99": { functions: {} } });
+    api.setTime("a", { hasTime: true, idleMin: 10, clockedMin: 100, totalMin: 100 });
     api.setBoard(["a", "b", "c", "d"]);
     const first = api.refreshData();
     await flush();
+    assert.equal(api.time("a"), null);
+    assert.equal(api.rollupKeys().length, 0);
     assert.equal(held.length, 4);
     assert.equal(detailsStarted, 4);
     const startedWhileHeld = detailsStarted;
@@ -365,7 +370,7 @@ try {
         await new Promise((resolve) => realSetTimeout(resolve, 700));
         await flush();
     }
-    assert.equal(api.rollupKeys().includes("99"), true);
+    assert.equal(api.rollupKeys().length, 0);
     assert.equal(api.state().loading, false);
     assert.equal(api.state().inFlight, 0);
     const kept = api.time("a") || api.time("b") || api.time("c") || api.time("d");
@@ -378,9 +383,10 @@ try {
     await failed;
     await flush();
     assert.ok(detailsStarted >= beforeFail);
-    assert.equal(api.rollupKeys().includes("99"), true);
+    assert.equal(api.rollupKeys().length, 0);
     const afterFail = api.time("a") || api.time("b");
-    assert.equal(afterFail.hasTime, true);
+    assert.equal(!!afterFail, true);
+    assert.equal(afterFail.hasTime, false);
 
     api.stop();
     api.setDown(true);
