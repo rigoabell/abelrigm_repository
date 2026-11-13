@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.22
+// @version      1.9.23
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.22';
+    const SCRIPT_VERSION = '1.9.23';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -6769,6 +6769,77 @@
         return out;
     }
 
+    function activityKind(event) {
+        if (!event) return '';
+        if (event.action === 'mark' || event.action === 'update' || event.action === 'clear' ||
+            event.action === 'unassign' || event.action === 'miss') return event.action;
+        const text = String(event.text || '');
+        if (/^marked \S+ leaving at /.test(text)) return 'mark';
+        if (/^updated \S+ /.test(text)) return 'update';
+        if (/^cleared \S+ /.test(text)) return 'clear';
+        if (/^unassigned \S+$/.test(text)) return 'unassign';
+        if (/ was not on a station$/.test(text)) return 'miss';
+        return '';
+    }
+
+    function activityWho(event) {
+        if (!event) return '';
+        if (event.who) return String(event.who).trim().toLowerCase();
+        const text = String(event.text || '');
+        let match = text.match(/^(?:marked|updated|cleared|unassigned) (\S+)/);
+        if (match) return match[1].toLowerCase();
+        match = text.match(/^(\S+) was not on a station$/);
+        return match ? match[1].toLowerCase() : '';
+    }
+
+    function activitySaid(event) {
+        if (!event) return '';
+        if (event.said) return event.said;
+        const text = String(event.text || '');
+        const match = text.match(/leaving at (\d{1,2}:\d{2}(?: [AP]M)?)|to leave at (\d{1,2}:\d{2} [AP]M)/);
+        return match ? (match[1] || match[2] || '') : '';
+    }
+
+    function restoreLatestMarks(doc, now) {
+        if (!doc) return false;
+        const events = recentActivity(doc, now);
+        const seen = Object.create(null);
+        let changed = false;
+        for (let i = 0; i < events.length; i++) {
+            const kind = activityKind(events[i]);
+            const who = activityWho(events[i]);
+            if (!kind || !who || seen[who]) continue;
+            seen[who] = true;
+            if (kind !== 'mark' && kind !== 'update') continue;
+            const said = activitySaid(events[i]);
+            if (!said) continue;
+            const rows = shiftRows(doc, now);
+            let open = null;
+            let same = null;
+            for (let r = 0; r < rows.length; r++) {
+                if (!rows[r] || rows[r].login !== who) continue;
+                if (leavingOpen(rows[r])) open = rows[r];
+                if (rows[r].id === who + '-' + said) same = rows[r];
+            }
+            if (open || !same) continue;
+            const when = eventTime(events[i], now);
+            const closedAt = rowRevisionTime(same, now);
+            if (when && closedAt && when <= closedAt) continue;
+            same.status = 'said';
+            same.said = said;
+            same.markedAt = events[i].at || same.markedAt;
+            if (when) same.markedAtMs = when;
+            same.clearedAt = '';
+            same.clearedAtMs = 0;
+            same.clearedBy = '';
+            same.takenOffAt = '';
+            same.takenHow = '';
+            same.back = '';
+            changed = true;
+        }
+        return changed;
+    }
+
     function pruneLeaving(doc, now) {
         if (!doc) return doc;
         const cutoff = now.getTime() - LEAVING_KEEP_MS;
@@ -6817,6 +6888,7 @@
     }
 
     function saveLeaving(doc) {
+        restoreLatestMarks(doc, new Date());
         pruneLeaving(doc, new Date());
         saveLeavingLocal(doc);
         if (leavingShareOn()) return publishLeaving(doc);
@@ -6864,8 +6936,23 @@
         return 0;
     }
 
+    function rowRevisionTime(row, now) {
+        if (!row) return 0;
+        let latest = 0;
+        if (typeof row.markedAtMs === 'number' && row.markedAtMs > latest) latest = row.markedAtMs;
+        if (typeof row.clearedAtMs === 'number' && row.clearedAtMs > latest) latest = row.clearedAtMs;
+        const clock = clockToMs(row.clearedAt || row.takenOffAt || row.markedAt, now);
+        if (clock > latest) latest = clock;
+        return latest;
+    }
+
+    function leavingOpen(row) {
+        return !!(row && (row.status === 'said' || row.status === 'stuck'));
+    }
+
     function mergeLeavingRows(left, right) {
         const byId = Object.create(null);
+        const now = new Date();
         function take(row) {
             if (!row || !row.id) return;
             const prev = byId[row.id];
@@ -6874,6 +6961,15 @@
                 byId[row.id] = copy;
                 return;
             }
+            const stampA = rowRevisionTime(prev, now);
+            const stampB = rowRevisionTime(copy, now);
+            const openA = leavingOpen(prev);
+            const openB = leavingOpen(copy);
+            if (openB && !openA && stampB > stampA) {
+                byId[row.id] = copy;
+                return;
+            }
+            if (openA && !openB && stampA > stampB) return;
             const rankA = leavingStatusRank(prev.status);
             const rankB = leavingStatusRank(copy.status);
             const histA = (prev.history || []).length;
@@ -7071,6 +7167,28 @@
             open.id = name + '-' + said;
             if (station) open.station = station;
             return { doc: doc, row: open, added: false, updated: true, previous: previous };
+        }
+        let closed = null;
+        const nextId = name + '-' + said;
+        for (let i = 0; i < rows.length; i++) {
+            if (rows[i] && rows[i].id === nextId) closed = rows[i];
+        }
+        if (closed) {
+            closed.status = 'said';
+            closed.said = said;
+            closed.saidMin = saidMin;
+            closed.markedAt = at;
+            closed.markedAtMs = now.getTime();
+            closed.clearedAt = '';
+            closed.clearedAtMs = 0;
+            closed.clearedBy = '';
+            closed.takenOffAt = '';
+            closed.takenHow = '';
+            closed.back = '';
+            if (station) closed.station = station;
+            if (!closed.history) closed.history = [];
+            closed.history.push({ said: said, at: at });
+            return { doc: doc, row: closed, added: true, updated: false };
         }
         const row = {
             id: name + '-' + said,
@@ -7532,6 +7650,7 @@
         if (!card) return;
         const now = new Date();
         const doc = loadLeaving();
+        if (restoreLatestMarks(doc, now)) saveLeaving(doc);
         const historyView = card.dataset.view === 'history';
         const title = card.querySelector('[data-leaving-title]');
         if (title) title.textContent = historyView ? 'Leaving History' : 'Leaving Early';

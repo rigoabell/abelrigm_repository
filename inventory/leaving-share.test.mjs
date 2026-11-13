@@ -8,7 +8,7 @@ const patched = src.replace(
     `globalThis.__mem3 = {
         addLeaving, saveLeaving, loadLeaving, clearMarkedLeave, shiftId,
         mergeLeaving, enableLeavingShare, publishLeaving, pullLeaving, whenLeavingShared,
-        activityLine, leavingLine, loginFromWelcome
+        activityLine, leavingLine, loginFromWelcome, restoreLatestMarks
     };
 })();`
 );
@@ -161,3 +161,44 @@ const both = JSON.parse(gist.text);
 const names = both.shifts[a.shiftId(now)].map((item) => item.login).sort();
 assert.deepEqual(names, ["brndbo", "wyoungmy"]);
 assert.equal(both.shifts[a.shiftId(now)].find((item) => item.login === "brndbo").status, "cancelled");
+
+const shiftKey = a.shiftId(now);
+const remarked = a.mergeLeaving(
+    {
+        shifts: { [shiftKey]: [{ id: "brndbo-02:00 PM", login: "brndbo", said: "02:00 PM", status: "cancelled", markedAtMs: now.getTime() - 10000, clearedAtMs: now.getTime() - 5000 }] },
+        activity: {}, runs: {}, rev: 1
+    },
+    {
+        shifts: { [shiftKey]: [{ id: "brndbo-02:00 PM", login: "brndbo", said: "02:00 PM", status: "said", markedAtMs: now.getTime() }] },
+        activity: {}, runs: {}, rev: 1
+    }
+);
+assert.equal(remarked.shifts[shiftKey][0].status, "said");
+const keptClear = a.mergeLeaving(
+    {
+        shifts: { [shiftKey]: [{ id: "brndbo-02:00 PM", login: "brndbo", said: "02:00 PM", status: "said", markedAtMs: now.getTime() - 10000 }] },
+        activity: {}, runs: {}, rev: 1
+    },
+    {
+        shifts: { [shiftKey]: [{ id: "brndbo-02:00 PM", login: "brndbo", said: "02:00 PM", status: "cancelled", markedAtMs: now.getTime() - 10000, clearedAtMs: now.getTime() }] },
+        activity: {}, runs: {}, rev: 1
+    }
+);
+assert.equal(keptClear.shifts[shiftKey][0].status, "cancelled");
+const healed = {
+    shifts: {
+        [shiftKey]: [{ id: "brndbo-01:00 PM", login: "brndbo", said: "01:00 PM", saidMin: 780, status: "cancelled", markedAt: "02:52 PM" }]
+    },
+    activity: {
+        [shiftKey]: [{ at: "03:56 PM", atMs: Date.now(), by: "abelrigm", text: "marked brndbo leaving at 01:00 PM", action: "mark", who: "brndbo", said: "01:00 PM" }]
+    },
+    runs: {},
+    rev: 1
+};
+assert.equal(a.restoreLatestMarks(healed, new Date()), true);
+assert.equal(healed.shifts[shiftKey][0].status, "said");
+const local = a.loadLeaving();
+a.clearMarkedLeave(local, "brndbo-02:00 PM", "abelrigm", now);
+const second = a.addLeaving(local, "brndbo", 14 * 60, "Station 3-01", new Date());
+assert.equal(second.row.status, "said");
+assert.equal(local.shifts[a.shiftId(now)].filter((item) => item.id === "brndbo-02:00 PM").length, 1);
