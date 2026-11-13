@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.19
+// @version      1.9.20
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.19';
+    const SCRIPT_VERSION = '1.9.20';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -5144,6 +5144,7 @@
                     existing.appendChild(makePopupLeavingButton(popupPerson));
                 }
                 paintPopupLeaving(existing, popupPerson);
+                placeNameLeaving(host, popupPerson);
                 continue;
             }
 
@@ -5159,6 +5160,7 @@
             while (anchor.parentElement && anchor.parentElement !== host) anchor = anchor.parentElement;
             if (anchor.parentElement === host) host.insertBefore(line, anchor);
             else host.appendChild(line);
+            placeNameLeaving(host, person);
         }
     }
 
@@ -6904,7 +6906,10 @@
         const rows = shiftRows(doc, now);
         for (let i = 0; i < rows.length; i++) {
             if (rows[i].id !== id) continue;
-            if (rows[i].status !== 'cancelled') rows[i].status = 'cancelled';
+            if (rows[i].status !== 'cancelled') {
+                rows[i].status = 'cancelled';
+                rows[i].clearedAt = clockText(now);
+            }
             return rows[i];
         }
         return null;
@@ -6969,7 +6974,11 @@
             text += ' (was ' + earlier.join(', ') + ')';
         }
         if (row.station) text += ' from ' + row.station;
-        if (row.status === 'cancelled') text += ' · cancelled';
+        if (row.status === 'cancelled') {
+            text += ' · cleared';
+            if (row.clearedBy) text += ' by ' + row.clearedBy;
+            if (row.clearedAt) text += ' at ' + row.clearedAt;
+        }
         else if (row.status === 'off') {
             text += ' · off at ' + (row.takenOffAt || '');
             if (row.takenHow === 'not on a station') text += ' (not on a station)';
@@ -7312,6 +7321,7 @@
     function clearMarkedLeave(doc, id, by, now) {
         const row = cancelLeaving(doc, id, now);
         if (!row || row.status !== 'cancelled') return null;
+        row.clearedBy = String(by || '').trim().toLowerCase();
         recordActivity(doc, by, 'cleared ' + row.login + ' marked at ' + row.said, now);
         pushEarlyRun(doc, {
             at: clockText(now), by: by, kind: 'clear', shiftId: shiftId(now),
@@ -7330,8 +7340,15 @@
         if (list) {
             while (list.firstChild) list.removeChild(list.firstChild);
             const rows = shiftRows(doc, now).slice().filter(function (row) {
-                return row && row.status !== 'cancelled';
+                return row && row.login;
             }).sort(function (a, b) {
+                function rank(row) {
+                    if (row.status === 'cancelled') return 2;
+                    if (row.status === 'off') return 1;
+                    return 0;
+                }
+                const byRank = rank(a) - rank(b);
+                if (byRank) return byRank;
                 return shiftMinute(a.saidMin) - shiftMinute(b.saidMin);
             });
             if (!rows.length) {
@@ -7349,6 +7366,10 @@
                 label.textContent = leavingLine(row);
                 label.style.cssText = 'font-size:12px; font-weight:650;';
                 line.appendChild(label);
+                if (row.status === 'cancelled') {
+                    list.appendChild(line);
+                    continue;
+                }
                 const clear = document.createElement('button');
                 clear.type = 'button';
                 clear.textContent = 'Clear';
@@ -7501,34 +7522,81 @@
         return null;
     }
 
-    function paintPopupLeaving(box, person) {
-        if (!box) return;
+    function compactName(text) {
+        return String(text || '').toLowerCase().replace(/[^a-z,]/g, '');
+    }
+
+    function elementOwnText(el) {
+        let text = '';
+        const nodes = el.childNodes || [];
+        for (let i = 0; i < nodes.length; i++) {
+            if (nodes[i].nodeType === 3) text += nodes[i].textContent || '';
+        }
+        return text.replace(/\s+/g, ' ').trim();
+    }
+
+    function findNameElement(host, person) {
+        const want = compactName(person && person.name);
+        if (!host || want.length < 3) return null;
+        const nodes = host.querySelectorAll('div, span, p, h1, h2, h3, h4, strong, b');
+        let exact = null;
+        let exactLen = 100000;
+        let loose = null;
+        let looseLen = 100000;
+        for (let i = 0; i < nodes.length; i++) {
+            const el = nodes[i];
+            if (el.closest && el.closest('.' + POPUP_CLASS)) continue;
+            if (el.getAttribute && el.getAttribute('data-mem3-leaving-note') != null) continue;
+            const own = compactName(elementOwnText(el));
+            const fullText = (el.textContent || '').replace(/\s+/g, ' ').trim();
+            const full = compactName(fullText);
+            if (own === want && fullText.length < exactLen) {
+                exact = el;
+                exactLen = fullText.length;
+            }
+            if (full.indexOf(want) === 0 && fullText.length < looseLen && fullText.length < 80) {
+                loose = el;
+                looseLen = fullText.length;
+            }
+        }
+        return exact || loose;
+    }
+
+    function placeNameLeaving(host, person) {
+        if (!host) return;
         try {
-            const login = (person && person.login) || box.dataset.login || '';
+            const login = (person && person.login) || '';
             const row = openLeavingFor(login);
-            let note = box.querySelector('[data-mem3-leaving-note]');
+            const notes = host.querySelectorAll('[data-mem3-leaving-note]');
+            let note = notes[0] || null;
+            for (let i = 1; i < notes.length; i++) notes[i].remove();
             if (!row) {
                 if (note) note.remove();
-            } else {
-                if (!note) {
-                    note = document.createElement('div');
-                    note.setAttribute('data-mem3-leaving-note', '');
-                    note.style.cssText = 'display:block; width:100%; box-sizing:border-box; margin-top:8px; ' +
-                        'padding:6px 8px; border-radius:6px; background:#f5c518; color:#000000; text-align:center; ' +
-                        'font:800 12px Segoe UI,system-ui,sans-serif;';
-                    const button = box.querySelector('[data-mem3-leaving-early]');
-                    if (button) box.insertBefore(note, button);
-                    else box.appendChild(note);
-                }
-                note.textContent = 'Leaving at ' + row.said;
+                return;
             }
-            const button = box.querySelector('[data-mem3-leaving-early]');
-            if (button) {
-                button.style.background = '#f5c518';
-                button.style.color = '#000000';
-                button.style.borderColor = '#c9a20a';
+            if (!note) {
+                note = document.createElement('div');
+                note.setAttribute('data-mem3-leaving-note', '');
+            }
+            note.style.cssText = 'display:block; margin:2px 0 0; padding:0; background:none; border:0; ' +
+                'color:#f85149; font:700 13px Segoe UI,system-ui,sans-serif; line-height:1.2;';
+            note.textContent = 'Leaving at ' + row.said;
+            const nameEl = findNameElement(host, person);
+            const parent = nameEl && nameEl.parentElement ? nameEl.parentElement : host;
+            const after = nameEl ? nameEl.nextSibling : host.firstChild;
+            if (note.parentElement !== parent || note.previousSibling !== nameEl) {
+                parent.insertBefore(note, after);
             }
         } catch (e) { /* the card still opens without the leave line */ }
+    }
+
+    function paintPopupLeaving(box, person) {
+        if (!box) return;
+        const button = box.querySelector('[data-mem3-leaving-early]');
+        if (!button) return;
+        button.style.background = '#f5c518';
+        button.style.color = '#000000';
+        button.style.borderColor = '#c9a20a';
     }
 
     function showLeaveCheck(card) {
