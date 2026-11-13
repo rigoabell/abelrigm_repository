@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.14
+// @version      1.9.15
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -22,6 +22,7 @@
 // @connect      federate.amazon.com
 // @connect      gist.githubusercontent.com
 // @connect      gist.github.com
+// @connect      api.github.com
 // @connect      raw.githubusercontent.com
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setClipboard
@@ -37,7 +38,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.14';
+    const SCRIPT_VERSION = '1.9.15';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -6488,6 +6489,10 @@
     const LEAVING_KEY = 'mem3-leaving-v1';
     const ACTOR_KEY = 'mem3-leaving-actor';
     const LEAVING_POLL_MS = 20000;
+    const LEAVING_GIST_FILE = 'mem3-leaving.json';
+    let LEAVING_GIST_ID = '';
+    let LEAVING_GIST_TOKEN = '';
+    let leavingShareChain = Promise.resolve();
     let leavingBusy = false;
     let leavingHeld = false;
 
@@ -6614,12 +6619,207 @@
         });
     }
 
-    function saveLeaving(doc) {
+    function saveLeavingLocal(doc) {
         const text = JSON.stringify(doc);
         try {
             if (typeof GM_setValue === 'function') GM_setValue(LEAVING_KEY, text);
         } catch (e) { /* the page copy below still records it */ }
         try { localStorage.setItem(LEAVING_KEY, text); } catch (e2) { /* storage can be blocked */ }
+    }
+
+    function saveLeaving(doc) {
+        saveLeavingLocal(doc);
+        if (leavingShareOn()) publishLeaving(doc);
+    }
+
+    function leavingShareOn() {
+        return !!(LEAVING_GIST_ID && LEAVING_GIST_TOKEN && typeof GM_xmlhttpRequest === 'function');
+    }
+
+    function enableLeavingShare(id, token) {
+        LEAVING_GIST_ID = String(id || '');
+        LEAVING_GIST_TOKEN = String(token || '');
+    }
+
+    function leavingStatusRank(status) {
+        if (status === 'cancelled') return 4;
+        if (status === 'off') return 3;
+        if (status === 'stuck') return 2;
+        if (status === 'said') return 1;
+        return 0;
+    }
+
+    function mergeLeavingRows(left, right) {
+        const byId = Object.create(null);
+        function take(row) {
+            if (!row || !row.id) return;
+            const prev = byId[row.id];
+            const copy = JSON.parse(JSON.stringify(row));
+            if (!prev) {
+                byId[row.id] = copy;
+                return;
+            }
+            const rankA = leavingStatusRank(prev.status);
+            const rankB = leavingStatusRank(copy.status);
+            const histA = (prev.history || []).length;
+            const histB = (copy.history || []).length;
+            if (rankB > rankA || (rankB === rankA && histB > histA) ||
+                (rankB === rankA && histB === histA && copy.back && !prev.back)) {
+                byId[row.id] = copy;
+            }
+        }
+        const lists = [left || [], right || []];
+        for (let n = 0; n < lists.length; n++) {
+            for (let i = 0; i < lists[n].length; i++) take(lists[n][i]);
+        }
+        const out = [];
+        const ids = Object.keys(byId);
+        for (let i = 0; i < ids.length; i++) out.push(byId[ids[i]]);
+        return out;
+    }
+
+    function mergeLeavingEvents(left, right, keyFn) {
+        const seen = Object.create(null);
+        const out = [];
+        function take(item) {
+            if (!item) return;
+            const key = keyFn(item);
+            if (seen[key]) return;
+            seen[key] = true;
+            out.push(item);
+        }
+        const lists = [left || [], right || []];
+        for (let n = 0; n < lists.length; n++) {
+            for (let i = 0; i < lists[n].length; i++) take(lists[n][i]);
+        }
+        return out;
+    }
+
+    function mergeLeaving(local, remote) {
+        const a = local && local.shifts ? local : emptyLeaving();
+        const b = remote && remote.shifts ? remote : emptyLeaving();
+        const out = emptyLeaving();
+        out.activity = {};
+        out.runs = {};
+        const shiftIds = Object.create(null);
+        const aShifts = a.shifts || {};
+        const bShifts = b.shifts || {};
+        Object.keys(aShifts).forEach(function (id) { shiftIds[id] = true; });
+        Object.keys(bShifts).forEach(function (id) { shiftIds[id] = true; });
+        Object.keys(shiftIds).forEach(function (id) {
+            out.shifts[id] = mergeLeavingRows(aShifts[id], bShifts[id]);
+        });
+        const actIds = Object.create(null);
+        const aAct = a.activity || {};
+        const bAct = b.activity || {};
+        Object.keys(aAct).forEach(function (id) { actIds[id] = true; });
+        Object.keys(bAct).forEach(function (id) { actIds[id] = true; });
+        Object.keys(actIds).forEach(function (id) {
+            out.activity[id] = mergeLeavingEvents(aAct[id], bAct[id], function (item) {
+                return item.at + '|' + item.by + '|' + item.text;
+            });
+        });
+        const runIds = Object.create(null);
+        const aRuns = a.runs || {};
+        const bRuns = b.runs || {};
+        Object.keys(aRuns).forEach(function (id) { runIds[id] = true; });
+        Object.keys(bRuns).forEach(function (id) { runIds[id] = true; });
+        Object.keys(runIds).forEach(function (id) {
+            out.runs[id] = mergeLeavingEvents(aRuns[id], bRuns[id], function (item) {
+                return (item.at || '') + '|' + (item.by || '') + '|' + (item.kind || '') + '|' +
+                    (item.summary || '') + '|' + (item.login || '');
+            });
+        });
+        out.rev = Math.max(a.rev || 0, b.rev || 0);
+        return out;
+    }
+
+    function leavingBody(doc) {
+        const copy = JSON.parse(JSON.stringify(doc || emptyLeaving()));
+        delete copy.rev;
+        return JSON.stringify(copy);
+    }
+
+    function gistRequest(method, extra) {
+        const headers = {
+            Authorization: 'Bearer ' + LEAVING_GIST_TOKEN,
+            Accept: 'application/vnd.github+json',
+            'Content-Type': 'application/json'
+        };
+        if (extra && extra.baseRev != null) headers['X-Leaving-Base'] = String(extra.baseRev);
+        return new Promise(function (resolve, reject) {
+            GM_xmlhttpRequest({
+                method: method,
+                url: 'https://api.github.com/gists/' + LEAVING_GIST_ID,
+                headers: headers,
+                data: extra && extra.body ? JSON.stringify(extra.body) : undefined,
+                timeout: 20000,
+                onload: function (res) { resolve(res || {}); },
+                onerror: function () { reject(new Error('gist')); },
+                ontimeout: function () { reject(new Error('gist timeout')); }
+            });
+        });
+    }
+
+    function readSharedLeaving() {
+        return gistRequest('GET').then(function (res) {
+            if (!res || res.status < 200 || res.status >= 300) throw new Error('gist read');
+            const payload = JSON.parse(res.responseText || '{}');
+            const file = payload.files && payload.files[LEAVING_GIST_FILE];
+            if (!file || !file.content) return emptyLeaving();
+            const doc = JSON.parse(file.content);
+            if (!doc || !doc.shifts) return emptyLeaving();
+            return doc;
+        });
+    }
+
+    function writeSharedLeaving(doc, baseRev) {
+        const body = { files: {} };
+        body.files[LEAVING_GIST_FILE] = { content: JSON.stringify(doc) };
+        return gistRequest('PATCH', { body: body, baseRev: baseRev }).then(function (res) {
+            if (res && res.status === 409) return { conflict: true };
+            if (!res || res.status < 200 || res.status >= 300) throw new Error('gist write');
+            return { conflict: false };
+        });
+    }
+
+    function publishLeavingOnce(localDoc, attempt) {
+        return readSharedLeaving().then(function (remote) {
+            const merged = mergeLeaving(localDoc, remote);
+            const base = remote.rev || 0;
+            if (leavingBody(merged) === leavingBody(remote)) {
+                merged.rev = base;
+                saveLeavingLocal(merged);
+                return merged;
+            }
+            merged.rev = base + 1;
+            return writeSharedLeaving(merged, base).then(function (result) {
+                if (result.conflict) {
+                    if (attempt >= 4) throw new Error('gist conflict');
+                    return publishLeavingOnce(localDoc, attempt + 1);
+                }
+                saveLeavingLocal(merged);
+                return merged;
+            });
+        });
+    }
+
+    function publishLeaving(doc) {
+        if (!leavingShareOn()) return Promise.resolve(doc);
+        const job = leavingShareChain.then(function () {
+            return publishLeavingOnce(doc, 0);
+        });
+        leavingShareChain = job.then(function (next) { return next; }, function () { return null; });
+        return job;
+    }
+
+    function pullLeaving() {
+        if (!leavingShareOn()) return Promise.resolve(loadLeaving());
+        return publishLeaving(loadLeaving());
+    }
+
+    function whenLeavingShared() {
+        return leavingShareChain;
     }
 
     function shiftRows(doc, date) {
@@ -6836,6 +7036,9 @@
         const doc = loadLeaving();
         if (noteReturns(doc, shiftRows(doc, now), now)) saveLeaving(doc);
         paintEarlyLog();
+        if (leavingShareOn()) {
+            pullLeaving().then(function () { paintEarlyLog(); }).catch(function () {});
+        }
     }
 
     async function unassignMarkedLeaves(by) {
