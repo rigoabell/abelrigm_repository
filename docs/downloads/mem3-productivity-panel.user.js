@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.11
+// @version      1.9.12
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -37,7 +37,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.11';
+    const SCRIPT_VERSION = '1.9.12';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -6758,6 +6758,55 @@
         }
     }
 
+    function pushEarlyRun(doc, run) {
+        if (!doc.runs) doc.runs = {};
+        const id = run.shiftId || shiftId(new Date());
+        run.shiftId = id;
+        if (!doc.runs[id]) doc.runs[id] = [];
+        doc.runs[id].push(run);
+        if (doc.runs[id].length > 40) doc.runs[id].shift();
+    }
+
+    function slimEarlyClick(record, error) {
+        const tip = record && record.tooltip;
+        const buttons = [];
+        const list = (tip && tip.buttons) || [];
+        for (let i = 0; i < list.length; i++) {
+            const button = list[i];
+            if (!button) continue;
+            buttons.push({ text: button.text || '', visible: button.visible !== false });
+        }
+        return {
+            beforeCount: record ? record.beforeCount : null,
+            afterCount: record ? record.afterCount : null,
+            leftBoard: !!(record && record.leftBoard),
+            clickedUnassign: !!(record && record.clickedUnassign),
+            clickMethod: record ? (record.clickMethod || '') : '',
+            buttonGone: !!(record && record.buttonGone),
+            tooltipButtons: buttons,
+            error: error || ''
+        };
+    }
+
+    function collectEarlyDebug() {
+        const now = new Date();
+        const doc = loadLeaving();
+        const id = shiftId(now);
+        return {
+            script: 'Leaving Early',
+            version: SCRIPT_VERSION,
+            at: now.toISOString(),
+            shiftId: id,
+            actor: loadActor(),
+            leavingBusy: leavingBusy,
+            unassigning: unassigning,
+            psHold: psBoardHolding(),
+            rows: (doc.shifts && doc.shifts[id]) || [],
+            activity: (doc.activity && doc.activity[id]) || [],
+            runs: (doc.runs && doc.runs[id]) || []
+        };
+    }
+
     function markedLeaving(rows) {
         const out = [];
         const list = rows || [];
@@ -6780,19 +6829,46 @@
     }
 
     async function unassignMarkedLeaves(by) {
-        if (!isAssignmentsPage() || leavingBusy || unassigning || psBoardHolding()) return;
         const actor = String(by || loadActor() || '').trim().toLowerCase() || 'board';
         const now = new Date();
+        let blocked = '';
+        if (!isAssignmentsPage()) blocked = 'Not on the assignments page.';
+        else if (leavingBusy || unassigning) blocked = 'An unassign is already running.';
+        else if (psBoardHolding()) blocked = 'The problem-solve sheet is holding the page.';
+        if (blocked) {
+            const doc = loadLeaving();
+            pushEarlyRun(doc, {
+                at: clockText(now), by: actor, kind: 'unassign', shiftId: shiftId(now),
+                summary: blocked, steps: []
+            });
+            saveLeaving(doc);
+            setLeavingStatus(blocked);
+            paintEarlyLog();
+            return;
+        }
         const doc = loadLeaving();
         const waiting = markedLeaving(shiftRows(doc, now));
         const rows = dueLeaving(waiting, now);
+        const run = {
+            at: clockText(now),
+            by: actor,
+            kind: 'unassign',
+            shiftId: shiftId(now),
+            waiting: waiting.map(function (row) {
+                return { login: row.login, said: row.said, station: row.station || '' };
+            }),
+            due: rows.length,
+            steps: [],
+            summary: ''
+        };
         if (!rows.length) {
-            const text = waiting.length
+            run.summary = waiting.length
                 ? 'No leave time has passed yet. ' + waiting.length + ' still waiting.'
                 : 'Nobody on this list is waiting.';
-            recordActivity(doc, actor, text, now);
+            recordActivity(doc, actor, run.summary, now);
+            pushEarlyRun(doc, run);
             saveLeaving(doc);
-            setLeavingStatus(text);
+            setLeavingStatus(run.summary);
             paintEarlyLog();
             return;
         }
@@ -6808,30 +6884,66 @@
                 setLeavingStatus('Unassigning ' + (i + 1) + '/' + rows.length + ' · ' + row.login);
                 const anchor = findAnchorForPerson(row.login, '');
                 const stamp = new Date();
+                const step = {
+                    at: clockText(stamp),
+                    login: row.login,
+                    said: row.said,
+                    station: row.station || '',
+                    result: ''
+                };
                 if (!anchor || countLoginOnBoard(row.login) === 0) {
                     markTakenOff(row, stamp, 'not on a station');
+                    step.result = 'not on a station';
                     recordActivity(doc, actor, row.login + ' was not on a station', stamp);
                     missed += 1;
+                    run.steps.push(step);
                     continue;
                 }
                 const record = { login: row.login, station: row.station, tries: 1 };
                 let left = false;
-                try { left = await unassignAnchor(anchor, record); } catch (e) { left = false; }
+                let error = '';
+                try { left = await unassignAnchor(anchor, record); } catch (e) {
+                    left = false;
+                    error = e && e.message ? e.message : String(e || 'unassign failed');
+                }
+                const click = slimEarlyClick(record, error);
+                step.beforeCount = click.beforeCount;
+                step.afterCount = click.afterCount;
+                step.leftBoard = click.leftBoard;
+                step.clickedUnassign = click.clickedUnassign;
+                step.clickMethod = click.clickMethod;
+                step.buttonGone = click.buttonGone;
+                step.tooltipButtons = click.tooltipButtons;
+                if (error) step.error = error;
                 if (left) {
                     markTakenOff(row, stamp, 'unassigned');
+                    step.result = 'unassigned';
                     recordActivity(doc, actor, 'unassigned ' + row.login, stamp);
                     off += 1;
                 } else {
+                    step.result = 'could not take off';
                     recordActivity(doc, actor, 'could not take ' + row.login + ' off', stamp);
                 }
+                run.steps.push(step);
             }
             const later = waiting.length - rows.length;
-            const summary = 'Unassigned ' + off + '. ' + missed + ' were not on a station. ' +
+            run.summary = 'Unassigned ' + off + '. ' + missed + ' were not on a station. ' +
                 (rows.length - off - missed) + ' could not be taken off. ' +
                 later + ' are still waiting for their time.';
-            recordActivity(doc, actor, summary, new Date());
+            run.off = off;
+            run.missed = missed;
+            run.failed = rows.length - off - missed;
+            run.stillWaiting = later;
+            recordActivity(doc, actor, run.summary, new Date());
+            pushEarlyRun(doc, run);
             saveLeaving(doc);
-            setLeavingStatus(summary);
+            setLeavingStatus(run.summary);
+        } catch (e) {
+            run.summary = e && e.message ? e.message : 'Unassign failed.';
+            run.error = run.summary;
+            pushEarlyRun(doc, run);
+            saveLeaving(doc);
+            setLeavingStatus(run.summary);
         } finally {
             holdLeaving(false);
             unassigning = false;
@@ -6877,6 +6989,10 @@
         const row = cancelLeaving(doc, id, now);
         if (!row || row.status !== 'cancelled') return null;
         recordActivity(doc, by, 'cleared ' + row.login + ' marked at ' + row.said, now);
+        pushEarlyRun(doc, {
+            at: clockText(now), by: by, kind: 'clear', shiftId: shiftId(now),
+            login: row.login, said: row.said, summary: 'cleared'
+        });
         return row;
     }
 
@@ -6987,23 +7103,43 @@
         const status = document.createElement('div');
         status.setAttribute('data-leaving-status', '');
         status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex; gap:6px; margin-top:8px;';
+        const debug = document.createElement('button');
+        debug.type = 'button';
+        debug.textContent = 'Copy early debug';
+        debug.style.cssText = 'padding:7px 10px; border-radius:6px; border:1px solid #58a6ff; background:#0d1117; ' +
+            'color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        debug.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            copyText(JSON.stringify(collectEarlyDebug(), null, 2)).then(function () {
+                debug.textContent = 'Copied';
+                setTimeout(function () { debug.textContent = 'Copy early debug'; }, 1500);
+            }).catch(function () {
+                debug.textContent = 'Copy failed';
+                setTimeout(function () { debug.textContent = 'Copy early debug'; }, 2000);
+            });
+        });
         const close = document.createElement('button');
         close.type = 'button';
         close.textContent = 'Close';
-        close.style.cssText = 'margin-top:8px; padding:7px 10px; border-radius:6px; border:1px solid #8b949e; ' +
+        close.style.cssText = 'padding:7px 10px; border-radius:6px; border:1px solid #8b949e; ' +
             'background:#0d1117; color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
         close.addEventListener('click', function (event) {
             event.preventDefault();
             event.stopPropagation();
             closeLeavingOverlay('mem3-leaving-list');
         });
+        actions.appendChild(debug);
+        actions.appendChild(close);
         card.appendChild(title);
         card.appendChild(ask);
         card.appendChild(by);
         card.appendChild(list);
         card.appendChild(activity);
         card.appendChild(status);
-        card.appendChild(close);
+        card.appendChild(actions);
         document.body.appendChild(card);
         paintEarlyLog();
     }
@@ -7128,6 +7264,12 @@
             } else {
                 recordActivity(doc, actor, who + ' already marked at ' + result.row.said, now);
             }
+            pushEarlyRun(doc, {
+                at: clockText(now), by: actor, kind: result.updated ? 'update' : (result.added ? 'mark' : 'same'),
+                shiftId: shiftId(now), login: who, said: result.row.said,
+                previous: result.previous || '', station: station || '',
+                summary: result.updated ? 'updated' : (result.added ? 'marked' : 'already marked')
+            });
             saveLeaving(doc);
             paintEarlyLog();
             if (result.updated) {
@@ -7216,10 +7358,22 @@
         function submit() {
             const actor = String(by.value || '').trim().toLowerCase();
             if (!looksLikeLogin(actor)) {
+                const doc = loadLeaving();
+                pushEarlyRun(doc, {
+                    at: clockText(new Date()), by: actor || 'unknown', kind: 'unassign',
+                    shiftId: shiftId(new Date()), summary: 'Enter your login.', steps: []
+                });
+                saveLeaving(doc);
                 setLeavingStatus('Enter your login.');
                 return;
             }
             if (pass.value !== UNASSIGN_PASSWORD) {
+                const doc = loadLeaving();
+                pushEarlyRun(doc, {
+                    at: clockText(new Date()), by: actor, kind: 'unassign',
+                    shiftId: shiftId(new Date()), summary: 'Wrong password.', steps: []
+                });
+                saveLeaving(doc);
                 setLeavingStatus('Wrong password.');
                 return;
             }
