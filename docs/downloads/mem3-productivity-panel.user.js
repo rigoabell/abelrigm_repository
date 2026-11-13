@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.8
+// @version      1.9.9
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -37,7 +37,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.8';
+    const SCRIPT_VERSION = '1.9.9';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -5073,6 +5073,7 @@
             });
             box.appendChild(dbg);
         }
+        box.appendChild(makePopupLeavingButton(person));
         return box;
     }
 
@@ -5126,6 +5127,9 @@
                 if (timeNode) timeNode.remove();
                 const popupPerson = IDENTITY.byLogin[existing.dataset.login] || personFromText(existing.textContent || '');
                 ensurePopupClock(existing, popupPerson, existing.dataset.empId || '');
+                if (!existing.querySelector('[data-mem3-leaving-early]')) {
+                    existing.appendChild(makePopupLeavingButton(popupPerson));
+                }
                 continue;
             }
 
@@ -6875,11 +6879,29 @@
             'background:#0d1117; color:#fff; font:600 13px Segoe UI,system-ui,sans-serif;';
     }
 
-    function openLeavingPanel() {
+    function makePopupLeavingButton(person) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = 'Leaving Early';
+        btn.setAttribute('data-mem3-leaving-early', '');
+        btn.style.cssText = 'display:block; width:100%; box-sizing:border-box; margin-top:8px; padding:6px 8px; ' +
+            'border-radius:6px; border:1px solid #30363d; background:#0d1117; color:#ffffff; cursor:pointer; ' +
+            'font:800 12px Segoe UI,system-ui,sans-serif; text-transform:none; letter-spacing:0;';
+        btn.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            const host = btn.closest('.' + POPUP_CLASS);
+            const login = (person && person.login) || (host && host.dataset.login) || '';
+            openLeavingPanel(login);
+        });
+        return btn;
+    }
+
+    function openLeavingPanel(prefill) {
         closeLeavingOverlay(LEAVING_ID);
         const card = document.createElement('div');
         card.id = LEAVING_ID;
-        card.style.cssText = 'position:fixed; right:16px; bottom:16px; z-index:2147483646; width:min(440px, calc(100vw - 24px)); ' +
+        card.style.cssText = 'position:fixed; left:50%; top:50%; transform:translate(-50%, -50%); z-index:2147483647; width:min(440px, calc(100vw - 24px)); ' +
             'padding:12px; border-radius:10px; background:#161b22; color:#fff; border:1px solid #30363d; ' +
             'box-shadow:0 8px 24px rgba(0,0,0,.45); font-family:Segoe UI,system-ui,sans-serif;';
         const title = document.createElement('div');
@@ -6898,6 +6920,7 @@
         const login = document.createElement('input');
         login.setAttribute('data-login', '');
         login.placeholder = 'Associate login';
+        if (prefill && looksLikeLogin(prefill)) login.value = String(prefill).trim().toLowerCase();
         login.style.cssText = leavingFieldStyle();
         const time = document.createElement('input');
         time.setAttribute('data-time', '');
@@ -6997,7 +7020,8 @@
         card.appendChild(form);
         card.appendChild(status);
         document.body.appendChild(card);
-        login.focus();
+        if (login.value) time.focus();
+        else login.focus();
     }
 
     function openEarlyPass() {
