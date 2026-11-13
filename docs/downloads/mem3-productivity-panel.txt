@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.17
+// @version      1.9.18
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.17';
+    const SCRIPT_VERSION = '1.9.18';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -7159,23 +7159,42 @@
                     run.steps.push(step);
                     continue;
                 }
-                const record = { login: row.login, station: row.station, tries: 1 };
+                const before = countLoginOnBoard(row.login);
+                step.beforeCount = before;
+                step.attempts = [];
+                let record = null;
                 let error = '';
-                try { await unassignAnchor(anchor, record); } catch (e) {
-                    error = e && e.message ? e.message : String(e || 'unassign failed');
+                for (let tryN = 1; tryN <= 4; tryN++) {
+                    if (countLoginOnBoard(row.login) < before) break;
+                    await closeAllAssociateMenus();
+                    const again = findAnchorForPerson(row.login, '');
+                    if (!again) break;
+                    record = { login: row.login, station: '', tries: tryN };
+                    error = '';
+                    try { await unassignAnchor(again, record); } catch (e) {
+                        error = e && e.message ? e.message : String(e || 'unassign failed');
+                    }
+                    const attempt = {
+                        try: tryN,
+                        clickMethod: record.clickMethod || '',
+                        buttonGone: !!record.buttonGone,
+                        afterCount: countLoginOnBoard(row.login)
+                    };
+                    if (error) attempt.error = error;
+                    step.attempts.push(attempt);
+                    if (attempt.afterCount < before) break;
+                    await sleep(300);
                 }
                 const click = slimEarlyClick(record, error);
-                step.beforeCount = click.beforeCount;
-                step.afterCount = click.afterCount;
-                step.leftBoard = click.leftBoard;
+                step.afterCount = countLoginOnBoard(row.login);
+                step.leftBoard = step.afterCount < before;
                 step.clickedUnassign = click.clickedUnassign;
                 step.clickMethod = click.clickMethod;
                 step.buttonGone = click.buttonGone;
                 step.tooltipButtons = click.tooltipButtons;
+                step.tries = step.attempts.length;
                 if (error) step.error = error;
-                const after = countLoginOnBoard(row.login);
-                step.afterCount = after;
-                const gone = typeof step.beforeCount === 'number' && after < step.beforeCount;
+                const gone = step.afterCount < before;
                 if (gone) {
                     markTakenOff(row, stamp, 'unassigned');
                     step.result = 'unassigned';
@@ -7183,7 +7202,11 @@
                     off += 1;
                 } else {
                     step.result = 'could not take off';
-                    if (step.buttonGone) step.note = 'Unassign closed but the login is still on the board.';
+                    let closed = !!step.buttonGone;
+                    for (let a = 0; a < step.attempts.length; a++) {
+                        if (step.attempts[a].buttonGone) closed = true;
+                    }
+                    if (closed) step.note = 'Unassign closed but the login is still on the board.';
                     recordActivity(doc, actor, 'could not take ' + row.login + ' off', stamp);
                 }
                 run.steps.push(step);
