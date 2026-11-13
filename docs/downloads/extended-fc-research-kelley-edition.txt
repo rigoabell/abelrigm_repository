@@ -1,11 +1,15 @@
 // ==UserScript==
 // @name         Extended FC Research - Kelley Edition (abelrigm)
-// @version      1.4.36
+// @version      1.4.37
 // @author       joergri
 // @include      http*://fcresearch-*.aka.amazon.com/*/results*
 // @include      http*://qi-fcresearch-na.corp.amazon.com/*/results*
 // @include      https://qifcr.na.aftx.amazonoperations.app/*
+// @include      https://pandash.amazon.com/*
 // @match        https://qifcr.na.aftx.amazonoperations.app/*
+// @match        https://pandash.amazon.com/*
+// @connect      pandash.amazon.com
+// @connect      qifcr.na.aftx.amazonoperations.app
 // @require      https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js
 // @require      https://drive.corp.amazon.com/view/joergri@/Bibos/jquery.cookie.js
 // @require      https://drive.corp.amazon.com/view/joergri@/Bibos/waitForKeyElements.js
@@ -16,12 +20,15 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
+// @grant        GM_setClipboard
+// @grant        unsafeWindow
 // @grant        GM_info
 // @description  add ProzessPath/Condition & Dwell Time by Costumer Shipments
 // ==/UserScript==
 
 
 // Changelog
+// 1.4.37 keep QIFCR MEM3 search and Pandash on one shared FC and marketplace; add Copy Debug
 // 1.4.36 remove Copy Hazmat Debug button
 // 1.4.35 rename to Kelley Edition; disable auto-update redirect (was reverting local fixes)
 // 1.4.34 show script version on debug button; warn in debug report if FC/marketplace broken
@@ -50,20 +57,113 @@
 
 
 (function() {
+    var SCRIPT_VERSION = '1.4.37';
     var URL = document.URL
-    var Item = URL.substr(URL.indexOf('results?s') + 10)
-    if(Item.includes('&profile')){ Item = Item.substr(0, Item.indexOf('&profile')) }
+    var SYNC_KEY = 'kelley_fc_pandash_sync_v1';
+    var KNOWN_MARKETS = ['US','DE','GB','IE','FR','ES','IT','CA','JP','MX','NL','SE','PL','BE','TR','AE','SA','IN','BR','AU','SG'];
+    var pandashBooted = false;
+    var pandashAutoClicked = false;
 
+    /* kelley-sync-start */
+    function parseSearchItem(url){
+        var text = String(url || '');
+        var match = text.match(/[?&]s=([^&#]+)/);
+        if(!match){ return '' }
+        var item = match[1];
+        try { item = decodeURIComponent(item); } catch (e) {}
+        var profileAt = item.indexOf('&profile');
+        if(profileAt !== -1){ item = item.slice(0, profileAt) }
+        return item;
+    }
     function parseRegionFromUrl(url){
-        var match = url.match(/(?:fcresearch|qifcr)[.-]([a-z]{2})\./i);
+        var match = String(url || '').match(/(?:fcresearch|qifcr)[.-]([a-z]{2})\./i);
         if(match){ return match[1].toLowerCase() }
         return 'na';
     }
     function parseFcFromUrl(url){
-        var match = url.match(/\/([A-Z0-9]{3,5})\/(?:results|search)/i);
+        var match = String(url || '').match(/\/([A-Z0-9]{3,5})\/(?:results|search)/i);
         return match ? match[1].toUpperCase() : '';
     }
+    function defaultMarketplaceForRegion(region){
+        return region === 'eu' ? 'DE' : 'US';
+    }
+    function resolveSharedMarketplace(syncMarket, cookieMarket, region){
+        return String(syncMarket || cookieMarket || defaultMarketplaceForRegion(region)).toUpperCase();
+    }
+    function mergePandashQuery(sync, fc, market){
+        var next = {
+            fc: (sync && sync.fc) || '',
+            region: (sync && sync.region) || '',
+            marketplace: (sync && sync.marketplace) || ''
+        };
+        if(/^[A-Z0-9]{3,5}$/.test(fc || '')){ next.fc = fc }
+        if(/^[A-Z]{2}$/.test(market || '')){ next.marketplace = market }
+        if(!next.region){ next.region = next.marketplace === 'DE' ? 'eu' : 'na' }
+        if(!next.marketplace){ next.marketplace = defaultMarketplaceForRegion(next.region) }
+        return next;
+    }
+    function collectSyncWarnings(sync, pageSnap, urlFc){
+        var warnings = [];
+        var shared = sync || {};
+        if(!shared.fc || !/^[A-Z0-9]{3,5}$/.test(shared.fc)){
+            warnings.push('FC missing or not a 3-5 character warehouse id');
+        }
+        if(!shared.marketplace || KNOWN_MARKETS.indexOf(shared.marketplace) === -1){
+            warnings.push('Marketplace missing or not a Pandash code');
+        }
+        if(shared.region === 'na' && shared.marketplace === 'DE'){
+            warnings.push('NA QIFCR is set to DE. Pandash will not match MEM3 unless that marketplace was chosen on purpose.');
+        }
+        if(shared.region === 'eu' && shared.marketplace === 'US'){
+            warnings.push('EU site is set to US. Pandash will not match unless that marketplace was chosen on purpose.');
+        }
+        if(urlFc && shared.fc && urlFc !== shared.fc){
+            warnings.push('URL FC ' + urlFc + ' does not match shared FC ' + shared.fc);
+        }
+        if(pageSnap && shared.fc && !pageSnap.fc){
+            warnings.push('Pandash FC field is empty; shared FC is ' + shared.fc);
+        }
+        if(pageSnap && pageSnap.fc && shared.fc && pageSnap.fc !== shared.fc){
+            warnings.push('Pandash FC field is ' + pageSnap.fc + ' but shared FC is ' + shared.fc);
+        }
+        if(pageSnap && shared.marketplace && !pageSnap.marketplace){
+            warnings.push('Pandash marketplace ' + shared.marketplace + ' is not selected');
+        }
+        if(pageSnap && pageSnap.marketplace && shared.marketplace && pageSnap.marketplace !== shared.marketplace){
+            warnings.push('Pandash marketplace is ' + pageSnap.marketplace + ' but shared marketplace is ' + shared.marketplace);
+        }
+        return warnings;
+    }
+    /* kelley-sync-end */
+
+    var Item = parseSearchItem(URL);
+
+    function readSync(){
+        try {
+            var raw = GM_getValue(SYNC_KEY, '');
+            if(!raw){ return {} }
+            return typeof raw === 'string' ? JSON.parse(raw) : raw;
+        } catch (e) {
+            return {};
+        }
+    }
+    function writeSync(patch){
+        var next = Object.assign({}, readSync(), patch || {}, { updatedAt: new Date().toISOString() });
+        GM_setValue(SYNC_KEY, JSON.stringify(next));
+        return next;
+    }
+    function rememberPandash(entry){
+        if(!lastPandashDiag.entries){ lastPandashDiag.entries = [] }
+        lastPandashDiag.entries.push(Object.assign({ at: new Date().toISOString() }, entry || {}));
+        if(lastPandashDiag.entries.length > 5){ lastPandashDiag.entries.shift() }
+    }
     function resolveFcName(){
+        if(location.hostname === 'pandash.amazon.com'){
+            var fromInput = '';
+            try { fromInput = String($('#FCinput').val() || '').trim(); } catch (e) {}
+            if(/^[A-Z0-9]{3,5}$/i.test(fromInput)){ return fromInput.toUpperCase() }
+            return String((readSync().fc) || '').toUpperCase();
+        }
         var fromUrl = parseFcFromUrl(document.URL);
         if(fromUrl){ return fromUrl }
         var warehouse = $('.warehouse-id').first();
@@ -74,19 +174,91 @@
         }
         var state = ($('.a-color-state').first().text() || '').replace(/\s*Turn FastSolve.*$/i, '').trim();
         var stateMatch = state.match(/^([A-Z0-9]{3,5})/i);
-        return stateMatch ? stateMatch[1].toUpperCase() : state.slice(0, 5);
+        if(stateMatch){ return stateMatch[1].toUpperCase() }
+        var synced = String((readSync().fc) || '').toUpperCase();
+        if(/^[A-Z0-9]{3,5}$/.test(synced)){ return synced }
+        return state.slice(0, 5);
     }
     function refreshSiteContext(){
-        Region = parseRegionFromUrl(document.URL);
-        fcname = resolveFcName();
-        Login = ($('.aok-float-right').text() || Login || '').trim();
+        var sync = readSync();
+        var urlFc = resolveFcName();
+        if(location.hostname === 'pandash.amazon.com'){
+            Region = sync.region || parseRegionFromUrl(document.URL) || 'na';
+            fcname = (urlFc || sync.fc || fcname || '').toUpperCase();
+        }else{
+            Region = parseRegionFromUrl(document.URL) || sync.region || 'na';
+            fcname = urlFc || sync.fc || fcname || '';
+        }
+        Login = ($('.aok-float-right').text() || Login || sync.login || '').trim();
     }
     function getDefaultPandashMarketplace(){
-        return Region === 'eu' ? 'DE' : 'US';
+        return defaultMarketplaceForRegion(Region);
+    }
+    function cookieMarketplace(){
+        try { return String($.cookie(`${fcname}_PandashMarketplace`) || '').toUpperCase(); } catch (e) { return ''; }
     }
     function getPandashMarketplace(){
         refreshSiteContext();
-        return ($.cookie(`${fcname}_PandashMarketplace`) || getDefaultPandashMarketplace()).toUpperCase();
+        var sync = readSync();
+        var value = resolveSharedMarketplace(sync.marketplace, cookieMarketplace(), Region);
+        if(sync.marketplace !== value || (fcname && sync.fc !== fcname)){
+            writeSync({
+                marketplace: value,
+                fc: /^[A-Z0-9]{3,5}$/.test(fcname || '') ? fcname : (sync.fc || ''),
+                region: Region || sync.region || '',
+                login: Login || sync.login || '',
+                host: location.hostname,
+                path: location.pathname
+            });
+        }
+        try {
+            if(fcname && cookieMarketplace() !== value){
+                $.cookie(`${fcname}_PandashMarketplace`, value, { expires: 365 });
+            }
+        } catch (e) {}
+        return value;
+    }
+    function setPandashMarketplace(code){
+        refreshSiteContext();
+        var value = String(code || '').trim().toUpperCase();
+        if(!value){ return '' }
+        var sync = readSync();
+        writeSync({
+            fc: /^[A-Z0-9]{3,5}$/.test(fcname || '') ? fcname : (sync.fc || ''),
+            region: Region || sync.region || '',
+            marketplace: value,
+            login: Login || sync.login || '',
+            host: location.hostname,
+            path: location.pathname
+        });
+        try { if(fcname){ $.cookie(`${fcname}_PandashMarketplace`, value, { expires: 365 }) } } catch (e) {}
+        return value;
+    }
+    function publishSiteContext(){
+        if(location.hostname === 'pandash.amazon.com'){ return readSync() }
+        refreshSiteContext();
+        if(!/^[A-Z0-9]{3,5}$/.test(fcname || '')){ return readSync() }
+        var sync = readSync();
+        var marketplace = resolveSharedMarketplace(sync.marketplace, cookieMarketplace(), Region);
+        var saved = writeSync({
+            fc: fcname,
+            region: Region,
+            marketplace: marketplace,
+            login: Login,
+            host: location.hostname,
+            path: location.pathname
+        });
+        try { $.cookie('fcmenu-warehouseId', fcname, { expires: 365 }); } catch (e) {}
+        try { $.cookie(`${fcname}_PandashMarketplace`, marketplace, { expires: 365 }); } catch (e) {}
+        return saved;
+    }
+    function pandashPageUrl(asin){
+        refreshSiteContext();
+        var market = getPandashMarketplace();
+        var fc = fcname || readSync().fc || '';
+        var url = 'https://pandash.amazon.com/index.jsp?fc=' + encodeURIComponent(fc) + '&market=' + encodeURIComponent(market);
+        if(asin){ url += '#' + encodeURIComponent(asin) }
+        return url;
     }
     function hazmatLevelColor(level){
         if(level == '0'){ return 'grey' }
@@ -98,18 +270,245 @@
         return '';
     }
     var pandashRestrictionCache = { fc: '', level: '', fetchedAt: 0 };
+    var lastPandashDiag = { entries: [] };
     async function fetchPandashRestriction(){
         refreshSiteContext();
         if(pandashRestrictionCache.fc === fcname && Date.now() - pandashRestrictionCache.fetchedAt < 300000){
             return pandashRestrictionCache.level;
         }
-        var Response = await CommonFunctions.gmFetch.get(`https://pandash.amazon.com/GridServlet?fc=${fcname}`);
-        var body = JSON.parse(Response.responseText);
-        if(body.error === 'Invalid FC' || !body.restriction){
-            throw new Error(body.error || 'Missing restriction level');
+        var Response;
+        try {
+            Response = await CommonFunctions.gmFetch.get(`https://pandash.amazon.com/GridServlet?fc=${fcname}`);
+            var body = JSON.parse(Response.responseText);
+            if(body.error === 'Invalid FC' || !body.restriction){
+                throw new Error(body.error || 'Missing restriction level');
+            }
+            pandashRestrictionCache = { fc: fcname, level: body.restriction, fetchedAt: Date.now() };
+            rememberPandash({ kind: 'restriction', ok: true, fc: fcname, level: body.restriction, status: Response.status });
+            return body.restriction;
+        } catch (err) {
+            rememberPandash({
+                kind: 'restriction',
+                ok: false,
+                fc: fcname,
+                error: String(err && err.message || err),
+                status: Response && Response.status,
+                body: Response ? String(Response.responseText || '').slice(0, 400) : ''
+            });
+            throw err;
         }
-        pandashRestrictionCache = { fc: fcname, level: body.restriction, fetchedAt: Date.now() };
-        return body.restriction;
+    }
+    function pageWindow(){
+        try { if(typeof unsafeWindow !== 'undefined' && unsafeWindow){ return unsafeWindow } } catch (e) {}
+        return window;
+    }
+    function page$(){
+        var w = pageWindow();
+        if(w.jQuery){ return w.jQuery }
+        if(w.$ && w.$.fn){ return w.$ }
+        return (typeof $ !== 'undefined') ? $ : null;
+    }
+    function pagePandashSnap(){
+        var snap = { fc: '', marketplace: '', asin: '' };
+        try {
+            var $p = page$();
+            if(!$p){ return snap }
+            snap.fc = String($p('#FCinput').val() || '').trim().toUpperCase();
+            snap.asin = String($p('#asinsFilter').val() || '').trim();
+            for(var i = 0; i < KNOWN_MARKETS.length; i++){
+                var code = KNOWN_MARKETS[i].toLowerCase();
+                if($p('#' + code).hasClass('ui-selected')){ snap.marketplace = KNOWN_MARKETS[i]; break; }
+            }
+        } catch (e) {}
+        return snap;
+    }
+    function readPandashQuery(){
+        var params = new URLSearchParams(location.search);
+        var merged = mergePandashQuery(readSync(), String(params.get('fc') || '').toUpperCase(), String(params.get('market') || params.get('marketplace') || '').toUpperCase());
+        if(params.get('fc') || params.get('market') || params.get('marketplace')){
+            writeSync(merged);
+        }
+        return merged;
+    }
+    function applyPandashForm(){
+        var $p = page$();
+        if(!$p || !$p.fn){ return false }
+        var sync = readSync();
+        var fc = String(sync.fc || '').toUpperCase();
+        var market = String(sync.marketplace || 'US').toLowerCase();
+        var hasForm = $p('#FCinput').length || $p('#asinsFilter').length || $p('#' + market).length;
+        if(!hasForm){ return false }
+        var asin = String(location.hash || '').replace(/^#/, '').trim();
+        try { asin = decodeURIComponent(asin); } catch (e) {}
+        if(asin && $p('#asinsFilter').length){ $p('#asinsFilter').val(asin).trigger('input').trigger('change'); }
+        var btn = $p('#' + market);
+        if(btn.length){
+            btn.siblings('.ui-selected').removeClass('ui-selected');
+            btn.addClass('ui-selected');
+            if(!btn.hasClass('kelley-synced')){
+                btn.addClass('kelley-synced');
+                btn.trigger('click');
+            }
+        }
+        if(fc && $p('#sourceFilter').length){ $p('#sourceFilter').val('FC').trigger('change'); }
+        if(fc && $p('#FCinput').length && String($p('#FCinput').val() || '').toUpperCase() !== fc){
+            $p('#FCinput').css('display', 'inline').val(fc).trigger('change');
+            var w = pageWindow();
+            if(typeof w.validateFC === 'function'){
+                try { w.validateFC(); } catch (err) {
+                    rememberPandash({ kind: 'validateFC', ok: false, error: String(err && err.message || err) });
+                }
+            }
+        }
+        if($p('#languageFilter').length && !$p('#languageFilter').val()){ $p('#languageFilter').val('EN').trigger('change'); }
+        if(asin && !pandashAutoClicked && $p('.statusOk').length && $p('#btOk').length){
+            pandashAutoClicked = true;
+            $p('#btOk').trigger('click');
+        }
+        return true;
+    }
+    function watchPandashFields(){
+        var input = document.getElementById('FCinput');
+        if(input && !input.dataset.kelleyWatch){
+            input.dataset.kelleyWatch = '1';
+            var saveFc = function(){
+                var fc = String(input.value || '').trim().toUpperCase();
+                if(!/^[A-Z0-9]{3,5}$/.test(fc)){ return }
+                var sync = readSync();
+                writeSync({
+                    fc: fc,
+                    region: sync.region || 'na',
+                    marketplace: sync.marketplace || defaultMarketplaceForRegion(sync.region || 'na'),
+                    login: sync.login || Login || ''
+                });
+                try { $.cookie('fcmenu-warehouseId', fc, { expires: 365 }); } catch (e) {}
+            };
+            input.addEventListener('change', saveFc);
+            input.addEventListener('blur', saveFc);
+        }
+        if(!document.documentElement.dataset.kelleyMarketWatch){
+            document.documentElement.dataset.kelleyMarketWatch = '1';
+            document.addEventListener('click', function(event){
+                var el = event.target && event.target.closest ? event.target.closest('[id]') : null;
+                if(!el || !/^[a-z]{2}$/.test(el.id)){ return }
+                if(KNOWN_MARKETS.indexOf(el.id.toUpperCase()) === -1){ return }
+                var parentName = (el.parentElement && el.parentElement.className) || '';
+                var ownName = el.className || '';
+                if(parentName.indexOf('ui-selectable') === -1 && ownName.indexOf('ui-selectee') === -1 && ownName.indexOf('ui-selected') === -1){ return }
+                setPandashMarketplace(el.id);
+            }, true);
+        }
+    }
+    function bootPandashPage(){
+        if(pandashBooted){ return }
+        pandashBooted = true;
+        readPandashQuery();
+        var start = function(){
+            installCopyDebugButton();
+            var tries = 0;
+            var timer = setInterval(function(){
+                tries++;
+                var applied = applyPandashForm();
+                watchPandashFields();
+                if((applied && pandashAutoClicked) || tries > 40){ clearInterval(timer) }
+                if(applied && !String(location.hash || '').replace(/^#/, '')){ clearInterval(timer) }
+            }, 500);
+        };
+        if(document.body){ start(); } else { document.addEventListener('DOMContentLoaded', start); }
+    }
+    function fallbackCopy(text){
+        try {
+            var el = document.createElement('textarea');
+            el.value = text;
+            el.setAttribute('readonly', 'readonly');
+            el.style.position = 'fixed';
+            el.style.left = '-9999px';
+            document.body.appendChild(el);
+            el.select();
+            var ok = document.execCommand('copy');
+            el.remove();
+            return !!ok;
+        } catch (e) {
+            return false;
+        }
+    }
+    function copyText(text){
+        return new Promise(function(resolve){
+            try {
+                if(typeof GM_setClipboard === 'function'){
+                    GM_setClipboard(text, 'text');
+                    resolve(true);
+                    return;
+                }
+            } catch (e) {}
+            if(navigator.clipboard && navigator.clipboard.writeText){
+                navigator.clipboard.writeText(text).then(function(){ resolve(true); }).catch(function(){ resolve(fallbackCopy(text)); });
+                return;
+            }
+            resolve(fallbackCopy(text));
+        });
+    }
+    function buildDebugReport(){
+        if(location.hostname === 'pandash.amazon.com'){ refreshSiteContext(); } else { publishSiteContext(); }
+        getPandashMarketplace();
+        var sync = readSync();
+        var snap = location.hostname === 'pandash.amazon.com' ? pagePandashSnap() : null;
+        var urlFc = parseFcFromUrl(location.href);
+        var warnings = collectSyncWarnings(sync, snap, urlFc);
+        var latest = (lastPandashDiag.entries || [])[lastPandashDiag.entries.length - 1];
+        if(latest && latest.ok === false){
+            warnings.push('Last Pandash call failed: ' + (latest.error || latest.kind || 'unknown'));
+        }
+        var cookieFc = '';
+        try { cookieFc = $.cookie('fcmenu-warehouseId') || ''; } catch (e) {}
+        if(cookieFc && sync.fc && String(cookieFc).toUpperCase() !== sync.fc){
+            warnings.push('fcmenu-warehouseId cookie is ' + cookieFc + ' but shared FC is ' + sync.fc);
+        }
+        var lines = [
+            'Extended FC Research - Kelley Edition — Copy Debug v' + SCRIPT_VERSION,
+            'Paste this into chat.',
+            'page: ' + location.href,
+            'host: ' + location.hostname,
+            'urlFc: ' + (urlFc || ''),
+            'fc: ' + (fcname || ''),
+            'region: ' + (Region || ''),
+            'marketplace: ' + ((sync && sync.marketplace) || ''),
+            'login: ' + (Login || ''),
+            'searchItem: ' + (Item || ''),
+            'cookieMarketplace: ' + (cookieMarketplace() || ''),
+            'cookieFc: ' + cookieFc,
+            'shared: ' + JSON.stringify(sync),
+            'pandashForm: ' + (snap ? JSON.stringify(snap) : ''),
+            'warnings:',
+            warnings.length ? warnings.map(function(line){ return '- ' + line }).join('\n') : '- none',
+            'lastPandash: ' + JSON.stringify(lastPandashDiag.entries || [])
+        ];
+        return lines.join('\n');
+    }
+    function installCopyDebugButton(){
+        if(document.getElementById('kelley-copy-debug')){ return }
+        if(!document.body){ return }
+        var btn = document.createElement('button');
+        btn.id = 'kelley-copy-debug';
+        btn.type = 'button';
+        btn.textContent = 'Copy Debug ' + SCRIPT_VERSION;
+        btn.style.cssText = 'position:fixed;bottom:12px;left:50%;transform:translateX(-50%);z-index:2147483646;padding:8px 14px;border-radius:8px;border:1px solid #333;background:#111;color:#fff;cursor:pointer;font:600 13px/1.2 sans-serif;';
+        btn.addEventListener('click', function(){
+            copyText(buildDebugReport()).then(function(ok){
+                btn.textContent = ok ? 'Copied' : 'Copy failed';
+                setTimeout(function(){ btn.textContent = 'Copy Debug ' + SCRIPT_VERSION; }, 1500);
+            });
+        });
+        document.body.appendChild(btn);
+    }
+    function watchResearchUrl(){
+        var last = location.href;
+        setInterval(function(){
+            if(location.href === last){ return }
+            last = location.href;
+            Item = parseSearchItem(last);
+            publishSiteContext();
+        }, 700);
     }
 
     var Region = parseRegionFromUrl(URL)
@@ -414,7 +813,7 @@
                                     $('.fcrp-tooltip').append('<a class="fcrp-ti" target="_blank" href="http://fcresearch-eu.aka.amazon.com/LEJ1/results?s='+itemAsin+'" >Open in New Tab</a>');
                                     $('.fcrp-tooltip').append('<hr/>ASIN');
                                     $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href="https://prepmanager-dub.amazon.com/view/'+itemAsin+'?region=EU">Prep Manager</a>');
-                                    $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href="https://pandash.amazon.com#'+itemAsin+'">PanDash</a>');
+                                    $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href="'+pandashPageUrl(itemAsin)+'">PanDash</a>');
                                     $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href=https://box-web-dub.amazon.com/BoxRecBrowser/getBoxRecommendation?marketplaceId=4&marketplace-selector=1&warehouseId=LEJ1&asin='+itemAsin+'&giftOption=NoGift&siocOverride=NONE&_requiresConcealment=on&postalCode=>BoxWeb</a>');
                                     $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href="https://image-assist.amazon.com/bulk_asin_viewer/view?display_type=SMALL-IMAGES&image_type=ALL&marketplaceId=4&asin='+itemAsin+'">Image Assist</a>')
                                     $('.fcrp-tooltip').append('<a class="fcrp-ti " target="_blank" href="https://t.corp.amazon.com/issues?q=extensions.tt.status%3A%28Assigned%20OR%20%22Work%20In%20Progress%22%20OR%20Researching%20OR%20Pending%20OR%20Resolved%20OR%20Closed%29%20AND%20currentSeverity%3A%283%20OR%204%20OR%205%20OR%20N%29%20AND%20full_text%3A%28'+itemAsin+'%29">SIM search</a>');
@@ -637,29 +1036,7 @@
                         });
                     }
                     else if(window.location.hostname == 'pandash.amazon.com'){
-                        if(window.location.hash){
-                            setTimeout(function(){
-                                let boAsin = window.location.hash;
-                                boAsin = boAsin.replace('#','');
-                                $('#asinsFilter').val(boAsin);
-
-                                $('#de').addClass('ui-selected');
-
-                                $('#sourceFilter').val('FC');
-                                $('#FCinput').css('display','inline');
-                                $('#FCinput').val($.cookie('fcmenu-warehouseId'));
-                                $('#FCinput').trigger('change');
-                                validateFC();
-
-                                $('#languageFilter').val('EN');
-                                let waitForValidateFc = setInterval(function(){
-                                    if($('.statusOk').length){
-                                        $('#btOk').click();
-                                        clearInterval(waitForValidateFc);
-                                    }
-                                },100);
-                            },500)
-                        }
+                        bootPandashPage();
                     }else {
 
 
@@ -1130,6 +1507,18 @@
                     var PostData = `language=default&source=${RestrictionLevel}-hazmat-FC&marketPlaces=${Marketplace}&asins=${ASIN}&sidx=product.asin&rows=99999&page=1&sord=desc&isExportOnly=FALSE&fileName=${Login}_${RestrictionLevel}-hazmat-FC_default_${TimeNow}&fc=${fcname}&pandashservice=`
                     var Response = await CommonFunctions.gmFetch.post(`https://pandash.amazon.com/GridServlet`, PostData)
                     var PanDashObj = JSON.parse(Response.responseText);
+                    rememberPandash({
+                        kind: 'product',
+                        ok: !PanDashObj.error,
+                        fc: fcname,
+                        marketplace: Marketplace,
+                        asin: ASIN,
+                        status: Response.status,
+                        error: PanDashObj.error || '',
+                        rows: (PanDashObj.rows && PanDashObj.rows.length) || 0,
+                        level: PanDashObj.rows && PanDashObj.rows[0] && PanDashObj.rows[0].level,
+                        body: String(Response.responseText || '').slice(0, 400)
+                    });
 
                     if(PanDashObj.error == "Invalid FC" ){
                         $('#PanDash th').html(`PanDash<span id="PandashMarketplace" style="cursor: pointer; vertical-align: top;" >⚙️</span>`)
@@ -1154,6 +1543,7 @@
 
                     ProductTbl.MoreInfos.PanDash.bindMarketplacePicker();
                     } catch(err) {
+                        rememberPandash({ kind: 'product', ok: false, fc: fcname, marketplace: getPandashMarketplace(), asin: ASIN, error: String(err && err.message || err) });
                         $('#PanDash td').html('PanDash request failed').css('background-color', 'red');
                     }
                 },
@@ -1162,7 +1552,7 @@
                         let Marketplace = getPandashMarketplace();
                         let newMarketplace = prompt("Choose your Marketplace like in Pandash. GB/IE/DE/FR/ES/IT/US ....", Marketplace);
                         if(newMarketplace){
-                            $.cookie(`${fcname}_PandashMarketplace`, newMarketplace.toUpperCase(), { expires: 365 })
+                            setPandashMarketplace(newMarketplace);
                         }
                     })
                 },
@@ -1530,7 +1920,7 @@
                         let Marketplace = getPandashMarketplace();
                         let newMarketplace = prompt("Choose your Marketplace like in Pandash. GB/IE/DE/FR/ES/IT/US ....", Marketplace);
                         if(newMarketplace){
-                            $.cookie(`${fcname}_PandashMarketplace`, newMarketplace.toUpperCase(), { expires: 365 })
+                            setPandashMarketplace(newMarketplace);
                         }
                     })
 
@@ -1600,6 +1990,18 @@
                         Response = await CommonFunctions.gmFetch.post(`https://pandash.amazon.com/GridServlet`, PostData)
 
                             var PanDashObj = JSON.parse(Response.responseText);
+                            rememberPandash({
+                                kind: 'inventory',
+                                ok: !PanDashObj.error,
+                                fc: fcname,
+                                marketplace: Marketplace,
+                                asin: ASIN,
+                                status: Response.status,
+                                error: PanDashObj.error || '',
+                                rows: (PanDashObj.rows && PanDashObj.rows.length) || 0,
+                                level: PanDashObj.rows && PanDashObj.rows[0] && PanDashObj.rows[0].level,
+                                body: String(Response.responseText || '').slice(0, 400)
+                            });
                             if(PanDashObj.error == "Invalid FC" ){
                                 $(HazmatCell).removeClass("my-loader").html(`failed`)
                                 return
@@ -1615,6 +2017,7 @@
                             $(HazmatCell).removeClass("my-loader").html(`Level ${HazmatLevel}`).css('background-color', Color).attr('title',Message)
                         }
                         catch(err) {
+                            rememberPandash({ kind: 'inventory', ok: false, fc: fcname, asin: ASIN, error: String(err && err.message || err) });
                             $(HazmatCell).removeClass("my-loader").html(`err`)
                         }
                     },
@@ -1882,7 +2285,8 @@
         constructor(){ this.init(); }
         async init(){
             CommonFunctions.addCSS()
-            refreshSiteContext()
+            publishSiteContext()
+            installCopyDebugButton()
             MainTbl.StartMain()
             waitForKeyElements('.a-span7 > table:nth-child(1) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(2)', ProductTbl.Start);
             InventoryTbl.Wait.Wait_for_TableHead()
@@ -1904,7 +2308,12 @@
         }
     };
 
-    new ToolController();
+    if(location.hostname === 'pandash.amazon.com'){
+        bootPandashPage();
+    }else{
+        watchResearchUrl();
+        new ToolController();
+    }
 
     // Update check — Kelley Edition: log only, do NOT redirect (redirect overwrote local fixes)
     var ScriptName = 'Extended%20FC%20Research%20-%20Kelley%20Edition';
