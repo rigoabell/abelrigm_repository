@@ -15,11 +15,11 @@ const board = sandbox.__psBoard;
 test("catalog entry matches the script", () => {
     const entry = catalog.find((item) => item.id === "mem3-control-tower-ps-board");
     assert.ok(entry);
-    assert.equal(entry.version, "1.0.0");
+    assert.equal(entry.version, "1.1.0");
     assert.equal(entry.category, "Control Tower");
     assert.equal(entry.file, "downloads/mem3-control-tower-ps-board.txt");
     assert.equal(entry.downloadName, "MEM3 Control Tower - PS Board (abelrigm).txt");
-    assert.match(src, /@version\s+1\.0\.0/);
+    assert.match(src, /@version\s+1\.1\.0/);
     assert.match(src, /control-tower\.meta\.amazon\.dev\/\*/);
     assert.match(src, /beta\.control-tower\.meta\.amazon\.dev\/\*/);
     assert.equal(src.includes("@grant"), false);
@@ -126,4 +126,38 @@ test("shift follows the 6:00 day and 18:00 night split", () => {
     assert.equal(board.sheetShift(new Date(2026, 10, 12, 18, 0)), "Nights");
     assert.equal(board.sheetShift(new Date(2026, 10, 12, 5, 59)), "Nights");
     assert.equal(board.sheetDate(new Date(2026, 10, 12, 15, 0)), "11/12/2026");
+});
+
+test("typing a login plans a Control Tower scan in or out", () => {
+    assert.equal(board.normalizeLogin("  AbelRigm "), "abelrigm");
+    const intoEmpty = board.scanPlan("1-even-a", [], "abelrigm", "in");
+    assert.equal(intoEmpty.ok, true);
+    assert.equal(intoEmpty.action, "in");
+    assert.equal(intoEmpty.login, "abelrigm");
+    assert.equal(intoEmpty.label, "1 Even A");
+
+    const taken = board.scanPlan("1-even-a", ["irifelix"], "abelrigm", "in");
+    assert.equal(taken.ok, false);
+    assert.equal(taken.code, "occupied");
+
+    const same = board.scanPlan("1-even-b", ["jlatonje"], "jlatonje", "in");
+    assert.equal(same.action, "already");
+
+    const out = board.scanPlan("1-even-b", ["jlatonje"], "abelrigm", "out");
+    assert.equal(out.ok, false);
+    assert.equal(out.code, "missing");
+
+    const remove = board.scanPlan("1-even-b", ["jlatonje"], "", "out");
+    assert.equal(remove.ok, true);
+    assert.equal(remove.action, "out");
+    assert.equal(remove.login, "jlatonje");
+
+    const typedOut = board.scanPlan("2-odd-a", ["hillarsi"], "Hillarsi", "out");
+    assert.equal(typedOut.ok, true);
+    assert.equal(typedOut.login, "hillarsi");
+
+    assert.equal(board.scanPlan("", [], "abelrigm", "in").code, "station");
+    assert.equal(board.scanPlan("blank-1", [], "abelrigm", "in").code, "station");
+    assert.equal(board.scanPlan("audit", [], "ab", "in").code, "login");
+    assert.equal(board.stationOf({ slots: { "1-even-b": ["jlatonje"], audit: ["abelrigm"] } }, "Abelrigm"), "audit");
 });

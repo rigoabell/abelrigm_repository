@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MEM3 Control Tower - PS Board (abelrigm)
 // @namespace    https://mem3.amazon.local/
-// @version      1.0.0
-// @description  Button on CRET Problem Solve that opens a sheet and places each associate on the problem-solve map.
+// @version      1.1.0
+// @description  Button on CRET Problem Solve that opens a sheet, places each associate, and scans a typed login in or out on Control Tower.
 // @author       abelrigm
 // @match        https://beta.control-tower.meta.amazon.dev/*
 // @match        https://beta.control-tower.meta.amazon.dev/MEM3/*
@@ -73,7 +73,8 @@
         assignment: true, employee: true, cret: true, crets: true, problem: true, solve: true,
         odd: true, even: true, see: true, ps: true, pa: true, the: true, and: true,
         idle: true, uph: true, avg: true, bigs: true, audit: true, audits: true,
-        line: true, priority: true
+        line: true, priority: true, assign: true, unassign: true, add: true,
+        cancel: true, close: true, scan: true, search: true
     };
 
     function sheetDate(date) {
@@ -270,10 +271,507 @@
         const people = readPeople(table);
         return {
             heading: heading,
+            table: table,
             people: people,
             placed: placePeople(people),
             staffed: people.filter(function (person) { return String(person.login || '').trim(); }).length
         };
+    }
+
+    function normalizeLogin(value) {
+        return String(value || '').trim().toLowerCase();
+    }
+
+    function validLogin(login) {
+        return /^[a-z][a-z0-9._-]{2,31}$/.test(login);
+    }
+
+    function stationLabel(slotId) {
+        let line, slot;
+        for (line = 0; line < LINES.length; line++) {
+            for (slot = 0; slot < LINES[line].length; slot++) {
+                if (LINES[line][slot].id === slotId) return LINES[line][slot].label;
+            }
+        }
+        for (slot = 0; slot < SUPPORT.length; slot++) {
+            if (SUPPORT[slot].id === slotId) return SUPPORT[slot].label;
+        }
+        return '';
+    }
+
+    // Scan in only fills an empty station. Scan out removes the typed login,
+    // or the only person on the station when the field is empty.
+    function scanPlan(slotId, names, rawLogin, action) {
+        const login = normalizeLogin(rawLogin);
+        const list = [];
+        const source = names || [];
+        for (let i = 0; i < source.length; i++) {
+            const name = normalizeLogin(source[i]);
+            if (name) list.push(name);
+        }
+        if (!slotId || !SLOT_SET[slotId]) {
+            return { ok: false, code: 'station', message: 'Click a station on the sheet first.' };
+        }
+        const label = stationLabel(slotId);
+        if (action === 'out') {
+            const who = login || (list.length === 1 ? list[0] : '');
+            if (!who) {
+                return { ok: false, code: 'login', message: 'Type the login to scan out. For example, abelrigm.' };
+            }
+            if (!validLogin(who)) {
+                return { ok: false, code: 'login', message: 'That does not look like a login. For example, abelrigm.' };
+            }
+            if (list.indexOf(who) === -1) {
+                return { ok: false, code: 'missing', message: who + ' is not on ' + label + '.' };
+            }
+            return { ok: true, action: 'out', login: who, label: label };
+        }
+        if (!validLogin(login)) {
+            return { ok: false, code: 'login', message: 'Type a login. For example, abelrigm.' };
+        }
+        if (list.indexOf(login) !== -1) {
+            return {
+                ok: true,
+                action: 'already',
+                login: login,
+                label: label,
+                message: login + ' is already on ' + label + '.'
+            };
+        }
+        if (list.length) {
+            return {
+                ok: false,
+                code: 'occupied',
+                message: label + ' already has ' + list.join(', ') + '. Scan them out first.'
+            };
+        }
+        return { ok: true, action: 'in', login: login, label: label };
+    }
+
+    function stationOf(placed, login) {
+        const want = normalizeLogin(login);
+        const slots = placed && placed.slots ? placed.slots : {};
+        const ids = Object.keys(slots);
+        for (let i = 0; i < ids.length; i++) {
+            const names = slots[ids[i]] || [];
+            for (let n = 0; n < names.length; n++) {
+                if (normalizeLogin(names[n]) === want) return ids[i];
+            }
+        }
+        return '';
+    }
+
+    function rowsForSlot(table, slotId) {
+        const rows = [];
+        if (!table || !table.querySelectorAll) return rows;
+        const body = table.querySelectorAll('tbody tr');
+        for (let i = 0; i < body.length; i++) {
+            const cells = body[i].querySelectorAll('td');
+            if (!cells.length) continue;
+            if (slotIdFromAssignment(cellText(cells[0])) === slotId) rows.push(body[i]);
+        }
+        return rows;
+    }
+
+    function rowHasLogin(row, login) {
+        return normalizeLogin(rowLogin(row)) === normalizeLogin(login);
+    }
+
+    function sleep(ms) {
+        return new Promise(function (resolve) { setTimeout(resolve, ms); });
+    }
+
+    function waitFor(read, ms) {
+        const start = Date.now();
+        return new Promise(function (resolve) {
+            (function poll() {
+                let hit = null;
+                try { hit = read(); } catch (e) { hit = null; }
+                if (hit) return resolve(hit);
+                if (Date.now() - start > ms) return resolve(null);
+                setTimeout(poll, 80);
+            })();
+        });
+    }
+
+    function pageWindow() {
+        return (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+    }
+
+    function pageClick(el) {
+        if (!el) return;
+        const win = pageWindow();
+        const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : { left: 0, top: 0, width: 2, height: 2 };
+        const x = Math.round(rect.left + Math.max(1, rect.width) / 2);
+        const y = Math.round(rect.top + Math.max(1, rect.height) / 2);
+        const base = {
+            bubbles: true, cancelable: true, composed: true, view: win, button: 0,
+            clientX: x, clientY: y, screenX: x, screenY: y,
+            pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1
+        };
+        const down = { buttons: 1 };
+        const up = { buttons: 0 };
+        const keys = Object.keys(base);
+        for (let i = 0; i < keys.length; i++) {
+            down[keys[i]] = base[keys[i]];
+            up[keys[i]] = base[keys[i]];
+        }
+        try { if (el.focus) el.focus(); } catch (e0) { /* ignore */ }
+        try {
+            el.dispatchEvent(new win.PointerEvent('pointerdown', down));
+            el.dispatchEvent(new win.MouseEvent('mousedown', down));
+            el.dispatchEvent(new win.PointerEvent('pointerup', up));
+            el.dispatchEvent(new win.MouseEvent('mouseup', up));
+            el.dispatchEvent(new win.MouseEvent('click', up));
+        } catch (e) { /* fall through */ }
+        try { el.click(); } catch (e2) { /* ignore */ }
+    }
+
+    function reactFiber(el) {
+        if (!el) return null;
+        let keys = [];
+        try { keys = Object.keys(el); } catch (e) { return null; }
+        for (let i = 0; i < keys.length; i++) {
+            if (keys[i].indexOf('__reactFiber') === 0 || keys[i].indexOf('__reactInternalInstance') === 0) return el[keys[i]];
+        }
+        return null;
+    }
+
+    function isMdnClickWrapper(fn) {
+        if (typeof fn !== 'function') return true;
+        const src = Function.prototype.toString.call(fn);
+        return src.indexOf('defaultPrevented') !== -1 && src.indexOf('noopener') !== -1;
+    }
+
+    function reactClick(el) {
+        const fns = [];
+        let fiber = reactFiber(el);
+        let hops = 0;
+        while (fiber && hops < 20) {
+            const props = fiber.memoizedProps || fiber.pendingProps;
+            if (props && typeof props.onClick === 'function' && !isMdnClickWrapper(props.onClick)) fns.push(props.onClick);
+            fiber = fiber.return;
+            hops++;
+        }
+        if (!fns.length) return false;
+        const event = {
+            target: el,
+            currentTarget: el,
+            type: 'click',
+            button: 0,
+            bubbles: true,
+            cancelable: true,
+            defaultPrevented: false,
+            preventDefault: function () { this.defaultPrevented = true; },
+            stopPropagation: function () {},
+            persist: function () {},
+            nativeEvent: { target: el, preventDefault: function () {}, stopPropagation: function () {} },
+            isDefaultPrevented: function () { return !!this.defaultPrevented; },
+            isPropagationStopped: function () { return false; }
+        };
+        for (let i = fns.length - 1; i >= 0; i--) {
+            try { fns[i](event); } catch (e) { /* keep going */ }
+        }
+        return true;
+    }
+
+    function clickControl(el) {
+        if (!el) return;
+        try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e) { /* ignore */ }
+        reactClick(el);
+        pageClick(el);
+    }
+
+    function visibleButton(pattern) {
+        const buttons = document.querySelectorAll('button');
+        for (let i = 0; i < buttons.length; i++) {
+            const btn = buttons[i];
+            if (!pattern.test((btn.textContent || '').replace(/\s+/g, ' ').trim())) continue;
+            if (btn.closest('#mem3-run-panel, #mem3-unassign-panel, #mem3-floor-summary')) continue;
+            const rect = btn.getBoundingClientRect();
+            if (rect.width < 1 || rect.height < 1) continue;
+            return btn;
+        }
+        return null;
+    }
+
+    function tooltipIds() {
+        const ids = [];
+        const tips = document.querySelectorAll('[id^="tooltip-"]');
+        for (let i = 0; i < tips.length; i++) {
+            const rect = tips[i].getBoundingClientRect();
+            if (rect.width >= 1 && rect.height >= 1 && tips[i].id) ids.push(tips[i].id);
+        }
+        return ids;
+    }
+
+    function newUnassignButton(known) {
+        const buttons = document.querySelectorAll('button');
+        for (let i = 0; i < buttons.length; i++) {
+            const btn = buttons[i];
+            if (!/^unassign$/i.test((btn.textContent || '').replace(/\s+/g, ' ').trim())) continue;
+            const tip = btn.closest('[id^="tooltip-"]');
+            if (tip && known[tip.id]) continue;
+            const rect = btn.getBoundingClientRect();
+            if (rect.width < 1 || rect.height < 1) continue;
+            return btn;
+        }
+        return null;
+    }
+
+    function loginAnchor(row, login) {
+        const want = normalizeLogin(login);
+        const anchors = row.querySelectorAll('a[role="button"], a[mdn-link], a, button');
+        for (let i = 0; i < anchors.length; i++) {
+            if (normalizeLogin(anchors[i].textContent) === want) return anchors[i];
+        }
+        return null;
+    }
+
+    function isPageSearch(input) {
+        const hint = ((input.getAttribute('placeholder') || '') + ' ' +
+            (input.getAttribute('aria-label') || '') + ' ' +
+            (input.id || '')).toLowerCase();
+        return hint.indexOf('search for login') !== -1 || (input.id || '').toLowerCase().indexOf('search-field-') === 0;
+    }
+
+    function visibleFields() {
+        const out = [];
+        const inputs = document.querySelectorAll('input, textarea');
+        for (let i = 0; i < inputs.length; i++) {
+            const rect = inputs[i].getBoundingClientRect();
+            if (rect.width >= 1 && rect.height >= 1) out.push(inputs[i]);
+        }
+        return out;
+    }
+
+    function assignOpener(row) {
+        const controls = row.querySelectorAll('button, a, [role="button"]');
+        for (let i = 0; i < controls.length; i++) {
+            const el = controls[i];
+            const label = ((el.textContent || '') + ' ' +
+                (el.getAttribute('aria-label') || '') + ' ' +
+                (el.getAttribute('title') || '')).replace(/\s+/g, ' ').trim();
+            if (/\b(assign|add associate|add employee)\b/i.test(label)) return el;
+        }
+        const cells = row.querySelectorAll('td');
+        const cell = cells.length ? cells[cells.length - 1] : null;
+        if (!cell) return null;
+        if (rowLogin(row)) return null;
+        const nested = cell.querySelector('button, a, [role="button"]');
+        return nested || cell;
+    }
+
+    function writeLogin(input, value) {
+        const win = pageWindow();
+        const proto = input.tagName === 'TEXTAREA'
+            ? (win.HTMLTextAreaElement && win.HTMLTextAreaElement.prototype)
+            : (win.HTMLInputElement && win.HTMLInputElement.prototype);
+        const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+        try { input.focus(); } catch (e) { /* ignore */ }
+        if (input._valueTracker) {
+            try { input._valueTracker.setValue(''); } catch (e2) { /* ignore */ }
+        }
+        if (desc && desc.set) desc.set.call(input, value);
+        else input.value = value;
+        try {
+            input.dispatchEvent(new win.InputEvent('input', {
+                bubbles: true, cancelable: true, data: value, inputType: 'insertText'
+            }));
+        } catch (e3) {
+            input.dispatchEvent(new win.Event('input', { bubbles: true }));
+        }
+        input.dispatchEvent(new win.Event('change', { bubbles: true }));
+    }
+
+    function optionMatches(el, login) {
+        const text = normalizeLogin(el.textContent);
+        if (!text || text.length > 80) return false;
+        if (text === login) return true;
+        const tokens = text.match(/[a-z][a-z0-9._-]{2,31}/g) || [];
+        return tokens.indexOf(login) !== -1;
+    }
+
+    function inOpenList(el) {
+        return !!(el.closest && el.closest('[role="dialog"], [role="listbox"], [id^="tooltip-"]'));
+    }
+
+    function findLoginOption(login, input) {
+        const dialog = input && input.closest
+            ? input.closest('[role="dialog"], [role="listbox"], [id^="tooltip-"]')
+            : null;
+        const root = dialog || (input && input.parentElement);
+        const pools = [];
+        if (root && root.querySelectorAll) pools.push(root);
+        pools.push(document);
+        for (let p = 0; p < pools.length; p++) {
+            const nodes = pools[p].querySelectorAll('[role="option"], [role="menuitem"], li, button, a');
+            let loose = null;
+            for (let i = 0; i < nodes.length; i++) {
+                const el = nodes[i];
+                if (el.closest && el.closest('tbody') && !inOpenList(el)) continue;
+                if (!optionMatches(el, login)) continue;
+                const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 2, height: 2 };
+                if (rect.width < 1 || rect.height < 1) continue;
+                if (normalizeLogin(el.textContent) === login) return el;
+                if (!loose) loose = el;
+            }
+            if (loose) return loose;
+        }
+        return null;
+    }
+
+    function newAssignInput(before) {
+        const inputs = document.querySelectorAll('input, textarea');
+        for (let i = 0; i < inputs.length; i++) {
+            const input = inputs[i];
+            if (before.indexOf(input) !== -1 || isPageSearch(input)) continue;
+            const rect = input.getBoundingClientRect();
+            if (rect.width < 1 || rect.height < 1) continue;
+            return input;
+        }
+        return null;
+    }
+
+    async function scanOutOnPage(row, login) {
+        const anchor = loginAnchor(row, login);
+        if (!anchor) return { ok: false, message: login + ' is not on that Control Tower row.' };
+        const known = Object.create(null);
+        const existing = tooltipIds();
+        for (let i = 0; i < existing.length; i++) known[existing[i]] = true;
+        clickControl(anchor);
+        let button = await waitFor(function () { return newUnassignButton(known); }, 1400);
+        if (!button) {
+            clickControl(anchor);
+            button = await waitFor(function () { return newUnassignButton(known) || visibleButton(/^unassign$/i); }, 1600);
+        }
+        if (!button) return { ok: false, message: 'Control Tower did not open Unassign for ' + login + '.' };
+        await sleep(200);
+        clickControl(button);
+        const gone = await waitFor(function () { return rowHasLogin(row, login) ? null : true; }, 4000);
+        if (!gone) return { ok: false, message: 'Unassign did not remove ' + login + ' from Control Tower.' };
+        return { ok: true, message: 'Scanned ' + login + ' out.' };
+    }
+
+    async function scanInOnPage(row, login) {
+        const before = visibleFields();
+        const opener = assignOpener(row);
+        if (!opener) return { ok: false, message: 'That station has no Assign control on Control Tower.' };
+        clickControl(opener);
+        const input = await waitFor(function () { return newAssignInput(before); }, 1600);
+        if (!input) return { ok: false, message: 'Control Tower did not open an assign field for this station.' };
+        writeLogin(input, login);
+        let option = await waitFor(function () { return findLoginOption(login, input); }, 1200);
+        if (!option) {
+            writeLogin(input, '');
+            let typed = '';
+            for (let i = 0; i < login.length; i++) {
+                typed += login.charAt(i);
+                writeLogin(input, typed);
+                await sleep(30);
+            }
+            option = await waitFor(function () { return findLoginOption(login, input); }, 1500);
+        }
+        if (option) clickControl(option);
+        else {
+            const win = pageWindow();
+            try {
+                input.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+                input.dispatchEvent(new win.KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+            } catch (e) { /* ignore */ }
+        }
+        const arrived = await waitFor(function () { return rowHasLogin(row, login) ? true : null; }, 4000);
+        if (!arrived) return { ok: false, message: 'Control Tower did not assign ' + login + '.' };
+        return { ok: true, message: 'Scanned ' + login + ' in.' };
+    }
+
+    let selectedSlot = '';
+    let scanBusy = false;
+
+    function scanInput() {
+        const host = document.getElementById(POPUP_ID);
+        return host && host.shadowRoot ? host.shadowRoot.querySelector('[data-scan]') : null;
+    }
+
+    function setScanStatus(text, kind) {
+        const host = document.getElementById(POPUP_ID);
+        const node = host && host.shadowRoot ? host.shadowRoot.querySelector('[data-scan-status]') : null;
+        if (!node) return;
+        node.textContent = text || '';
+        node.className = 'scan-status' + (kind ? ' is-' + kind : '');
+    }
+
+    function markSelected() {
+        const host = document.getElementById(POPUP_ID);
+        if (!host || !host.shadowRoot) return;
+        const boxes = host.shadowRoot.querySelectorAll('[data-slot]');
+        for (let i = 0; i < boxes.length; i++) {
+            const on = boxes[i].getAttribute('data-slot') === selectedSlot;
+            if (on) boxes[i].classList.add('is-selected');
+            else boxes[i].classList.remove('is-selected');
+        }
+    }
+
+    function chooseSlot(slotId, login) {
+        if (!SLOT_SET[slotId] || scanBusy) return;
+        selectedSlot = slotId;
+        markSelected();
+        const input = scanInput();
+        if (input && login) input.value = login;
+        if (input && input.focus) input.focus();
+        const label = stationLabel(slotId);
+        setScanStatus(login ? (login + ' on ' + label + '. Scan out removes them from Control Tower.') : ('Selected ' + label + '.'), '');
+    }
+
+    async function runScan(action) {
+        if (scanBusy) return;
+        const input = scanInput();
+        const typed = input ? input.value : '';
+        const group = readGroup();
+        const names = (group.placed.slots && group.placed.slots[selectedSlot]) || [];
+        const plan = scanPlan(selectedSlot, names, typed, action);
+        if (!plan.ok) {
+            setScanStatus(plan.message, 'bad');
+            return;
+        }
+        if (plan.action === 'already') {
+            setScanStatus(plan.message, 'ok');
+            return;
+        }
+        if (plan.action === 'in') {
+            const elsewhere = stationOf(group.placed, plan.login);
+            if (elsewhere && elsewhere !== selectedSlot) {
+                setScanStatus(plan.login + ' is already on ' + stationLabel(elsewhere) + '. Scan them out there first.', 'bad');
+                return;
+            }
+        }
+        const rows = rowsForSlot(group.table, selectedSlot);
+        if (!rows.length) {
+            setScanStatus(plan.label + ' is not a row on CRET Problem Solve.', 'bad');
+            return;
+        }
+        let row = rows[0];
+        if (plan.action === 'out') {
+            for (let i = 0; i < rows.length; i++) {
+                if (rowHasLogin(rows[i], plan.login)) row = rows[i];
+            }
+        } else {
+            for (let i = 0; i < rows.length; i++) {
+                if (!rowLogin(rows[i])) row = rows[i];
+            }
+        }
+        scanBusy = true;
+        setScanStatus((plan.action === 'out' ? 'Scanning ' + plan.login + ' out of ' : 'Scanning ' + plan.login + ' in to ') + plan.label + '…', '');
+        let result;
+        try {
+            result = plan.action === 'out' ? await scanOutOnPage(row, plan.login) : await scanInOnPage(row, plan.login);
+        } catch (e) {
+            result = { ok: false, message: (e && e.message) ? e.message : 'Control Tower did not take that scan.' };
+        }
+        scanBusy = false;
+        setScanStatus(result.message, result.ok ? 'ok' : 'bad');
+        if (result.ok && input) input.value = '';
+        tick();
     }
 
     const SHEET_CSS = '' +
@@ -288,16 +786,29 @@
         ' font-weight:700; letter-spacing:0.06em; text-transform:uppercase; white-space:nowrap; }' +
         '.fill { display:inline-block; min-width:88px; margin-left:6px; padding:0 8px 1px; border-bottom:1px solid #1d3b64;' +
         ' font-weight:700; letter-spacing:0; text-transform:none; text-align:center; }' +
-        '.floor { display:flex; gap:22px; margin-top:26px; }' +
+        '.scan { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:16px; }' +
+        '.scan-input { width:180px; padding:6px 8px; border:1px solid #8eafd0; border-radius:6px; color:#1a2332;' +
+        ' font:700 14px Segoe UI, system-ui, sans-serif; }' +
+        '.scan-input:focus { outline:2px solid #1d3b64; outline-offset:1px; }' +
+        '.scan-btn { padding:6px 10px; border-radius:6px; border:1px solid #1d3b64; background:#1d3b64; color:#fff;' +
+        ' font:700 13px Segoe UI, system-ui, sans-serif; cursor:pointer; }' +
+        '.scan-btn.out { background:#fff; color:#1d3b64; }' +
+        '.scan-status { flex:1 0 220px; font-size:13px; font-weight:650; color:#5d7190; }' +
+        '.scan-status.is-ok { color:#1a7f37; }' +
+        '.scan-status.is-bad { color:#a12622; }' +
+        '.floor { display:flex; gap:22px; margin-top:18px; }' +
         '.cluster { flex:1 1 0; min-width:0; display:grid; grid-template-columns:1fr 1fr; grid-template-rows:auto auto;' +
         ' column-gap:8px; row-gap:8px; align-items:stretch; }' +
         '.support { display:grid; grid-template-columns:repeat(4, 1fr); column-gap:28px; row-gap:32px; margin-top:36px; }' +
         '.slot { border:1px solid #c5d3e0; background:#fff; min-width:0; }' +
+        '.slot-live { cursor:pointer; }' +
+        '.slot.is-selected { border-color:#1d3b64; box-shadow:0 0 0 2px #1d3b64; }' +
         '.slot-head { min-height:28px; padding:5px 6px; background:#8eafd0; color:#1d3b64; font-size:13px; font-weight:700;' +
         ' text-align:center; line-height:1.2; }' +
         '.slot-body { min-height:72px; padding:6px 4px; background:#fbfcfe; display:flex; flex-direction:column;' +
         ' align-items:center; justify-content:center; gap:3px; }' +
-        '.name { font-size:14px; font-weight:700; color:#1a2332; text-align:center; line-height:1.25; word-break:break-word; }' +
+        '.name { font-size:14px; font-weight:700; color:#1a2332; text-align:center; line-height:1.25; word-break:break-word;' +
+        ' background:transparent; border:0; padding:0; cursor:pointer; font-family:Segoe UI, system-ui, sans-serif; }' +
         '.extra { margin-top:22px; padding-top:12px; border-top:1px solid #d5deea; }' +
         '.extra-title { font-size:12px; font-weight:800; letter-spacing:0.05em; text-transform:uppercase; color:#5d7190; }' +
         '.extra-row { margin-top:4px; font-size:14px; font-weight:650; color:#1a2332; }' +
@@ -322,6 +833,10 @@
         body.setAttribute('data-body', '');
         box.appendChild(head);
         box.appendChild(body);
+        if (!slot.blank) {
+            box.classList.add('slot-live');
+            box.addEventListener('click', function () { chooseSlot(slot.id, ''); });
+        }
         return box;
     }
 
@@ -355,6 +870,48 @@
         top.appendChild(title);
         top.appendChild(meta);
 
+        const scan = document.createElement('div');
+        scan.className = 'scan';
+        const field = document.createElement('input');
+        field.className = 'scan-input';
+        field.setAttribute('data-scan', '');
+        field.setAttribute('aria-label', 'Login');
+        field.placeholder = 'abelrigm';
+        field.autocomplete = 'off';
+        field.spellcheck = false;
+        field.addEventListener('keydown', function (event) {
+            if (event.key !== 'Enter') return;
+            event.preventDefault();
+            event.stopPropagation();
+            runScan('in');
+        });
+        const scanIn = document.createElement('button');
+        scanIn.type = 'button';
+        scanIn.className = 'scan-btn';
+        scanIn.textContent = 'Scan in';
+        scanIn.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            runScan('in');
+        });
+        const scanOut = document.createElement('button');
+        scanOut.type = 'button';
+        scanOut.className = 'scan-btn out';
+        scanOut.textContent = 'Scan out';
+        scanOut.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            runScan('out');
+        });
+        const status = document.createElement('div');
+        status.className = 'scan-status';
+        status.setAttribute('data-scan-status', '');
+        status.textContent = 'Click a station, then type a login.';
+        scan.appendChild(field);
+        scan.appendChild(scanIn);
+        scan.appendChild(scanOut);
+        scan.appendChild(status);
+
         const floor = document.createElement('div');
         floor.className = 'floor';
         for (let line = 0; line < LINES.length; line++) {
@@ -379,6 +936,7 @@
         note.hidden = true;
 
         sheet.appendChild(top);
+        sheet.appendChild(scan);
         sheet.appendChild(floor);
         sheet.appendChild(support);
         sheet.appendChild(extra);
@@ -416,9 +974,17 @@
         body.setAttribute('data-sig', sig);
         body.textContent = '';
         for (let i = 0; i < names.length; i++) {
-            const name = document.createElement('div');
+            const name = document.createElement('button');
+            name.type = 'button';
             name.className = 'name';
             name.textContent = names[i];
+            name.title = 'Put ' + names[i] + ' in the login field';
+            name.addEventListener('click', function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+                const box = body.closest('[data-slot]');
+                if (box) chooseSlot(box.getAttribute('data-slot'), name.textContent);
+            });
             body.appendChild(name);
         }
     }
@@ -439,6 +1005,7 @@
             if (!body) continue;
             fillBody(body, group.placed.slots[id] || []);
         }
+        markSelected();
         const extra = shadow.querySelector('[data-extra]');
         if (extra) {
             const rows = group.placed.extra;
@@ -485,6 +1052,8 @@
         paint(readGroup());
         const btn = document.getElementById(BTN_ID);
         if (btn) btn.setAttribute('aria-expanded', 'true');
+        const input = scanInput();
+        if (input && input.focus) input.focus();
     }
 
     function closeBoard() {
@@ -547,7 +1116,12 @@
     }
 
     function onKey(event) {
-        if (event.key === 'Escape') closeBoard();
+        if (event.key !== 'Escape' || !event.isTrusted) return;
+        const path = event.composedPath ? event.composedPath() : [];
+        for (let i = 0; i < path.length; i++) {
+            if (path[i] && path[i].getAttribute && path[i].hasAttribute && path[i].hasAttribute('data-scan')) return;
+        }
+        closeBoard();
     }
 
     function boot() {
@@ -586,6 +1160,9 @@
             sheetDate: sheetDate,
             shortAssignment: shortAssignment,
             readPeople: readPeople,
+            normalizeLogin: normalizeLogin,
+            scanPlan: scanPlan,
+            stationOf: stationOf,
             lines: LINES,
             support: SUPPORT
         };
