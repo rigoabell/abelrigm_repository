@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MEM3 Control Tower - PS Board (abelrigm)
 // @namespace    https://mem3.amazon.local/
-// @version      1.1.0
+// @version      1.2.0
 // @description  Button on CRET Problem Solve that opens a sheet, places each associate, and scans a typed login in or out on Control Tower.
 // @author       abelrigm
 // @match        https://beta.control-tower.meta.amazon.dev/*
@@ -74,7 +74,7 @@
         odd: true, even: true, see: true, ps: true, pa: true, the: true, and: true,
         idle: true, uph: true, avg: true, bigs: true, audit: true, audits: true,
         line: true, priority: true, assign: true, unassign: true, add: true,
-        cancel: true, close: true, scan: true, search: true
+        cancel: true, close: true, scan: true, search: true, none: true
     };
 
     function sheetDate(date) {
@@ -528,38 +528,24 @@
         return null;
     }
 
-    function isPageSearch(input) {
-        const hint = ((input.getAttribute('placeholder') || '') + ' ' +
-            (input.getAttribute('aria-label') || '') + ' ' +
-            (input.id || '')).toLowerCase();
-        return hint.indexOf('search for login') !== -1 || (input.id || '').toLowerCase().indexOf('search-field-') === 0;
+    function isToolbarSearch(input) {
+        if (input.closest && input.closest('[id^="tooltip-"]')) return false;
+        const hint = ((input.getAttribute('placeholder') || '') + ' ' + (input.id || '')).toLowerCase();
+        return hint.indexOf('search for login') !== -1 || hint.indexOf('search-field-') === 0;
     }
 
-    function visibleFields() {
-        const out = [];
-        const inputs = document.querySelectorAll('input, textarea');
-        for (let i = 0; i < inputs.length; i++) {
-            const rect = inputs[i].getBoundingClientRect();
-            if (rect.width >= 1 && rect.height >= 1) out.push(inputs[i]);
-        }
-        return out;
+    function isAssignSearch(input) {
+        if (!input.closest || !input.closest('[id^="tooltip-"]')) return false;
+        const hint = ((input.getAttribute('placeholder') || '') + ' ' + (input.id || '')).toLowerCase();
+        return hint.indexOf('search for login') !== -1 || hint.indexOf('search-field-') === 0;
     }
 
-    function assignOpener(row) {
-        const controls = row.querySelectorAll('button, a, [role="button"]');
-        for (let i = 0; i < controls.length; i++) {
-            const el = controls[i];
-            const label = ((el.textContent || '') + ' ' +
-                (el.getAttribute('aria-label') || '') + ' ' +
-                (el.getAttribute('title') || '')).replace(/\s+/g, ' ').trim();
-            if (/\b(assign|add associate|add employee)\b/i.test(label)) return el;
+    function noneAnchor(row) {
+        const anchors = row.querySelectorAll('a[role="button"], a[mdn-link]');
+        for (let i = 0; i < anchors.length; i++) {
+            if (/^none$/i.test((anchors[i].textContent || '').replace(/\s+/g, ' ').trim())) return anchors[i];
         }
-        const cells = row.querySelectorAll('td');
-        const cell = cells.length ? cells[cells.length - 1] : null;
-        if (!cell) return null;
-        if (rowLogin(row)) return null;
-        const nested = cell.querySelector('button, a, [role="button"]');
-        return nested || cell;
+        return null;
     }
 
     function writeLogin(input, value) {
@@ -584,51 +570,45 @@
         input.dispatchEvent(new win.Event('change', { bubbles: true }));
     }
 
-    function optionMatches(el, login) {
-        const text = normalizeLogin(el.textContent);
-        if (!text || text.length > 80) return false;
-        if (text === login) return true;
-        const tokens = text.match(/[a-z][a-z0-9._-]{2,31}/g) || [];
-        return tokens.indexOf(login) !== -1;
+    function hasLoginToken(el, login) {
+        if (!el) return false;
+        const nodes = el.querySelectorAll('td, a, span, div, button');
+        const pool = nodes.length ? nodes : [el];
+        for (let i = 0; i < pool.length; i++) {
+            if (pool[i].children && pool[i].children.length) continue;
+            const text = (pool[i].textContent || '').toLowerCase().replace(/\s+/g, ' ').trim();
+            if (!text) continue;
+            if (text === login) return true;
+            const tokens = text.match(/[a-z][a-z0-9._-]{2,31}/g) || [];
+            if (tokens.indexOf(login) !== -1) return true;
+        }
+        return false;
     }
 
-    function inOpenList(el) {
-        return !!(el.closest && el.closest('[role="dialog"], [role="listbox"], [id^="tooltip-"]'));
-    }
-
-    function findLoginOption(login, input) {
-        const dialog = input && input.closest
-            ? input.closest('[role="dialog"], [role="listbox"], [id^="tooltip-"]')
-            : null;
-        const root = dialog || (input && input.parentElement);
-        const pools = [];
-        if (root && root.querySelectorAll) pools.push(root);
-        pools.push(document);
-        for (let p = 0; p < pools.length; p++) {
-            const nodes = pools[p].querySelectorAll('[role="option"], [role="menuitem"], li, button, a');
-            let loose = null;
-            for (let i = 0; i < nodes.length; i++) {
-                const el = nodes[i];
-                if (el.closest && el.closest('tbody') && !inOpenList(el)) continue;
-                if (!optionMatches(el, login)) continue;
-                const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 2, height: 2 };
-                if (rect.width < 1 || rect.height < 1) continue;
-                if (normalizeLogin(el.textContent) === login) return el;
-                if (!loose) loose = el;
-            }
-            if (loose) return loose;
+    function assignSearch(known) {
+        const inputs = document.querySelectorAll('input');
+        for (let i = 0; i < inputs.length; i++) {
+            const input = inputs[i];
+            if (isToolbarSearch(input) || !isAssignSearch(input)) continue;
+            const tip = input.closest('[id^="tooltip-"]');
+            if (tip && known[tip.id]) continue;
+            const rect = input.getBoundingClientRect();
+            if (rect.width < 1 || rect.height < 1) continue;
+            return input;
         }
         return null;
     }
 
-    function newAssignInput(before) {
-        const inputs = document.querySelectorAll('input, textarea');
-        for (let i = 0; i < inputs.length; i++) {
-            const input = inputs[i];
-            if (before.indexOf(input) !== -1 || isPageSearch(input)) continue;
-            const rect = input.getBoundingClientRect();
+    function assignButtonFor(login) {
+        const buttons = document.querySelectorAll('button');
+        for (let i = 0; i < buttons.length; i++) {
+            const btn = buttons[i];
+            if (!/^assign$/i.test((btn.textContent || '').replace(/\s+/g, ' ').trim())) continue;
+            if (!btn.closest || !btn.closest('[id^="tooltip-"]')) continue;
+            const rect = btn.getBoundingClientRect();
             if (rect.width < 1 || rect.height < 1) continue;
-            return input;
+            const row = btn.closest('tr') || btn.closest('[id^="tooltip-"]');
+            if (row && hasLoginToken(row, login)) return btn;
         }
         return null;
     }
@@ -653,33 +633,33 @@
         return { ok: true, message: 'Scanned ' + login + ' out.' };
     }
 
+    async function typeLogin(input, login) {
+        writeLogin(input, '');
+        let typed = '';
+        for (let i = 0; i < login.length; i++) {
+            typed += login.charAt(i);
+            writeLogin(input, typed);
+            await sleep(25);
+        }
+    }
+
     async function scanInOnPage(row, login) {
-        const before = visibleFields();
-        const opener = assignOpener(row);
-        if (!opener) return { ok: false, message: 'That station has no Assign control on Control Tower.' };
+        const opener = noneAnchor(row);
+        if (!opener) return { ok: false, message: 'That station is not open. Control Tower does not show None.' };
+        const known = Object.create(null);
+        const existing = tooltipIds();
+        for (let i = 0; i < existing.length; i++) known[existing[i]] = true;
         clickControl(opener);
-        const input = await waitFor(function () { return newAssignInput(before); }, 1600);
-        if (!input) return { ok: false, message: 'Control Tower did not open an assign field for this station.' };
-        writeLogin(input, login);
-        let option = await waitFor(function () { return findLoginOption(login, input); }, 1200);
-        if (!option) {
-            writeLogin(input, '');
-            let typed = '';
-            for (let i = 0; i < login.length; i++) {
-                typed += login.charAt(i);
-                writeLogin(input, typed);
-                await sleep(30);
-            }
-            option = await waitFor(function () { return findLoginOption(login, input); }, 1500);
+        const input = await waitFor(function () { return assignSearch(known); }, 1600);
+        if (!input) return { ok: false, message: 'Control Tower did not open the login search.' };
+        await typeLogin(input, login);
+        let button = await waitFor(function () { return assignButtonFor(login); }, 1800);
+        if (!button) {
+            writeLogin(input, login);
+            button = await waitFor(function () { return assignButtonFor(login); }, 1500);
         }
-        if (option) clickControl(option);
-        else {
-            const win = pageWindow();
-            try {
-                input.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-                input.dispatchEvent(new win.KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
-            } catch (e) { /* ignore */ }
-        }
+        if (!button) return { ok: false, message: 'Control Tower did not show Assign for ' + login + '.' };
+        clickControl(button);
         const arrived = await waitFor(function () { return rowHasLogin(row, login) ? true : null; }, 4000);
         if (!arrived) return { ok: false, message: 'Control Tower did not assign ' + login + '.' };
         return { ok: true, message: 'Scanned ' + login + ' in.' };
