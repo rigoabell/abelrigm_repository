@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.18
+// @version      1.9.19
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.18';
+    const SCRIPT_VERSION = '1.9.19';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -5086,6 +5086,7 @@
             box.appendChild(dbg);
         }
         box.appendChild(makePopupLeavingButton(person));
+        paintPopupLeaving(box, person);
         return box;
     }
 
@@ -5142,6 +5143,7 @@
                 if (!existing.querySelector('[data-mem3-leaving-early]')) {
                     existing.appendChild(makePopupLeavingButton(popupPerson));
                 }
+                paintPopupLeaving(existing, popupPerson);
                 continue;
             }
 
@@ -6493,6 +6495,7 @@
     const LEAVING_SHARE_URL = 'https://extendsclass.com/api/json-storage/bin/edfeccc';
     let leavingShareChain = Promise.resolve();
     let leavingShareError = '';
+    let leavingStop = false;
     let leavingBusy = false;
     let leavingHeld = false;
 
@@ -7084,7 +7087,10 @@
         if (noteReturns(doc, shiftRows(doc, now), now)) saveLeaving(doc);
         paintEarlyLog();
         if (leavingShareOn()) {
-            pullLeaving().then(function () { paintEarlyLog(); }).catch(function () {});
+            pullLeaving().then(function () {
+                paintEarlyLog();
+                decoratePopups();
+            }).catch(function () {});
         }
     }
 
@@ -7129,18 +7135,28 @@
             pushEarlyRun(doc, run);
             saveLeaving(doc);
             setLeavingStatus(run.summary);
+            finishEarlyProgress(run.summary);
             paintEarlyLog();
             return;
         }
+        leavingStop = false;
         leavingBusy = true;
         unassigning = true;
         holdLeaving(true);
         let off = 0;
         let missed = 0;
+        const taken = [];
+        const left = [];
         try {
             recordActivity(doc, actor, 'started unassign for leave times that have passed', now);
+            paintEarlyProgress(0, rows.length, '');
             for (let i = 0; i < rows.length; i++) {
+                if (leavingStop) {
+                    for (let j = i; j < rows.length; j++) left.push(rows[j].login);
+                    break;
+                }
                 const row = rows[i];
+                paintEarlyProgress(i, rows.length, row.login);
                 setLeavingStatus('Unassigning ' + (i + 1) + '/' + rows.length + ' · ' + row.login);
                 const anchor = findAnchorForPerson(row.login, '');
                 const stamp = new Date();
@@ -7157,6 +7173,7 @@
                     recordActivity(doc, actor, row.login + ' was not on a station', stamp);
                     missed += 1;
                     run.steps.push(step);
+                    paintEarlyProgress(i + 1, rows.length, '');
                     continue;
                 }
                 const before = countLoginOnBoard(row.login);
@@ -7165,6 +7182,7 @@
                 let record = null;
                 let error = '';
                 for (let tryN = 1; tryN <= 4; tryN++) {
+                    if (leavingStop) break;
                     if (countLoginOnBoard(row.login) < before) break;
                     await closeAllAssociateMenus();
                     const again = findAnchorForPerson(row.login, '');
@@ -7195,13 +7213,22 @@
                 step.tries = step.attempts.length;
                 if (error) step.error = error;
                 const gone = step.afterCount < before;
+                if (leavingStop && !gone) {
+                    left.push(row.login);
+                    for (let j = i + 1; j < rows.length; j++) left.push(rows[j].login);
+                    step.result = 'stopped';
+                    run.steps.push(step);
+                    break;
+                }
                 if (gone) {
                     markTakenOff(row, stamp, 'unassigned');
                     step.result = 'unassigned';
                     recordActivity(doc, actor, 'unassigned ' + row.login, stamp);
+                    taken.push(row.login);
                     off += 1;
                 } else {
                     step.result = 'could not take off';
+                    left.push(row.login);
                     let closed = !!step.buttonGone;
                     for (let a = 0; a < step.attempts.length; a++) {
                         if (step.attempts[a].buttonGone) closed = true;
@@ -7210,25 +7237,36 @@
                     recordActivity(doc, actor, 'could not take ' + row.login + ' off', stamp);
                 }
                 run.steps.push(step);
+                paintEarlyProgress(i + 1, rows.length, '');
             }
             const later = waiting.length - rows.length;
             run.summary = 'Unassigned ' + off + '. ' + missed + ' were not on a station. ' +
                 (rows.length - off - missed) + ' could not be taken off. ' +
                 later + ' are still waiting for their time.';
+            if (taken.length) run.summary += ' Unassigned: ' + taken.join(', ') + '.';
+            if (leavingStop) {
+                run.stopped = true;
+                run.summary = 'Stopped. Unassigned ' + taken.length +
+                    (taken.length ? ': ' + taken.join(', ') : '') +
+                    '. Still to unassign: ' + (left.length ? left.join(', ') : 'nobody') + '.';
+                if (later) run.summary += ' ' + later + ' are still waiting for their time.';
+            }
             run.off = off;
             run.missed = missed;
-            run.failed = rows.length - off - missed;
+            run.failed = left.length;
             run.stillWaiting = later;
+            run.taken = taken;
+            run.left = left;
             recordActivity(doc, actor, run.summary, new Date());
             pushEarlyRun(doc, run);
             saveLeaving(doc);
-            setLeavingStatus(run.summary);
+            finishEarlyProgress(run.summary);
         } catch (e) {
             run.summary = e && e.message ? e.message : 'Unassign failed.';
             run.error = run.summary;
             pushEarlyRun(doc, run);
             saveLeaving(doc);
-            setLeavingStatus(run.summary);
+            finishEarlyProgress(run.summary);
         } finally {
             holdLeaving(false);
             unassigning = false;
@@ -7451,13 +7489,149 @@
             'background:#0d1117; color:#fff; font:600 13px Segoe UI,system-ui,sans-serif;';
     }
 
+    function openLeavingFor(login) {
+        const name = String(login || '').trim().toLowerCase();
+        if (!name) return null;
+        const rows = shiftRows(loadLeaving(), new Date());
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            if (!row || row.login !== name) continue;
+            if (row.status === 'said' || row.status === 'stuck') return row;
+        }
+        return null;
+    }
+
+    function paintPopupLeaving(box, person) {
+        if (!box) return;
+        try {
+            const login = (person && person.login) || box.dataset.login || '';
+            const row = openLeavingFor(login);
+            let note = box.querySelector('[data-mem3-leaving-note]');
+            if (!row) {
+                if (note) note.remove();
+            } else {
+                if (!note) {
+                    note = document.createElement('div');
+                    note.setAttribute('data-mem3-leaving-note', '');
+                    note.style.cssText = 'display:block; width:100%; box-sizing:border-box; margin-top:8px; ' +
+                        'padding:6px 8px; border-radius:6px; background:#f5c518; color:#000000; text-align:center; ' +
+                        'font:800 12px Segoe UI,system-ui,sans-serif;';
+                    const button = box.querySelector('[data-mem3-leaving-early]');
+                    if (button) box.insertBefore(note, button);
+                    else box.appendChild(note);
+                }
+                note.textContent = 'Leaving at ' + row.said;
+            }
+            const button = box.querySelector('[data-mem3-leaving-early]');
+            if (button) {
+                button.style.background = '#f5c518';
+                button.style.color = '#000000';
+                button.style.borderColor = '#c9a20a';
+            }
+        } catch (e) { /* the card still opens without the leave line */ }
+    }
+
+    function showLeaveCheck(card) {
+        if (!card) return;
+        let tick = card.querySelector('[data-leave-check]');
+        if (!tick) {
+            tick = document.createElement('div');
+            tick.setAttribute('data-leave-check', '');
+            tick.textContent = '✓';
+            tick.style.cssText = 'position:absolute; left:50%; top:50%; transform:translate(-50%, -50%); ' +
+                'font:900 84px Segoe UI,system-ui,sans-serif; color:#3fb950; pointer-events:none; ' +
+                'text-shadow:0 0 18px rgba(63,185,80,.85); z-index:2; opacity:0;';
+            card.appendChild(tick);
+        }
+        if (tick._fade) clearTimeout(tick._fade);
+        tick.style.transition = 'none';
+        tick.style.opacity = '1';
+        tick._fade = setTimeout(function () {
+            tick.style.transition = 'opacity .6s linear';
+            tick.style.opacity = '0';
+        }, 3000);
+    }
+
+    function mountEarlyProgress(card) {
+        while (card.firstChild) card.removeChild(card.firstChild);
+        const title = document.createElement('div');
+        title.textContent = 'Unassign Early Outs';
+        title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif; margin-bottom:8px;';
+        const count = document.createElement('div');
+        count.setAttribute('data-early-count', '');
+        count.textContent = 'Starting';
+        count.style.cssText = 'font:800 13px Segoe UI,system-ui,sans-serif; margin-bottom:6px;';
+        const track = document.createElement('div');
+        track.style.cssText = 'height:12px; border-radius:6px; background:#0d1117; border:1px solid #30363d; overflow:hidden;';
+        const fill = document.createElement('div');
+        fill.setAttribute('data-early-fill', '');
+        fill.style.cssText = 'height:100%; width:0%; background:#3fb950;';
+        track.appendChild(fill);
+        const current = document.createElement('div');
+        current.setAttribute('data-early-current', '');
+        current.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
+        const status = document.createElement('div');
+        status.setAttribute('data-leaving-status', '');
+        status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
+        const stop = document.createElement('button');
+        stop.type = 'button';
+        stop.setAttribute('data-early-stop', '');
+        stop.textContent = 'Stop';
+        stop.style.cssText = 'margin-top:10px; padding:7px 10px; border-radius:6px; border:1px solid #f85149; ' +
+            'background:#0d1117; color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        stop.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            leavingStop = true;
+            stop.disabled = true;
+            stop.textContent = 'Stopping';
+        });
+        card.appendChild(title);
+        card.appendChild(count);
+        card.appendChild(track);
+        card.appendChild(current);
+        card.appendChild(status);
+        card.appendChild(stop);
+    }
+
+    function paintEarlyProgress(done, total, login) {
+        const card = document.getElementById('mem3-early-pass');
+        if (!card) return;
+        const fill = card.querySelector('[data-early-fill]');
+        const count = card.querySelector('[data-early-count]');
+        const current = card.querySelector('[data-early-current]');
+        const width = total ? Math.round((done / total) * 100) : 0;
+        if (fill) fill.style.width = width + '%';
+        if (count) count.textContent = done + ' of ' + total;
+        if (current) current.textContent = login ? 'Unassigning ' + login : '';
+    }
+
+    function finishEarlyProgress(text) {
+        const card = document.getElementById('mem3-early-pass');
+        setLeavingStatus(text);
+        if (!card) return;
+        const current = card.querySelector('[data-early-current]');
+        if (current) current.textContent = '';
+        const stop = card.querySelector('[data-early-stop]');
+        if (!stop) return;
+        const close = stop.cloneNode(true);
+        close.disabled = false;
+        close.textContent = 'Close';
+        close.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            closeLeavingOverlay('mem3-early-pass');
+        });
+        stop.replaceWith(close);
+    }
+
     function makePopupLeavingButton(person) {
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.textContent = 'Leaving Early';
         btn.setAttribute('data-mem3-leaving-early', '');
         btn.style.cssText = 'display:block; width:100%; box-sizing:border-box; margin-top:8px; padding:6px 8px; ' +
-            'border-radius:6px; border:1px solid #30363d; background:#0d1117; color:#ffffff; cursor:pointer; ' +
+            'border-radius:6px; border:1px solid #c9a20a; background:#f5c518; color:#000000; cursor:pointer; ' +
             'font:800 12px Segoe UI,system-ui,sans-serif; text-transform:none; letter-spacing:0;';
         btn.addEventListener('click', function (event) {
             event.preventDefault();
@@ -7577,7 +7751,11 @@
             }
             setLeavingStatus(markedText);
             watchLeavingShare(markedText, shared);
-            if (result.added || result.updated) login.value = '';
+            decoratePopups();
+            if (result.added || result.updated) {
+                showLeaveCheck(card);
+                login.value = '';
+            }
         }
         mark.addEventListener('click', function (event) {
             event.preventDefault();
@@ -7624,12 +7802,13 @@
     }
 
     function openEarlyPass() {
+        if (leavingBusy || unassigning) return;
         closeLeavingOverlay('mem3-early-pass');
         const card = document.createElement('div');
         card.id = 'mem3-early-pass';
-        card.style.cssText = 'position:fixed; right:16px; bottom:16px; z-index:2147483646; width:min(360px, calc(100vw - 24px)); ' +
-            'padding:12px; border-radius:10px; background:#161b22; color:#fff; border:1px solid #30363d; ' +
-            'font-family:Segoe UI,system-ui,sans-serif;';
+        card.style.cssText = 'position:fixed; left:50%; top:50%; transform:translate(-50%, -50%); z-index:2147483647; ' +
+            'width:min(440px, calc(100vw - 24px)); padding:12px; border-radius:10px; background:#161b22; color:#fff; ' +
+            'border:1px solid #30363d; box-shadow:0 8px 24px rgba(0,0,0,.45); font-family:Segoe UI,system-ui,sans-serif;';
         const title = document.createElement('div');
         title.textContent = 'Unassign Early Outs';
         title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif; margin-bottom:8px;';
@@ -7677,6 +7856,7 @@
             }
             saveActor(actor);
             pass.value = '';
+            mountEarlyProgress(card);
             unassignMarkedLeaves(actor);
         }
         go.addEventListener('click', function (event) {

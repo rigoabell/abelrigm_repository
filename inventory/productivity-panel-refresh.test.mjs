@@ -7,7 +7,13 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.18/);
+assert.match(src, /@version\s+1\.9\.19/);
+assert.match(src, /background:#f5c518; color:#000000/);
+assert.match(src, /data-leave-check/);
+assert.match(src, /data-early-fill/);
+assert.match(src, /data-early-stop/);
+assert.match(src, /leavingStop = true/);
+assert.equal(src.includes("bottom:16px"), false);
 assert.match(src, /for \(let tryN = 1; tryN <= 4; tryN\+\+\)/);
 assert.match(src, /extendsclass\.com\/api\/json-storage\/bin\/edfeccc/);
 assert.match(src, /Every computer running this script sees this list/);
@@ -54,7 +60,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.18");
+assert.equal(entry.version, "1.9.19");
 const leavingList = src.slice(src.indexOf("function openLeavingList"), src.indexOf("function closeLeavingOverlay"));
 assert.ok(leavingList.indexOf("header.appendChild(close)") !== -1);
 assert.ok(leavingList.indexOf("card.appendChild(header)") < leavingList.indexOf("card.appendChild(scroller)"));
