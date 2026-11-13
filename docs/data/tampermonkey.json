@@ -114,8 +114,8 @@
     "name": "MEM3 Control Tower - PS Board (abelrigm)",
     "category": "Control Tower",
     "summary": "Scan a typed login in or out of a problem-solve station on Control Tower.",
-    "detail": "On MEM3 assignments, a PS board button sits on the CRET Problem Solve group and stays out of the productivity panel. The sheet places each associate on the line map, with the B station stacked on the split side. Audit PS, Grey Totes, Gatekeeper, Bigs PS, Add-Ins, and Exceptions sit on one row under the lines, each the same size as a line station. Click a station and type a login, for example abelrigm. Scan in clicks the None link, types the login into the search Control Tower opens, and clicks Assign. Scan out clicks the login and then Unassign. Copy debug puts the station, the row, and any open search or Assign button on the clipboard. The sheet follows the group as the page updates. Anyone whose station is not on the sheet is listed under it.",
-    "version": "1.3.2",
+    "detail": "On MEM3 assignments, a PS board button sits on the CRET Problem Solve group and stays out of the productivity panel. The sheet places each associate on the line map, with the B station stacked on the split side. Audit PS, Grey Totes, Gatekeeper, Bigs PS, Add-Ins, and Exceptions sit on one row under the lines, each the same size as a line station. Click a station and type a login, for example abelrigm. Scan in clicks the None link, types the login into the search Control Tower opens, and clicks Assign. Scan out clicks the login and then Unassign. Scan in waits until Assign stays on that person, then clicks it once. Copy debug puts the station, the row, and any open search or Assign button on the clipboard. The sheet follows the group as the page updates. Anyone whose station is not on the sheet is listed under it.",
+    "version": "1.3.3",
     "runsOn": "beta.control-tower.meta.amazon.dev, control-tower.meta.amazon.dev",
     "file": "downloads/mem3-control-tower-ps-board.txt",
     "downloadName": "MEM3 Control Tower - PS Board (abelrigm).txt"

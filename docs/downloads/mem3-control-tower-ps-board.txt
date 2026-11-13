@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MEM3 Control Tower - PS Board (abelrigm)
 // @namespace    https://mem3.amazon.local/
-// @version      1.3.2
+// @version      1.3.3
 // @description  Button on CRET Problem Solve that opens a sheet, places each associate, and scans a typed login in or out on Control Tower.
 // @author       abelrigm
 // @match        https://beta.control-tower.meta.amazon.dev/*
@@ -23,7 +23,7 @@
     // Lines 1 and 3 split Even into A (front) and B (stacked behind).
     // Lines 2 and 4 split Odd the same way. The other side is a single station.
 
-    const SCRIPT_VERSION = '1.3.2';
+    const SCRIPT_VERSION = '1.3.3';
     const BTN_ID = 'mem3-ps-board-btn';
     const POPUP_ID = 'mem3-ps-board';
     const PANEL_JUNK = '.mem3-uph-badge, .mem3-line-avg-badge, .mem3-popup-uph, .mem3-popup-clock, .mem3-popup-idle, .mem3-yield';
@@ -422,8 +422,9 @@
             el.dispatchEvent(new win.PointerEvent('pointerup', up));
             el.dispatchEvent(new win.MouseEvent('mouseup', up));
             el.dispatchEvent(new win.MouseEvent('click', up));
-        } catch (e) { /* fall through */ }
-        try { el.click(); } catch (e2) { /* ignore */ }
+        } catch (e) {
+            try { el.click(); } catch (e2) { /* ignore */ }
+        }
     }
 
     function reactFiber(el) {
@@ -453,6 +454,7 @@
             hops++;
         }
         if (!fns.length) return false;
+        // The button's own handler only. Calling every parent handler submits Assign again.
         const event = {
             target: el,
             currentTarget: el,
@@ -468,16 +470,16 @@
             isDefaultPrevented: function () { return !!this.defaultPrevented; },
             isPropagationStopped: function () { return false; }
         };
-        for (let i = fns.length - 1; i >= 0; i--) {
-            try { fns[i](event); } catch (e) { /* keep going */ }
-        }
+        try { fns[0](event); } catch (e) { return false; }
         return true;
     }
 
     function clickControl(el) {
         if (!el) return;
         try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e) { /* ignore */ }
-        reactClick(el);
+        // One path. React onClick plus a DOM click both submit the assignment,
+        // and Control Tower reports an error after the person is already on the station.
+        if (reactClick(el)) return;
         pageClick(el);
     }
 
@@ -640,7 +642,42 @@
         for (let i = 0; i < login.length; i++) {
             typed += login.charAt(i);
             writeLogin(input, typed);
-            await sleep(25);
+            await sleep(70);
+        }
+    }
+
+    async function settledAssign(login) {
+        let last = null;
+        let seen = 0;
+        const start = Date.now();
+        while (Date.now() - start < 2200) {
+            const button = assignButtonFor(login);
+            if (button && button === last) {
+                seen += 1;
+                if (seen >= 3) return button;
+            } else {
+                last = button;
+                seen = button ? 1 : 0;
+            }
+            await sleep(200);
+        }
+        return assignButtonFor(login);
+    }
+
+    function dismissAssignmentError() {
+        const nodes = document.querySelectorAll('[role="dialog"], [role="alert"], div');
+        for (let i = 0; i < nodes.length; i++) {
+            const el = nodes[i];
+            const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+            if (text.indexOf('An error has occurred during assignment') === -1) continue;
+            if (text.length > 400) continue;
+            const buttons = el.querySelectorAll('button, [role="button"]');
+            for (let b = 0; b < buttons.length; b++) {
+                const label = (buttons[b].textContent || '').replace(/\s+/g, ' ').trim();
+                if (!/^(ok|close|dismiss|got it)$/i.test(label)) continue;
+                pageClick(buttons[b]);
+                return;
+            }
         }
     }
 
@@ -654,10 +691,10 @@
         const input = await waitFor(function () { return assignSearch(known); }, 1600);
         if (!input) return { ok: false, message: 'Control Tower did not open the login search.' };
         await typeLogin(input, login);
-        let button = await waitFor(function () { return assignButtonFor(login); }, 1800);
+        let button = await settledAssign(login);
         if (!button) {
             writeLogin(input, login);
-            button = await waitFor(function () { return assignButtonFor(login); }, 1500);
+            button = await settledAssign(login);
         }
         if (!button) return { ok: false, message: 'Control Tower did not show Assign for ' + login + '.' };
         clickControl(button);
@@ -665,6 +702,7 @@
             return stationStillHas(slotId, login) ? true : null;
         }, 8000);
         if (!arrived) return { ok: false, message: 'Control Tower did not assign ' + login + '.' };
+        dismissAssignmentError();
         return { ok: true, message: 'Scanned ' + login + ' in.' };
     }
 
