@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.27
+// @version      1.9.28
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.27';
+    const SCRIPT_VERSION = '1.9.28';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -4172,11 +4172,11 @@
 
     function ensureSummaryActions() {
         let actions = document.getElementById('mem3-summary-actions');
-        if (actions && actions.getAttribute('data-mem3-probe') !== 'issues-v198') actions.remove();
-        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'issues-v198') return actions;
+        if (actions && actions.getAttribute('data-mem3-probe') !== 'actions-v1928') actions.remove();
+        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'actions-v1928') return actions;
         actions = document.createElement('div');
         actions.id = 'mem3-summary-actions';
-        actions.setAttribute('data-mem3-probe', 'issues-v198');
+        actions.setAttribute('data-mem3-probe', 'actions-v1928');
         actions.style.cssText = 'display:flex; gap:6px; align-items:flex-start; flex-wrap:wrap;';
         function actionButton(label, border) {
             const btn = document.createElement('button');
@@ -4199,10 +4199,8 @@
                 setTimeout(function () { copyBtn.textContent = 'Copy debug'; }, 2000);
             });
         });
-        actions.appendChild(makeLeavingEarlyButton());
         actions.appendChild(makeShowLeavingButton());
         actions.appendChild(makeEarlyUnassignButton());
-        actions.appendChild(makeIssueButton());
         actions.appendChild(copyBtn);
         return actions;
     }
