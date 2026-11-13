@@ -8,7 +8,7 @@ const patched = src.replace(
     `globalThis.__mem3 = {
         addLeaving, saveLeaving, loadLeaving, clearMarkedLeave, shiftId,
         mergeLeaving, enableLeavingShare, publishLeaving, pullLeaving, whenLeavingShared,
-        activityLine, leavingLine
+        activityLine, leavingLine, loginFromWelcome
     };
 })();`
 );
@@ -108,6 +108,9 @@ function boot(store) {
 const now = new Date();
 const a = boot({});
 const b = boot({});
+assert.equal(a.loginFromWelcome("Welcome abelrigm"), "abelrigm");
+assert.equal(a.loginFromWelcome("Welcome  Abelrigm "), "abelrigm");
+assert.equal(a.loginFromWelcome("Welcome back"), "");
 
 const docA = a.loadLeaving();
 const marked = a.addLeaving(docA, "brndbo", 14 * 60, "Station 3-01", now);

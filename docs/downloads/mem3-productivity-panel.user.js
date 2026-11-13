@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.21
+// @version      1.9.22
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.21';
+    const SCRIPT_VERSION = '1.9.22';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -6614,6 +6614,48 @@
         try { localStorage.setItem(ACTOR_KEY, text); } catch (e2) { /* storage can be blocked */ }
     }
 
+    function loginFromWelcome(text) {
+        const match = String(text || '').replace(/\s+/g, ' ').trim().match(/^welcome\s+([a-z][a-z0-9._-]{2,31})$/i);
+        if (!match) return '';
+        const login = match[1].toLowerCase();
+        if (login === 'back' || login === 'there' || login === 'user') return '';
+        return login;
+    }
+
+    function signedInLogin() {
+        try {
+            const nav = document.querySelector('#app-layout-content-1 nav') ||
+                document.querySelector('main nav') || document.querySelector('nav');
+            if (!nav) return '';
+            const nodes = nav.querySelectorAll('div');
+            for (let i = 0; i < nodes.length; i++) {
+                const login = loginFromWelcome(elementOwnText(nodes[i])) || loginFromWelcome(nodes[i].textContent);
+                if (!login) continue;
+                saveActor(login);
+                return login;
+            }
+        } catch (e) { /* this page has no welcome line */ }
+        return '';
+    }
+
+    function requireActor() {
+        const actor = signedInLogin();
+        if (looksLikeLogin(actor)) return actor;
+        setLeavingStatus('Control Tower has not shown who is signed in.');
+        return '';
+    }
+
+    function signedInNote() {
+        const note = document.createElement('div');
+        note.setAttribute('data-signed-in', '');
+        const actor = signedInLogin();
+        note.textContent = looksLikeLogin(actor)
+            ? 'Signed in as ' + personLabel(actor)
+            : 'Control Tower has not shown who is signed in.';
+        note.style.cssText = 'font-size:12px; color:#8b949e; margin-bottom:8px;';
+        return note;
+    }
+
     function personLabel(login) {
         const key = String(login || '').trim().toLowerCase();
         if (!key || key === 'board') return 'The board';
@@ -7196,7 +7238,7 @@
             version: SCRIPT_VERSION,
             at: now.toISOString(),
             shiftId: id,
-            actor: loadActor(),
+            actor: signedInLogin(),
             share: leavingShareOn(),
             shareError: leavingShareError,
             rev: doc.rev || 0,
@@ -7499,8 +7541,8 @@
                 ? 'Activity from the past 12 hours.'
                 : 'Who is leaving, at their latest time. The same list is on every computer running this script.';
         }
-        const by = card.querySelector('[data-by]');
-        if (by) by.style.display = historyView ? 'none' : '';
+        const signed = card.querySelector('[data-signed-in]');
+        if (signed) signed.style.display = historyView ? 'none' : '';
         const historyBtn = card.querySelector('[data-leaving-history]');
         if (historyBtn) historyBtn.textContent = historyView ? 'Show Leaving' : 'Show History';
         const list = card.querySelector('[data-leaving-list]');
@@ -7533,12 +7575,8 @@
                 clear.addEventListener('click', function (event) {
                     event.preventDefault();
                     event.stopPropagation();
-                    const actor = String((card.querySelector('[data-by]') || {}).value || '').trim().toLowerCase();
-                    if (!looksLikeLogin(actor)) {
-                        setLeavingStatus('Enter your login.');
-                        return;
-                    }
-                    saveActor(actor);
+                    const actor = requireActor();
+                    if (!actor) return;
                     const current = loadLeaving();
                     const cleared = clearMarkedLeave(current, row.id, actor, new Date());
                     if (!cleared) return;
@@ -7589,11 +7627,6 @@
         ask.setAttribute('data-leaving-ask', '');
         ask.textContent = 'Who is leaving, at their latest time. The same list is on every computer running this script.';
         ask.style.cssText = 'font-size:12px; color:#8b949e; margin-bottom:8px;';
-        const by = document.createElement('input');
-        by.setAttribute('data-by', '');
-        by.placeholder = 'Your login';
-        by.value = loadActor();
-        by.style.cssText = leavingFieldStyle() + ' width:100%; box-sizing:border-box; margin-bottom:8px;';
         const list = document.createElement('div');
         list.setAttribute('data-leaving-list', '');
         const activity = document.createElement('div');
@@ -7652,7 +7685,7 @@
         scroller.appendChild(status);
         card.appendChild(header);
         card.appendChild(ask);
-        card.appendChild(by);
+        card.appendChild(signedInNote());
         card.appendChild(scroller);
         card.appendChild(actions);
         document.body.appendChild(card);
@@ -7895,11 +7928,6 @@
         const timeRow = document.createElement('div');
         timeRow.setAttribute('data-time-row', '');
         timeRow.style.cssText = 'display:flex; gap:6px; flex-wrap:nowrap; align-items:center;';
-        const by = document.createElement('input');
-        by.setAttribute('data-by', '');
-        by.placeholder = 'Your login';
-        by.value = loadActor();
-        by.style.cssText = leavingFieldStyle();
         const login = document.createElement('input');
         login.setAttribute('data-login', '');
         login.placeholder = 'Associate login';
@@ -7935,17 +7963,14 @@
         close.style.cssText = 'padding:7px 10px; border-radius:6px; border:1px solid #8b949e; background:#0d1117; ' +
             'color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
         function submit() {
-            const actor = String(by.value || '').trim().toLowerCase();
+            const actor = requireActor();
             const who = String(login.value || '').trim().toLowerCase();
             const typed = finishLeaveTime(time.value);
             time.value = typed;
             const saidMin = /^\d{2}:\d{2}$/.test(typed)
                 ? parseLeaveTime(typed + ' ' + (half.value || 'PM'))
                 : null;
-            if (!looksLikeLogin(actor)) {
-                setLeavingStatus('Enter your login.');
-                return;
-            }
+            if (!actor) return;
             if (!looksLikeLogin(who)) {
                 setLeavingStatus('Enter a login.');
                 return;
@@ -7954,7 +7979,6 @@
                 setLeavingStatus('Enter a time like 12:00.');
                 return;
             }
-            saveActor(actor);
             const now = new Date();
             const doc = loadLeaving();
             const station = stationForLogin(who);
@@ -8019,7 +8043,6 @@
             event.stopPropagation();
             closeLeavingOverlay(LEAVING_ID);
         });
-        loginRow.appendChild(by);
         loginRow.appendChild(login);
         timeRow.appendChild(time);
         timeRow.appendChild(half);
@@ -8032,6 +8055,7 @@
         status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
         card.appendChild(title);
         card.appendChild(ask);
+        card.appendChild(signedInNote());
         card.appendChild(form);
         card.appendChild(status);
         document.body.appendChild(card);
@@ -8050,10 +8074,6 @@
         const title = document.createElement('div');
         title.textContent = 'Unassign Early Outs';
         title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif; margin-bottom:8px;';
-        const by = document.createElement('input');
-        by.placeholder = 'Your login';
-        by.value = loadActor();
-        by.style.cssText = leavingFieldStyle() + ' width:100%; box-sizing:border-box; margin-bottom:6px;';
         const pass = document.createElement('input');
         pass.type = 'password';
         pass.placeholder = 'Password';
@@ -8071,17 +8091,8 @@
         close.textContent = 'Close';
         close.style.cssText = go.style.cssText;
         function submit() {
-            const actor = String(by.value || '').trim().toLowerCase();
-            if (!looksLikeLogin(actor)) {
-                const doc = loadLeaving();
-                pushEarlyRun(doc, {
-                    at: clockText(new Date()), by: actor || 'unknown', kind: 'unassign',
-                    shiftId: shiftId(new Date()), summary: 'Enter your login.', steps: []
-                });
-                saveLeaving(doc);
-                setLeavingStatus('Enter your login.');
-                return;
-            }
+            const actor = requireActor();
+            if (!actor) return;
             if (pass.value !== UNASSIGN_PASSWORD) {
                 const doc = loadLeaving();
                 pushEarlyRun(doc, {
@@ -8092,7 +8103,6 @@
                 setLeavingStatus('Wrong password.');
                 return;
             }
-            saveActor(actor);
             pass.value = '';
             mountEarlyProgress(card);
             unassignMarkedLeaves(actor);
@@ -8116,13 +8126,12 @@
         status.setAttribute('data-leaving-status', '');
         status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
         card.appendChild(title);
-        card.appendChild(by);
+        card.appendChild(signedInNote());
         card.appendChild(pass);
         card.appendChild(row);
         card.appendChild(status);
         document.body.appendChild(card);
-        if (by.value) pass.focus();
-        else by.focus();
+        pass.focus();
     }
 
     function init() {
