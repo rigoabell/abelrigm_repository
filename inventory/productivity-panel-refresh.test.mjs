@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.5/);
+assert.match(src, /@version\s+1\.9\.6/);
 assert.match(src, /dueLeaving\(waiting, now\)/);
 assert.match(src, /Unassign leaving/);
 assert.match(src, /refreshLeaving\(\)/);
@@ -35,7 +35,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.5");
+assert.equal(entry.version, "1.9.6");
 assert.match(entry.detail, /types MEM3/);
 assert.match(entry.runsOn, /menu\.na\.aft\.amazonoperations\.app/);
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
@@ -491,7 +491,10 @@ try {
     const noon = new Date(2026, 10, 13, 12, 0);
     assert.equal(api.shiftId(noon), "2026-11-13-days");
     assert.equal(api.shiftId(new Date(2026, 10, 13, 1, 30)), "2026-11-12-nights");
-    assert.equal(api.parseLeaveTime("12:00"), 720);
+    assert.equal(api.parseLeaveTime("12:00 PM"), 720);
+    assert.equal(api.parseLeaveTime("12:00 AM"), 0);
+    assert.equal(api.parseLeaveTime("1:30 pm"), 13 * 60 + 30);
+    assert.equal(api.parseLeaveTime("12:00"), null);
     assert.equal(api.parseLeaveTime("25:00"), null);
     const leaving = { shifts: {} };
     const marked = api.addLeaving(leaving, "Wilrayni", 720, "CRET 2 Even", noon);
@@ -504,10 +507,10 @@ try {
     assert.equal(api.dueLeaving(shiftRows, noon).length, 1);
     const moved = api.addLeaving(leaving, "wilrayni", 13 * 60 + 30, "CRET 2 Even", new Date(2026, 10, 13, 11, 40));
     assert.equal(moved.updated, true);
-    assert.equal(moved.previous, "12:00");
-    assert.equal(moved.row.said, "13:30");
+    assert.equal(moved.previous, "12:00 PM");
+    assert.equal(moved.row.said, "1:30 PM");
     assert.equal(moved.row.history.length, 2);
-    assert.equal(moved.row.history[0].said, "12:00");
+    assert.equal(moved.row.history[0].said, "12:00 PM");
     assert.equal(api.dueLeaving(shiftRows, noon).length, 0);
     assert.equal(api.dueLeaving(shiftRows, new Date(2026, 10, 13, 13, 30)).length, 1);
     const night = new Date(2026, 10, 13, 23, 0);
@@ -516,9 +519,9 @@ try {
     assert.equal(api.dueLeaving(nights.shifts[api.shiftId(night)], night).length, 0);
     assert.equal(api.dueLeaving(nights.shifts[api.shiftId(night)], new Date(2026, 10, 14, 1, 5)).length, 1);
     api.markTakenOff(marked.row, noon, "unassigned");
-    assert.equal(marked.row.takenOffAt, "12:00");
+    assert.equal(marked.row.takenOffAt, "12:00 PM");
     assert.equal(api.noteBack(marked.row, "3 Odd", new Date(2026, 10, 13, 12, 40)), true);
-    assert.equal(marked.row.back, "3 Odd at 12:40");
+    assert.equal(marked.row.back, "3 Odd at 12:40 PM");
     assert.equal(api.noteBack(marked.row, "3 Odd", new Date(2026, 10, 13, 12, 50)), false);
     assert.equal(api.dueLeaving(shiftRows, noon).length, 0);
 } finally {

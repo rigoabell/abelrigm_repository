@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.5
+// @version      1.9.6
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -37,7 +37,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.5';
+    const SCRIPT_VERSION = '1.9.6';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -6479,16 +6479,28 @@
         return start.getFullYear() + '-' + leavingPad(start.getMonth() + 1) + '-' + leavingPad(start.getDate()) + '-' + name;
     }
 
+    function formatLeaveTime(min) {
+        let hour = Math.floor(min / 60) % 24;
+        const minute = min % 60;
+        const suffix = hour >= 12 ? 'PM' : 'AM';
+        hour = hour % 12;
+        if (hour === 0) hour = 12;
+        return hour + ':' + leavingPad(minute) + ' ' + suffix;
+    }
+
     function clockText(date) {
-        return leavingPad(date.getHours()) + ':' + leavingPad(date.getMinutes());
+        return formatLeaveTime(date.getHours() * 60 + date.getMinutes());
     }
 
     function parseLeaveTime(text) {
-        const match = String(text || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+        const match = String(text || '').trim().match(/^(\d{1,2}):(\d{2})\s*(am|pm)$/i);
         if (!match) return null;
-        const hour = parseInt(match[1], 10);
+        let hour = parseInt(match[1], 10);
         const minute = parseInt(match[2], 10);
-        if (hour > 23 || minute > 59) return null;
+        if (hour < 1 || hour > 12 || minute > 59) return null;
+        const pm = match[3].toLowerCase() === 'pm';
+        if (hour === 12) hour = pm ? 12 : 0;
+        else if (pm) hour += 12;
         return hour * 60 + minute;
     }
 
@@ -6536,7 +6548,7 @@
     function addLeaving(doc, login, saidMin, station, now) {
         const rows = shiftRows(doc, now);
         const name = String(login || '').trim().toLowerCase();
-        const said = leavingPad(Math.floor(saidMin / 60)) + ':' + leavingPad(saidMin % 60);
+        const said = formatLeaveTime(saidMin);
         const at = clockText(now);
         let open = null;
         for (let i = 0; i < rows.length; i++) {
@@ -6708,7 +6720,7 @@
             return;
         }
         if (saidMin == null) {
-            setLeavingStatus('Enter a time like 12:00.');
+            setLeavingStatus('Enter a time like 12:00 PM.');
             return;
         }
         const now = new Date();
@@ -6752,7 +6764,7 @@
         login.setAttribute('autocomplete', 'off');
         const time = document.createElement('input');
         time.setAttribute('data-time', '');
-        time.placeholder = '12:00';
+        time.placeholder = '12:00 PM';
         time.setAttribute('autocomplete', 'off');
         const fieldStyle = 'flex:1; min-width:0; padding:6px 8px; border-radius:6px; border:1px solid #30363d; ' +
             'background:#0d1117; color:#fff; font:13px Segoe UI,system-ui,sans-serif;';
