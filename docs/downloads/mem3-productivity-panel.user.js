@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.1
+// @version      1.9.2
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -37,7 +37,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.1';
+    const SCRIPT_VERSION = '1.9.2';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -1273,6 +1273,7 @@
     }
 
     function paintAllClockRings() {
+        if (psBoardHolding()) return;
         if (!CLOCK.loadedAt) return;
         installPulseStyles();
         const rows = document.querySelectorAll('table tbody tr');
@@ -1551,10 +1552,10 @@
     // follow on the next tick from whatever has arrived so far.
     function scheduleLivePaint() {
         noteTimeProgress();
-        if (livePaintTimer || unassigning) return;
+        if (livePaintTimer || unassigning || psBoardHolding()) return;
         livePaintTimer = setTimeout(function () {
             livePaintTimer = null;
-            if (unassigning) return;
+            if (unassigning || psBoardHolding()) return;
             render();
         }, 50);
     }
@@ -2603,6 +2604,25 @@
 
     const UNASSIGN_PASSWORD = 'MEM3';
     let unassigning = false;
+    let psHoldSeen = false;
+
+    // The problem-solve sheet sets this while it clicks None, Assign, or Unassign.
+    // Rewriting rows or the tooltip during that click keeps Control Tower from
+    // painting the new station until a refresh.
+    function psBoardHolding() {
+        const root = document.documentElement;
+        return !!(root && root.hasAttribute && root.hasAttribute('data-mem3-ps-hold'));
+    }
+
+    function notePsHold() {
+        if (psBoardHolding()) {
+            psHoldSeen = true;
+            return;
+        }
+        if (!psHoldSeen) return;
+        psHoldSeen = false;
+        scheduleRender();
+    }
     const UNASSIGN_LOG = [];
 
     function pushUnassignLog(entry) {
@@ -5124,6 +5144,7 @@
             if (pending) return;
             pending = setTimeout(function () {
                 pending = null;
+                if (psBoardHolding()) return;
                 try { decoratePopups(); } catch (e) { warn('popup decorate failed:', e); }
             }, 80);
         };
@@ -5287,7 +5308,7 @@
     }
 
     function render() {
-        if (unassigning) return;
+        if (unassigning || psBoardHolding()) return;
         if (!isAssignmentsPage() || !assignmentsReady()) return;
         lastRenderAt = Date.now();
         if (rowObserver) rowObserver.disconnect();
@@ -5457,11 +5478,12 @@
     }
 
     function scheduleRender() {
-        if (unassigning) return;
+        if (unassigning || psBoardHolding()) return;
         if (renderTimer) return;
         const wait = Math.max(250, RENDER_MIN_GAP_MS - (Date.now() - lastRenderAt));
         renderTimer = setTimeout(function () {
             renderTimer = null;
+            if (unassigning || psBoardHolding()) return;
             if (tablesSignature() === lastSignature) {
                 if (rowsMissingBadges()) {
                     render();
@@ -5619,6 +5641,7 @@
             ensureFloorSummary();
             placeCornerDebugButton();
             removeCornerPhotoDebugButton();
+            notePsHold();
         }, 400);
         document.addEventListener('click', function (e) {
             const el = e.target && e.target.closest ? e.target.closest('button, a') : null;
@@ -6374,7 +6397,7 @@
     let linePairObs = null;
 
     function tickLinePairs() {
-        if (linePairApplying) return;
+        if (linePairApplying || psBoardHolding()) return;
         linePairApplying = true;
         if (linePairObs && typeof linePairObs.disconnect === 'function') linePairObs.disconnect();
         if (rowObserver) rowObserver.disconnect();

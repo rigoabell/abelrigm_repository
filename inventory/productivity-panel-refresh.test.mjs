@@ -7,7 +7,9 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.1/);
+assert.match(src, /@version\s+1\.9\.2/);
+assert.match(src, /function psBoardHolding/);
+assert.match(src, /data-mem3-ps-hold/);
 assert.match(src, /raw\.githubusercontent\.com\/rigoabell\/abelrigm_repository\/main\/docs\/downloads\/mem3-productivity-panel\.user\.js/);
 assert.match(src, /oidc\.prod\.na\.maask\.amazonoperations\.com\/authentication/);
 assert.match(src, /menu\.na\.aft\.amazonoperations\.app/);
@@ -27,7 +29,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.1");
+assert.equal(entry.version, "1.9.2");
 assert.match(entry.detail, /types MEM3/);
 assert.match(entry.runsOn, /menu\.na\.aft\.amazonoperations\.app/);
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
