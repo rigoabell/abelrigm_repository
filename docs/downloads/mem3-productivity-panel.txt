@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.23
+// @version      1.9.24
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.23';
+    const SCRIPT_VERSION = '1.9.24';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -6887,8 +6887,34 @@
         try { localStorage.setItem(LEAVING_KEY, text); } catch (e2) { /* storage can be blocked */ }
     }
 
+    function collapseOpenLeaving(rows) {
+        const list = rows || [];
+        const now = new Date();
+        const best = Object.create(null);
+        for (let i = 0; i < list.length; i++) {
+            const row = list[i];
+            if (!leavingOpen(row) || !row.login) continue;
+            const prev = best[row.login];
+            if (!prev || rowRevisionTime(row, now) >= rowRevisionTime(prev, now)) {
+                if (prev && prev !== row) {
+                    prev.status = 'cancelled';
+                    prev.takenHow = prev.takenHow || 'replaced';
+                }
+                best[row.login] = row;
+            } else {
+                row.status = 'cancelled';
+                row.takenHow = row.takenHow || 'replaced';
+            }
+        }
+        return list;
+    }
+
     function saveLeaving(doc) {
         restoreLatestMarks(doc, new Date());
+        const shifts = doc.shifts || {};
+        Object.keys(shifts).forEach(function (id) {
+            collapseOpenLeaving(shifts[id]);
+        });
         pruneLeaving(doc, new Date());
         saveLeavingLocal(doc);
         if (leavingShareOn()) return publishLeaving(doc);
@@ -7018,7 +7044,7 @@
         Object.keys(aShifts).forEach(function (id) { shiftIds[id] = true; });
         Object.keys(bShifts).forEach(function (id) { shiftIds[id] = true; });
         Object.keys(shiftIds).forEach(function (id) {
-            out.shifts[id] = mergeLeavingRows(aShifts[id], bShifts[id]);
+            out.shifts[id] = collapseOpenLeaving(mergeLeavingRows(aShifts[id], bShifts[id]));
         });
         const actIds = Object.create(null);
         const aAct = a.activity || {};
@@ -7119,6 +7145,14 @@
             return publishLeavingOnce(doc, 0);
         }).then(function (next) {
             leavingShareError = '';
+            try {
+                const nodes = document.querySelectorAll('[data-leaving-status]');
+                for (let i = 0; i < nodes.length; i++) {
+                    if (String(nodes[i].textContent || '').indexOf('shared list did not load') !== -1) {
+                        nodes[i].textContent = 'Other computers can see it.';
+                    }
+                }
+            } catch (e) { /* the list is not open */ }
             return next;
         }, function (err) {
             leavingShareError = err && err.message ? err.message : 'shared list failed';
@@ -7639,10 +7673,18 @@
             const when = rowTime(row, now);
             return !when || when >= cutoff;
         });
-        rows.sort(function (a, b) {
+        const best = Object.create(null);
+        for (let i = 0; i < rows.length; i++) {
+            const prev = best[rows[i].login];
+            if (!prev || rowRevisionTime(rows[i], now) >= rowRevisionTime(prev, now)) best[rows[i].login] = rows[i];
+        }
+        const out = [];
+        const names = Object.keys(best);
+        for (let i = 0; i < names.length; i++) out.push(best[names[i]]);
+        out.sort(function (a, b) {
             return shiftMinute(a.saidMin) - shiftMinute(b.saidMin);
         });
-        return rows;
+        return out;
     }
 
     function paintEarlyLog() {

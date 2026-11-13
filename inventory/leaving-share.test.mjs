@@ -202,3 +202,18 @@ a.clearMarkedLeave(local, "brndbo-02:00 PM", "abelrigm", now);
 const second = a.addLeaving(local, "brndbo", 14 * 60, "Station 3-01", new Date());
 assert.equal(second.row.status, "said");
 assert.equal(local.shifts[a.shiftId(now)].filter((item) => item.id === "brndbo-02:00 PM").length, 1);
+const doubled = a.mergeLeaving(
+    {
+        shifts: {
+            [shiftKey]: [
+                { id: "brndbo-01:00 PM", login: "brndbo", said: "01:00 PM", saidMin: 780, status: "said", markedAtMs: now.getTime() - 5000 },
+                { id: "brndbo-01:01 PM", login: "brndbo", said: "01:01 PM", saidMin: 781, status: "said", markedAtMs: now.getTime() }
+            ]
+        },
+        activity: {}, runs: {}, rev: 1
+    },
+    { shifts: {}, activity: {}, runs: {}, rev: 1 }
+);
+const stillOpen = doubled.shifts[shiftKey].filter((item) => item.status === "said");
+assert.equal(stillOpen.length, 1);
+assert.equal(stillOpen[0].said, "01:01 PM");
