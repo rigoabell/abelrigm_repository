@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.7
+// @version      1.9.8
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -37,7 +37,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.7';
+    const SCRIPT_VERSION = '1.9.8';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -2881,7 +2881,8 @@
             if (!pattern.test((btn.textContent || '').trim())) continue;
             if (btn.closest('#' + FLOOR_SUMMARY_ID) || btn.closest('#mem3-unassign-panel') ||
                 btn.closest('#mem3-run-panel') || btn.closest('#' + CORNER_DEBUG_ID) ||
-                btn.closest('#' + PHOTO_DEBUG_ID) || btn.closest('#' + LEAVING_ID)) continue;
+                btn.closest('#' + PHOTO_DEBUG_ID) || btn.closest('#' + LEAVING_ID) ||
+                btn.closest('#mem3-early-pass')) continue;
             const rect = btn.getBoundingClientRect();
             if (rect.width < 1 || rect.height < 1) continue;
             return btn;
@@ -3002,7 +3003,8 @@
             if (!/^unassign$/i.test((btn.textContent || '').trim())) continue;
             if (btn.closest('#' + FLOOR_SUMMARY_ID) || btn.closest('#mem3-unassign-panel') ||
                 btn.closest('#mem3-run-panel') || btn.closest('#' + CORNER_DEBUG_ID) ||
-                btn.closest('#' + PHOTO_DEBUG_ID) || btn.closest('#' + LEAVING_ID)) continue;
+                btn.closest('#' + PHOTO_DEBUG_ID) || btn.closest('#' + LEAVING_ID) ||
+                btn.closest('#mem3-early-pass')) continue;
             const tip = btn.closest('[id^="tooltip-"]');
             if (!tip || known[tip.id]) continue;
             const rect = btn.getBoundingClientRect();
@@ -4124,11 +4126,11 @@
 
     function ensureSummaryActions() {
         let actions = document.getElementById('mem3-summary-actions');
-        if (actions && actions.getAttribute('data-mem3-probe') !== 'issues-v188') actions.remove();
-        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'issues-v188') return actions;
+        if (actions && actions.getAttribute('data-mem3-probe') !== 'issues-v198') actions.remove();
+        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'issues-v198') return actions;
         actions = document.createElement('div');
         actions.id = 'mem3-summary-actions';
-        actions.setAttribute('data-mem3-probe', 'issues-v188');
+        actions.setAttribute('data-mem3-probe', 'issues-v198');
         actions.style.cssText = 'display:flex; gap:6px; align-items:flex-start; flex-wrap:wrap;';
         function actionButton(label, border) {
             const btn = document.createElement('button');
@@ -4151,6 +4153,9 @@
                 setTimeout(function () { copyBtn.textContent = 'Copy debug'; }, 2000);
             });
         });
+        actions.appendChild(makeLeavingEarlyButton());
+        actions.appendChild(makeEarlyLog());
+        actions.appendChild(makeEarlyUnassignButton());
         actions.appendChild(makeIssueButton());
         actions.appendChild(copyBtn);
         return actions;
@@ -4847,6 +4852,7 @@
 
         node.appendChild(metrics);
         header.appendChild(actions);
+        paintEarlyLog();
 
         const progress = document.createElement('div');
         progress.id = 'mem3-idle-progress';
@@ -6432,7 +6438,10 @@
             node.id === CORNER_DEBUG_ID ||
             node.id === UPDATE_PROMPT_ID ||
             node.id === LEAVING_ID ||
-            node.closest('#' + LEAVING_ID));
+            node.closest('#' + LEAVING_ID) ||
+            node.id === 'mem3-early-pass' ||
+            node.closest('#mem3-early-pass') ||
+            node.id === 'mem3-early-log');
     }
 
     function initLinePairs() {
@@ -6460,8 +6469,9 @@
         if (document.body) linePairObs.observe(document.body, { childList: true, subtree: true });
     }
 
-    const LEAVING_ID = 'mem3-leaving';
+    const LEAVING_ID = 'mem3-leaving-panel';
     const LEAVING_KEY = 'mem3-leaving-v1';
+    const ACTOR_KEY = 'mem3-leaving-actor';
     const LEAVING_POLL_MS = 20000;
     let leavingBusy = false;
     let leavingHeld = false;
@@ -6529,6 +6539,36 @@
         } catch (e3) {
             return emptyLeaving();
         }
+    }
+
+    function loadActor() {
+        let raw = '';
+        try {
+            if (typeof GM_getValue === 'function') raw = GM_getValue(ACTOR_KEY, '') || '';
+        } catch (e) { raw = ''; }
+        if (!raw) {
+            try { raw = localStorage.getItem(ACTOR_KEY) || ''; } catch (e2) { raw = ''; }
+        }
+        return String(raw || '').trim().toLowerCase();
+    }
+
+    function saveActor(login) {
+        const text = String(login || '').trim().toLowerCase();
+        try {
+            if (typeof GM_setValue === 'function') GM_setValue(ACTOR_KEY, text);
+        } catch (e) { /* the page copy below still records it */ }
+        try { localStorage.setItem(ACTOR_KEY, text); } catch (e2) { /* storage can be blocked */ }
+    }
+
+    function recordActivity(doc, by, text, now) {
+        if (!doc.activity) doc.activity = {};
+        const id = shiftId(now);
+        if (!doc.activity[id]) doc.activity[id] = [];
+        doc.activity[id].push({
+            at: clockText(now),
+            by: String(by || '').trim().toLowerCase() || 'board',
+            text: text
+        });
     }
 
     function saveLeaving(doc) {
@@ -6631,13 +6671,16 @@
         }
     }
 
-    function noteReturns(rows, now) {
+    function noteReturns(doc, rows, now) {
         let changed = false;
         for (let i = 0; i < rows.length; i++) {
             const row = rows[i];
             if (!row || row.status !== 'off') continue;
             if (!loginStillOnBoard(row.login)) continue;
-            if (noteBack(row, stationForLogin(row.login) || 'a station', now)) changed = true;
+            const where = stationForLogin(row.login) || 'a station';
+            if (!noteBack(row, where, now)) continue;
+            recordActivity(doc, 'board', row.login + ' back on ' + row.back, now);
+            changed = true;
         }
         return changed;
     }
@@ -6662,205 +6705,8 @@
     }
 
     function setLeavingStatus(text) {
-        const node = document.querySelector('#' + LEAVING_ID + ' [data-status]');
-        if (node) node.textContent = text || '';
-    }
-
-    function paintLeaving(doc, now) {
-        const card = document.getElementById(LEAVING_ID);
-        if (!card) return;
-        const list = card.querySelector('[data-list]');
-        if (!list) return;
-        while (list.firstChild) list.removeChild(list.firstChild);
-        const rows = shiftRows(doc, now).slice().sort(function (a, b) {
-            return shiftMinute(a.saidMin) - shiftMinute(b.saidMin);
-        });
-        if (!rows.length) {
-            const empty = document.createElement('div');
-            empty.textContent = 'Nobody is marked for this shift.';
-            empty.style.cssText = 'color:#8b949e; font-size:12px;';
-            list.appendChild(empty);
-            return;
-        }
-        for (let i = 0; i < rows.length; i++) {
-            const row = rows[i];
-            const line = document.createElement('div');
-            line.style.cssText = 'display:flex; gap:8px; align-items:flex-start; justify-content:space-between; ' +
-                'padding:6px 0; border-top:1px solid #30363d;';
-            const label = document.createElement('div');
-            label.textContent = leavingLine(row);
-            label.style.cssText = 'font-size:12px; font-weight:650;';
-            line.appendChild(label);
-            if (row.status === 'said') {
-                const keep = document.createElement('button');
-                keep.type = 'button';
-                keep.textContent = 'Keep';
-                keep.style.cssText = 'flex:0 0 auto; padding:2px 8px; border-radius:6px; border:1px solid #8b949e; ' +
-                    'background:#0d1117; color:#fff; font:700 11px Segoe UI,system-ui,sans-serif; cursor:pointer;';
-                keep.addEventListener('click', function () {
-                    const current = loadLeaving();
-                    cancelLeaving(current, row.id, new Date());
-                    saveLeaving(current);
-                    setLeavingStatus(row.login + ' stays. The said time is still on the list.');
-                    paintLeaving(current, new Date());
-                });
-                line.appendChild(keep);
-            }
-            list.appendChild(line);
-        }
-    }
-
-    function onMarkLeave() {
-        const card = document.getElementById(LEAVING_ID);
-        if (!card) return;
-        const login = String((card.querySelector('[data-login]') || {}).value || '').trim().toLowerCase();
-        const saidMin = parseLeaveTime(
-            String((card.querySelector('[data-time]') || {}).value || '').replace(/\s*(am|pm)\s*$/i, '') +
-            ' ' + ((card.querySelector('[data-half]') || {}).value || 'PM')
-        );
-        if (!looksLikeLogin(login)) {
-            setLeavingStatus('Enter a login.');
-            return;
-        }
-        if (saidMin == null) {
-            setLeavingStatus('Enter a time like 12:00 PM.');
-            return;
-        }
-        const now = new Date();
-        const doc = loadLeaving();
-        const station = stationForLogin(login);
-        const result = addLeaving(doc, login, saidMin, station, now);
-        saveLeaving(doc);
-        const loginEl = card.querySelector('[data-login]');
-        if (loginEl && (result.added || result.updated)) loginEl.value = '';
-        if (result.updated) {
-            setLeavingStatus('Updated ' + login + ' from ' + result.previous + ' to ' + result.row.said + '.');
-        } else if (result.added) {
-            setLeavingStatus('Marked ' + login + ' at ' + result.row.said + (station ? ' from ' + station : '') + '.');
-        } else {
-            setLeavingStatus(login + ' is already marked at ' + result.row.said + '.');
-        }
-        paintLeaving(doc, now);
-    }
-
-    function ensureLeavingCard() {
-        if (!document.body || !isAssignmentsPage()) return null;
-        let card = document.getElementById(LEAVING_ID);
-        if (card) return card;
-        card = document.createElement('div');
-        card.id = LEAVING_ID;
-        card.style.cssText = 'position:fixed; right:12px; bottom:12px; z-index:2147483646; ' +
-            'width:min(380px, calc(100% - 24px)); max-height:min(420px, calc(100% - 24px)); overflow:auto; ' +
-            'background:#161b22; color:#ffffff; border:1px solid #30363d; border-radius:10px; padding:10px; ' +
-            'font-family:Segoe UI,system-ui,sans-serif; box-shadow:0 8px 24px rgba(0,0,0,0.45);';
-        const title = document.createElement('div');
-        title.textContent = 'Leaving';
-        title.style.cssText = 'font-size:13px; font-weight:800; letter-spacing:0.04em; text-transform:uppercase;';
-        const note = document.createElement('div');
-        note.textContent = 'Saved on this computer. The password unassigns only times that have passed.';
-        note.style.cssText = 'color:#8b949e; font-size:11px; margin:2px 0 8px;';
-        const form = document.createElement('div');
-        form.style.cssText = 'display:flex; gap:6px;';
-        const login = document.createElement('input');
-        login.setAttribute('data-login', '');
-        login.placeholder = 'login';
-        login.setAttribute('autocomplete', 'off');
-        const time = document.createElement('input');
-        time.setAttribute('data-time', '');
-        time.placeholder = '12:00';
-        time.setAttribute('autocomplete', 'off');
-        const half = document.createElement('select');
-        half.setAttribute('data-half', '');
-        const am = document.createElement('option');
-        am.value = 'AM';
-        am.textContent = 'AM';
-        const pm = document.createElement('option');
-        pm.value = 'PM';
-        pm.textContent = 'PM';
-        half.appendChild(am);
-        half.appendChild(pm);
-        half.value = 'PM';
-        const fieldStyle = 'flex:1; min-width:0; padding:6px 8px; border-radius:6px; border:1px solid #30363d; ' +
-            'background:#0d1117; color:#fff; font:13px Segoe UI,system-ui,sans-serif;';
-        login.style.cssText = fieldStyle;
-        time.style.cssText = fieldStyle + 'flex:0 0 72px;';
-        half.style.cssText = fieldStyle + 'flex:0 0 68px;';
-        const mark = document.createElement('button');
-        mark.type = 'button';
-        mark.textContent = 'Mark';
-        mark.style.cssText = 'flex:0 0 auto; padding:6px 10px; border-radius:6px; border:1px solid #1d3b64; ' +
-            'background:#1d3b64; color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
-        mark.addEventListener('click', function (event) {
-            event.preventDefault();
-            event.stopPropagation();
-            onMarkLeave();
-        });
-        time.addEventListener('keydown', function (event) {
-            if (event.key === 'Enter') onMarkLeave();
-        });
-        form.appendChild(login);
-        form.appendChild(time);
-        form.appendChild(half);
-        form.appendChild(mark);
-        const run = document.createElement('button');
-        run.type = 'button';
-        run.textContent = 'Unassign leaving';
-        run.style.cssText = 'margin-top:8px; padding:6px 10px; border-radius:6px; border:1px solid #f85149; ' +
-            'background:#0d1117; color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
-        const passRow = document.createElement('div');
-        passRow.style.cssText = 'display:none; gap:6px; margin-top:8px;';
-        const pass = document.createElement('input');
-        pass.type = 'password';
-        pass.placeholder = 'Password';
-        pass.setAttribute('autocomplete', 'off');
-        pass.style.cssText = fieldStyle;
-        const go = document.createElement('button');
-        go.type = 'button';
-        go.textContent = 'Run';
-        go.style.cssText = mark.style.cssText;
-        function showPass() {
-            passRow.style.display = 'flex';
-            pass.focus();
-        }
-        function submitPass() {
-            if (pass.value !== UNASSIGN_PASSWORD) {
-                setLeavingStatus('Wrong password.');
-                pass.focus();
-                return;
-            }
-            pass.value = '';
-            passRow.style.display = 'none';
-            unassignMarkedLeaves();
-        }
-        run.addEventListener('click', function (event) {
-            event.preventDefault();
-            event.stopPropagation();
-            showPass();
-        });
-        go.addEventListener('click', function (event) {
-            event.preventDefault();
-            event.stopPropagation();
-            submitPass();
-        });
-        pass.addEventListener('keydown', function (event) {
-            if (event.key === 'Enter') submitPass();
-        });
-        passRow.appendChild(pass);
-        passRow.appendChild(go);
-        const status = document.createElement('div');
-        status.setAttribute('data-status', '');
-        status.style.cssText = 'min-height:16px; margin-top:6px; font-size:12px; color:#c9d1d9;';
-        const list = document.createElement('div');
-        list.setAttribute('data-list', '');
-        card.appendChild(title);
-        card.appendChild(note);
-        card.appendChild(form);
-        card.appendChild(run);
-        card.appendChild(passRow);
-        card.appendChild(status);
-        card.appendChild(list);
-        document.body.appendChild(card);
-        return card;
+        const nodes = document.querySelectorAll('[data-leaving-status]');
+        for (let i = 0; i < nodes.length; i++) nodes[i].textContent = text || '';
     }
 
     function holdLeaving(on) {
@@ -6890,24 +6736,31 @@
 
     function refreshLeaving() {
         if (!isAssignmentsPage()) return;
-        ensureLeavingCard();
-        if (leavingBusy || unassigning) return;
+        if (leavingBusy || unassigning) {
+            paintEarlyLog();
+            return;
+        }
         const now = new Date();
         const doc = loadLeaving();
-        if (noteReturns(shiftRows(doc, now), now)) saveLeaving(doc);
-        paintLeaving(doc, now);
+        if (noteReturns(doc, shiftRows(doc, now), now)) saveLeaving(doc);
+        paintEarlyLog();
     }
 
-    async function unassignMarkedLeaves() {
+    async function unassignMarkedLeaves(by) {
         if (!isAssignmentsPage() || leavingBusy || unassigning || psBoardHolding()) return;
+        const actor = String(by || loadActor() || '').trim().toLowerCase() || 'board';
         const now = new Date();
         const doc = loadLeaving();
         const waiting = markedLeaving(shiftRows(doc, now));
         const rows = dueLeaving(waiting, now);
         if (!rows.length) {
-            setLeavingStatus(waiting.length
+            const text = waiting.length
                 ? 'No leave time has passed yet. ' + waiting.length + ' still waiting.'
-                : 'Nobody on this list is waiting.');
+                : 'Nobody on this list is waiting.';
+            recordActivity(doc, actor, text, now);
+            saveLeaving(doc);
+            setLeavingStatus(text);
+            paintEarlyLog();
             return;
         }
         leavingBusy = true;
@@ -6916,12 +6769,15 @@
         let off = 0;
         let missed = 0;
         try {
+            recordActivity(doc, actor, 'started unassign for leave times that have passed', now);
             for (let i = 0; i < rows.length; i++) {
                 const row = rows[i];
                 setLeavingStatus('Unassigning ' + (i + 1) + '/' + rows.length + ' · ' + row.login);
                 const anchor = findAnchorForPerson(row.login, '');
+                const stamp = new Date();
                 if (!anchor || countLoginOnBoard(row.login) === 0) {
-                    markTakenOff(row, new Date(), 'not on a station');
+                    markTakenOff(row, stamp, 'not on a station');
+                    recordActivity(doc, actor, row.login + ' was not on a station', stamp);
                     missed += 1;
                     continue;
                 }
@@ -6929,28 +6785,291 @@
                 let left = false;
                 try { left = await unassignAnchor(anchor, record); } catch (e) { left = false; }
                 if (left) {
-                    markTakenOff(row, new Date(), 'unassigned');
+                    markTakenOff(row, stamp, 'unassigned');
+                    recordActivity(doc, actor, 'unassigned ' + row.login, stamp);
                     off += 1;
+                } else {
+                    recordActivity(doc, actor, 'could not take ' + row.login + ' off', stamp);
                 }
             }
-            saveLeaving(doc);
             const later = waiting.length - rows.length;
-            setLeavingStatus('Unassigned ' + off + '. ' + missed + ' were not on a station. ' +
+            const summary = 'Unassigned ' + off + '. ' + missed + ' were not on a station. ' +
                 (rows.length - off - missed) + ' could not be taken off. ' +
-                later + ' are still waiting for their time.');
+                later + ' are still waiting for their time.';
+            recordActivity(doc, actor, summary, new Date());
+            saveLeaving(doc);
+            setLeavingStatus(summary);
         } finally {
             holdLeaving(false);
             unassigning = false;
             leavingBusy = false;
-            paintLeaving(doc, new Date());
+            paintEarlyLog();
         }
     }
 
     function startLeaving() {
         if (!isAssignmentsPage() || !document.body) return;
-        ensureLeavingCard();
-        paintLeaving(loadLeaving(), new Date());
+        paintEarlyLog();
         setInterval(function () { refreshLeaving(); }, LEAVING_POLL_MS);
+    }
+
+    function panelChipButton(label, onClick) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = label;
+        btn.style.cssText = 'flex:0 0 auto; padding:6px 10px; border-radius:8px; border:1px solid #30363d; ' +
+            'background:#0d1117; color:#ffffff; cursor:pointer; ' +
+            'font:800 12px Segoe UI,system-ui,sans-serif; letter-spacing:0; text-transform:none; white-space:nowrap;';
+        btn.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            onClick();
+        });
+        return btn;
+    }
+
+    function makeLeavingEarlyButton() {
+        return panelChipButton('Leaving Early', openLeavingPanel);
+    }
+
+    function makeEarlyUnassignButton() {
+        return panelChipButton('Unassign Early Outs', openEarlyPass);
+    }
+
+    function makeEarlyLog() {
+        const log = document.createElement('div');
+        log.id = 'mem3-early-log';
+        log.style.cssText = 'flex:1 1 240px; min-width:180px; max-width:420px; max-height:92px; overflow:auto; ' +
+            'text-align:left; text-transform:none; letter-spacing:0; font:600 11px/1.35 Segoe UI,system-ui,sans-serif; ' +
+            'color:#c9d1d9; background:#0d1117; border:1px solid #30363d; border-radius:8px; padding:6px 8px;';
+        return log;
+    }
+
+    function paintEarlyLog() {
+        const node = document.getElementById('mem3-early-log');
+        if (!node) return;
+        const now = new Date();
+        const doc = loadLeaving();
+        const rows = (doc.activity && doc.activity[shiftId(now)]) || [];
+        while (node.firstChild) node.removeChild(node.firstChild);
+        if (!rows.length) {
+            node.textContent = 'No activity this shift.';
+            return;
+        }
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            const line = document.createElement('div');
+            line.textContent = row.at + ' · ' + row.by + ' · ' + row.text;
+            node.appendChild(line);
+        }
+        node.scrollTop = node.scrollHeight;
+    }
+
+    function closeLeavingOverlay(id) {
+        const old = document.getElementById(id);
+        if (old) old.remove();
+    }
+
+    function leavingFieldStyle() {
+        return 'flex:1 1 120px; min-width:0; padding:7px 8px; border-radius:6px; border:1px solid #30363d; ' +
+            'background:#0d1117; color:#fff; font:600 13px Segoe UI,system-ui,sans-serif;';
+    }
+
+    function openLeavingPanel() {
+        closeLeavingOverlay(LEAVING_ID);
+        const card = document.createElement('div');
+        card.id = LEAVING_ID;
+        card.style.cssText = 'position:fixed; right:16px; bottom:16px; z-index:2147483646; width:min(440px, calc(100vw - 24px)); ' +
+            'padding:12px; border-radius:10px; background:#161b22; color:#fff; border:1px solid #30363d; ' +
+            'box-shadow:0 8px 24px rgba(0,0,0,.45); font-family:Segoe UI,system-ui,sans-serif;';
+        const title = document.createElement('div');
+        title.textContent = 'Leaving Early';
+        title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif; margin-bottom:4px;';
+        const ask = document.createElement('div');
+        ask.textContent = 'What time are they leaving? Saved on this computer.';
+        ask.style.cssText = 'font-size:12px; color:#8b949e; margin-bottom:8px;';
+        const form = document.createElement('div');
+        form.style.cssText = 'display:flex; gap:6px; flex-wrap:wrap;';
+        const by = document.createElement('input');
+        by.setAttribute('data-by', '');
+        by.placeholder = 'Your login';
+        by.value = loadActor();
+        by.style.cssText = leavingFieldStyle();
+        const login = document.createElement('input');
+        login.setAttribute('data-login', '');
+        login.placeholder = 'Associate login';
+        login.style.cssText = leavingFieldStyle();
+        const time = document.createElement('input');
+        time.setAttribute('data-time', '');
+        time.placeholder = '12:00';
+        time.style.cssText = leavingFieldStyle() + ' flex:0 1 90px;';
+        const half = document.createElement('select');
+        half.setAttribute('data-half', '');
+        half.style.cssText = leavingFieldStyle() + ' flex:0 0 72px;';
+        const am = document.createElement('option');
+        am.value = 'AM';
+        am.textContent = 'AM';
+        const pm = document.createElement('option');
+        pm.value = 'PM';
+        pm.textContent = 'PM';
+        half.appendChild(am);
+        half.appendChild(pm);
+        half.value = 'PM';
+        const mark = document.createElement('button');
+        mark.type = 'button';
+        mark.textContent = 'Mark';
+        mark.style.cssText = 'padding:7px 10px; border-radius:6px; border:1px solid #3fb950; background:#238636; ' +
+            'color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = 'Close';
+        close.style.cssText = 'padding:7px 10px; border-radius:6px; border:1px solid #8b949e; background:#0d1117; ' +
+            'color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        function submit() {
+            const actor = String(by.value || '').trim().toLowerCase();
+            const who = String(login.value || '').trim().toLowerCase();
+            const saidMin = parseLeaveTime(
+                String(time.value || '').replace(/\s*(am|pm)\s*$/i, '') + ' ' + (half.value || 'PM')
+            );
+            if (!looksLikeLogin(actor)) {
+                setLeavingStatus('Enter your login.');
+                return;
+            }
+            if (!looksLikeLogin(who)) {
+                setLeavingStatus('Enter a login.');
+                return;
+            }
+            if (saidMin == null) {
+                setLeavingStatus('Enter a time like 12:00 PM.');
+                return;
+            }
+            saveActor(actor);
+            const now = new Date();
+            const doc = loadLeaving();
+            const station = stationForLogin(who);
+            const result = addLeaving(doc, who, saidMin, station, now);
+            if (result.updated) {
+                recordActivity(doc, actor, 'updated ' + who + ' from ' + result.previous + ' to ' + result.row.said, now);
+            } else if (result.added) {
+                recordActivity(doc, actor, 'marked ' + who + ' leaving at ' + result.row.said +
+                    (station ? ' from ' + station : ''), now);
+            } else {
+                recordActivity(doc, actor, who + ' already marked at ' + result.row.said, now);
+            }
+            saveLeaving(doc);
+            paintEarlyLog();
+            if (result.updated) {
+                setLeavingStatus('Updated ' + who + ' from ' + result.previous + ' to ' + result.row.said + '.');
+            } else if (result.added) {
+                setLeavingStatus('Marked ' + who + ' at ' + result.row.said + (station ? ' from ' + station : '') + '.');
+            } else {
+                setLeavingStatus(who + ' is already marked at ' + result.row.said + '.');
+            }
+            if (result.added || result.updated) login.value = '';
+        }
+        mark.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            submit();
+        });
+        login.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter') submit();
+        });
+        time.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter') submit();
+        });
+        close.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            closeLeavingOverlay(LEAVING_ID);
+        });
+        form.appendChild(by);
+        form.appendChild(login);
+        form.appendChild(time);
+        form.appendChild(half);
+        form.appendChild(mark);
+        form.appendChild(close);
+        const status = document.createElement('div');
+        status.setAttribute('data-leaving-status', '');
+        status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
+        card.appendChild(title);
+        card.appendChild(ask);
+        card.appendChild(form);
+        card.appendChild(status);
+        document.body.appendChild(card);
+        login.focus();
+    }
+
+    function openEarlyPass() {
+        closeLeavingOverlay('mem3-early-pass');
+        const card = document.createElement('div');
+        card.id = 'mem3-early-pass';
+        card.style.cssText = 'position:fixed; right:16px; bottom:16px; z-index:2147483646; width:min(360px, calc(100vw - 24px)); ' +
+            'padding:12px; border-radius:10px; background:#161b22; color:#fff; border:1px solid #30363d; ' +
+            'font-family:Segoe UI,system-ui,sans-serif;';
+        const title = document.createElement('div');
+        title.textContent = 'Unassign Early Outs';
+        title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif; margin-bottom:8px;';
+        const by = document.createElement('input');
+        by.placeholder = 'Your login';
+        by.value = loadActor();
+        by.style.cssText = leavingFieldStyle() + ' width:100%; box-sizing:border-box; margin-bottom:6px;';
+        const pass = document.createElement('input');
+        pass.type = 'password';
+        pass.placeholder = 'Password';
+        pass.setAttribute('autocomplete', 'off');
+        pass.style.cssText = leavingFieldStyle() + ' width:100%; box-sizing:border-box;';
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; gap:6px; margin-top:8px;';
+        const go = document.createElement('button');
+        go.type = 'button';
+        go.textContent = 'Run';
+        go.style.cssText = 'padding:7px 10px; border-radius:6px; border:1px solid #f85149; background:#0d1117; ' +
+            'color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = 'Close';
+        close.style.cssText = go.style.cssText;
+        function submit() {
+            const actor = String(by.value || '').trim().toLowerCase();
+            if (!looksLikeLogin(actor)) {
+                setLeavingStatus('Enter your login.');
+                return;
+            }
+            if (pass.value !== UNASSIGN_PASSWORD) {
+                setLeavingStatus('Wrong password.');
+                return;
+            }
+            saveActor(actor);
+            pass.value = '';
+            unassignMarkedLeaves(actor);
+        }
+        go.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            submit();
+        });
+        pass.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter') submit();
+        });
+        close.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            closeLeavingOverlay('mem3-early-pass');
+        });
+        row.appendChild(go);
+        row.appendChild(close);
+        const status = document.createElement('div');
+        status.setAttribute('data-leaving-status', '');
+        status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
+        card.appendChild(title);
+        card.appendChild(by);
+        card.appendChild(pass);
+        card.appendChild(row);
+        card.appendChild(status);
+        document.body.appendChild(card);
+        if (by.value) pass.focus();
+        else by.focus();
     }
 
     function init() {
