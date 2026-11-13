@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.26
+// @version      1.9.27
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.26';
+    const SCRIPT_VERSION = '1.9.27';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -1800,6 +1800,48 @@
         const td = tr.querySelector('td');
         const raw = td ? td.textContent : tr.textContent;
         return String(raw || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function directText(el) {
+        if (!el) return '';
+        const kids = el.children || [];
+        if (el.childNodes && el.childNodes.length) {
+            let text = '';
+            for (let i = 0; i < el.childNodes.length; i++) {
+                const node = el.childNodes[i];
+                if (node && node.nodeType === 3) text += node.textContent || '';
+            }
+            const direct = text.replace(/\s+/g, ' ').trim();
+            if (direct || kids.length) return direct;
+        }
+        if (kids.length) return '';
+        return String(el.textContent || '').replace(/\s+/g, ' ').trim();
+    }
+
+    // A disabled station stays on the board, but it is not an open station
+    // and it is not part of the utilization percent.
+    function stationIsDisabled(tr) {
+        if (!tr) return false;
+        if (String((tr.getAttribute && tr.getAttribute('aria-disabled')) || '').toLowerCase() === 'true') return true;
+        const cls = String(tr.className || '');
+        if (/(?:^|\s)(?:disabled|is-disabled|station-disabled)(?:\s|$)/i.test(cls)) return true;
+        const stack = [tr];
+        while (stack.length) {
+            const el = stack.pop();
+            const kids = el.children || [];
+            for (let i = 0; i < kids.length; i++) {
+                const child = kids[i];
+                const childCls = String(child.className || '');
+                if (childCls.indexOf(DECOR_CLASS) !== -1 || childCls.indexOf(BIGS_IDLE_CLASS) !== -1) continue;
+                stack.push(child);
+            }
+            if (el === tr) continue;
+            const own = directText(el);
+            if (own && /\bdisabled\b/i.test(own)) return true;
+            const label = el.getAttribute ? String(el.getAttribute('aria-label') || el.getAttribute('title') || '') : '';
+            if (/\bdisabled\b/i.test(label)) return true;
+        }
+        return false;
     }
 
     // A Customer Returns station reads like:
@@ -4934,7 +4976,7 @@
                 const tr = trs[i];
                 total++;
                 const assignment = rowAssignmentText(tr);
-                const crStation = isCustomerReturnsStation(assignment);
+                const crStation = isCustomerReturnsStation(assignment) && !stationIsDisabled(tr);
                 if (crStation) crStations++;
 
                 const found = findLoginInRow(tr);
@@ -6165,7 +6207,8 @@
         const utilSec = infoSection('Station utilization');
         utilSec.appendChild(infoRows([
             ['What counts', 'Customer Returns stations only. A station reads “Customer Returns” and then the half assignment, such as Station 3-06.'],
-            ['Left out', 'Waterspiders and every other role on the line'],
+            ['Left out', 'Waterspiders, disabled stations, and every other role on the line'],
+            ['Disabled', 'A station marked Disabled is left out of the percent and is not listed as empty.'],
             ['Red sign', 'Under 90% of those stations have an associate signed in'],
             ['Yellow sign', '90% up to, but not including, 100%'],
             ['Green check', '100%'],

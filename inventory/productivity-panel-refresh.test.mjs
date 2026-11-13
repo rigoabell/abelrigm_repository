@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.26/);
+assert.match(src, /@version\s+1\.9\.27/);
 assert.match(src, /data-mem3-refresh-count/);
 assert.match(src, /data-mem3-refresh-every/);
 assert.match(src, /minute \+ ' min'/);
@@ -74,11 +74,12 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.26");
+assert.equal(entry.version, "1.9.27");
 const leavingList = src.slice(src.indexOf("function openLeavingList"), src.indexOf("function closeLeavingOverlay"));
 assert.ok(leavingList.indexOf("header.appendChild(close)") !== -1);
 assert.ok(leavingList.indexOf("card.appendChild(header)") < leavingList.indexOf("card.appendChild(scroller)"));
 assert.match(entry.detail, /clears every rate and idle time/);
+assert.match(entry.detail, /skips a station marked Disabled/);
 assert.equal(entry.detail.includes("keeps the last good number"), false);
 assert.match(entry.detail, /shares one leaving list/);
 assert.match(entry.detail, /types MEM3/);
@@ -212,6 +213,7 @@ const patched = src.replace(
         setDown(value) { FCLM_DOWN = value; },
         showUpdate(remote) { showUpdatePrompt(remote); },
         shiftId, parseLeaveTime, addLeaving, dueLeaving, noteBack, markTakenOff, cleanStationText,
+        stationDisabled(row) { return stationIsDisabled(row); },
         stop() {
             refreshGeneration++;
             timeGeneration++;
@@ -550,6 +552,26 @@ try {
         api.cleanStationText("Customer Returns 1st Half: Station 3-01 | 2nd Half: Station 3-39 18.8 UPH 20.9% IDLE IN"),
         "Customer Returns 1st Half: Station 3-01 | 2nd Half: Station 3-39"
     );
+    const openStation = stationTable([
+        ["Customer Returns 1st Half: Station 3-06 | 2nd Half: Station 3-70", ""]
+    ]).querySelector("tbody tr");
+    assert.equal(api.stationDisabled(openStation), false);
+    const disabledLabel = stationTable([
+        ["Customer Returns 1st Half: Station 3-08 | 2nd Half: Station 3-68", ""]
+    ]).querySelector("tbody tr");
+    const disabledMark = makeNode("span");
+    disabledMark.textContent = "Disabled";
+    disabledLabel.appendChild(disabledMark);
+    assert.equal(api.stationDisabled(disabledLabel), true);
+    const disabledInName = stationTable([
+        ["Customer Returns 1st Half: Station 4-02 Disabled | 2nd Half: Station 4-20", ""]
+    ]).querySelector("tbody tr");
+    assert.equal(api.stationDisabled(disabledInName), true);
+    const ariaDisabled = stationTable([
+        ["Customer Returns 1st Half: Station 4-04 | 2nd Half: Station 4-18", "abelrigm"]
+    ]).querySelector("tbody tr");
+    ariaDisabled.setAttribute("aria-disabled", "true");
+    assert.equal(api.stationDisabled(ariaDisabled), true);
     assert.equal(api.parseLeaveTime("25:00"), null);
     const leaving = { shifts: {} };
     const marked = api.addLeaving(leaving, "Wilrayni", 720, "CRET 2 Even", noon);
