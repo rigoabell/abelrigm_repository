@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.13
+// @version      1.9.14
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -37,7 +37,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.13';
+    const SCRIPT_VERSION = '1.9.14';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -6672,7 +6672,7 @@
         const rows = shiftRows(doc, now);
         for (let i = 0; i < rows.length; i++) {
             if (rows[i].id !== id) continue;
-            if (rows[i].status === 'said' || rows[i].status === 'stuck') rows[i].status = 'cancelled';
+            if (rows[i].status !== 'cancelled') rows[i].status = 'cancelled';
             return rows[i];
         }
         return null;
@@ -7037,30 +7037,28 @@
                 label.textContent = leavingLine(row);
                 label.style.cssText = 'font-size:12px; font-weight:650;';
                 line.appendChild(label);
-                if (row.status === 'said' || row.status === 'stuck') {
-                    const clear = document.createElement('button');
-                    clear.type = 'button';
-                    clear.textContent = 'Clear';
-                    clear.style.cssText = 'flex:0 0 auto; padding:4px 8px; border-radius:6px; border:1px solid #f85149; ' +
-                        'background:#0d1117; color:#fff; font:800 11px Segoe UI,system-ui,sans-serif; cursor:pointer;';
-                    clear.addEventListener('click', function (event) {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        const actor = String((card.querySelector('[data-by]') || {}).value || '').trim().toLowerCase();
-                        if (!looksLikeLogin(actor)) {
-                            setLeavingStatus('Enter your login.');
-                            return;
-                        }
-                        saveActor(actor);
-                        const current = loadLeaving();
-                        const cleared = clearMarkedLeave(current, row.id, actor, new Date());
-                        if (!cleared) return;
-                        saveLeaving(current);
-                        setLeavingStatus('Cleared ' + cleared.login + '.');
-                        paintEarlyLog();
-                    });
-                    line.appendChild(clear);
-                }
+                const clear = document.createElement('button');
+                clear.type = 'button';
+                clear.textContent = 'Clear';
+                clear.style.cssText = 'flex:0 0 auto; padding:4px 8px; border-radius:6px; border:1px solid #f85149; ' +
+                    'background:#0d1117; color:#fff; font:800 11px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+                clear.addEventListener('click', function (event) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const actor = String((card.querySelector('[data-by]') || {}).value || '').trim().toLowerCase();
+                    if (!looksLikeLogin(actor)) {
+                        setLeavingStatus('Enter your login.');
+                        return;
+                    }
+                    saveActor(actor);
+                    const current = loadLeaving();
+                    const cleared = clearMarkedLeave(current, row.id, actor, new Date());
+                    if (!cleared) return;
+                    saveLeaving(current);
+                    setLeavingStatus('Cleared ' + cleared.login + '.');
+                    paintEarlyLog();
+                });
+                line.appendChild(clear);
                 list.appendChild(line);
             }
         }
