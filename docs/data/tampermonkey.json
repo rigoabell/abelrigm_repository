@@ -245,9 +245,9 @@
     "id": "amazon-login-photo-lookup",
     "name": "Amazon Login Photo Lookup (abelrigm)",
     "category": "FCLM",
-    "summary": "Look up an Amazon login and show the badge photo, name, and shift.",
-    "detail": "Paste logins and the script asks FCLM for the matching employee. Results show as cards or a table with the badge photo, name, badge number, and shift.",
-    "version": "0.9.3",
+    "summary": "Look up an Amazon login and show the badge photo, name, shift, and this week's hours.",
+    "detail": "Paste logins and the script asks FCLM for the matching employee. Results show as cards or a table with the badge photo, name, badge number, and shift. This week starts Sunday at 6:00 AM. Each day lists the hours worked and Day (6:00 AM–5:59 PM) or Night (6:00 PM–5:59 AM, named for the evening it starts). Meals are left out.",
+    "version": "0.9.6",
     "runsOn": "Amazon pages, using FCLM for the lookup",
     "file": "downloads/amazon-login-photo-lookup.txt",
     "downloadName": "Amazon Login Photo Lookup (abelrigm).txt"
