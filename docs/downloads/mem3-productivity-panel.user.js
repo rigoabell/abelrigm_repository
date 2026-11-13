@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.29
+// @version      1.9.30
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.29';
+    const SCRIPT_VERSION = '1.9.30';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -654,6 +654,61 @@
         return headers;
     }
 
+    // Medium and Large EACH rates blend into one UPH.
+    // Hours for a size are its units divided by that size's UPH.
+    // The rate is both sizes' units divided by both sizes' hours.
+    function blendMediumLarge(mediumUnits, mediumUph, largeUnits, largeUph) {
+        let units = 0;
+        let hours = 0;
+        function add(count, rate) {
+            if (!(count > 0) || !(rate > 0)) return;
+            units += count;
+            hours += count / rate;
+        }
+        add(mediumUnits, mediumUph);
+        add(largeUnits, largeUph);
+        return {
+            units: units,
+            hours: hours,
+            uph: hours > 0 ? (units / hours) : 0
+        };
+    }
+
+    function columnValue(row, headers, matcher) {
+        const cells = row.children;
+        for (let i = 0; i < headers.length; i++) {
+            const h = headers[i].header.toLowerCase();
+            if (!matcher(h)) continue;
+            const cell = cells[headers[i].index];
+            if (!cell) continue;
+            const n = parseNumber(textOf(cell));
+            if (n === null) continue;
+            return { value: n, header: headers[i].header };
+        }
+        return { value: null, header: '' };
+    }
+
+    function eachSizeHeader(header, size) {
+        if (header.indexOf('paid hour') !== -1) return false;
+        if (size === 'medium') return /\bmedium\b/.test(header);
+        return /\blarge\b/.test(header) && !/x-?\s*large/.test(header);
+    }
+
+    function sizePair(row, headers, size) {
+        const units = columnValue(row, headers, function (h) {
+            return eachSizeHeader(h, size) && /\bunits?\b/.test(h);
+        });
+        const uph = columnValue(row, headers, function (h) {
+            return eachSizeHeader(h, size) && /\buph\b/.test(h);
+        });
+        return {
+            units: units.value || 0,
+            uph: uph.value || 0,
+            unitHeader: units.header,
+            uphHeader: uph.header
+        };
+    }
+
     function bestNumber(row, headers, matcher) {
         let best = null;
         let bestHeader = '';
@@ -725,24 +780,19 @@
             const empId = bestText(row, headers, function (h) { return /(^|\/ )id$/.test(h) || /employee id/.test(h); })
                 || textOf(row.children[1]);
             if (!/^\d+$/.test(empId)) { info.skippedRows++; continue; }
-            const unitsPick = bestNumber(row, headers, function (h) { return /\bunits?\b/.test(h); });
-            let uphPick = bestNumber(row, headers, function (h) { return /\buph\b/.test(h); });
-            if (uphPick.value === null) uphPick = bestNumber(row, headers, function (h) { return /\bjph\b/.test(h); });
-            const hoursPick = bestNumber(row, headers, function (h) { return /paid hours/.test(h); });
-            const units = unitsPick.value || 0;
-            const paidHours = hoursPick.value || 0;
-            let uph = uphPick.value;
-            if (units > 0 && paidHours > 0) uph = units / paidHours;
-            else if (uph === null) uph = 0;
+            const medium = sizePair(row, headers, 'medium');
+            const large = sizePair(row, headers, 'large');
+            const blended = blendMediumLarge(medium.units, medium.uph, large.units, large.uph);
+            if (!(blended.units > 0)) { info.skippedRows++; continue; }
             if (!pending[empId]) pending[empId] = { name: textOf(row.children[2]), rows: [] };
             pending[empId].rows.push({
-                units: units,
-                uph: uph,
-                hours: paidHours,
+                units: blended.units,
+                uph: blended.uph,
+                hours: blended.hours,
                 job: 'ShipmentReturned',
-                unitHeader: unitsPick.header,
-                uphHeader: uphPick.header,
-                hoursHeader: hoursPick.header
+                unitHeader: [medium.unitHeader, large.unitHeader].filter(Boolean).join(' + '),
+                uphHeader: [medium.uphHeader, large.uphHeader].filter(Boolean).join(' + '),
+                hoursHeader: 'units / size UPH'
             });
         }
 
@@ -6218,13 +6268,13 @@
         const defGrid = document.createElement('div');
         defGrid.style.cssText = 'display:grid; grid-template-columns:1fr 1fr; gap:8px;';
         infoCard(defGrid, 'Rate',
-            'Primary Grading [1667843456854] from Function Rollup. ShipmentReturned units divided by that function’s paid hours. Photograph and problem-solve actions are not added in.');
+            'Primary Grading [1667843456854] from Function Rollup. Medium and Large EACH units, divided by the hours those units took. A size’s hours are its units divided by that size’s UPH. JPH is not used.');
         infoCard(defGrid, 'IDLE percent',
             'From FCLM Time Details for the selected window. Indirect time plus Time Off Task, divided by paid time clocked in.');
         infoCard(defGrid, 'Total',
             'The average of the side rates. Each person is counted once.');
         infoCard(defGrid, 'No data',
-            'No UPH for a window means that person has no Primary Grading rate in it. No data for a window means Time Details has no clock time, which is what you see when someone came in later.');
+            'No UPH for a window means that person has no Medium or Large Primary Grading units in it. No data for a window means Time Details has no clock time, which is what you see when someone came in later.');
         defs.appendChild(defGrid);
         card.appendChild(defs);
 

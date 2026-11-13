@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.29/);
+assert.match(src, /@version\s+1\.9\.30/);
 assert.match(src, /data-mem3-refresh-count/);
 assert.match(src, /data-mem3-refresh-every/);
 assert.match(src, /minute \+ ' min'/);
@@ -79,7 +79,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.29");
+assert.equal(entry.version, "1.9.30");
 const leavingList = src.slice(src.indexOf("function openLeavingList"), src.indexOf("function closeLeavingOverlay"));
 assert.ok(leavingList.indexOf("header.appendChild(close)") !== -1);
 assert.ok(leavingList.indexOf("card.appendChild(header)") < leavingList.indexOf("card.appendChild(scroller)"));
@@ -89,6 +89,8 @@ assert.match(src, /BIGS Line \+ Line Support/);
 assert.match(src, /if \(name === 'BIGS'\) return 'BIGs'/);
 assert.match(src, /gridRow = '1 \/ span 2'/);
 assert.match(entry.detail, /sits under L1 Odd/);
+assert.match(entry.detail, /Medium and Large EACH units/);
+assert.equal(entry.detail.includes("JPH is not used"), true);
 assert.equal(entry.detail.includes("keeps the last good number"), false);
 assert.match(entry.detail, /shares one leaving list/);
 assert.match(entry.detail, /types MEM3/);
@@ -222,6 +224,7 @@ const patched = src.replace(
         setDown(value) { FCLM_DOWN = value; },
         showUpdate(remote) { showUpdatePrompt(remote); },
         shiftId, parseLeaveTime, addLeaving, dueLeaving, noteBack, markTakenOff, cleanStationText,
+        blendMediumLarge,
         stationDisabled(row) { return stationIsDisabled(row); },
         stop() {
             refreshGeneration++;
@@ -549,6 +552,17 @@ try {
     assert.match(prompt, /Refresh this screen/);
     assert.match(prompt, /F5/);
     assert.match(prompt, /If you do not refresh this screen/);
+
+    const blended = api.blendMediumLarge(49, 28.79, 81, 20.65);
+    const blendedHours = (49 / 28.79) + (81 / 20.65);
+    assert.equal(blended.units, 130);
+    assert.ok(Math.abs(blended.hours - blendedHours) < 0.000001);
+    assert.ok(Math.abs(blended.uph - (130 / blendedHours)) < 0.000001);
+    const mediumOnly = api.blendMediumLarge(49, 28.79, 0, 0);
+    assert.equal(mediumOnly.units, 49);
+    assert.ok(Math.abs(mediumOnly.uph - 28.79) < 0.000001);
+    assert.equal(api.blendMediumLarge(10, 0, 0, 20).units, 0);
+    assert.equal(api.blendMediumLarge(0, 0, 0, 0).uph, 0);
 
     const noon = new Date(2026, 10, 13, 12, 0);
     assert.equal(api.shiftId(noon), "2026-11-13-days");
