@@ -7,7 +7,8 @@ const patched = src.replace(
     "applyTodayDateOnce();\n    init();\n    startSilentUpdates();\n})();",
     `globalThis.__mem3 = {
         addLeaving, saveLeaving, loadLeaving, clearMarkedLeave, shiftId,
-        mergeLeaving, enableLeavingShare, publishLeaving, pullLeaving, whenLeavingShared
+        mergeLeaving, enableLeavingShare, publishLeaving, pullLeaving, whenLeavingShared,
+        activityLine, leavingLine
     };
 })();`
 );
@@ -104,7 +105,7 @@ function boot(store) {
     return sandbox.__mem3;
 }
 
-const now = new Date(2026, 10, 13, 14, 5);
+const now = new Date();
 const a = boot({});
 const b = boot({});
 
@@ -125,6 +126,23 @@ assert.equal(shift[0].said, "02:00 PM");
 const docB = b.loadLeaving();
 const cleared = b.clearMarkedLeave(docB, shift[0].id, "otherpa", now);
 assert.ok(cleared);
+const clearEvents = docB.activity[b.shiftId(now)];
+assert.match(
+    b.activityLine(clearEvents[clearEvents.length - 1]),
+    /^otherpa cleared brndbo from leaving at 02:00 PM at \d{2}:\d{2} [AP]M$/
+);
+assert.equal(
+    b.activityLine({
+        action: "update",
+        by: "otherpa",
+        who: "brndbo",
+        said: "03:00 PM",
+        at: "02:10 PM",
+        text: "updated brndbo from 02:00 PM to 03:00 PM"
+    }),
+    "otherpa updated brndbo to leave at 03:00 PM at 02:10 PM"
+);
+assert.equal(b.leavingLine({ login: "brndbo", said: "03:00 PM", station: "Station 3-01" }), "brndbo leaving at 03:00 PM from Station 3-01");
 b.saveLeaving(docB);
 await finish(b.whenLeavingShared());
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.20
+// @version      1.9.21
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.20';
+    const SCRIPT_VERSION = '1.9.21';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -6494,6 +6494,7 @@
     const LEAVING_KEY = 'mem3-leaving-v1';
     const ACTOR_KEY = 'mem3-leaving-actor';
     const LEAVING_POLL_MS = 20000;
+    const LEAVING_KEEP_MS = 12 * 60 * 60 * 1000;
     const LEAVING_SHARE_URL = 'https://extendsclass.com/api/json-storage/bin/edfeccc';
     let leavingShareChain = Promise.resolve();
     let leavingShareError = '';
@@ -6613,15 +6614,156 @@
         try { localStorage.setItem(ACTOR_KEY, text); } catch (e2) { /* storage can be blocked */ }
     }
 
-    function recordActivity(doc, by, text, now) {
+    function personLabel(login) {
+        const key = String(login || '').trim().toLowerCase();
+        if (!key || key === 'board') return 'The board';
+        const person = IDENTITY.byLogin[key];
+        if (person && person.name) return person.name;
+        return key;
+    }
+
+    function clockToMs(clock, now) {
+        const min = parseLeaveTime(clock);
+        if (min == null || !now) return 0;
+        const stamp = new Date(now.getFullYear(), now.getMonth(), now.getDate(),
+            Math.floor(min / 60) % 24, min % 60, 0, 0);
+        if (stamp.getTime() > now.getTime() + 60000) stamp.setDate(stamp.getDate() - 1);
+        return stamp.getTime();
+    }
+
+    function eventTime(item, now) {
+        if (item && typeof item.atMs === 'number' && item.atMs > 0) return item.atMs;
+        return clockToMs(item && item.at, now);
+    }
+
+    function rowTime(row, now) {
+        if (!row) return 0;
+        if (typeof row.markedAtMs === 'number' && row.markedAtMs > 0) return row.markedAtMs;
+        if (typeof row.clearedAtMs === 'number' && row.clearedAtMs > 0) return row.clearedAtMs;
+        return clockToMs(row.clearedAt || row.takenOffAt || row.markedAt, now);
+    }
+
+    function recordActivity(doc, by, text, now, extra) {
         if (!doc.activity) doc.activity = {};
         const id = shiftId(now);
         if (!doc.activity[id]) doc.activity[id] = [];
-        doc.activity[id].push({
+        const item = {
             at: clockText(now),
+            atMs: now.getTime(),
             by: String(by || '').trim().toLowerCase() || 'board',
             text: text
+        };
+        if (extra) {
+            if (extra.action) item.action = extra.action;
+            if (extra.who) item.who = String(extra.who).trim().toLowerCase();
+            if (extra.said) item.said = extra.said;
+            if (extra.detail) item.detail = extra.detail;
+        }
+        doc.activity[id].push(item);
+    }
+
+    function activityLine(event) {
+        const actor = personLabel(event && event.by);
+        const when = event && event.at ? ' at ' + event.at : '';
+        const who = personLabel(event && event.who);
+        if (event && event.action === 'clear') {
+            return actor + ' cleared ' + who + ' from leaving at ' + event.said + when;
+        }
+        if (event && event.action === 'update') {
+            return actor + ' updated ' + who + ' to leave at ' + event.said + when;
+        }
+        if (event && event.action === 'mark') {
+            return actor + ' marked ' + who + ' leaving at ' + event.said +
+                (event.detail ? ' from ' + event.detail : '') + when;
+        }
+        if (event && event.action === 'same') {
+            return actor + ' left ' + who + ' leaving at ' + event.said + when;
+        }
+        if (event && event.action === 'unassign') return actor + ' unassigned ' + who + when;
+        if (event && event.action === 'miss') return actor + ' found ' + who + ' was not on a station' + when;
+        if (event && event.action === 'fail') return actor + ' could not take ' + who + ' off' + when;
+        if (event && event.action === 'back') {
+            return actor + ' saw ' + who + ' back on ' + (event.detail || '') + when;
+        }
+        const text = String((event && event.text) || '');
+        let match = text.match(/^cleared (\S+) marked at (.+)$/);
+        if (match) return actor + ' cleared ' + personLabel(match[1]) + ' from leaving at ' + match[2] + when;
+        match = text.match(/^cleared (\S+) from leaving at (.+)$/);
+        if (match) return actor + ' cleared ' + personLabel(match[1]) + ' from leaving at ' + match[2] + when;
+        match = text.match(/^updated (\S+) from .+ to (.+)$/);
+        if (match) return actor + ' updated ' + personLabel(match[1]) + ' to leave at ' + match[2] + when;
+        match = text.match(/^marked (\S+) leaving at (\d{1,2}:\d{2} [AP]M)(?: from (.+))?$/);
+        if (match) {
+            return actor + ' marked ' + personLabel(match[1]) + ' leaving at ' + match[2] +
+                (match[3] ? ' from ' + match[3] : '') + when;
+        }
+        match = text.match(/^unassigned (\S+)$/);
+        if (match) return actor + ' unassigned ' + personLabel(match[1]) + when;
+        match = text.match(/^could not take (\S+) off$/);
+        if (match) return actor + ' could not take ' + personLabel(match[1]) + ' off' + when;
+        match = text.match(/^(\S+) was not on a station$/);
+        if (match) return actor + ' found ' + personLabel(match[1]) + ' was not on a station' + when;
+        match = text.match(/^(\S+) back on (.+)$/);
+        if (match) return actor + ' saw ' + personLabel(match[1]) + ' back on ' + match[2] + when;
+        match = text.match(/^(\S+) already marked at (.+)$/);
+        if (match) return actor + ' left ' + personLabel(match[1]) + ' leaving at ' + match[2] + when;
+        if (event && event.action === 'note') return actor + ' ' + text + when;
+        return actor + (text ? ' ' + text : '') + when;
+    }
+
+    function recentActivity(doc, now) {
+        const cutoff = now.getTime() - LEAVING_KEEP_MS;
+        const out = [];
+        const act = (doc && doc.activity) || {};
+        const ids = Object.keys(act);
+        for (let n = 0; n < ids.length; n++) {
+            const list = act[ids[n]] || [];
+            for (let i = 0; i < list.length; i++) {
+                const when = eventTime(list[i], now);
+                if (when && when >= cutoff) out.push(list[i]);
+            }
+        }
+        out.sort(function (a, b) { return eventTime(b, now) - eventTime(a, now); });
+        return out;
+    }
+
+    function pruneLeaving(doc, now) {
+        if (!doc) return doc;
+        const cutoff = now.getTime() - LEAVING_KEEP_MS;
+        const shifts = doc.shifts || {};
+        Object.keys(shifts).forEach(function (id) {
+            const rows = shifts[id] || [];
+            const keep = [];
+            for (let i = 0; i < rows.length; i++) {
+                const row = rows[i];
+                if (!row) continue;
+                const open = row.status === 'said' || row.status === 'stuck';
+                const when = rowTime(row, now);
+                if (!when) {
+                    if (open) keep.push(row);
+                    continue;
+                }
+                if (when >= cutoff) keep.push(row);
+            }
+            if (keep.length) shifts[id] = keep;
+            else delete shifts[id];
         });
+        function trimMap(bucket, timeOf) {
+            if (!bucket) return;
+            Object.keys(bucket).forEach(function (id) {
+                const list = bucket[id] || [];
+                const keep = [];
+                for (let i = 0; i < list.length; i++) {
+                    const when = timeOf(list[i], now);
+                    if (when && when >= cutoff) keep.push(list[i]);
+                }
+                if (keep.length) bucket[id] = keep;
+                else delete bucket[id];
+            });
+        }
+        trimMap(doc.activity, eventTime);
+        trimMap(doc.runs, eventTime);
+        return doc;
     }
 
     function saveLeavingLocal(doc) {
@@ -6633,6 +6775,7 @@
     }
 
     function saveLeaving(doc) {
+        pruneLeaving(doc, new Date());
         saveLeavingLocal(doc);
         if (leavingShareOn()) return publishLeaving(doc);
         return Promise.resolve(doc);
@@ -6881,6 +7024,8 @@
             open.history.push({ said: said, at: at });
             open.said = said;
             open.saidMin = saidMin;
+            open.markedAt = at;
+            open.markedAtMs = now.getTime();
             open.id = name + '-' + said;
             if (station) open.station = station;
             return { doc: doc, row: open, added: false, updated: true, previous: previous };
@@ -6892,6 +7037,7 @@
             saidMin: saidMin,
             station: station || '',
             markedAt: at,
+            markedAtMs: now.getTime(),
             status: 'said',
             takenOffAt: '',
             takenHow: '',
@@ -6909,6 +7055,7 @@
             if (rows[i].status !== 'cancelled') {
                 rows[i].status = 'cancelled';
                 rows[i].clearedAt = clockText(now);
+                rows[i].clearedAtMs = now.getTime();
             }
             return rows[i];
         }
@@ -6959,32 +7106,18 @@
             if (!loginStillOnBoard(row.login)) continue;
             const where = stationForLogin(row.login) || 'a station';
             if (!noteBack(row, where, now)) continue;
-            recordActivity(doc, 'board', row.login + ' back on ' + row.back, now);
+            recordActivity(doc, 'board', row.login + ' back on ' + row.back, now, {
+                action: 'back', who: row.login, detail: row.back
+            });
             changed = true;
         }
         return changed;
     }
 
     function leavingLine(row) {
-        let text = row.login + ' said ' + row.said;
-        const history = row.history || [];
-        if (history.length > 1) {
-            const earlier = [];
-            for (let i = 0; i < history.length - 1; i++) earlier.push(history[i].said);
-            text += ' (was ' + earlier.join(', ') + ')';
-        }
+        let text = personLabel(row.login) + ' leaving at ' + row.said;
         if (row.station) text += ' from ' + row.station;
-        if (row.status === 'cancelled') {
-            text += ' · cleared';
-            if (row.clearedBy) text += ' by ' + row.clearedBy;
-            if (row.clearedAt) text += ' at ' + row.clearedAt;
-        }
-        else if (row.status === 'off') {
-            text += ' · off at ' + (row.takenOffAt || '');
-            if (row.takenHow === 'not on a station') text += ' (not on a station)';
-        } else if (row.status === 'stuck') text += ' · still on the station';
-        else text += ' · waiting';
-        if (row.back) text += ' · back on ' + row.back;
+        if (row.status === 'stuck') text += ' · still on the station';
         return text;
     }
 
@@ -7140,7 +7273,7 @@
             run.summary = waiting.length
                 ? 'No leave time has passed yet. ' + waiting.length + ' still waiting.'
                 : 'Nobody on this list is waiting.';
-            recordActivity(doc, actor, run.summary, now);
+            recordActivity(doc, actor, run.summary, now, { action: 'note' });
             pushEarlyRun(doc, run);
             saveLeaving(doc);
             setLeavingStatus(run.summary);
@@ -7157,7 +7290,7 @@
         const taken = [];
         const left = [];
         try {
-            recordActivity(doc, actor, 'started unassign for leave times that have passed', now);
+            recordActivity(doc, actor, 'started unassign for leave times that have passed', now, { action: 'note' });
             paintEarlyProgress(0, rows.length, '');
             for (let i = 0; i < rows.length; i++) {
                 if (leavingStop) {
@@ -7179,7 +7312,9 @@
                 if (!anchor || countLoginOnBoard(row.login) === 0) {
                     markTakenOff(row, stamp, 'not on a station');
                     step.result = 'not on a station';
-                    recordActivity(doc, actor, row.login + ' was not on a station', stamp);
+                    recordActivity(doc, actor, row.login + ' was not on a station', stamp, {
+                        action: 'miss', who: row.login
+                    });
                     missed += 1;
                     run.steps.push(step);
                     paintEarlyProgress(i + 1, rows.length, '');
@@ -7232,7 +7367,9 @@
                 if (gone) {
                     markTakenOff(row, stamp, 'unassigned');
                     step.result = 'unassigned';
-                    recordActivity(doc, actor, 'unassigned ' + row.login, stamp);
+                    recordActivity(doc, actor, 'unassigned ' + row.login, stamp, {
+                        action: 'unassign', who: row.login, said: row.said
+                    });
                     taken.push(row.login);
                     off += 1;
                 } else {
@@ -7243,7 +7380,9 @@
                         if (step.attempts[a].buttonGone) closed = true;
                     }
                     if (closed) step.note = 'Unassign closed but the login is still on the board.';
-                    recordActivity(doc, actor, 'could not take ' + row.login + ' off', stamp);
+                    recordActivity(doc, actor, 'could not take ' + row.login + ' off', stamp, {
+                        action: 'fail', who: row.login, said: row.said
+                    });
                 }
                 run.steps.push(step);
                 paintEarlyProgress(i + 1, rows.length, '');
@@ -7266,7 +7405,7 @@
             run.stillWaiting = later;
             run.taken = taken;
             run.left = left;
-            recordActivity(doc, actor, run.summary, new Date());
+            recordActivity(doc, actor, run.summary, new Date(), { action: 'note' });
             pushEarlyRun(doc, run);
             saveLeaving(doc);
             finishEarlyProgress(run.summary);
@@ -7322,7 +7461,9 @@
         const row = cancelLeaving(doc, id, now);
         if (!row || row.status !== 'cancelled') return null;
         row.clearedBy = String(by || '').trim().toLowerCase();
-        recordActivity(doc, by, 'cleared ' + row.login + ' marked at ' + row.said, now);
+        recordActivity(doc, by, 'cleared ' + row.login + ' from leaving at ' + row.said, now, {
+            action: 'clear', who: row.login, said: row.said
+        });
         pushEarlyRun(doc, {
             at: clockText(now), by: by, kind: 'clear', shiftId: shiftId(now),
             login: row.login, said: row.said, summary: 'cleared'
@@ -7330,30 +7471,48 @@
         return row;
     }
 
+    function currentLeaving(doc, now) {
+        const cutoff = now.getTime() - LEAVING_KEEP_MS;
+        const rows = shiftRows(doc, now).slice().filter(function (row) {
+            if (!row || !row.login) return false;
+            if (row.status !== 'said' && row.status !== 'stuck') return false;
+            const when = rowTime(row, now);
+            return !when || when >= cutoff;
+        });
+        rows.sort(function (a, b) {
+            return shiftMinute(a.saidMin) - shiftMinute(b.saidMin);
+        });
+        return rows;
+    }
+
     function paintEarlyLog() {
         const card = document.getElementById('mem3-leaving-list');
         if (!card) return;
         const now = new Date();
         const doc = loadLeaving();
+        const historyView = card.dataset.view === 'history';
+        const title = card.querySelector('[data-leaving-title]');
+        if (title) title.textContent = historyView ? 'Leaving History' : 'Leaving Early';
+        const ask = card.querySelector('[data-leaving-ask]');
+        if (ask) {
+            ask.textContent = historyView
+                ? 'Activity from the past 12 hours.'
+                : 'Who is leaving, at their latest time. The same list is on every computer running this script.';
+        }
+        const by = card.querySelector('[data-by]');
+        if (by) by.style.display = historyView ? 'none' : '';
+        const historyBtn = card.querySelector('[data-leaving-history]');
+        if (historyBtn) historyBtn.textContent = historyView ? 'Show Leaving' : 'Show History';
         const list = card.querySelector('[data-leaving-list]');
         const activity = card.querySelector('[data-leaving-activity]');
+        if (list) list.style.display = historyView ? 'none' : '';
+        if (activity) activity.style.display = historyView ? '' : 'none';
         if (list) {
             while (list.firstChild) list.removeChild(list.firstChild);
-            const rows = shiftRows(doc, now).slice().filter(function (row) {
-                return row && row.login;
-            }).sort(function (a, b) {
-                function rank(row) {
-                    if (row.status === 'cancelled') return 2;
-                    if (row.status === 'off') return 1;
-                    return 0;
-                }
-                const byRank = rank(a) - rank(b);
-                if (byRank) return byRank;
-                return shiftMinute(a.saidMin) - shiftMinute(b.saidMin);
-            });
+            const rows = currentLeaving(doc, now);
             if (!rows.length) {
                 const empty = document.createElement('div');
-                empty.textContent = 'Nobody is marked for this shift.';
+                empty.textContent = 'Nobody is leaving early.';
                 empty.style.cssText = 'color:#8b949e; font-size:12px;';
                 list.appendChild(empty);
             }
@@ -7366,10 +7525,6 @@
                 label.textContent = leavingLine(row);
                 label.style.cssText = 'font-size:12px; font-weight:650;';
                 line.appendChild(label);
-                if (row.status === 'cancelled') {
-                    list.appendChild(line);
-                    continue;
-                }
                 const clear = document.createElement('button');
                 clear.type = 'button';
                 clear.textContent = 'Clear';
@@ -7388,7 +7543,8 @@
                     const cleared = clearMarkedLeave(current, row.id, actor, new Date());
                     if (!cleared) return;
                     const shared = saveLeaving(current);
-                    const clearedText = 'Cleared ' + cleared.login + '.';
+                    const clearedText = personLabel(cleared.clearedBy) + ' cleared ' +
+                        personLabel(cleared.login) + ' at ' + cleared.clearedAt + '.';
                     setLeavingStatus(clearedText);
                     watchLeavingShare(clearedText, shared);
                     paintEarlyLog();
@@ -7399,24 +7555,17 @@
         }
         if (activity) {
             while (activity.firstChild) activity.removeChild(activity.firstChild);
-            const events = (doc.activity && doc.activity[shiftId(now)]) || [];
-            const title = document.createElement('div');
-            title.textContent = 'Activity';
-            title.style.cssText = 'margin-top:10px; font-size:11px; font-weight:800; letter-spacing:0.04em; ' +
-                'text-transform:uppercase; color:#8b949e;';
-            activity.appendChild(title);
+            const events = recentActivity(doc, now);
             if (!events.length) {
                 const empty = document.createElement('div');
-                empty.textContent = 'No activity this shift.';
-                empty.style.cssText = 'color:#8b949e; font-size:12px; margin-top:4px;';
+                empty.textContent = 'No activity in the past 12 hours.';
+                empty.style.cssText = 'color:#8b949e; font-size:12px;';
                 activity.appendChild(empty);
-                return;
             }
             for (let i = 0; i < events.length; i++) {
-                const eventRow = events[i];
                 const line = document.createElement('div');
-                line.textContent = eventRow.at + ' · ' + eventRow.by + ' · ' + eventRow.text;
-                line.style.cssText = 'font-size:12px; margin-top:4px;';
+                line.textContent = activityLine(events[i]);
+                line.style.cssText = 'font-size:12px; padding:6px 0; border-top:1px solid #30363d;';
                 activity.appendChild(line);
             }
         }
@@ -7433,10 +7582,12 @@
         const header = document.createElement('div');
         header.style.cssText = 'display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:4px;';
         const title = document.createElement('div');
+        title.setAttribute('data-leaving-title', '');
         title.textContent = 'Leaving Early';
         title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif;';
         const ask = document.createElement('div');
-        ask.textContent = 'Who is leaving this shift. The same list is on every computer running this script.';
+        ask.setAttribute('data-leaving-ask', '');
+        ask.textContent = 'Who is leaving, at their latest time. The same list is on every computer running this script.';
         ask.style.cssText = 'font-size:12px; color:#8b949e; margin-bottom:8px;';
         const by = document.createElement('input');
         by.setAttribute('data-by', '');
@@ -7480,6 +7631,19 @@
             event.stopPropagation();
             closeLeavingOverlay('mem3-leaving-list');
         });
+        const history = document.createElement('button');
+        history.type = 'button';
+        history.setAttribute('data-leaving-history', '');
+        history.textContent = 'Show History';
+        history.style.cssText = 'flex:1 1 auto; padding:7px 10px; border-radius:6px; border:1px solid #f5c518; ' +
+            'background:#f5c518; color:#000000; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        history.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            card.dataset.view = card.dataset.view === 'history' ? 'list' : 'history';
+            paintEarlyLog();
+        });
+        actions.appendChild(history);
         actions.appendChild(debug);
         header.appendChild(title);
         header.appendChild(close);
@@ -7796,12 +7960,18 @@
             const station = stationForLogin(who);
             const result = addLeaving(doc, who, saidMin, station, now);
             if (result.updated) {
-                recordActivity(doc, actor, 'updated ' + who + ' from ' + result.previous + ' to ' + result.row.said, now);
+                recordActivity(doc, actor, 'updated ' + who + ' to leave at ' + result.row.said, now, {
+                    action: 'update', who: who, said: result.row.said
+                });
             } else if (result.added) {
                 recordActivity(doc, actor, 'marked ' + who + ' leaving at ' + result.row.said +
-                    (station ? ' from ' + station : ''), now);
+                    (station ? ' from ' + station : ''), now, {
+                    action: 'mark', who: who, said: result.row.said, detail: station || ''
+                });
             } else {
-                recordActivity(doc, actor, who + ' already marked at ' + result.row.said, now);
+                recordActivity(doc, actor, who + ' already marked at ' + result.row.said, now, {
+                    action: 'same', who: who, said: result.row.said
+                });
             }
             pushEarlyRun(doc, {
                 at: clockText(now), by: actor, kind: result.updated ? 'update' : (result.added ? 'mark' : 'same'),
