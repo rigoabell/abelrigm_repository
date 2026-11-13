@@ -158,9 +158,9 @@
     "name": "Extended FC Research - Kelley Edition (abelrigm)",
     "category": "FC Research",
     "summary": "Add process path, condition, and dwell time to FC Research shipment results.",
-    "detail": "Extends FC Research result pages with process path, condition, and dwell time by customer shipment. This is the Kelley Edition of that research layout.",
-    "version": "1.4.36",
-    "runsOn": "fcresearch-*.aka.amazon.com, qi-fcresearch-na.corp.amazon.com, qifcr.na.aftx.amazonoperations.app",
+    "detail": "Extends FC Research result pages with process path, condition, and dwell time by customer shipment. QIFCR MEM3 search and Pandash share one FC and marketplace. Copy Debug copies a sync report.",
+    "version": "1.4.37",
+    "runsOn": "fcresearch-*.aka.amazon.com, qi-fcresearch-na.corp.amazon.com, qifcr.na.aftx.amazonoperations.app, pandash.amazon.com",
     "file": "downloads/extended-fc-research-kelley-edition.txt",
     "downloadName": "Extended FC Research - Kelley Edition (abelrigm).txt"
   },
