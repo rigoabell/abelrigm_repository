@@ -7,7 +7,10 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.2/);
+assert.match(src, /@version\s+1\.9\.3/);
+assert.match(src, /const LEAVING_POLL_MS = 20000;/);
+assert.match(src, /LEAVING_ID = 'mem3-leaving'/);
+assert.match(src, /Saved on this computer/);
 assert.match(src, /function psBoardHolding/);
 assert.match(src, /data-mem3-ps-hold/);
 assert.match(src, /raw\.githubusercontent\.com\/rigoabell\/abelrigm_repository\/main\/docs\/downloads\/mem3-productivity-panel\.user\.js/);
@@ -29,7 +32,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.2");
+assert.equal(entry.version, "1.9.3");
 assert.match(entry.detail, /types MEM3/);
 assert.match(entry.runsOn, /menu\.na\.aft\.amazonoperations\.app/);
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
@@ -160,6 +163,7 @@ const patched = src.replace(
         },
         setDown(value) { FCLM_DOWN = value; },
         showUpdate(remote) { showUpdatePrompt(remote); },
+        shiftId, parseLeaveTime, addLeaving, dueLeaving, noteBack, markTakenOff,
         stop() {
             refreshGeneration++;
             timeGeneration++;
@@ -480,6 +484,32 @@ try {
     assert.match(prompt, /Refresh this screen/);
     assert.match(prompt, /F5/);
     assert.match(prompt, /If you do not refresh this screen/);
+
+    const noon = new Date(2026, 10, 13, 12, 0);
+    assert.equal(api.shiftId(noon), "2026-11-13-days");
+    assert.equal(api.shiftId(new Date(2026, 10, 13, 1, 30)), "2026-11-12-nights");
+    assert.equal(api.parseLeaveTime("12:00"), 720);
+    assert.equal(api.parseLeaveTime("25:00"), null);
+    const leaving = { shifts: {} };
+    const marked = api.addLeaving(leaving, "Wilrayni", 720, "CRET 2 Even", noon);
+    assert.equal(marked.added, true);
+    assert.equal(marked.row.login, "wilrayni");
+    assert.equal(marked.row.status, "said");
+    assert.equal(api.addLeaving(leaving, "wilrayni", 720, "", noon).added, false);
+    const shiftRows = leaving.shifts[api.shiftId(noon)];
+    assert.equal(api.dueLeaving(shiftRows, new Date(2026, 10, 13, 11, 59)).length, 0);
+    assert.equal(api.dueLeaving(shiftRows, noon).length, 1);
+    const night = new Date(2026, 10, 13, 23, 0);
+    const nights = { shifts: {} };
+    api.addLeaving(nights, "abelrigm", 60, "", night);
+    assert.equal(api.dueLeaving(nights.shifts[api.shiftId(night)], night).length, 0);
+    assert.equal(api.dueLeaving(nights.shifts[api.shiftId(night)], new Date(2026, 10, 14, 1, 5)).length, 1);
+    api.markTakenOff(marked.row, noon, "unassigned");
+    assert.equal(marked.row.takenOffAt, "12:00");
+    assert.equal(api.noteBack(marked.row, "3 Odd", new Date(2026, 10, 13, 12, 40)), true);
+    assert.equal(marked.row.back, "3 Odd at 12:40");
+    assert.equal(api.noteBack(marked.row, "3 Odd", new Date(2026, 10, 13, 12, 50)), false);
+    assert.equal(api.dueLeaving(shiftRows, noon).length, 0);
 } finally {
     if (api) api.stop();
 }

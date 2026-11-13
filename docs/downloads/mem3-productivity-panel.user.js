@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.2
+// @version      1.9.3
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -37,7 +37,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.2';
+    const SCRIPT_VERSION = '1.9.3';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -2881,7 +2881,7 @@
             if (!pattern.test((btn.textContent || '').trim())) continue;
             if (btn.closest('#' + FLOOR_SUMMARY_ID) || btn.closest('#mem3-unassign-panel') ||
                 btn.closest('#mem3-run-panel') || btn.closest('#' + CORNER_DEBUG_ID) ||
-                btn.closest('#' + PHOTO_DEBUG_ID)) continue;
+                btn.closest('#' + PHOTO_DEBUG_ID) || btn.closest('#' + LEAVING_ID)) continue;
             const rect = btn.getBoundingClientRect();
             if (rect.width < 1 || rect.height < 1) continue;
             return btn;
@@ -3002,7 +3002,7 @@
             if (!/^unassign$/i.test((btn.textContent || '').trim())) continue;
             if (btn.closest('#' + FLOOR_SUMMARY_ID) || btn.closest('#mem3-unassign-panel') ||
                 btn.closest('#mem3-run-panel') || btn.closest('#' + CORNER_DEBUG_ID) ||
-                btn.closest('#' + PHOTO_DEBUG_ID)) continue;
+                btn.closest('#' + PHOTO_DEBUG_ID) || btn.closest('#' + LEAVING_ID)) continue;
             const tip = btn.closest('[id^="tooltip-"]');
             if (!tip || known[tip.id]) continue;
             const rect = btn.getBoundingClientRect();
@@ -6430,7 +6430,9 @@
             node.closest('.' + SECTION_BADGE_CLASS) ||
             node.closest('.' + POPUP_CLASS) ||
             node.id === CORNER_DEBUG_ID ||
-            node.id === UPDATE_PROMPT_ID);
+            node.id === UPDATE_PROMPT_ID ||
+            node.id === LEAVING_ID ||
+            node.closest('#' + LEAVING_ID));
     }
 
     function initLinePairs() {
@@ -6458,6 +6460,380 @@
         if (document.body) linePairObs.observe(document.body, { childList: true, subtree: true });
     }
 
+    const LEAVING_ID = 'mem3-leaving';
+    const LEAVING_KEY = 'mem3-leaving-v1';
+    const LEAVING_POLL_MS = 20000;
+    let leavingBusy = false;
+    let leavingHeld = false;
+
+    // Local to this browser. A later update can point the same rows at a shared gist.
+    function leavingPad(n) {
+        return n < 10 ? '0' + n : String(n);
+    }
+
+    function shiftId(date) {
+        const hour = date.getHours();
+        const start = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+        if (hour < 6) start.setDate(start.getDate() - 1);
+        const name = (hour >= 6 && hour < 18) ? 'days' : 'nights';
+        return start.getFullYear() + '-' + leavingPad(start.getMonth() + 1) + '-' + leavingPad(start.getDate()) + '-' + name;
+    }
+
+    function clockText(date) {
+        return leavingPad(date.getHours()) + ':' + leavingPad(date.getMinutes());
+    }
+
+    function parseLeaveTime(text) {
+        const match = String(text || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+        if (!match) return null;
+        const hour = parseInt(match[1], 10);
+        const minute = parseInt(match[2], 10);
+        if (hour > 23 || minute > 59) return null;
+        return hour * 60 + minute;
+    }
+
+    function shiftMinute(min) {
+        if (min < 6 * 60) return min + 24 * 60;
+        return min;
+    }
+
+    function emptyLeaving() {
+        return { shifts: {} };
+    }
+
+    function loadLeaving() {
+        let raw = '';
+        try {
+            if (typeof GM_getValue === 'function') raw = GM_getValue(LEAVING_KEY, '') || '';
+        } catch (e) { raw = ''; }
+        if (!raw) {
+            try { raw = localStorage.getItem(LEAVING_KEY) || ''; } catch (e2) { raw = ''; }
+        }
+        if (!raw) return emptyLeaving();
+        try {
+            const doc = JSON.parse(raw);
+            if (!doc || typeof doc !== 'object' || !doc.shifts) return emptyLeaving();
+            return doc;
+        } catch (e3) {
+            return emptyLeaving();
+        }
+    }
+
+    function saveLeaving(doc) {
+        const text = JSON.stringify(doc);
+        try {
+            if (typeof GM_setValue === 'function') GM_setValue(LEAVING_KEY, text);
+        } catch (e) { /* the page copy below still records it */ }
+        try { localStorage.setItem(LEAVING_KEY, text); } catch (e2) { /* storage can be blocked */ }
+    }
+
+    function shiftRows(doc, date) {
+        const id = shiftId(date);
+        if (!doc.shifts[id]) doc.shifts[id] = [];
+        return doc.shifts[id];
+    }
+
+    function addLeaving(doc, login, saidMin, station, now) {
+        const rows = shiftRows(doc, now);
+        const said = leavingPad(Math.floor(saidMin / 60)) + ':' + leavingPad(saidMin % 60);
+        const id = String(login || '').trim().toLowerCase() + '-' + said;
+        for (let i = 0; i < rows.length; i++) {
+            if (rows[i].id === id && rows[i].status !== 'cancelled') return { doc: doc, row: rows[i], added: false };
+        }
+        const row = {
+            id: id,
+            login: String(login || '').trim().toLowerCase(),
+            said: said,
+            saidMin: saidMin,
+            station: station || '',
+            markedAt: clockText(now),
+            status: 'said',
+            takenOffAt: '',
+            takenHow: '',
+            back: ''
+        };
+        rows.push(row);
+        return { doc: doc, row: row, added: true };
+    }
+
+    function cancelLeaving(doc, id, now) {
+        const rows = shiftRows(doc, now);
+        for (let i = 0; i < rows.length; i++) {
+            if (rows[i].id !== id) continue;
+            if (rows[i].status === 'said') rows[i].status = 'cancelled';
+            return rows[i];
+        }
+        return null;
+    }
+
+    function dueLeaving(rows, now) {
+        const nowMin = shiftMinute(now.getHours() * 60 + now.getMinutes());
+        const out = [];
+        const list = rows || [];
+        for (let i = 0; i < list.length; i++) {
+            const row = list[i];
+            if (!row || row.status !== 'said') continue;
+            if (nowMin >= shiftMinute(row.saidMin)) out.push(row);
+        }
+        return out;
+    }
+
+    function markTakenOff(row, now, how) {
+        row.status = 'off';
+        row.takenOffAt = clockText(now);
+        row.takenHow = how || '';
+        return row;
+    }
+
+    function noteBack(row, station, now) {
+        if (!row || row.status !== 'off' || !station || row.back) return false;
+        row.back = station + ' at ' + clockText(now);
+        return true;
+    }
+
+    function stationForLogin(login) {
+        try {
+            const anchor = findAnchorForPerson(login, '');
+            if (!anchor) return '';
+            const person = boardPersonFromAnchor(anchor);
+            return person.station || '';
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function noteReturns(rows, now) {
+        let changed = false;
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            if (!row || row.status !== 'off') continue;
+            if (!loginStillOnBoard(row.login)) continue;
+            if (noteBack(row, stationForLogin(row.login) || 'a station', now)) changed = true;
+        }
+        return changed;
+    }
+
+    function leavingLine(row) {
+        let text = row.login + ' said ' + row.said;
+        if (row.station) text += ' from ' + row.station;
+        if (row.status === 'cancelled') text += ' · cancelled';
+        else if (row.status === 'off') {
+            text += ' · off at ' + (row.takenOffAt || '');
+            if (row.takenHow === 'not on a station') text += ' (not on a station)';
+        } else if (row.status === 'stuck') text += ' · still on the station';
+        else text += ' · waiting';
+        if (row.back) text += ' · back on ' + row.back;
+        return text;
+    }
+
+    function setLeavingStatus(text) {
+        const node = document.querySelector('#' + LEAVING_ID + ' [data-status]');
+        if (node) node.textContent = text || '';
+    }
+
+    function paintLeaving(doc, now) {
+        const card = document.getElementById(LEAVING_ID);
+        if (!card) return;
+        const list = card.querySelector('[data-list]');
+        if (!list) return;
+        while (list.firstChild) list.removeChild(list.firstChild);
+        const rows = shiftRows(doc, now).slice().sort(function (a, b) {
+            return shiftMinute(a.saidMin) - shiftMinute(b.saidMin);
+        });
+        if (!rows.length) {
+            const empty = document.createElement('div');
+            empty.textContent = 'Nobody is marked for this shift.';
+            empty.style.cssText = 'color:#8b949e; font-size:12px;';
+            list.appendChild(empty);
+            return;
+        }
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            const line = document.createElement('div');
+            line.style.cssText = 'display:flex; gap:8px; align-items:flex-start; justify-content:space-between; ' +
+                'padding:6px 0; border-top:1px solid #30363d;';
+            const label = document.createElement('div');
+            label.textContent = leavingLine(row);
+            label.style.cssText = 'font-size:12px; font-weight:650;';
+            line.appendChild(label);
+            if (row.status === 'said') {
+                const keep = document.createElement('button');
+                keep.type = 'button';
+                keep.textContent = 'Keep';
+                keep.style.cssText = 'flex:0 0 auto; padding:2px 8px; border-radius:6px; border:1px solid #8b949e; ' +
+                    'background:#0d1117; color:#fff; font:700 11px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+                keep.addEventListener('click', function () {
+                    const current = loadLeaving();
+                    cancelLeaving(current, row.id, new Date());
+                    saveLeaving(current);
+                    setLeavingStatus(row.login + ' stays. The said time is still on the list.');
+                    paintLeaving(current, new Date());
+                });
+                line.appendChild(keep);
+            }
+            list.appendChild(line);
+        }
+    }
+
+    function onMarkLeave() {
+        const card = document.getElementById(LEAVING_ID);
+        if (!card) return;
+        const login = String((card.querySelector('[data-login]') || {}).value || '').trim().toLowerCase();
+        const saidMin = parseLeaveTime((card.querySelector('[data-time]') || {}).value);
+        if (!looksLikeLogin(login)) {
+            setLeavingStatus('Enter a login.');
+            return;
+        }
+        if (saidMin == null) {
+            setLeavingStatus('Enter a time like 12:00.');
+            return;
+        }
+        const now = new Date();
+        const doc = loadLeaving();
+        const station = stationForLogin(login);
+        const result = addLeaving(doc, login, saidMin, station, now);
+        saveLeaving(doc);
+        const loginEl = card.querySelector('[data-login]');
+        if (loginEl && result.added) loginEl.value = '';
+        setLeavingStatus(result.added
+            ? 'Marked ' + login + ' at ' + result.row.said + (station ? ' from ' + station : '') + '.'
+            : login + ' is already marked at ' + result.row.said + '.');
+        paintLeaving(doc, now);
+    }
+
+    function ensureLeavingCard() {
+        if (!document.body || !isAssignmentsPage()) return null;
+        let card = document.getElementById(LEAVING_ID);
+        if (card) return card;
+        card = document.createElement('div');
+        card.id = LEAVING_ID;
+        card.style.cssText = 'position:fixed; right:12px; bottom:12px; z-index:2147483646; ' +
+            'width:min(380px, calc(100% - 24px)); max-height:min(420px, calc(100% - 24px)); overflow:auto; ' +
+            'background:#161b22; color:#ffffff; border:1px solid #30363d; border-radius:10px; padding:10px; ' +
+            'font-family:Segoe UI,system-ui,sans-serif; box-shadow:0 8px 24px rgba(0,0,0,0.45);';
+        const title = document.createElement('div');
+        title.textContent = 'Leaving';
+        title.style.cssText = 'font-size:13px; font-weight:800; letter-spacing:0.04em; text-transform:uppercase;';
+        const note = document.createElement('div');
+        note.textContent = 'Saved on this computer. Not shared yet.';
+        note.style.cssText = 'color:#8b949e; font-size:11px; margin:2px 0 8px;';
+        const form = document.createElement('div');
+        form.style.cssText = 'display:flex; gap:6px;';
+        const login = document.createElement('input');
+        login.setAttribute('data-login', '');
+        login.placeholder = 'login';
+        login.setAttribute('autocomplete', 'off');
+        const time = document.createElement('input');
+        time.setAttribute('data-time', '');
+        time.placeholder = '12:00';
+        time.setAttribute('autocomplete', 'off');
+        const fieldStyle = 'flex:1; min-width:0; padding:6px 8px; border-radius:6px; border:1px solid #30363d; ' +
+            'background:#0d1117; color:#fff; font:13px Segoe UI,system-ui,sans-serif;';
+        login.style.cssText = fieldStyle;
+        time.style.cssText = fieldStyle + 'flex:0 0 72px;';
+        const mark = document.createElement('button');
+        mark.type = 'button';
+        mark.textContent = 'Mark';
+        mark.style.cssText = 'flex:0 0 auto; padding:6px 10px; border-radius:6px; border:1px solid #1d3b64; ' +
+            'background:#1d3b64; color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        mark.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            onMarkLeave();
+        });
+        time.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter') onMarkLeave();
+        });
+        form.appendChild(login);
+        form.appendChild(time);
+        form.appendChild(mark);
+        const status = document.createElement('div');
+        status.setAttribute('data-status', '');
+        status.style.cssText = 'min-height:16px; margin-top:6px; font-size:12px; color:#c9d1d9;';
+        const list = document.createElement('div');
+        list.setAttribute('data-list', '');
+        card.appendChild(title);
+        card.appendChild(note);
+        card.appendChild(form);
+        card.appendChild(status);
+        card.appendChild(list);
+        document.body.appendChild(card);
+        return card;
+    }
+
+    function holdLeaving(on) {
+        const root = document.documentElement;
+        if (!root || !root.setAttribute) return;
+        if (on) {
+            if (!root.hasAttribute || !root.hasAttribute('data-mem3-ps-hold')) {
+                root.setAttribute('data-mem3-ps-hold', '1');
+                leavingHeld = true;
+            }
+            return;
+        }
+        if (leavingHeld && root.removeAttribute) {
+            root.removeAttribute('data-mem3-ps-hold');
+            leavingHeld = false;
+        }
+    }
+
+    async function runDueLeaves() {
+        if (!isAssignmentsPage()) return;
+        ensureLeavingCard();
+        if (leavingBusy || unassigning || psBoardHolding()) {
+            paintLeaving(loadLeaving(), new Date());
+            return;
+        }
+        const now = new Date();
+        const doc = loadLeaving();
+        const rows = shiftRows(doc, now);
+        let changed = noteReturns(rows, now);
+        const due = dueLeaving(rows, now);
+        if (!due.length) {
+            if (changed) saveLeaving(doc);
+            paintLeaving(doc, now);
+            return;
+        }
+        leavingBusy = true;
+        unassigning = true;
+        holdLeaving(true);
+        try {
+            for (let i = 0; i < due.length; i++) {
+                const row = due[i];
+                const anchor = findAnchorForPerson(row.login, '');
+                if (!anchor || countLoginOnBoard(row.login) === 0) {
+                    markTakenOff(row, new Date(), 'not on a station');
+                    changed = true;
+                    continue;
+                }
+                const record = { login: row.login, station: row.station, tries: (row.tries || 0) + 1 };
+                row.tries = record.tries;
+                let left = false;
+                try { left = await unassignAnchor(anchor, record); } catch (e) { left = false; }
+                if (left) {
+                    markTakenOff(row, new Date(), 'unassigned');
+                    changed = true;
+                } else if (row.tries >= 3) {
+                    row.status = 'stuck';
+                    changed = true;
+                } else changed = true;
+            }
+        } finally {
+            if (changed) saveLeaving(doc);
+            holdLeaving(false);
+            unassigning = false;
+            leavingBusy = false;
+            paintLeaving(doc, new Date());
+        }
+    }
+
+    function startLeaving() {
+        if (!isAssignmentsPage() || !document.body) return;
+        ensureLeavingCard();
+        paintLeaving(loadLeaving(), new Date());
+        setInterval(function () { runDueLeaves(); }, LEAVING_POLL_MS);
+    }
+
     function init() {
         const staleRun = document.getElementById('mem3-run-panel');
         if (staleRun) staleRun.remove();
@@ -6470,6 +6846,7 @@
         showAssignments();
         initLinePairs();
         setInterval(repairBoard, 1000);
+        startLeaving();
     }
 
     const MENU_IDP_SELECTION_URL = 'https://d34wrqb3xn2znf.cloudfront.net/idp-selection?redirect_uri=https%3A%2F%2Fmenu.na.aft.amazonoperations.app%2Fdo%2Fmfa%2Flogin&nonce=5f50a80c5db87e9cc23b0bc2124a6b6de1e21c0b83cd318714aff390c61ec6fb&scope=openid+tenantId%3A1545ed74-d2cd-11ec-9d64-0242ac120002&client_id=fc-menu-prod-na&state&response_type=code&otp&user_code&authorize_url=https%3A%2F%2Fprod.us-east-1.federated-auth.aft.a2z.com%2F1545ed74-d2cd-11ec-9d64-0242ac120002%2Fauthorize&data=%5B%7B%22id%22%3A%22amazon-federate-prod%22%2C%22displayString%22%3A%22IT+Service+Login%22%7D%2C%7B%22id%22%3A%22maask-prod-na%22%2C%22displayString%22%3A%22Login+with+MAASK%22%7D%5D&code_challenge&code_challenge_method&referrer=https%3A%2F%2Fmenu.na.aft.amazonoperations.app%2Fmidway%2Flogin&ui_locales=en_US';
