@@ -15,13 +15,15 @@ const board = sandbox.__psBoard;
 test("catalog entry matches the script", () => {
     const entry = catalog.find((item) => item.id === "mem3-control-tower-ps-board");
     assert.ok(entry);
-    assert.equal(entry.version, "1.2.0");
+    assert.equal(entry.version, "1.3.0");
     assert.equal(entry.category, "Control Tower");
     assert.equal(entry.file, "downloads/mem3-control-tower-ps-board.txt");
     assert.equal(entry.downloadName, "MEM3 Control Tower - PS Board (abelrigm).txt");
-    assert.match(src, /@version\s+1\.2\.0/);
+    assert.match(src, /@version\s+1\.3\.0/);
     assert.match(src, /function noneAnchor/);
     assert.match(src, /function assignButtonFor/);
+    assert.match(src, /Copy debug/);
+    assert.match(src, /function formatDebug/);
     assert.match(src, /control-tower\.meta\.amazon\.dev\/\*/);
     assert.match(src, /beta\.control-tower\.meta\.amazon\.dev\/\*/);
     assert.equal(src.includes("@grant"), false);
@@ -162,4 +164,38 @@ test("typing a login plans a Control Tower scan in or out", () => {
     assert.equal(board.scanPlan("blank-1", [], "abelrigm", "in").code, "station");
     assert.equal(board.scanPlan("audit", [], "ab", "in").code, "login");
     assert.equal(board.stationOf({ slots: { "1-even-b": ["jlatonje"], audit: ["abelrigm"] } }, "Abelrigm"), "audit");
+});
+
+test("copy debug names the station, the None link, the search, and Assign", () => {
+    const text = board.formatDebug({
+        version: "1.3.0",
+        href: "https://control-tower.meta.amazon.dev/MEM3/assignments",
+        selected: "1-odd",
+        label: "1 Odd",
+        typed: "abelrigm",
+        status: "Control Tower did not show Assign for abelrigm.",
+        last: { action: "in", login: "abelrigm", ok: false, message: "Control Tower did not show Assign for abelrigm." },
+        group: true,
+        names: [],
+        rows: [{
+            login: "",
+            none: '<a role="button">None</a>',
+            person: "",
+            cells: ["CRET 1 Odd (PS)", '<td><a role="button">None</a></td>']
+        }],
+        searches: [{ id: "search-field-1", placeholder: "Search for login", value: "" }],
+        tooltips: [{
+            id: "tooltip-852",
+            inputs: [{ id: "search-field-853", placeholder: "Search for login, badge, etc...", value: "abelrigm" }],
+            buttons: ["Assign"],
+            html: '<div id="tooltip-852"><button>Assign</button></div>'
+        }]
+    });
+    assert.match(text, /MEM3 PS Board debug v1\.3\.0/);
+    assert.match(text, /station: 1 Odd \(1-odd\)/);
+    assert.match(text, /typed: abelrigm/);
+    assert.match(text, /<a role="button">None<\/a>/);
+    assert.match(text, /search-field-853/);
+    assert.match(text, /buttons: Assign/);
+    assert.match(text, /page search #search-field-1/);
 });
