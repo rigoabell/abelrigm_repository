@@ -7,7 +7,8 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.4/);
+assert.match(src, /@version\s+1\.9\.5/);
+assert.match(src, /dueLeaving\(waiting, now\)/);
 assert.match(src, /Unassign leaving/);
 assert.match(src, /refreshLeaving\(\)/);
 assert.match(src, /const LEAVING_POLL_MS = 20000;/);
@@ -34,7 +35,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.4");
+assert.equal(entry.version, "1.9.5");
 assert.match(entry.detail, /types MEM3/);
 assert.match(entry.runsOn, /menu\.na\.aft\.amazonoperations\.app/);
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
@@ -497,10 +498,18 @@ try {
     assert.equal(marked.added, true);
     assert.equal(marked.row.login, "wilrayni");
     assert.equal(marked.row.status, "said");
-    assert.equal(api.addLeaving(leaving, "wilrayni", 720, "", noon).added, false);
+    assert.equal(api.addLeaving(leaving, "wilrayni", 720, "", noon).updated, false);
     const shiftRows = leaving.shifts[api.shiftId(noon)];
     assert.equal(api.dueLeaving(shiftRows, new Date(2026, 10, 13, 11, 59)).length, 0);
     assert.equal(api.dueLeaving(shiftRows, noon).length, 1);
+    const moved = api.addLeaving(leaving, "wilrayni", 13 * 60 + 30, "CRET 2 Even", new Date(2026, 10, 13, 11, 40));
+    assert.equal(moved.updated, true);
+    assert.equal(moved.previous, "12:00");
+    assert.equal(moved.row.said, "13:30");
+    assert.equal(moved.row.history.length, 2);
+    assert.equal(moved.row.history[0].said, "12:00");
+    assert.equal(api.dueLeaving(shiftRows, noon).length, 0);
+    assert.equal(api.dueLeaving(shiftRows, new Date(2026, 10, 13, 13, 30)).length, 1);
     const night = new Date(2026, 10, 13, 23, 0);
     const nights = { shifts: {} };
     api.addLeaving(nights, "abelrigm", 60, "", night);

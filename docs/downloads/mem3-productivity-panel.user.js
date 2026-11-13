@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.4
+// @version      1.9.5
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -37,7 +37,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.4';
+    const SCRIPT_VERSION = '1.9.5';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -6535,25 +6535,42 @@
 
     function addLeaving(doc, login, saidMin, station, now) {
         const rows = shiftRows(doc, now);
+        const name = String(login || '').trim().toLowerCase();
         const said = leavingPad(Math.floor(saidMin / 60)) + ':' + leavingPad(saidMin % 60);
-        const id = String(login || '').trim().toLowerCase() + '-' + said;
+        const at = clockText(now);
+        let open = null;
         for (let i = 0; i < rows.length; i++) {
-            if (rows[i].id === id && rows[i].status !== 'cancelled') return { doc: doc, row: rows[i], added: false };
+            if (rows[i].login !== name) continue;
+            if (rows[i].status !== 'said' && rows[i].status !== 'stuck') continue;
+            open = rows[i];
+            break;
+        }
+        if (open) {
+            if (!open.history) open.history = [{ said: open.said, at: open.markedAt }];
+            if (open.said === said) return { doc: doc, row: open, added: false, updated: false };
+            const previous = open.said;
+            open.history.push({ said: said, at: at });
+            open.said = said;
+            open.saidMin = saidMin;
+            open.id = name + '-' + said;
+            if (station) open.station = station;
+            return { doc: doc, row: open, added: false, updated: true, previous: previous };
         }
         const row = {
-            id: id,
-            login: String(login || '').trim().toLowerCase(),
+            id: name + '-' + said,
+            login: name,
             said: said,
             saidMin: saidMin,
             station: station || '',
-            markedAt: clockText(now),
+            markedAt: at,
             status: 'said',
             takenOffAt: '',
             takenHow: '',
-            back: ''
+            back: '',
+            history: [{ said: said, at: at }]
         };
         rows.push(row);
-        return { doc: doc, row: row, added: true };
+        return { doc: doc, row: row, added: true, updated: false };
     }
 
     function cancelLeaving(doc, id, now) {
@@ -6615,6 +6632,12 @@
 
     function leavingLine(row) {
         let text = row.login + ' said ' + row.said;
+        const history = row.history || [];
+        if (history.length > 1) {
+            const earlier = [];
+            for (let i = 0; i < history.length - 1; i++) earlier.push(history[i].said);
+            text += ' (was ' + earlier.join(', ') + ')';
+        }
         if (row.station) text += ' from ' + row.station;
         if (row.status === 'cancelled') text += ' · cancelled';
         else if (row.status === 'off') {
@@ -6694,10 +6717,14 @@
         const result = addLeaving(doc, login, saidMin, station, now);
         saveLeaving(doc);
         const loginEl = card.querySelector('[data-login]');
-        if (loginEl && result.added) loginEl.value = '';
-        setLeavingStatus(result.added
-            ? 'Marked ' + login + ' at ' + result.row.said + (station ? ' from ' + station : '') + '.'
-            : login + ' is already marked at ' + result.row.said + '.');
+        if (loginEl && (result.added || result.updated)) loginEl.value = '';
+        if (result.updated) {
+            setLeavingStatus('Updated ' + login + ' from ' + result.previous + ' to ' + result.row.said + '.');
+        } else if (result.added) {
+            setLeavingStatus('Marked ' + login + ' at ' + result.row.said + (station ? ' from ' + station : '') + '.');
+        } else {
+            setLeavingStatus(login + ' is already marked at ' + result.row.said + '.');
+        }
         paintLeaving(doc, now);
     }
 
@@ -6715,7 +6742,7 @@
         title.textContent = 'Leaving';
         title.style.cssText = 'font-size:13px; font-weight:800; letter-spacing:0.04em; text-transform:uppercase;';
         const note = document.createElement('div');
-        note.textContent = 'Saved on this computer. Unassign runs here, after the password.';
+        note.textContent = 'Saved on this computer. The password unassigns only times that have passed.';
         note.style.cssText = 'color:#8b949e; font-size:11px; margin:2px 0 8px;';
         const form = document.createElement('div');
         form.style.cssText = 'display:flex; gap:6px;';
@@ -6845,10 +6872,14 @@
 
     async function unassignMarkedLeaves() {
         if (!isAssignmentsPage() || leavingBusy || unassigning || psBoardHolding()) return;
+        const now = new Date();
         const doc = loadLeaving();
-        const rows = markedLeaving(shiftRows(doc, new Date()));
+        const waiting = markedLeaving(shiftRows(doc, now));
+        const rows = dueLeaving(waiting, now);
         if (!rows.length) {
-            setLeavingStatus('Nobody on this list is waiting.');
+            setLeavingStatus(waiting.length
+                ? 'No leave time has passed yet. ' + waiting.length + ' still waiting.'
+                : 'Nobody on this list is waiting.');
             return;
         }
         leavingBusy = true;
@@ -6875,8 +6906,10 @@
                 }
             }
             saveLeaving(doc);
+            const later = waiting.length - rows.length;
             setLeavingStatus('Unassigned ' + off + '. ' + missed + ' were not on a station. ' +
-                (rows.length - off - missed) + ' stayed on the list.');
+                (rows.length - off - missed) + ' could not be taken off. ' +
+                later + ' are still waiting for their time.');
         } finally {
             holdLeaving(false);
             unassigning = false;
