@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.6
+// @version      1.9.7
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -37,7 +37,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.6';
+    const SCRIPT_VERSION = '1.9.7';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -6714,7 +6714,10 @@
         const card = document.getElementById(LEAVING_ID);
         if (!card) return;
         const login = String((card.querySelector('[data-login]') || {}).value || '').trim().toLowerCase();
-        const saidMin = parseLeaveTime((card.querySelector('[data-time]') || {}).value);
+        const saidMin = parseLeaveTime(
+            String((card.querySelector('[data-time]') || {}).value || '').replace(/\s*(am|pm)\s*$/i, '') +
+            ' ' + ((card.querySelector('[data-half]') || {}).value || 'PM')
+        );
         if (!looksLikeLogin(login)) {
             setLeavingStatus('Enter a login.');
             return;
@@ -6764,12 +6767,24 @@
         login.setAttribute('autocomplete', 'off');
         const time = document.createElement('input');
         time.setAttribute('data-time', '');
-        time.placeholder = '12:00 PM';
+        time.placeholder = '12:00';
         time.setAttribute('autocomplete', 'off');
+        const half = document.createElement('select');
+        half.setAttribute('data-half', '');
+        const am = document.createElement('option');
+        am.value = 'AM';
+        am.textContent = 'AM';
+        const pm = document.createElement('option');
+        pm.value = 'PM';
+        pm.textContent = 'PM';
+        half.appendChild(am);
+        half.appendChild(pm);
+        half.value = 'PM';
         const fieldStyle = 'flex:1; min-width:0; padding:6px 8px; border-radius:6px; border:1px solid #30363d; ' +
             'background:#0d1117; color:#fff; font:13px Segoe UI,system-ui,sans-serif;';
         login.style.cssText = fieldStyle;
         time.style.cssText = fieldStyle + 'flex:0 0 72px;';
+        half.style.cssText = fieldStyle + 'flex:0 0 68px;';
         const mark = document.createElement('button');
         mark.type = 'button';
         mark.textContent = 'Mark';
@@ -6785,6 +6800,7 @@
         });
         form.appendChild(login);
         form.appendChild(time);
+        form.appendChild(half);
         form.appendChild(mark);
         const run = document.createElement('button');
         run.type = 'button';
