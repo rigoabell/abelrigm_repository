@@ -15,11 +15,12 @@ const board = sandbox.__psBoard;
 test("catalog entry matches the script", () => {
     const entry = catalog.find((item) => item.id === "mem3-control-tower-ps-board");
     assert.ok(entry);
-    assert.equal(entry.version, "1.3.0");
+    assert.equal(entry.version, "1.3.1");
     assert.equal(entry.category, "Control Tower");
     assert.equal(entry.file, "downloads/mem3-control-tower-ps-board.txt");
     assert.equal(entry.downloadName, "MEM3 Control Tower - PS Board (abelrigm).txt");
-    assert.match(src, /@version\s+1\.3\.0/);
+    assert.match(src, /@version\s+1\.3\.1/);
+    assert.match(src, /data-mem3-ps-hold/);
     assert.match(src, /function noneAnchor/);
     assert.match(src, /function assignButtonFor/);
     assert.match(src, /Copy debug/);

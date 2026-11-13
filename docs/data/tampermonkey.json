@@ -103,8 +103,8 @@
     "name": "Productivity Panel (abelrigm)",
     "category": "Control Tower",
     "summary": "Show each associate's rate and idle time, and refresh both together every 5 minutes.",
-    "detail": "On MEM3 assignments, Primary Grading rate and idle time update on one cycle. The rate is drawn as soon as its page arrives. Idle pages start then, four at a time, line people before BIGS, one try per person. Someone who shows up before the next cycle gets that rate and an idle page without waiting. At five minutes everyone is recalculated, and new people after that are picked up the same way. Each row, the line idle total, and the floor idle total update as each person comes back. BIGS idle stays on those rows and out of the totals. A failed pull keeps the last good number. Installed copies check the repository update link and open the new version when it is higher. On the MAASK authentication page, it opens the IT login chooser and clicks IT Service Login. On the menu location page it types MEM3 and presses Enter.",
-    "version": "1.9.1",
+    "detail": "On MEM3 assignments, Primary Grading rate and idle time update on one cycle. The rate is drawn as soon as its page arrives. Idle pages start then, four at a time, line people before BIGS, one try per person. Someone who shows up before the next cycle gets that rate and an idle page without waiting. At five minutes everyone is recalculated, and new people after that are picked up the same way. Each row, the line idle total, and the floor idle total update as each person comes back. BIGS idle stays on those rows and out of the totals. A failed pull keeps the last good number. Installed copies check the repository update link and open the new version when it is higher. On the MAASK authentication page, it opens the IT login chooser and clicks IT Service Login. On the menu location page it types MEM3 and presses Enter. While the problem-solve sheet scans someone in or out, the panel stops rewriting rows so Control Tower can update the station.",
+    "version": "1.9.2",
     "runsOn": "beta.control-tower.meta.amazon.dev, control-tower.meta.amazon.dev, oidc.prod.na.maask.amazonoperations.com, *.cloudfront.net/idp-selection, menu.na.aft.amazonoperations.app",
     "file": "downloads/mem3-productivity-panel.txt",
     "downloadName": "Productivity Panel (abelrigm).txt"
@@ -115,7 +115,7 @@
     "category": "Control Tower",
     "summary": "Scan a typed login in or out of a problem-solve station on Control Tower.",
     "detail": "On MEM3 assignments, a PS board button sits on the CRET Problem Solve group and stays out of the productivity panel. The sheet places each associate on the line map, with the B station stacked on the split side, and on Audit PS, Grey Totes, Gatekeeper, Bigs PS, Add-Ins, and Exceptions. Click a station and type a login, for example abelrigm. Scan in clicks the None link, types the login into the search Control Tower opens, and clicks Assign. Scan out clicks the login and then Unassign. Copy debug puts the station, the row, and any open search or Assign button on the clipboard. The sheet follows the group as the page updates. Anyone whose station is not on the sheet is listed under it.",
-    "version": "1.3.0",
+    "version": "1.3.1",
     "runsOn": "beta.control-tower.meta.amazon.dev, control-tower.meta.amazon.dev",
     "file": "downloads/mem3-control-tower-ps-board.txt",
     "downloadName": "MEM3 Control Tower - PS Board (abelrigm).txt"
