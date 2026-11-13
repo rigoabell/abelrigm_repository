@@ -7,7 +7,9 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.3/);
+assert.match(src, /@version\s+1\.9\.4/);
+assert.match(src, /Unassign leaving/);
+assert.match(src, /refreshLeaving\(\)/);
 assert.match(src, /const LEAVING_POLL_MS = 20000;/);
 assert.match(src, /LEAVING_ID = 'mem3-leaving'/);
 assert.match(src, /Saved on this computer/);
@@ -32,7 +34,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.3");
+assert.equal(entry.version, "1.9.4");
 assert.match(entry.detail, /types MEM3/);
 assert.match(entry.runsOn, /menu\.na\.aft\.amazonoperations\.app/);
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");

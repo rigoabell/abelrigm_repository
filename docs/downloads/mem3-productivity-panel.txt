@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.3
+// @version      1.9.4
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -37,7 +37,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.3';
+    const SCRIPT_VERSION = '1.9.4';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -6715,7 +6715,7 @@
         title.textContent = 'Leaving';
         title.style.cssText = 'font-size:13px; font-weight:800; letter-spacing:0.04em; text-transform:uppercase;';
         const note = document.createElement('div');
-        note.textContent = 'Saved on this computer. Not shared yet.';
+        note.textContent = 'Saved on this computer. Unassign runs here, after the password.';
         note.style.cssText = 'color:#8b949e; font-size:11px; margin:2px 0 8px;';
         const form = document.createElement('div');
         form.style.cssText = 'display:flex; gap:6px;';
@@ -6747,6 +6747,51 @@
         form.appendChild(login);
         form.appendChild(time);
         form.appendChild(mark);
+        const run = document.createElement('button');
+        run.type = 'button';
+        run.textContent = 'Unassign leaving';
+        run.style.cssText = 'margin-top:8px; padding:6px 10px; border-radius:6px; border:1px solid #f85149; ' +
+            'background:#0d1117; color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        const passRow = document.createElement('div');
+        passRow.style.cssText = 'display:none; gap:6px; margin-top:8px;';
+        const pass = document.createElement('input');
+        pass.type = 'password';
+        pass.placeholder = 'Password';
+        pass.setAttribute('autocomplete', 'off');
+        pass.style.cssText = fieldStyle;
+        const go = document.createElement('button');
+        go.type = 'button';
+        go.textContent = 'Run';
+        go.style.cssText = mark.style.cssText;
+        function showPass() {
+            passRow.style.display = 'flex';
+            pass.focus();
+        }
+        function submitPass() {
+            if (pass.value !== UNASSIGN_PASSWORD) {
+                setLeavingStatus('Wrong password.');
+                pass.focus();
+                return;
+            }
+            pass.value = '';
+            passRow.style.display = 'none';
+            unassignMarkedLeaves();
+        }
+        run.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            showPass();
+        });
+        go.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            submitPass();
+        });
+        pass.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter') submitPass();
+        });
+        passRow.appendChild(pass);
+        passRow.appendChild(go);
         const status = document.createElement('div');
         status.setAttribute('data-status', '');
         status.style.cssText = 'min-height:16px; margin-top:6px; font-size:12px; color:#c9d1d9;';
@@ -6755,6 +6800,8 @@
         card.appendChild(title);
         card.appendChild(note);
         card.appendChild(form);
+        card.appendChild(run);
+        card.appendChild(passRow);
         card.appendChild(status);
         card.appendChild(list);
         document.body.appendChild(card);
@@ -6777,49 +6824,60 @@
         }
     }
 
-    async function runDueLeaves() {
+    function markedLeaving(rows) {
+        const out = [];
+        const list = rows || [];
+        for (let i = 0; i < list.length; i++) {
+            if (list[i] && list[i].status === 'said') out.push(list[i]);
+        }
+        return out;
+    }
+
+    function refreshLeaving() {
         if (!isAssignmentsPage()) return;
         ensureLeavingCard();
-        if (leavingBusy || unassigning || psBoardHolding()) {
-            paintLeaving(loadLeaving(), new Date());
-            return;
-        }
+        if (leavingBusy || unassigning) return;
         const now = new Date();
         const doc = loadLeaving();
-        const rows = shiftRows(doc, now);
-        let changed = noteReturns(rows, now);
-        const due = dueLeaving(rows, now);
-        if (!due.length) {
-            if (changed) saveLeaving(doc);
-            paintLeaving(doc, now);
+        if (noteReturns(shiftRows(doc, now), now)) saveLeaving(doc);
+        paintLeaving(doc, now);
+    }
+
+    async function unassignMarkedLeaves() {
+        if (!isAssignmentsPage() || leavingBusy || unassigning || psBoardHolding()) return;
+        const doc = loadLeaving();
+        const rows = markedLeaving(shiftRows(doc, new Date()));
+        if (!rows.length) {
+            setLeavingStatus('Nobody on this list is waiting.');
             return;
         }
         leavingBusy = true;
         unassigning = true;
         holdLeaving(true);
+        let off = 0;
+        let missed = 0;
         try {
-            for (let i = 0; i < due.length; i++) {
-                const row = due[i];
+            for (let i = 0; i < rows.length; i++) {
+                const row = rows[i];
+                setLeavingStatus('Unassigning ' + (i + 1) + '/' + rows.length + ' · ' + row.login);
                 const anchor = findAnchorForPerson(row.login, '');
                 if (!anchor || countLoginOnBoard(row.login) === 0) {
                     markTakenOff(row, new Date(), 'not on a station');
-                    changed = true;
+                    missed += 1;
                     continue;
                 }
-                const record = { login: row.login, station: row.station, tries: (row.tries || 0) + 1 };
-                row.tries = record.tries;
+                const record = { login: row.login, station: row.station, tries: 1 };
                 let left = false;
                 try { left = await unassignAnchor(anchor, record); } catch (e) { left = false; }
                 if (left) {
                     markTakenOff(row, new Date(), 'unassigned');
-                    changed = true;
-                } else if (row.tries >= 3) {
-                    row.status = 'stuck';
-                    changed = true;
-                } else changed = true;
+                    off += 1;
+                }
             }
+            saveLeaving(doc);
+            setLeavingStatus('Unassigned ' + off + '. ' + missed + ' were not on a station. ' +
+                (rows.length - off - missed) + ' stayed on the list.');
         } finally {
-            if (changed) saveLeaving(doc);
             holdLeaving(false);
             unassigning = false;
             leavingBusy = false;
@@ -6831,7 +6889,7 @@
         if (!isAssignmentsPage() || !document.body) return;
         ensureLeavingCard();
         paintLeaving(loadLeaving(), new Date());
-        setInterval(function () { runDueLeaves(); }, LEAVING_POLL_MS);
+        setInterval(function () { refreshLeaving(); }, LEAVING_POLL_MS);
     }
 
     function init() {
