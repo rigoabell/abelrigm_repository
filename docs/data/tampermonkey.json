@@ -121,6 +121,17 @@
     "downloadName": "MEM3 Control Tower - PS Board (abelrigm).txt"
   },
   {
+    "id": "mem3-station-roster",
+    "name": "MEM3 Control Tower - Station Roster (abelrigm)",
+    "category": "Control Tower",
+    "summary": "Export every station in every department with the login, empty, or disabled.",
+    "detail": "On MEM3 assignments, Export stations reads each department and group. Every station is one row. The value is the login, empty when nobody is signed in, or disabled when Control Tower marks the station disabled. The sheet copies a CSV and downloads mem3-stations-YYYY-MM-DD.csv. The button stays off the group headings so the productivity panel still reads those names.",
+    "version": "1.0.0",
+    "runsOn": "beta.control-tower.meta.amazon.dev, control-tower.meta.amazon.dev",
+    "file": "downloads/mem3-station-roster.txt",
+    "downloadName": "MEM3 Control Tower - Station Roster (abelrigm).txt"
+  },
+  {
     "id": "fc-menu-secure-login-helper",
     "name": "FC Menu secure login helper (abelrigm)",
     "category": "FC Menu",
