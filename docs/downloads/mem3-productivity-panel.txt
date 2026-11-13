@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.24
+// @version      1.9.25
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.24';
+    const SCRIPT_VERSION = '1.9.25';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -194,6 +194,7 @@
     const WINDOW_GROUPS = ['Shift', 'Halves', 'Quarters', 'Fast starts'];
     let ACTIVE_WINDOW = 'all';
     const REFRESH_MS = 5 * 60 * 1000;
+    const REFRESH_CHOICE_KEY = 'mem3-refresh-min';
     const IDLE_START_MIN = 11;
     const TIME_WORKERS = 4;
     const UPH_TARGET = 30;
@@ -894,6 +895,8 @@
     let refreshBusy = false;
     let refreshDue = false;
     let refreshTimer = null;
+    let refreshClockTimer = null;
+    let nextRefreshAt = 0;
     let livePaintTimer = null;
     let BOARD_IDS = [];
     let BIGS_IDS = [];
@@ -1304,8 +1307,8 @@
         }
     }
 
-    function scheduleClockLoad() {
-        if (CLOCK.loadedAt && Date.now() - CLOCK.loadedAt < REFRESH_MS) {
+    function scheduleClockLoad(force) {
+        if (!force && CLOCK.loadedAt && Date.now() - CLOCK.loadedAt < refreshIntervalMs()) {
             paintAllClockRings();
             return Promise.resolve();
         }
@@ -1388,10 +1391,11 @@
         return (TIME_TRIES[empId] || 0) >= MAX_TIME_TRIES;
     }
 
-    // One read per associate. A later 5-minute rate refresh leaves that idle
-    // percent where it is. Reload and a window change clear the cache first.
+    // A full recalc marks saved rows as refreshing so idle is read again.
+    // A failed read keeps the last good number. Someone new has no row yet.
     function needsTimeThisCycle(empId) {
         const t = LAST_TIME[empId];
+        if (t && t.refreshing) return true;
         if (t && (timeSettled(t) || t.gaveUp)) return false;
         if ((TIME_TRIES[empId] || 0) >= MAX_TIME_TRIES) return false;
         return true;
@@ -1525,6 +1529,7 @@
         if (prevGood && !incomingGood) {
             prev.cycle = refreshCycle;
             prev.gaveUp = true;
+            prev.refreshing = false;
             if (record && record.tries) prev.tries = record.tries;
             recordTimeIssue(empId, record, true);
             if (DEBUG.timeLoad) DEBUG.timeLoad.done = (DEBUG.timeLoad.done || 0) + 1;
@@ -4750,6 +4755,33 @@
         nameRow.appendChild(makeInfoButton());
         titleWrap.appendChild(nameRow);
         titleWrap.appendChild(byline);
+        const refreshRow = document.createElement('div');
+        refreshRow.setAttribute('data-mem3-refresh', '');
+        refreshRow.style.cssText = 'display:flex; align-items:center; gap:6px; margin-top:4px;';
+        const count = document.createElement('div');
+        count.setAttribute('data-mem3-refresh-count', '');
+        count.style.cssText = 'font:800 12px Segoe UI,system-ui,sans-serif; color:#f5c518; min-width:108px;';
+        const every = document.createElement('select');
+        every.setAttribute('data-mem3-refresh-every', '');
+        every.style.cssText = 'padding:2px 4px; border-radius:6px; border:1px solid #30363d; background:#0d1117; ' +
+            'color:#fff; font:700 12px Segoe UI,system-ui,sans-serif;';
+        for (let minute = 1; minute <= 5; minute++) {
+            const opt = document.createElement('option');
+            opt.value = String(minute);
+            opt.textContent = minute + ' min';
+            every.appendChild(opt);
+        }
+        every.value = String(refreshMinutes());
+        every.addEventListener('change', function () {
+            const picked = parseInt(every.value, 10);
+            if (picked < 1 || picked > 5) return;
+            saveRefreshMinutes(picked);
+            scheduleNextRefresh();
+        });
+        refreshRow.appendChild(count);
+        refreshRow.appendChild(every);
+        titleWrap.appendChild(refreshRow);
+        paintRefreshCountdown();
         header.appendChild(titleWrap);
 
         const windows = document.createElement('div');
@@ -5543,12 +5575,70 @@
         }, delay);
     }
 
+    function refreshMinutes() {
+        let raw = '';
+        try {
+            if (typeof GM_getValue === 'function') raw = GM_getValue(REFRESH_CHOICE_KEY, '') || '';
+        } catch (e) { raw = ''; }
+        if (!raw) {
+            try { raw = localStorage.getItem(REFRESH_CHOICE_KEY) || ''; } catch (e2) { raw = ''; }
+        }
+        const n = parseInt(raw, 10);
+        if (n >= 1 && n <= 5) return n;
+        return 5;
+    }
+
+    function saveRefreshMinutes(n) {
+        const text = String(n);
+        try {
+            if (typeof GM_setValue === 'function') GM_setValue(REFRESH_CHOICE_KEY, text);
+        } catch (e) { /* the page copy below still records it */ }
+        try { localStorage.setItem(REFRESH_CHOICE_KEY, text); } catch (e2) { /* storage can be blocked */ }
+    }
+
+    function refreshIntervalMs() {
+        return refreshMinutes() * 60 * 1000;
+    }
+
+    function paintRefreshCountdown() {
+        let nodes = [];
+        try { nodes = document.querySelectorAll('[data-mem3-refresh-count]'); } catch (e) { return; }
+        let text = 'Recalc now';
+        if (refreshBusy) text = 'Recalculating';
+        else if (nextRefreshAt) {
+            const sec = Math.max(0, Math.ceil((nextRefreshAt - Date.now()) / 1000));
+            const m = Math.floor(sec / 60);
+            const s = sec % 60;
+            text = 'Recalc in ' + m + ':' + (s < 10 ? '0' : '') + s;
+        }
+        for (let i = 0; i < nodes.length; i++) {
+            if (nodes[i].textContent !== text) nodes[i].textContent = text;
+        }
+    }
+
+    function armRefreshClock() {
+        if (refreshClockTimer) return;
+        refreshClockTimer = setInterval(paintRefreshCountdown, 1000);
+    }
+
+    function reopenTimesForRefresh() {
+        resetTimeTries();
+        const ids = Object.keys(LAST_TIME);
+        for (let i = 0; i < ids.length; i++) {
+            if (LAST_TIME[ids[i]]) LAST_TIME[ids[i]].refreshing = true;
+        }
+    }
+
     function scheduleNextRefresh() {
         if (refreshTimer) clearTimeout(refreshTimer);
+        const wait = refreshIntervalMs();
+        nextRefreshAt = Date.now() + wait;
+        armRefreshClock();
+        paintRefreshCountdown();
         refreshTimer = setTimeout(function () {
             refreshTimer = null;
             refreshData();
-        }, REFRESH_MS);
+        }, wait);
     }
 
     function pagesHeld() {
@@ -5570,7 +5660,9 @@
         const gen = ++refreshGeneration;
         refreshBusy = true;
         refreshDue = false;
+        reopenTimesForRefresh();
         scheduleNextRefresh();
+        paintRefreshCountdown();
         try {
             if (!identityLoaded) await loadIdentities();
             if (gen !== refreshGeneration) return;
@@ -5598,7 +5690,7 @@
             lastIdentified = null;
             render();
             if (gen !== refreshGeneration) return;
-            const clockDone = scheduleClockLoad();
+            const clockDone = scheduleClockLoad(true);
             await loadBoardTimes();
             if (gen !== refreshGeneration) return;
             await clockDone;
