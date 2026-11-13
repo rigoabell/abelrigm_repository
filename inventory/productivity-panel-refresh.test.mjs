@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.28/);
+assert.match(src, /@version\s+1\.9\.29/);
 assert.match(src, /data-mem3-refresh-count/);
 assert.match(src, /data-mem3-refresh-every/);
 assert.match(src, /minute \+ ' min'/);
@@ -79,12 +79,16 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.28");
+assert.equal(entry.version, "1.9.29");
 const leavingList = src.slice(src.indexOf("function openLeavingList"), src.indexOf("function closeLeavingOverlay"));
 assert.ok(leavingList.indexOf("header.appendChild(close)") !== -1);
 assert.ok(leavingList.indexOf("card.appendChild(header)") < leavingList.indexOf("card.appendChild(scroller)"));
 assert.match(entry.detail, /clears every rate and idle time/);
 assert.match(entry.detail, /skips a station marked Disabled/);
+assert.match(src, /BIGS Line \+ Line Support/);
+assert.match(src, /if \(name === 'BIGS'\) return 'BIGs'/);
+assert.match(src, /gridRow = '1 \/ span 2'/);
+assert.match(entry.detail, /sits under L1 Odd/);
 assert.equal(entry.detail.includes("keeps the last good number"), false);
 assert.match(entry.detail, /shares one leaving list/);
 assert.match(entry.detail, /types MEM3/);

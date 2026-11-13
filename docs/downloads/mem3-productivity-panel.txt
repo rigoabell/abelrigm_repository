@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.28
+// @version      1.9.29
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.28';
+    const SCRIPT_VERSION = '1.9.29';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -209,6 +209,15 @@
         'LINE 4 ODD':  ['CRET Line 4 (O)'],
         'LINE 4 EVEN': ['CRET Line 4 (E)']
     };
+    const BIGS_GROUP = 'BIGS Line + Line Support';
+
+    function panelEntries() {
+        const out = [];
+        const keys = Object.keys(TARGET_SECTIONS);
+        for (let i = 0; i < keys.length; i++) out.push({ name: keys[i], labels: TARGET_SECTIONS[keys[i]] });
+        out.push({ name: 'BIGS', labels: [BIGS_GROUP] });
+        return out;
+    }
 
     const DECOR_CLASS = 'mem3-uph-badge';
     const BIGS_IDLE_CLASS = 'mem3-bigs-idle';
@@ -1499,9 +1508,9 @@
     function visibleEmpIds() {
         const ids = [];
         const seen = Object.create(null);
-        const keys = Object.keys(TARGET_SECTIONS);
-        for (let i = 0; i < keys.length; i++) {
-            const labels = TARGET_SECTIONS[keys[i]];
+        const panels = panelEntries();
+        for (let i = 0; i < panels.length; i++) {
+            const labels = panels[i].labels;
             for (let j = 0; j < labels.length; j++) {
                 const h = findH5(labels[j]);
                 const table = h ? findTable(h) : null;
@@ -2032,12 +2041,12 @@
         const node = document.getElementById(FLOOR_SUMMARY_ID);
         const bar = findToolbar();
         const headers = {};
-        const keys = Object.keys(TARGET_SECTIONS);
-        for (let i = 0; i < keys.length; i++) {
-            const label = TARGET_SECTIONS[keys[i]][0];
+        const panels = panelEntries();
+        for (let i = 0; i < panels.length; i++) {
+            const label = panels[i].labels[0];
             const h = findH5(label);
             const table = h ? findTable(h) : null;
-            headers[keys[i]] = {
+            headers[panels[i].name] = {
                 headerFound: !!h,
                 tableFound: !!table,
                 rows: table ? table.querySelectorAll('tbody tr').length : 0
@@ -2362,7 +2371,8 @@
         return rows;
     }
 
-    // BIGS stations are display-only. Their idle percent is not added to a side or to Total.
+    // BIGS Line + Line Support is the BIGs column and counts in Total.
+    // Any other row whose name contains BIGS keeps an idle badge only.
     function decorateBigsStations() {
         const ids = [];
         const seen = Object.create(null);
@@ -4068,9 +4078,24 @@
     }
 
     function panelTitle(name) {
+        if (name === 'BIGS') return 'BIGs';
         const line = /^LINE\s+(\d+)\s+(ODD|EVEN)/i.exec(name);
         if (line) return 'L' + line[1] + ' ' + (line[2].toUpperCase() === 'ODD' ? 'Odd' : 'Even');
         return name;
+    }
+
+    function summaryColumn(name) {
+        const columns = {
+            'LINE 1 ODD': '2',
+            'LINE 1 EVEN': '3',
+            'LINE 2 ODD': '4',
+            'LINE 2 EVEN': '5',
+            'LINE 3 ODD': '6',
+            'LINE 3 EVEN': '7',
+            'LINE 4 ODD': '8',
+            'LINE 4 EVEN': '9'
+        };
+        return columns[name] || '';
     }
 
     function makeSummaryCell(opts) {
@@ -4641,7 +4666,7 @@
     }
 
     function summaryStructureSig(data) {
-        return 'v46|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
+        return 'v47|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
             (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
             (data.floorOpen || []).join(';') + '|' +
             data.floorStaffed + '|' + (data.asOf || '') + '|' +
@@ -4879,10 +4904,11 @@
         }
 
         const metrics = document.createElement('div');
-        metrics.style.cssText = 'display:flex; align-items:flex-start; flex-wrap:nowrap; gap:0; width:100%; min-width:0;';
+        metrics.style.cssText = 'display:grid; grid-template-columns:minmax(0,1.15fr) repeat(8,minmax(0,1fr)); ' +
+            'grid-template-rows:auto auto; column-gap:0; row-gap:6px; width:100%; align-items:stretch;';
 
         const totalIds = lineIdsOf(data);
-        metrics.appendChild(makeSummaryCell({
+        const totalCell = makeSummaryCell({
             summaryKey: 'total',
             scopeLabel: 'Total',
             empIds: totalIds,
@@ -4896,12 +4922,17 @@
             stations: data.floorStations || 0,
             openStations: data.floorOpen || [],
             lead: true,
-            title: 'Average of the odd and even side rates. Total work time and IDLE time are summed once per associate from FCLM Time Details.'
-        }));
+            title: 'Average of the side rates and BIGs. Total work time and IDLE time are summed once per associate from FCLM Time Details.'
+        });
+        totalCell.style.gridColumn = '1';
+        totalCell.style.gridRow = '1 / span 2';
+        totalCell.style.alignSelf = 'stretch';
+        totalCell.style.height = '100%';
+        metrics.appendChild(totalCell);
 
         for (let i = 0; i < data.lines.length; i++) {
             const line = data.lines[i];
-            metrics.appendChild(makeSummaryCell({
+            const cell = makeSummaryCell({
                 summaryKey: line.name,
                 scopeLabel: panelTitle(line.name),
                 empIds: line.empIds || [],
@@ -4920,7 +4951,15 @@
                     (line.avgUph > 0 ? '' : ' \u00b7 no rate this shift') +
                     ' \u00b7 ' + idleLabel(sideIdlePct(line.idleMin || 0, line.clockedMin || 0)) + ' IDLE \u00b7 ' +
                     formatDuration(line.idleMin || 0) + ' / ' + formatDuration(line.clockedMin || 0) + ' clocked in'
-            }));
+            });
+            if (line.name === 'BIGS') {
+                cell.style.gridColumn = '2';
+                cell.style.gridRow = '2';
+            } else {
+                cell.style.gridColumn = summaryColumn(line.name);
+                cell.style.gridRow = '1';
+            }
+            metrics.appendChild(cell);
         }
 
         node.appendChild(metrics);
@@ -5245,9 +5284,9 @@
        --------------------------------------------------------------- */
     function collectDebugSnapshot() {
         const sections = {};
-        const keys = Object.keys(TARGET_SECTIONS);
-        for (let i = 0; i < keys.length; i++) {
-            sections[keys[i]] = TARGET_SECTIONS[keys[i]].map(function (label) {
+        const panels = panelEntries();
+        for (let i = 0; i < panels.length; i++) {
+            sections[panels[i].name] = panels[i].labels.map(function (label) {
                 const h = findH5(label);
                 return { label: label, found: !!h, hasTable: !!(h && findTable(h)) };
             });
@@ -5352,9 +5391,9 @@
     // don't cause a badge rebuild when nothing actually changed.
     function tablesSignature() {
         let sig = '';
-        const keys = Object.keys(TARGET_SECTIONS);
-        for (let i = 0; i < keys.length; i++) {
-            const labels = TARGET_SECTIONS[keys[i]];
+        const panels = panelEntries();
+        for (let i = 0; i < panels.length; i++) {
+            const labels = panels[i].labels;
             for (let j = 0; j < labels.length; j++) {
                 const h = findH5(labels[j]);
                 const table = h ? findTable(h) : null;
@@ -5412,11 +5451,11 @@
             let floorTotalMin = 0, floorIdleMin = 0, floorClockedMin = 0, floorBoth = 0;
             const floorSeen = Object.create(null);
             BOARD_IDS = [];
-            const keys = Object.keys(TARGET_SECTIONS);
-            for (let i = 0; i < keys.length; i++) {
-                const s = decorateSection(keys[i], TARGET_SECTIONS[keys[i]]);
+            const panels = panelEntries();
+            for (let i = 0; i < panels.length; i++) {
+                const s = decorateSection(panels[i].name, panels[i].labels);
                 lineStats.push({
-                    name: keys[i],
+                    name: panels[i].name,
                     avgUph: s.avgUph,
                     totalUnits: s.totalUnits,
                     staffed: s.staffed,
@@ -5430,7 +5469,7 @@
                     openStations: s.openStations || [],
                     empIds: s.empIds || []
                 });
-                DEBUG.perLine[keys[i]] = lineStats[lineStats.length - 1];
+                DEBUG.perLine[panels[i].name] = lineStats[lineStats.length - 1];
                 if (s.avgUph > 0) avgList.push(s.avgUph);
                 floorUnits += s.totalUnits;
                 floorStaffed += s.staffed;
@@ -5440,7 +5479,7 @@
                 floorCrStations += s.crStations || 0;
                 floorCrSigned += s.crSigned || 0;
                 const opens = s.openStations || [];
-                for (let o = 0; o < opens.length; o++) floorOpen.push(panelTitle(keys[i]) + '  ' + opens[o]);
+                for (let o = 0; o < opens.length; o++) floorOpen.push(panelTitle(panels[i].name) + '  ' + opens[o]);
                 const ids = s.empIds || [];
                 for (let e = 0; e < ids.length; e++) {
                     if (floorSeen[ids[e]]) continue;
@@ -5513,9 +5552,9 @@
     function rowsMissingBadges() {
         try {
             if (!isAssignmentsPage() || !assignmentsReady()) return false;
-            const keys = Object.keys(TARGET_SECTIONS);
-            for (let i = 0; i < keys.length; i++) {
-                const labels = TARGET_SECTIONS[keys[i]];
+            const panels = panelEntries();
+            for (let i = 0; i < panels.length; i++) {
+                const labels = panels[i].labels;
                 for (let j = 0; j < labels.length; j++) {
                     const h = findH5(labels[j]);
                     const table = h ? findTable(h) : null;
@@ -6194,10 +6233,11 @@
             ['Formula', 'Indirect time + Time Off Task, divided by paid time clocked in'],
             ['Counts', 'Indirect function time and Time Off Task in the selected window'],
             ['Does not count', 'Active graded time, or time outside the window'],
-            ['BIGS stations', 'A station whose name contains BIGS shows that associate’s idle percent on the row. It is left out of every side and out of Total.'],
+            ['BIGs', 'BIGS Line + Line Support. It sits under L1 Odd and has the same rate, idle percent, associates idle, units, and hours. Those associates count in Total.'],
+            ['Other BIGS rows', 'A station outside that group whose name contains BIGS shows idle on the row and stays out of the line totals.'],
             ['IDLE NOW', 'The latest function row is indirect or Time Off Task, and that row has lasted at least 11 minutes. A diamond in the function title is still that stretch. A shorter row is the lag after a scan. Someone who is clocked out is not counted. Earlier idle in the window still counts in the percent.'],
             ['ASSOCIATES IDLE', 'The number under the idle percent is how many associates on that side, or on the whole floor for Total, have been idle for at least 11 minutes. The white eye on the left opens that list.'],
-            ['View', 'The eye left of UPH lists that side from the lowest rate. The eye left of the idle percent lists it from the highest idle percent. Total does the same for everyone on the lines.'],
+            ['View', 'The eye left of UPH lists that side from the lowest rate. The eye left of the idle percent lists it from the highest idle percent. Total does the same for everyone on the lines and on BIGs.'],
             ['Hours idle', 'Under units, the idle hours are the indirect time plus Time Off Task already in the idle percent.']
         ]));
         card.appendChild(idleSec);
