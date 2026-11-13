@@ -7,7 +7,8 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.12/);
+assert.match(src, /@version\s+1\.9\.13/);
+assert.match(src, /function cleanStationText/);
 assert.match(src, /Copy early debug/);
 assert.match(src, /function collectEarlyDebug/);
 assert.match(src, /Show Leaving Early/);
@@ -50,7 +51,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.12");
+assert.equal(entry.version, "1.9.13");
 assert.match(entry.detail, /types MEM3/);
 assert.match(entry.runsOn, /menu\.na\.aft\.amazonoperations\.app/);
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
@@ -181,7 +182,7 @@ const patched = src.replace(
         },
         setDown(value) { FCLM_DOWN = value; },
         showUpdate(remote) { showUpdatePrompt(remote); },
-        shiftId, parseLeaveTime, addLeaving, dueLeaving, noteBack, markTakenOff,
+        shiftId, parseLeaveTime, addLeaving, dueLeaving, noteBack, markTakenOff, cleanStationText,
         stop() {
             refreshGeneration++;
             timeGeneration++;
@@ -510,6 +511,10 @@ try {
     assert.equal(api.parseLeaveTime("12:00 AM"), 0);
     assert.equal(api.parseLeaveTime("1:30 pm"), 13 * 60 + 30);
     assert.equal(api.parseLeaveTime("12:00"), null);
+    assert.equal(
+        api.cleanStationText("Customer Returns 1st Half: Station 3-01 | 2nd Half: Station 3-39 18.8 UPH 20.9% IDLE IN"),
+        "Customer Returns 1st Half: Station 3-01 | 2nd Half: Station 3-39"
+    );
     assert.equal(api.parseLeaveTime("25:00"), null);
     const leaving = { shifts: {} };
     const marked = api.addLeaving(leaving, "Wilrayni", 720, "CRET 2 Even", noon);

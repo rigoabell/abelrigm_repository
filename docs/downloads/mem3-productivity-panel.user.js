@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.12
+// @version      1.9.13
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -37,7 +37,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.12';
+    const SCRIPT_VERSION = '1.9.13';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -2678,6 +2678,16 @@
         };
     }
 
+    function cleanStationText(text) {
+        let station = String(text || '').replace(/\s+/g, ' ').trim();
+        station = station.replace(/\s+No UPH for\b.*$/i, '');
+        station = station.replace(/\s+\d+(?:\.\d+)?\s+UPH\b.*$/i, '');
+        station = station.replace(/\s+\d+(?:\.\d+)?%\s+IDLE\b.*$/i, '');
+        station = station.replace(/\s+[—–-]\s+IDLE\b.*$/i, '');
+        station = station.replace(/\s+IDLE NOW\b.*$/i, '');
+        return station.replace(/\s+/g, ' ').replace(/\s*\|\s*$/, '').trim();
+    }
+
     function unassignTarget(anchor) {
         const login = (anchor && anchor.textContent || '').replace(/\s+/g, ' ').trim();
         const person = IDENTITY.byLogin[login.toLowerCase()];
@@ -2687,7 +2697,7 @@
         if (login && station) {
             const idx = station.toLowerCase().lastIndexOf(login.toLowerCase());
             if (idx !== -1) station = station.slice(0, idx) + station.slice(idx + login.length);
-            station = station.replace(/\s+/g, ' ').replace(/\s*\|\s*$/, '').trim();
+            station = cleanStationText(station);
         }
         return {
             login: login,
@@ -6900,10 +6910,8 @@
                     continue;
                 }
                 const record = { login: row.login, station: row.station, tries: 1 };
-                let left = false;
                 let error = '';
-                try { left = await unassignAnchor(anchor, record); } catch (e) {
-                    left = false;
+                try { await unassignAnchor(anchor, record); } catch (e) {
                     error = e && e.message ? e.message : String(e || 'unassign failed');
                 }
                 const click = slimEarlyClick(record, error);
@@ -6915,13 +6923,17 @@
                 step.buttonGone = click.buttonGone;
                 step.tooltipButtons = click.tooltipButtons;
                 if (error) step.error = error;
-                if (left) {
+                const after = countLoginOnBoard(row.login);
+                step.afterCount = after;
+                const gone = typeof step.beforeCount === 'number' && after < step.beforeCount;
+                if (gone) {
                     markTakenOff(row, stamp, 'unassigned');
                     step.result = 'unassigned';
                     recordActivity(doc, actor, 'unassigned ' + row.login, stamp);
                     off += 1;
                 } else {
                     step.result = 'could not take off';
+                    if (step.buttonGone) step.note = 'Unassign closed but the login is still on the board.';
                     recordActivity(doc, actor, 'could not take ' + row.login + ' off', stamp);
                 }
                 run.steps.push(step);
