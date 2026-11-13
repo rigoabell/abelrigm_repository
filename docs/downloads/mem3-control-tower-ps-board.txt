@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MEM3 Control Tower - PS Board (abelrigm)
 // @namespace    https://mem3.amazon.local/
-// @version      1.2.0
+// @version      1.3.0
 // @description  Button on CRET Problem Solve that opens a sheet, places each associate, and scans a typed login in or out on Control Tower.
 // @author       abelrigm
 // @match        https://beta.control-tower.meta.amazon.dev/*
@@ -23,6 +23,7 @@
     // Lines 1 and 3 split Even into A (front) and B (stacked behind).
     // Lines 2 and 4 split Odd the same way. The other side is a single station.
 
+    const SCRIPT_VERSION = '1.3.0';
     const BTN_ID = 'mem3-ps-board-btn';
     const POPUP_ID = 'mem3-ps-board';
     const PANEL_JUNK = '.mem3-uph-badge, .mem3-line-avg-badge, .mem3-popup-uph, .mem3-popup-clock, .mem3-popup-idle, .mem3-yield';
@@ -667,6 +668,7 @@
 
     let selectedSlot = '';
     let scanBusy = false;
+    let lastScan = null;
 
     function scanInput() {
         const host = document.getElementById(POPUP_ID);
@@ -679,6 +681,203 @@
         if (!node) return;
         node.textContent = text || '';
         node.className = 'scan-status' + (kind ? ' is-' + kind : '');
+    }
+
+    function clipText(text, max) {
+        const value = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+        if (value.length <= max) return value;
+        return value.slice(0, max) + '…';
+    }
+
+    function isShown(el) {
+        if (!el || !el.getBoundingClientRect) return true;
+        const rect = el.getBoundingClientRect();
+        return rect.width >= 1 && rect.height >= 1;
+    }
+
+    function debugRows(table, slotId) {
+        const rows = rowsForSlot(table, slotId);
+        const out = [];
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            const cells = row.querySelectorAll('td');
+            const html = [];
+            for (let c = 0; c < cells.length; c++) html.push(clipText(cells[c].outerHTML || cells[c].textContent, 500));
+            const none = noneAnchor(row);
+            const login = rowLogin(row);
+            const person = login ? loginAnchor(row, login) : null;
+            out.push({
+                login: login || '',
+                none: none ? clipText(none.outerHTML, 400) : '',
+                person: person ? clipText(person.outerHTML, 400) : '',
+                cells: html
+            });
+        }
+        return out;
+    }
+
+    function debugTooltips() {
+        const out = [];
+        const tips = document.querySelectorAll('[id^="tooltip-"]');
+        for (let i = 0; i < tips.length; i++) {
+            const tip = tips[i];
+            if (tip.closest && tip.closest('#' + POPUP_ID)) continue;
+            if (!isShown(tip)) continue;
+            const inputs = [];
+            const fields = tip.querySelectorAll('input, textarea');
+            for (let f = 0; f < fields.length; f++) {
+                inputs.push({
+                    id: fields[f].id || '',
+                    placeholder: fields[f].getAttribute('placeholder') || '',
+                    value: clipText(fields[f].value, 40)
+                });
+            }
+            const buttons = [];
+            const found = tip.querySelectorAll('button, a[role="button"], a[mdn-link]');
+            for (let b = 0; b < found.length; b++) {
+                const label = clipText(found[b].textContent, 40);
+                if (label) buttons.push(label);
+            }
+            out.push({
+                id: tip.id || '',
+                inputs: inputs,
+                buttons: buttons,
+                html: clipText(tip.outerHTML, 900)
+            });
+        }
+        return out;
+    }
+
+    function debugSearches() {
+        const out = [];
+        const inputs = document.querySelectorAll('input, textarea');
+        for (let i = 0; i < inputs.length; i++) {
+            const input = inputs[i];
+            if (input.closest && (input.closest('#' + POPUP_ID) || input.closest('[id^="tooltip-"]'))) continue;
+            const hint = ((input.getAttribute('placeholder') || '') + ' ' + (input.id || '')).toLowerCase();
+            if (hint.indexOf('search') === -1 && hint.indexOf('login') === -1) continue;
+            if (!isShown(input)) continue;
+            out.push({
+                id: input.id || '',
+                placeholder: input.getAttribute('placeholder') || '',
+                value: clipText(input.value, 40)
+            });
+        }
+        return out;
+    }
+
+    function collectDebug() {
+        const group = readGroup();
+        const host = document.getElementById(POPUP_ID);
+        const statusNode = host && host.shadowRoot ? host.shadowRoot.querySelector('[data-scan-status]') : null;
+        const field = scanInput();
+        const names = (group.placed && group.placed.slots && group.placed.slots[selectedSlot]) || [];
+        let href = '';
+        try { href = location.href; } catch (e) { href = ''; }
+        return {
+            version: SCRIPT_VERSION,
+            href: href,
+            selected: selectedSlot,
+            label: stationLabel(selectedSlot),
+            typed: field ? field.value : '',
+            status: statusNode ? (statusNode.textContent || '') : '',
+            last: lastScan,
+            group: !!group.heading,
+            names: names,
+            rows: debugRows(group.table, selectedSlot),
+            tooltips: debugTooltips(),
+            searches: debugSearches()
+        };
+    }
+
+    function formatDebug(info) {
+        const lines = [];
+        const data = info || {};
+        lines.push('MEM3 PS Board debug v' + (data.version || ''));
+        lines.push('page: ' + (data.href || ''));
+        lines.push('station: ' + (data.label || '(none)') + (data.selected ? ' (' + data.selected + ')' : ''));
+        lines.push('typed: ' + (data.typed || '(empty)'));
+        lines.push('status: ' + (data.status || ''));
+        if (data.last) {
+            lines.push('last scan: ' + (data.last.action || '') + ' ' + (data.last.login || '') + ' — ' + (data.last.message || ''));
+        }
+        lines.push('group: ' + (data.group ? 'CRET Problem Solve found' : 'CRET Problem Solve not found'));
+        const names = data.names || [];
+        lines.push('on sheet: ' + (names.length ? names.join(', ') : '(empty)'));
+        const rows = data.rows || [];
+        if (!rows.length) lines.push('rows: none for this station');
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            lines.push('row ' + (i + 1) + ' login=' + (row.login || '(empty)'));
+            if (row.none) lines.push('  none: ' + row.none);
+            if (row.person) lines.push('  login link: ' + row.person);
+            const cells = row.cells || [];
+            for (let c = 0; c < cells.length; c++) lines.push('  cell ' + (c + 1) + ': ' + cells[c]);
+        }
+        const searches = data.searches || [];
+        if (!searches.length) lines.push('page search: none');
+        for (let s = 0; s < searches.length; s++) {
+            lines.push('page search #' + (searches[s].id || '?') + ' placeholder="' + (searches[s].placeholder || '') + '" value="' + (searches[s].value || '') + '"');
+        }
+        const tips = data.tooltips || [];
+        if (!tips.length) lines.push('tooltips: none open');
+        for (let t = 0; t < tips.length; t++) {
+            const tip = tips[t];
+            lines.push('tooltip ' + (tip.id || '?'));
+            const inputs = tip.inputs || [];
+            if (!inputs.length) lines.push('  input: none');
+            for (let n = 0; n < inputs.length; n++) {
+                lines.push('  input #' + (inputs[n].id || '?') + ' placeholder="' + (inputs[n].placeholder || '') + '" value="' + (inputs[n].value || '') + '"');
+            }
+            lines.push('  buttons: ' + ((tip.buttons && tip.buttons.length) ? tip.buttons.join(', ') : 'none'));
+            if (tip.html) lines.push('  html: ' + tip.html);
+        }
+        return lines.join('\n');
+    }
+
+    function showDebugText(text) {
+        const host = document.getElementById(POPUP_ID);
+        const root = host && host.shadowRoot;
+        if (!root) return;
+        let box = root.querySelector('[data-debug-text]');
+        if (!box) {
+            box = document.createElement('textarea');
+            box.setAttribute('data-debug-text', '');
+            box.className = 'debug-text';
+            box.readOnly = true;
+            const scan = root.querySelector('.scan');
+            if (scan && scan.parentElement) scan.parentElement.insertBefore(box, scan.nextSibling);
+        }
+        box.hidden = false;
+        box.value = text;
+        try { box.focus(); box.select(); } catch (e) { /* ignore */ }
+    }
+
+    function copyText(text) {
+        return new Promise(function (resolve, reject) {
+            const nav = typeof navigator !== 'undefined' ? navigator : null;
+            const finish = function (err) {
+                if (!err) { resolve(); return; }
+                try {
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.setAttribute('readonly', '');
+                    ta.style.cssText = 'position:fixed; left:0; top:0; width:1px; height:1px; opacity:0;';
+                    document.body.appendChild(ta);
+                    ta.focus();
+                    ta.select();
+                    const ok = document.execCommand('copy');
+                    ta.remove();
+                    if (ok) resolve();
+                    else reject(err);
+                } catch (e) { reject(err); }
+            };
+            if (nav && nav.clipboard && nav.clipboard.writeText) {
+                nav.clipboard.writeText(text).then(function () { finish(null); }).catch(finish);
+                return;
+            }
+            finish(new Error('copy failed'));
+        });
     }
 
     function markSelected() {
@@ -749,6 +948,13 @@
             result = { ok: false, message: (e && e.message) ? e.message : 'Control Tower did not take that scan.' };
         }
         scanBusy = false;
+        lastScan = {
+            action: plan.action,
+            login: plan.login,
+            label: plan.label,
+            ok: !!result.ok,
+            message: result.message
+        };
         setScanStatus(result.message, result.ok ? 'ok' : 'bad');
         if (result.ok && input) input.value = '';
         tick();
@@ -773,9 +979,12 @@
         '.scan-btn { padding:6px 10px; border-radius:6px; border:1px solid #1d3b64; background:#1d3b64; color:#fff;' +
         ' font:700 13px Segoe UI, system-ui, sans-serif; cursor:pointer; }' +
         '.scan-btn.out { background:#fff; color:#1d3b64; }' +
+        '.scan-btn.debug { background:#fff; color:#5d7190; border-color:#8eafd0; }' +
         '.scan-status { flex:1 0 220px; font-size:13px; font-weight:650; color:#5d7190; }' +
         '.scan-status.is-ok { color:#1a7f37; }' +
         '.scan-status.is-bad { color:#a12622; }' +
+        '.debug-text { display:block; width:100%; height:140px; margin-top:10px; box-sizing:border-box;' +
+        ' border:1px solid #8eafd0; color:#1a2332; font:12px ui-monospace, Consolas, monospace; padding:8px; }' +
         '.floor { display:flex; gap:22px; margin-top:18px; }' +
         '.cluster { flex:1 1 0; min-width:0; display:grid; grid-template-columns:1fr 1fr; grid-template-rows:auto auto;' +
         ' column-gap:8px; row-gap:8px; align-items:stretch; }' +
@@ -883,6 +1092,24 @@
             event.stopPropagation();
             runScan('out');
         });
+        const copyDebug = document.createElement('button');
+        copyDebug.type = 'button';
+        copyDebug.className = 'scan-btn debug';
+        copyDebug.textContent = 'Copy debug';
+        copyDebug.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            const text = formatDebug(collectDebug());
+            copyText(text).then(function () {
+                const host = document.getElementById(POPUP_ID);
+                const box = host && host.shadowRoot ? host.shadowRoot.querySelector('[data-debug-text]') : null;
+                if (box) box.hidden = true;
+                setScanStatus('Debug copied. Paste it in chat.', 'ok');
+            }).catch(function () {
+                showDebugText(text);
+                setScanStatus('Clipboard was blocked. The debug text is selected below.', 'bad');
+            });
+        });
         const status = document.createElement('div');
         status.className = 'scan-status';
         status.setAttribute('data-scan-status', '');
@@ -890,6 +1117,7 @@
         scan.appendChild(field);
         scan.appendChild(scanIn);
         scan.appendChild(scanOut);
+        scan.appendChild(copyDebug);
         scan.appendChild(status);
 
         const floor = document.createElement('div');
@@ -1143,6 +1371,7 @@
             normalizeLogin: normalizeLogin,
             scanPlan: scanPlan,
             stationOf: stationOf,
+            formatDebug: formatDebug,
             lines: LINES,
             support: SUPPORT
         };
