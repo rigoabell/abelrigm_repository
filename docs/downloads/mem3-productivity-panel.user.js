@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.10.5
+// @version      1.10.6
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.10.5';
+    const SCRIPT_VERSION = '1.10.6';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -4198,10 +4198,8 @@
         }
     }
 
-    function askUnassignConfirm(button, titleText, noteText, onOk) {
+    function askPassword(titleText, noteText, onOk) {
         if (unassigning) return;
-        const count = boardAnchors().length;
-        if (!count) return;
         const old = document.getElementById('mem3-unassign-panel');
         if (old) old.remove();
         const overlay = document.createElement('div');
@@ -4264,6 +4262,13 @@
         overlay.appendChild(card);
         document.body.appendChild(overlay);
         input.focus();
+    }
+
+    function askUnassignConfirm(button, titleText, noteText, onOk) {
+        if (unassigning) return;
+        const count = boardAnchors().length;
+        if (!count) return;
+        askPassword(titleText, noteText, onOk);
     }
 
     function askUnassignAll(button) {
@@ -6180,6 +6185,7 @@
             scheduleLinePairs();
             if (CLOCK.loadedAt) paintAllClockRings();
             queueMissingTimes();
+            placeGroupUnassignButtons();
         }
     }
 
@@ -6246,7 +6252,242 @@
         return false;
     }
 
+    function headingLabel(heading) {
+        if (!heading) return '';
+        const clone = heading.cloneNode ? heading.cloneNode(true) : heading;
+        if (clone.querySelectorAll) {
+            const junk = clone.querySelectorAll('.' + SECTION_BADGE_CLASS + ', .' + DECOR_CLASS);
+            for (let i = 0; i < junk.length; i++) junk[i].remove();
+        }
+        return groupNameFromHeading((clone.textContent || '').replace(/\s+/g, ' ').trim());
+    }
+
+    function groupRoot(heading) {
+        let el = heading;
+        for (let i = 0; i < 12 && el && el.parentElement; i++) {
+            const parent = el.parentElement;
+            if (parent === document.body || parent === document.documentElement) {
+                return el.querySelector && el.querySelector('table') ? el : null;
+            }
+            const heads = parent.querySelectorAll('h3, h4, h5');
+            let others = 0;
+            for (let h = 0; h < heads.length; h++) {
+                if (!el.contains(heads[h])) others++;
+            }
+            if (others && el.querySelector && el.querySelector('table')) return el;
+            el = parent;
+        }
+        return el && el.querySelector && el.querySelector('table') ? el : null;
+    }
+
+    function anchorInRoot(root, login) {
+        const want = String(login || '').trim().toLowerCase();
+        if (!root || !root.querySelectorAll || !want) return null;
+        const anchors = root.querySelectorAll('tbody a[role="button"], tbody a[mdn-link]');
+        for (let i = 0; i < anchors.length; i++) {
+            const text = (anchors[i].textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            if (text === want) return anchors[i];
+        }
+        return null;
+    }
+
+    function peopleInGroup(root) {
+        if (!root || !root.querySelectorAll) return [];
+        const tables = root.querySelectorAll('table');
+        const out = [];
+        const seen = Object.create(null);
+        for (let t = 0; t < tables.length; t++) {
+            if (tables[t].closest && tables[t].closest('#' + FLOOR_SUMMARY_ID)) continue;
+            const anchors = tables[t].querySelectorAll('tbody a[role="button"], tbody a[mdn-link]');
+            for (let a = 0; a < anchors.length; a++) {
+                const login = (anchors[a].textContent || '').replace(/\s+/g, ' ').trim();
+                if (/^(none|disabled)$/i.test(login)) continue;
+                if (!looksLikeLogin(login)) continue;
+                const key = login.toLowerCase();
+                if (seen[key]) continue;
+                seen[key] = true;
+                const person = boardPersonFromAnchor(anchors[a]);
+                if (!person.login) person.login = key;
+                out.push(person);
+            }
+        }
+        return out;
+    }
+
+    function liveRootFor(heading, fallback) {
+        const label = headingLabel(heading);
+        if (!label) return fallback;
+        const heads = document.querySelectorAll('h3, h4, h5');
+        for (let i = 0; i < heads.length; i++) {
+            if (headingLabel(heads[i]) !== label) continue;
+            const root = groupRoot(heads[i]);
+            if (root && root.isConnected !== false && root.querySelector && root.querySelector('table')) return root;
+        }
+        return fallback;
+    }
+
+    async function unassignGroup(button, root) {
+        if (unassigning) return;
+        const heading = button && button.previousElementSibling;
+        if (heading && /^H[1-6]$/.test(heading.tagName || '')) root = liveRootFor(heading, root);
+        const people = peopleInGroup(root);
+        unassigning = true;
+        RUN_STOP = false;
+        holdLeaving(true);
+        const original = button.textContent;
+        const batch = { mode: 'unassign-group', people: people, reassign: '' };
+        let left = 0;
+        try {
+            if (!people.length) {
+                batch.error = 'no associate';
+                pushUnassignLog(batch);
+                button.textContent = 'Nobody signed in';
+                return;
+            }
+            batch.reassign = formatReassignList(people);
+            try { await copyText(batch.reassign); } catch (e0) { /* ignore */ }
+            paintRunPanel({
+                title: 'Unassigning group',
+                done: 0,
+                total: people.length,
+                detail: batch.reassign,
+                stats: 'Copied Name, Login, Station for reassign'
+            });
+            for (let i = 0; i < people.length; i++) {
+                if (RUN_STOP) {
+                    batch.stopped = true;
+                    break;
+                }
+                const person = people[i];
+                const login = person.login;
+                person.tries = 0;
+                person.clickedUnassign = false;
+                button.textContent = 'Unassigning ' + (i + 1) + '/' + people.length;
+                paintRunPanel({
+                    title: 'Unassigning group',
+                    done: left,
+                    total: people.length,
+                    current: (person.name ? person.name + '  ' : '') + login,
+                    detail: person.station || 'Opening menu',
+                    stats: 'Copied Name, Login, Station for reassign'
+                });
+                let stayedOff = false;
+                let watchedOnce = false;
+                while (person.tries < 4 && !RUN_STOP) {
+                    const anchor = anchorInRoot(root, login);
+                    if (!anchor) break;
+                    person.tries++;
+                    await closeAllAssociateMenus();
+                    const fresh = boardPersonFromAnchor(anchor);
+                    person.station = fresh.station || person.station;
+                    person.name = fresh.name || person.name;
+                    person.empId = fresh.empId || person.empId;
+                    await sleep(80);
+                    watchedOnce = true;
+                    const ok = await unassignAnchor(anchor, person);
+                    if (ok) {
+                        stayedOff = true;
+                        break;
+                    }
+                    await sleep(300);
+                }
+                if (!stayedOff && !watchedOnce) {
+                    const watched = await watchUnassign(login, '');
+                    stayedOff = watched.gone;
+                    person.samples = watched.samples;
+                }
+                person.leftBoard = stayedOff;
+                if (person.leftBoard) left++;
+                await sleep(400);
+            }
+            batch.done = left;
+            batch.reassign = formatReassignList(people);
+            pushUnassignLog(batch);
+            try { await copyText(batch.reassign); } catch (e2) { /* ignore */ }
+            button.textContent = 'Unassigned ' + left + '/' + people.length;
+            paintRunPanel({
+                title: batch.stopped ? 'Unassign stopped' : 'Unassign finished',
+                done: left,
+                total: people.length,
+                detail: batch.reassign,
+                stats: 'Copied Name, Login, Station for reassign',
+                barColor: left === people.length ? '#2ea043' : '#d29922',
+                finished: true
+            });
+        } catch (e) {
+            batch.error = (e && e.message) ? e.message : String(e);
+            batch.reassign = formatReassignList(people);
+            pushUnassignLog(batch);
+            button.textContent = 'Unassign failed';
+            paintRunPanel({
+                title: 'Unassign failed',
+                done: left,
+                total: people.length,
+                detail: batch.reassign || batch.error,
+                barColor: '#f85149',
+                finished: true
+            });
+        } finally {
+            holdLeaving(false);
+            unassigning = false;
+            setTimeout(function () {
+                if (button.isConnected) button.textContent = original;
+            }, 4000);
+        }
+    }
+
+    function askUnassignGroup(button, heading) {
+        const live = heading && heading.isConnected ? heading : null;
+        const root = live ? groupRoot(live) : null;
+        if (!root) return;
+        const people = peopleInGroup(root);
+        const name = headingLabel(live) || 'this group';
+        if (!people.length) {
+            const previous = button.textContent;
+            button.textContent = 'Nobody signed in';
+            setTimeout(function () {
+                if (button.isConnected && button.textContent === 'Nobody signed in') button.textContent = previous;
+            }, 2000);
+            return;
+        }
+        askPassword(
+            'Unassign ' + name + '?',
+            people.length + (people.length === 1 ? ' person is' : ' people are') +
+                ' signed in on this group. Enter the password to continue.',
+            function () { unassignGroup(button, root); }
+        );
+    }
+
+    function placeGroupUnassignButtons() {
+        if (!isAssignmentsPage() || unassigning) return;
+        const heads = document.querySelectorAll('h3, h4, h5');
+        const seen = [];
+        for (let i = 0; i < heads.length; i++) {
+            const heading = heads[i];
+            if (heading.closest && heading.closest('#' + FLOOR_SUMMARY_ID)) continue;
+            const root = groupRoot(heading);
+            if (!root || !root.querySelector || !root.querySelector('table')) continue;
+            if (seen.indexOf(root) !== -1) continue;
+            seen.push(root);
+            if (root.querySelector('[data-mem3-unassign-group]')) continue;
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.setAttribute('data-mem3-unassign-group', '1');
+            btn.textContent = 'Unassign Group';
+            btn.style.cssText = 'display:inline-block; margin:4px 0 8px 8px; padding:4px 8px; border-radius:6px; ' +
+                'border:1px solid #f85149; background:#0d1117; color:#fff; cursor:pointer; ' +
+                'font:800 11px Segoe UI,system-ui,sans-serif; vertical-align:middle;';
+            btn.addEventListener('click', function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+                askUnassignGroup(btn, heading);
+            });
+            if (heading.parentNode) heading.parentNode.insertBefore(btn, heading.nextSibling);
+        }
+    }
+
     function repairBoard() {
+        placeGroupUnassignButtons();
         if (unassigning || !LAST_ROLLUP_AT) return;
         if (rowsMissingBadges()) scheduleLivePaint();
     }
