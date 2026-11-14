@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Assign Round Trip (abelrigm)
 // @namespace    https://mem3.amazon.local/
-// @version      1.3.0
+// @version      1.3.1
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-assign-roundtrip.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-assign-roundtrip.user.js
 // @description  Unassign one Control Tower login, watch the station, then assign that same login back.
@@ -26,7 +26,7 @@
     // stops then. It never waits longer than 10 seconds. A menu that only
     // closes for a moment does not count.
 
-    const VERSION = '1.3.0';
+    const VERSION = '1.3.1';
     const LINE_LABEL = 'CRET Line 1 (O) + Line Support';
     const PANEL_ID = 'mem3-assign-roundtrip';
     const METHODS = ['fiber', 'fiber-all', 'native'];
@@ -62,6 +62,10 @@
         return /^none$/i.test(plain(value));
     }
 
+    function isDisabledLabel(value) {
+        return /^disabled$/i.test(plain(value));
+    }
+
     function isTargetHeading(text) {
         const name = plain(text).toLowerCase().replace(/\d+(\.\d+)?\s*uph\s*avg.*/i, '').trim();
         return name.indexOf('cret line 1 (o)') !== -1 && name.indexOf('line support') !== -1;
@@ -70,10 +74,11 @@
     function classifyEmployee(anchorText, cellText) {
         const anchor = plain(anchorText);
         if (isNoneLabel(anchor)) return { employee: 'None', login: '' };
+        if (isDisabledLabel(anchor)) return { employee: 'DISABLED', login: '' };
         if (looksLikeLogin(anchor)) return { employee: normalizeLogin(anchor), login: normalizeLogin(anchor) };
         let raw = plain(cellText).replace(/\boverride\b/ig, '');
         raw = plain(raw);
-        if (/^disabled$/i.test(raw)) return { employee: 'DISABLED', login: '' };
+        if (isDisabledLabel(raw)) return { employee: 'DISABLED', login: '' };
         if (!raw || isNoneLabel(raw)) return { employee: 'None', login: '' };
         if (looksLikeLogin(raw)) return { employee: normalizeLogin(raw), login: normalizeLogin(raw) };
         return { employee: raw, login: '' };
@@ -277,12 +282,24 @@
         return !!(el && el.closest && el.closest('[id^="tooltip-"]'));
     }
 
+    function textWithSpaces(el) {
+        if (!el) return '';
+        if (el.nodeType === 3) return el.textContent || '';
+        let text = '';
+        const kids = el.childNodes || [];
+        for (let i = 0; i < kids.length; i++) {
+            if (text && kids[i].nodeType !== 3) text += ' ';
+            text += textWithSpaces(kids[i]);
+        }
+        return text;
+    }
+
     function cleanText(el) {
         if (!el) return '';
         const clone = el.cloneNode(true);
         const junk = clone.querySelectorAll ? clone.querySelectorAll(PANEL_JUNK) : [];
         for (let i = 0; i < junk.length; i++) junk[i].remove();
-        return plain(clone.textContent);
+        return plain(textWithSpaces(clone));
     }
 
     function stationRows() {
@@ -495,7 +512,7 @@
                     let anchorText = '';
                     for (let a = 0; a < anchors.length; a++) {
                         const text = plain(anchors[a].textContent);
-                        if (isNoneLabel(text) || looksLikeLogin(text)) {
+                        if (isNoneLabel(text) || isDisabledLabel(text) || looksLikeLogin(text)) {
                             anchorText = text;
                             break;
                         }
@@ -760,6 +777,9 @@
     }
 
     async function unassignLogin(login, mode) {
+        if (isNoneLabel(login) || isDisabledLabel(login)) {
+            return { ok: false, text: mode + ' · ' + login + ' is not a person.' };
+        }
         const row = findLoginRow(login);
         if (!row) return { ok: false, text: mode + ' · ' + login + ' is not on a station.' };
         const address = rowAddress(row);

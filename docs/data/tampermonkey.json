@@ -125,8 +125,8 @@
     "name": "Assign Round Trip (abelrigm)",
     "category": "Control Tower",
     "summary": "Unassign one login, watch the station, then assign that same login back.",
-    "detail": "A separate panel on MEM3 assignments. Line 1 Odd + Support reads CRET Line 1 (O) + Line Support from top to bottom. It copies Assignment and Employee first, including None and disabled stations, then unassigns each signed-in person and assigns that same person back only if they stay off. Each wait moves on as soon as the result has held, and it gives up at 10 seconds. No login has to be typed. Copy roster copies that table again without clicking anyone. Copy debug copies the roster, the run, and any open Unassign or Assign menu. One person can still be typed for a single try. The click can be fiber, fiber-all, or a mouse click. The productivity panel is left running unless Pause the productivity panel is checked.",
-    "version": "1.3.0",
+    "detail": "A separate panel on MEM3 assignments. Line 1 Odd + Support reads CRET Line 1 (O) + Line Support from top to bottom. It copies Assignment and Employee first, including None and disabled stations, then unassigns each signed-in person and assigns that same person back only if they stay off. A disabled station is not a login, so it is not clicked. Each wait moves on as soon as the result has held, and it gives up at 10 seconds. No login has to be typed. Copy roster copies that table again without clicking anyone. Copy debug copies the roster, the run, and any open Unassign or Assign menu. One person can still be typed for a single try. The click can be fiber, fiber-all, or a mouse click. The productivity panel is left running unless Pause the productivity panel is checked.",
+    "version": "1.3.1",
     "runsOn": "beta.control-tower.meta.amazon.dev, control-tower.meta.amazon.dev",
     "file": "downloads/mem3-assign-roundtrip.txt",
     "downloadName": "Assign Round Trip (abelrigm).txt"

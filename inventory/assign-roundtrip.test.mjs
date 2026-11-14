@@ -20,11 +20,11 @@ function bits(text) {
 test("catalog entry matches the script", () => {
     const entry = catalog.find((item) => item.id === "mem3-assign-roundtrip");
     assert.ok(entry);
-    assert.equal(entry.version, "1.3.0");
+    assert.equal(entry.version, "1.3.1");
     assert.equal(entry.category, "Control Tower");
     assert.equal(entry.file, "downloads/mem3-assign-roundtrip.txt");
     assert.equal(entry.downloadName, "Assign Round Trip (abelrigm).txt");
-    assert.match(src, /@version\s+1\.3\.0/);
+    assert.match(src, /@version\s+1\.3\.1/);
     assert.equal(tool.lineLabel, "CRET Line 1 (O) + Line Support");
     assert.equal(src, published);
     assert.deepEqual(JSON.parse(JSON.stringify(tool.methods)), ["fiber", "fiber-all", "native"]);
@@ -87,6 +87,8 @@ test("the roster table keeps the station and who was on it", () => {
     const who = (anchor, cell) => JSON.parse(JSON.stringify(tool.classifyEmployee(anchor, cell)));
     assert.deepEqual(who("None", "None"), { employee: "None", login: "" });
     assert.deepEqual(who("", "DISABLED"), { employee: "DISABLED", login: "" });
+    assert.deepEqual(who("disabled", "disabled"), { employee: "DISABLED", login: "" });
+    assert.deepEqual(who("Disabled", "Disabled"), { employee: "DISABLED", login: "" });
     assert.deepEqual(who("pmakaela", "pmakaela Override"), { employee: "pmakaela", login: "pmakaela" });
     assert.deepEqual(who("", "anyisim Override"), { employee: "anyisim", login: "anyisim" });
     const table = tool.rosterTable("CRET Line 1 (O) + Line Support", [
