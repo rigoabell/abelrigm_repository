@@ -7,10 +7,10 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.43/);
+assert.match(src, /@version\s+1\.9\.44/);
 assert.match(src, /data-mem3-enter-notes/);
-assert.match(src, /data-mem3-line-notes/);
-assert.match(src, /function lineNoteName/);
+assert.equal(src.includes("data-mem3-line-notes"), false);
+assert.match(src, /grid-template-columns:188px 188px/);
 assert.match(src, /lines\[i\]\.name !== 'BIGS'/);
 assert.match(src, /function uphHighlight/);
 assert.match(src, /Enter Notes/);
@@ -112,7 +112,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.43");
+assert.equal(entry.version, "1.9.44");
 assert.match(entry.detail, /View Notes/);
 assert.match(entry.detail, /cleared only by the person who wrote it/);
 assert.match(entry.detail, /lists those stations under Disabled/);
@@ -261,7 +261,7 @@ const patched = src.replace(
         setDown(value) { FCLM_DOWN = value; },
         showUpdate(remote) { showUpdatePrompt(remote); },
         shiftId, parseLeaveTime, addLeaving, dueLeaving, noteBack, markTakenOff, cleanStationText, customerReturnsLines,
-        blendMediumLarge, overallRate, bodyColumn, placeBesideLogin, extremeRanks, uphHighlight, lineNoteName,
+        blendMediumLarge, overallRate, bodyColumn, placeBesideLogin, extremeRanks, uphHighlight,
         stationDisabled(row) { return stationIsDisabled(row); },
         stop() {
             refreshGeneration++;
@@ -669,8 +669,6 @@ try {
     const overall = api.overallRate(overallRow, overallHeaders);
     assert.equal(overall.units, 139);
     assert.ok(Math.abs(overall.uph - (139 / 5.36)) < 0.000001);
-    assert.equal(api.lineNoteName("LINE 3 ODD"), "CRET Line 3 (O)");
-    assert.equal(api.lineNoteName("BIGS"), "BIGs");
     const ranks = api.extremeRanks([
         { name: "LINE 1 ODD", avgUph: 20, idleMin: 10, clockedMin: 100 },
         { name: "BIGS", avgUph: 5, idleMin: 50, clockedMin: 100 },

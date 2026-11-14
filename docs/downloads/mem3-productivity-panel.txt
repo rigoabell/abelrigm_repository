@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.43
+// @version      1.9.44
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.43';
+    const SCRIPT_VERSION = '1.9.44';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -4614,13 +4614,6 @@
         return wrap;
     }
 
-    function lineNoteName(name) {
-        if (name === 'BIGS') return 'BIGs';
-        const labels = TARGET_SECTIONS[name];
-        const raw = labels && labels[0] ? labels[0] : name;
-        return raw.replace(/\bLINE\b/, 'Line');
-    }
-
     function panelTitle(name) {
         if (name === 'BIGS') return 'BIGs';
         const line = /^LINE\s+(\d+)\s+(ODD|EVEN)/i.exec(name);
@@ -4732,22 +4725,6 @@
         addMetric(formatUnits(opts.units || 0), 'units', '#8b949e', '', opts.lead ? 16 : 13, { key: 'units' });
         addMetric(formatDuration(opts.idleMin || 0), 'hrs idle', '#8b949e', '', opts.lead ? 16 : 13, { key: 'idleHours' });
 
-        if (opts.noteFor) {
-            const noteBtn = document.createElement('button');
-            noteBtn.type = 'button';
-            noteBtn.textContent = 'Enter Notes';
-            noteBtn.setAttribute('data-mem3-line-notes', opts.noteFor);
-            noteBtn.style.cssText = 'align-self:flex-start; margin-top:4px; padding:4px 8px; border-radius:6px; ' +
-                'border:1px solid #8b949e; background:#6e7681; color:#ffffff; cursor:pointer; ' +
-                'font:800 11px Segoe UI,system-ui,sans-serif; white-space:nowrap;';
-            noteBtn.addEventListener('click', function (e) {
-                e.preventDefault();
-                e.stopPropagation();
-                openNotesPanel(opts.noteFor, 'line');
-            });
-            valueRow.appendChild(noteBtn);
-        }
-
         cell.appendChild(titleRow);
         cell.appendChild(valueRow);
         return cell;
@@ -4757,25 +4734,14 @@
 
     function ensureSummaryActions() {
         let actions = document.getElementById('mem3-summary-actions');
-        if (actions && actions.getAttribute('data-mem3-probe') !== 'actions-v1942') actions.remove();
-        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'actions-v1942') return actions;
+        if (actions && actions.getAttribute('data-mem3-probe') !== 'actions-v1944') actions.remove();
+        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'actions-v1944') return actions;
         actions = document.createElement('div');
         actions.id = 'mem3-summary-actions';
-        actions.setAttribute('data-mem3-probe', 'actions-v1942');
-        actions.style.cssText = 'display:flex; gap:6px; align-items:flex-start; flex-wrap:wrap;';
-        function actionButton(label, border) {
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.textContent = label;
-            btn.style.cssText = 'flex:0 0 auto; padding:4px 8px; border-radius:8px; cursor:pointer; ' +
-                'font:800 11px Segoe UI,system-ui,sans-serif; letter-spacing:0.03em; text-transform:uppercase; ' +
-                'color:#ffffff; background:#0d1117; border:1px solid ' + border + '; white-space:nowrap;';
-            return btn;
-        }
-        const copyBtn = actionButton('Copy debug', '#30363d');
-        copyBtn.addEventListener('click', function (e) {
-            e.preventDefault();
-            e.stopPropagation();
+        actions.setAttribute('data-mem3-probe', 'actions-v1944');
+        actions.style.cssText = 'display:grid; grid-template-columns:188px 188px; gap:6px; ' +
+            'align-self:flex-start; margin-left:auto;';
+        const copyBtn = panelChipButton('Copy debug', function () {
             copyText(JSON.stringify(collectSummaryDebug(), null, 2)).then(function () {
                 copyBtn.textContent = 'Copied';
                 setTimeout(function () { copyBtn.textContent = 'Copy debug'; }, 1500);
@@ -5512,7 +5478,6 @@
                 stations: line.stations || 0,
                 openStations: line.openStations || [],
                 disabledStations: line.disabledStations || [],
-                noteFor: lineNoteName(line.name),
                 title: panelTitle(line.name) + ' \u00b7 ' + gradingLabel() +
                     (line.avgUph > 0 ? '' : ' \u00b7 no rate this shift') +
                     ' \u00b7 ' + idleLabel(sideIdlePct(line.idleMin || 0, line.clockedMin || 0)) + ' IDLE \u00b7 ' +
@@ -8893,8 +8858,8 @@
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.textContent = label;
-        btn.style.cssText = 'flex:0 0 auto; padding:6px 10px; border-radius:8px; border:1px solid #30363d; ' +
-            'background:#0d1117; color:#ffffff; cursor:pointer; ' +
+        btn.style.cssText = 'width:100%; box-sizing:border-box; padding:6px 10px; border-radius:8px; border:1px solid #30363d; ' +
+            'background:#0d1117; color:#ffffff; cursor:pointer; text-align:center; ' +
             'font:800 12px Segoe UI,system-ui,sans-serif; letter-spacing:0; text-transform:none; white-space:nowrap;';
         btn.addEventListener('click', function (event) {
             event.preventDefault();
