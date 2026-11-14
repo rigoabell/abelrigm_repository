@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.39
+// @version      1.9.40
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.39';
+    const SCRIPT_VERSION = '1.9.40';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -2647,8 +2647,8 @@
     function badgeGridStyle(withYield) {
         const cols = withYield ? 'max-content max-content' : 'max-content';
         return 'display:inline-grid; grid-template-columns:' + cols + '; ' +
-            'grid-template-rows:auto; column-gap:6px; align-items:center; margin-left:8px; ' +
-            'vertical-align:middle; flex:0 0 auto; align-self:center;';
+            'grid-template-rows:auto auto auto; column-gap:6px; row-gap:4px; margin-left:8px; ' +
+            'vertical-align:middle; flex:0 0 auto; align-self:center; align-items:center;';
     }
 
     function rowIdleYield(time, empId) {
@@ -2765,23 +2765,22 @@
         wrap.title = rateText + ' \u00b7 ' + (noTime ? windowGapText() : timeText(time)) + (nowTitle ? ' \u00b7 ' + nowTitle : '');
         const rate = makePill(rateText, color, 16.5);
         const idle = makePill(idleText, noTime ? '#8b949e' : idleColor(pct), 16.5);
-        const rateAnchor = document.createElement('span');
-        rateAnchor.style.cssText = 'position:relative; display:inline-block;';
-        rateAnchor.appendChild(rate);
-        idle.style.position = 'absolute';
-        idle.style.left = '0';
-        idle.style.top = 'calc(100% + 4px)';
-        idle.style.whiteSpace = 'nowrap';
-        rateAnchor.appendChild(idle);
+        const spacer = idle.cloneNode(true);
+        spacer.style.visibility = 'hidden';
+        spacer.setAttribute('aria-hidden', 'true');
         const col = idleNow ? 2 : 1;
         if (idleNow) {
             const mark = rowIdleYield(time, empId);
-            placeBadgeCell(mark, 1, 1);
+            placeBadgeCell(mark, 1, 2);
             mark.style.alignSelf = 'center';
             wrap.appendChild(mark);
         }
-        placeBadgeCell(rateAnchor, col, 1);
-        wrap.appendChild(rateAnchor);
+        placeBadgeCell(spacer, col, 1);
+        placeBadgeCell(rate, col, 2);
+        placeBadgeCell(idle, col, 3);
+        wrap.appendChild(spacer);
+        wrap.appendChild(rate);
+        wrap.appendChild(idle);
         wrap.setAttribute('data-sig', (known ? '1' : '0') + '|' + rateText + '|' + idleText + '|' + idleNowSig(time, empId));
         return wrap;
     }

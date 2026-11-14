@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.39/);
+assert.match(src, /@version\s+1\.9\.40/);
 assert.match(src, /function centerEmployeeLine/);
 assert.match(src, /stationList\('Disabled', disabled, '#8b949e'\)/);
 assert.match(src, /function pinAssignmentColumn/);
@@ -17,9 +17,10 @@ assert.match(src, /function customerReturnsLines/);
 assert.match(src, /function layoutCustomerReturns/);
 assert.match(src, /mem3-cr-station/);
 assert.match(src, /max-content max-content/);
-assert.match(src, /placeBadgeCell\(rateAnchor, col, 1\)/);
-assert.match(src, /idle\.style\.top = 'calc\(100% \+ 4px\)'/);
-assert.equal(src.includes("placeBadgeCell(idle, col, 2)"), false);
+assert.match(src, /placeBadgeCell\(spacer, col, 1\)/);
+assert.match(src, /placeBadgeCell\(rate, col, 2\)/);
+assert.match(src, /placeBadgeCell\(idle, col, 3\)/);
+assert.equal(src.includes("idle.style.top"), false);
 assert.match(src, /function rowIdleYield/);
 assert.equal(src.includes("placeBadgeCell(pill, 2, 1)"), false);
 assert.equal(src.includes("makePill('IDLE NOW'"), false);
@@ -97,7 +98,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.39");
+assert.equal(entry.version, "1.9.40");
 assert.match(entry.detail, /lists those stations under Disabled/);
 assert.match(entry.detail, /red yield sign/);
 const leavingList = src.slice(src.indexOf("function openLeavingList"), src.indexOf("function closeLeavingOverlay"));
