@@ -7,11 +7,12 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.37/);
+assert.match(src, /@version\s+1\.9\.38/);
+assert.match(src, /function centerEmployeeLine/);
 assert.match(src, /stationList\('Disabled', disabled, '#8b949e'\)/);
 assert.match(src, /function pinAssignmentColumn/);
 assert.match(src, /tableLayout = 'fixed'/);
-assert.match(src, /width = '18em'/);
+assert.match(src, /width = '15em'/);
 assert.match(src, /function customerReturnsLines/);
 assert.match(src, /function layoutCustomerReturns/);
 assert.match(src, /mem3-cr-station/);
@@ -96,7 +97,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.37");
+assert.equal(entry.version, "1.9.38");
 assert.match(entry.detail, /lists those stations under Disabled/);
 assert.match(entry.detail, /red yield sign/);
 const leavingList = src.slice(src.indexOf("function openLeavingList"), src.indexOf("function closeLeavingOverlay"));

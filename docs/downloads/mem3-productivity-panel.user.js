@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.37
+// @version      1.9.38
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.37';
+    const SCRIPT_VERSION = '1.9.38';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -2124,8 +2124,8 @@
     // photos to the right of the line above. Lock the two-column tables to one width.
     function pinAssignmentColumn(cell) {
         if (!cell || !cell.style) return;
-        cell.style.width = '18em';
-        cell.style.maxWidth = '18em';
+        cell.style.width = '15em';
+        cell.style.maxWidth = '15em';
         cell.style.boxSizing = 'border-box';
         const table = cell.closest && cell.closest('table');
         if (!table || !table.style || !table.querySelectorAll) return;
@@ -2144,8 +2144,8 @@
             if (!first || !first.style) continue;
             const span = Number(first.getAttribute && first.getAttribute('colspan') || 1);
             if (span > 1) continue;
-            first.style.width = '18em';
-            first.style.maxWidth = '18em';
+            first.style.width = '15em';
+            first.style.maxWidth = '15em';
             first.style.boxSizing = 'border-box';
         }
     }
@@ -2689,15 +2689,39 @@
     function keepBadgeBesideLogin(host) {
         if (!host || !host.style) return;
         loosenBadgeHost(host);
-        let display = '';
-        try {
-            display = window.getComputedStyle ? (window.getComputedStyle(host).display || '') : '';
-        } catch (e) {
-            display = '';
+        const tag = String(host.tagName || '').toUpperCase();
+        if (tag === 'TR' || tag === 'TABLE') return;
+        if (tag === 'TD') {
+            host.style.verticalAlign = 'middle';
+            host.style.display = 'flex';
+            host.style.flexDirection = 'row';
+            host.style.flexWrap = 'nowrap';
+            host.style.alignItems = 'center';
+            return;
         }
-        if (display.indexOf('flex') === -1) return;
+        host.style.display = 'flex';
+        host.style.flexDirection = 'row';
         host.style.flexWrap = 'nowrap';
         host.style.alignItems = 'center';
+    }
+
+    // The photo, the login, and the UPH / idle stack share one horizontal center.
+    function centerEmployeeLine(tr, loginEl, badge) {
+        const host = (badge && badge.parentElement) || (loginEl && loginEl.parentElement);
+        keepBadgeBesideLogin(host);
+        if (badge && badge.style) badge.style.alignSelf = 'center';
+        if (loginEl && loginEl.style) loginEl.style.alignSelf = 'center';
+        const avatar = avatarEl(tr);
+        if (avatar && avatar.style) avatar.style.alignSelf = 'center';
+        let node = host;
+        while (node && node.parentElement && node !== tr) {
+            const parent = node.parentElement;
+            if (avatar && parent.contains && parent.contains(avatar)) {
+                keepBadgeBesideLogin(parent);
+                break;
+            }
+            node = parent;
+        }
     }
 
     // Override lives in the same row as the name. The grid has to be a sibling
@@ -2715,6 +2739,7 @@
                     if (before) parent.insertBefore(badge, before);
                     else parent.appendChild(badge);
                 }
+                centerEmployeeLine(tr, loginEl, badge);
                 return;
             }
             node = parent;
@@ -2722,6 +2747,7 @@
         const host = badgeHost(loginEl, tr);
         keepBadgeBesideLogin(host);
         if (badge.parentElement !== host) host.appendChild(badge);
+        centerEmployeeLine(tr, loginEl, badge);
     }
 
     function makeBadge(stats, known, time, empId) {
@@ -2770,6 +2796,7 @@
             keepBadgeBesideLogin(host);
             if (badge.parentElement !== host) host.appendChild(badge);
         }
+        centerEmployeeLine(tr, found && found.el, badge);
     }
 
     function assignmentHasBigs(text) {
