@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Assign Round Trip (abelrigm)
 // @namespace    https://mem3.amazon.local/
-// @version      1.2.0
+// @version      1.3.0
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-assign-roundtrip.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-assign-roundtrip.user.js
 // @description  Unassign one Control Tower login, watch the station, then assign that same login back.
@@ -22,14 +22,15 @@
     // and, if that person stays off, put back on the same station.
     // fiber calls the button's own handler. fiber-all also calls the handlers
     // on the boxes around it. native is a mouse click.
-    // A login counts as off only after the last 3 seconds of a 12 second watch
-    // still show them gone. A menu closing for a moment does not count.
+    // A login counts as off once the last 3 seconds show them gone. The watch
+    // stops then. It never waits longer than 10 seconds. A menu that only
+    // closes for a moment does not count.
 
-    const VERSION = '1.2.0';
+    const VERSION = '1.3.0';
     const LINE_LABEL = 'CRET Line 1 (O) + Line Support';
     const PANEL_ID = 'mem3-assign-roundtrip';
     const METHODS = ['fiber', 'fiber-all', 'native'];
-    const WATCH_MS = 12000;
+    const WATCH_MS = 10000;
     const SAMPLE_MS = 500;
     const TAIL = 6;
     const PANEL_JUNK = '.mem3-uph-badge, .mem3-line-avg-badge, .mem3-popup-uph, .mem3-popup-clock, .mem3-popup-idle, .mem3-yield';
@@ -127,6 +128,12 @@
             if (!samples[i]) return 'arrived';
         }
         return 'assigned';
+    }
+
+    function ready(samples, goal) {
+        const result = outcome(samples, goal);
+        if (goal === 'gone') return result === 'left';
+        return result === 'arrived' || result === 'assigned';
     }
 
     function sampleText(samples) {
@@ -612,7 +619,7 @@
         let last = null;
         let seen = 0;
         const start = Date.now();
-        while (Date.now() - start < 2200) {
+        while (Date.now() - start < WATCH_MS) {
             const button = assignButtonFor(login);
             if (button && button === last) {
                 seen += 1;
@@ -667,11 +674,12 @@
 
     async function openFor(el, mode, read) {
         const known = tooltipIds();
+        const start = Date.now();
         let opener = clickControl(el, mode);
-        let found = await waitFor(function () { return read(known); }, 1600);
-        if (!found && opener !== 'native') {
+        let found = await waitFor(function () { return read(known); }, Math.min(2000, WATCH_MS));
+        if (!found && opener !== 'native' && Date.now() - start < WATCH_MS) {
             opener = clickControl(el, 'native');
-            found = await waitFor(function () { return read(known); }, 1600);
+            found = await waitFor(function () { return read(known); }, Math.max(0, WATCH_MS - (Date.now() - start)));
         }
         if (!found) found = read(null);
         return { found: found, opener: opener };
@@ -735,7 +743,7 @@
         if (stopBtn) stopBtn.disabled = !on;
     }
 
-    async function watch(read, label) {
+    async function watch(read, label, goal) {
         const samples = [];
         const start = Date.now();
         while (Date.now() - start < WATCH_MS) {
@@ -743,6 +751,7 @@
             let here = false;
             try { here = !!read(); } catch (e) { here = false; }
             samples.push(here);
+            if (ready(samples, goal)) break;
             const left = Math.max(0, Math.ceil((WATCH_MS - (Date.now() - start)) / 1000));
             setStatus(label + ' · ' + left + 's · ' + (here ? 'on the station' : 'off the station'));
             await sleep(SAMPLE_MS);
@@ -769,8 +778,8 @@
         }
         await sleep(200);
         const clicked = clickControl(opened.found, mode);
-        const gone = await waitFor(function () { return buttonGone(opened.found) ? true : null; }, 2500);
-        const samples = await watch(function () { return loginOnBoard(login); }, mode + ' unassign ' + login);
+        const gone = await waitFor(function () { return buttonGone(opened.found) ? true : null; }, WATCH_MS);
+        const samples = await watch(function () { return loginOnBoard(login); }, mode + ' unassign ' + login, 'gone');
         const result = outcome(samples, 'gone');
         return {
             ok: result === 'left',
@@ -810,7 +819,7 @@
         const clicked = clickControl(button, mode);
         const error = assignmentError();
         dismissAssignmentError();
-        const samples = await watch(function () { return loginOnRow(address, login); }, mode + ' assign ' + login);
+        const samples = await watch(function () { return loginOnRow(address, login); }, mode + ' assign ' + login, 'here');
         const result = outcome(samples, 'here');
         let text = mode + ' · Assign click ' + clicked + ' · ' + result + ' · ' + sampleText(samples);
         if (error) text += ' · ' + error;
@@ -849,16 +858,9 @@
 
     async function afterResume(login, address) {
         hold(false);
-        const samples = [];
-        const start = Date.now();
-        while (Date.now() - start < 8000) {
-            if (stop) break;
-            const here = address ? loginOnRow(address, login) : loginOnBoard(login);
-            samples.push(!!here);
-            const left = Math.max(0, Math.ceil((8000 - (Date.now() - start)) / 1000));
-            setStatus('After the panel resumed · ' + left + 's · ' + (here ? 'on the station' : 'off the station'));
-            await sleep(SAMPLE_MS);
-        }
+        const samples = await watch(function () {
+            return address ? loginOnRow(address, login) : loginOnBoard(login);
+        }, 'After the panel resumed', 'here');
         const on = outcome(samples, 'here');
         log('After the productivity panel resumed · ' + on + ' · ' + sampleText(samples));
     }
@@ -984,20 +986,67 @@
         copyText(table, 'Copied the original roster.');
     }
 
-    function copyLog() {
-        const payload = {
+    function clipText(value, max) {
+        const text = String(value == null ? '' : value);
+        return text.length > max ? text.slice(0, max) + '…' : text;
+    }
+
+    function debugTooltips() {
+        const out = [];
+        const tips = document.querySelectorAll('[id^="tooltip-"]');
+        for (let i = 0; i < tips.length; i++) {
+            const tip = tips[i];
+            if (inPanel(tip) || !shown(tip)) continue;
+            const inputs = [];
+            const fields = tip.querySelectorAll('input, textarea');
+            for (let f = 0; f < fields.length; f++) {
+                inputs.push({
+                    id: fields[f].id || '',
+                    placeholder: fields[f].getAttribute('placeholder') || '',
+                    value: clipText(fields[f].value, 40)
+                });
+            }
+            const buttons = [];
+            const found = tip.querySelectorAll('button, a[role="button"], a[mdn-link]');
+            for (let b = 0; b < found.length; b++) {
+                const label = clipText(plain(found[b].textContent), 40);
+                if (label) buttons.push(label);
+            }
+            out.push({
+                id: tip.id || '',
+                inputs: inputs,
+                buttons: buttons,
+                html: clipText(tip.outerHTML, 900)
+            });
+        }
+        return out;
+    }
+
+    function collectDebug() {
+        let href = '';
+        try { href = location.href; } catch (e) { href = ''; }
+        const heading = findTargetHeading();
+        const title = heading ? (headingLabel(heading) || ownText(heading) || LINE_LABEL) : '';
+        const status = panelQuery('[data-status]');
+        return {
             script: 'Assign Round Trip',
             version: VERSION,
-            href: String(location.href || ''),
-            runs: runs
+            at: new Date().toISOString(),
+            href: href,
+            pause: pausePanel(),
+            busy: busy,
+            line: title,
+            roster: heading ? readRoster(heading) : [],
+            status: status ? (status.textContent || '') : '',
+            runs: runs,
+            tooltips: debugTooltips()
         };
-        const text = JSON.stringify(payload, null, 2);
-        const done = function () { setStatus('Copied the log.'); };
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(text).then(done, function () { setStatus('The log is in the box below.'); });
-            return;
-        }
-        setStatus('The log is in the box below.');
+    }
+
+    function copyDebug() {
+        const text = JSON.stringify(collectDebug(), null, 2);
+        log('Copied debug.');
+        copyText(text, 'Copied debug.');
     }
 
     function paint() {
@@ -1030,7 +1079,7 @@
             '</style>',
             '<div class="box">',
             '<div class="head"><strong>Assign test</strong><span class="ver">', VERSION, '</span></div>',
-            '<p class="hint">Line 1 Odd + Support reads CRET Line 1 (O) + Line Support, copies who is on each station, then unassigns each signed-in person and assigns that same person back if they stay off. No login to type. None and disabled stations stay as they are. Leave Pause unchecked when the productivity panel is turned off.</p>',
+            '<p class="hint">Line 1 Odd + Support reads CRET Line 1 (O) + Line Support, copies who is on each station, then unassigns each signed-in person and assigns that same person back if they stay off. It moves on as soon as that result has held, and it stops waiting at 10 seconds. No login to type. None and disabled stations stay as they are. Leave Pause unchecked when the productivity panel is turned off.</p>',
             '<label>One person, optional<input data-login list="logins" placeholder="abelrigm" autocomplete="off" spellcheck="false"></label>',
             '<datalist id="logins"></datalist>',
             '<label>Click<select data-method>',
@@ -1041,7 +1090,7 @@
             '<div class="actions"><button data-line>Line 1 Odd + Support, one by one</button></div>',
             '<div class="actions"><button data-go>Unassign, then assign back</button><button data-all>Try all 3</button></div>',
             '<label class="check"><input type="checkbox" data-pause> Pause the productivity panel</label>',
-            '<div class="actions"><button data-roster>Copy roster</button><button data-stop disabled>Stop</button><button data-copy>Copy log</button></div>',
+            '<div class="actions"><button data-roster>Copy roster</button><button data-debug>Copy debug</button><button data-stop disabled>Stop</button></div>',
             '<div data-status></div>',
             '<pre data-log></pre>',
             '</div>'
@@ -1061,7 +1110,7 @@
             setStatus('Stopping after this check.');
         });
         root.querySelector('[data-roster]').addEventListener('click', copyRoster);
-        root.querySelector('[data-copy]').addEventListener('click', copyLog);
+        root.querySelector('[data-debug]').addEventListener('click', copyDebug);
         root.querySelector('[data-login]').addEventListener('focus', refreshLogins);
         refreshLogins();
     }
@@ -1088,6 +1137,7 @@
             isOtherLine: isOtherLine,
             classifyEmployee: classifyEmployee,
             rosterTable: rosterTable,
+            ready: ready,
             lineLabel: LINE_LABEL,
             sampleText: sampleText
         };

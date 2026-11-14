@@ -20,15 +20,16 @@ function bits(text) {
 test("catalog entry matches the script", () => {
     const entry = catalog.find((item) => item.id === "mem3-assign-roundtrip");
     assert.ok(entry);
-    assert.equal(entry.version, "1.2.0");
+    assert.equal(entry.version, "1.3.0");
     assert.equal(entry.category, "Control Tower");
     assert.equal(entry.file, "downloads/mem3-assign-roundtrip.txt");
     assert.equal(entry.downloadName, "Assign Round Trip (abelrigm).txt");
-    assert.match(src, /@version\s+1\.2\.0/);
+    assert.match(src, /@version\s+1\.3\.0/);
     assert.equal(tool.lineLabel, "CRET Line 1 (O) + Line Support");
     assert.equal(src, published);
     assert.deepEqual(JSON.parse(JSON.stringify(tool.methods)), ["fiber", "fiber-all", "native"]);
-    assert.equal(tool.watchMs, 12000);
+    assert.equal(tool.watchMs, 10000);
+    assert.match(src, /Copy debug/);
     assert.match(src, /Search for login/);
     assert.match(src, /function noneAnchor/);
     assert.match(src, /function assignButtonFor/);
@@ -49,6 +50,12 @@ test("a flicker does not count as leaving or arriving", () => {
     assert.equal(tool.outcome(bits("111111000000"), "here"), "blinked");
     assert.equal(tool.outcome(bits("1010"), "gone"), "short");
     assert.equal(tool.outcome(bits("101010101010"), "gone"), "blinked");
+    assert.equal(tool.ready(bits("000000"), "gone"), true);
+    assert.equal(tool.ready(bits("00000"), "gone"), false);
+    assert.equal(tool.ready(bits("111111000000"), "gone"), true);
+    assert.equal(tool.ready(bits("000000111111"), "here"), true);
+    assert.equal(tool.ready(bits("111111111111"), "here"), true);
+    assert.equal(tool.ready(bits("101010101010"), "gone"), false);
 });
 
 test("the station mark ignores the login cell", () => {
