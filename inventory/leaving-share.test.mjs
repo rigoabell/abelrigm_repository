@@ -8,23 +8,31 @@ const patched = src.replace(
     `globalThis.__mem3 = {
         addLeaving, saveLeaving, loadLeaving, clearMarkedLeave, shiftId,
         mergeLeaving, enableLeavingShare, publishLeaving, pullLeaving, whenLeavingShared,
-        activityLine, leavingLine, loginFromWelcome, restoreLatestMarks
+        activityLine, leavingLine, loginFromWelcome, restoreLatestMarks,
+        addNote, clearNote, saveNotes, loadNotes, pullNotes, whenNotesShared, mergeNotes, openNotes
     };
 })();`
 );
 
 const gist = { rev: 0, text: "" };
+const notesGist = { rev: 0, text: "" };
 const waiting = [];
 let failNext = 0;
 
 function handle(opts) {
-    const base = Number((opts.headers && (opts.headers["X-Leaving-Base"] || opts.headers["x-leaving-base"])) || 0);
-    if (!opts.url || opts.url.indexOf("https://extendsclass.com/api/json-storage/bin/edfeccc") !== 0) {
+    const notes = opts.url && opts.url.indexOf("https://extendsclass.com/api/json-storage/bin/dcfefcf") === 0;
+    const leaving = opts.url && opts.url.indexOf("https://extendsclass.com/api/json-storage/bin/edfeccc") === 0;
+    const store = notes ? notesGist : gist;
+    const baseName = notes ? "X-Notes-Base" : "X-Leaving-Base";
+    const base = Number((opts.headers && (opts.headers[baseName] || opts.headers[baseName.toLowerCase()])) || 0);
+    if (!notes && !leaving) {
         opts.onload({ status: 404, responseText: "" });
         return;
     }
     if (opts.method === "GET") {
-        const content = gist.text || JSON.stringify({ shifts: {}, rev: 0 });
+        const content = store.text || (notes
+            ? JSON.stringify({ notes: [], rev: 0 })
+            : JSON.stringify({ shifts: {}, rev: 0 }));
         opts.onload({
             status: 200,
             responseText: content + "<!doctype html><html></html>"
@@ -42,12 +50,12 @@ function handle(opts) {
     }
     const doc = JSON.parse(opts.data);
     const content = opts.data;
-    if (base !== gist.rev || doc.rev !== gist.rev + 1) {
+    if (base !== store.rev || doc.rev !== store.rev + 1) {
         opts.onload({ status: 409, responseText: "" });
         return;
     }
-    gist.rev = doc.rev;
-    gist.text = content;
+    store.rev = doc.rev;
+    store.text = content;
     opts.onload({ status: 200, responseText: "{}" });
 }
 
@@ -217,3 +225,31 @@ const doubled = a.mergeLeaving(
 const stillOpen = doubled.shifts[shiftKey].filter((item) => item.status === "said");
 assert.equal(stillOpen.length, 1);
 assert.equal(stillOpen[0].said, "01:01 PM");
+
+const notesA = a.loadNotes();
+const written = a.addNote(notesA, "brndbo", "abelrigm", "coaching on large", now);
+assert.ok(written);
+assert.equal(written.about, "brndbo");
+assert.equal(written.by, "abelrigm");
+assert.equal(a.addNote({ notes: [] }, "brndbo", "otherpa", "   ", now), null);
+a.saveNotes(notesA);
+await finish(a.whenNotesShared());
+const seenNotes = await finish(b.pullNotes());
+const open = b.openNotes(seenNotes);
+assert.equal(open.length, 1);
+assert.equal(open[0].text, "coaching on large");
+const blocked = b.clearNote(b.loadNotes(), open[0].id, "otherpa", now);
+assert.equal(blocked, null);
+assert.equal(b.loadNotes().notes.find((item) => item.id === open[0].id).status, "open");
+const docClear = a.loadNotes();
+const clearedNote = a.clearNote(docClear, open[0].id, "abelrigm", now);
+assert.equal(clearedNote.status, "cleared");
+a.saveNotes(docClear);
+await finish(a.whenNotesShared());
+const afterNotes = await finish(b.pullNotes());
+assert.equal(b.openNotes(afterNotes).length, 0);
+const keptNote = a.mergeNotes(
+    { notes: [{ id: "n1", about: "brndbo", by: "abelrigm", text: "keep", status: "open", atMs: now.getTime() }], rev: 1 },
+    { notes: [{ id: "n1", about: "brndbo", by: "abelrigm", text: "keep", status: "cleared", atMs: now.getTime(), clearedAtMs: now.getTime() + 1 }], rev: 1 }
+);
+assert.equal(keptNote.notes[0].status, "cleared");

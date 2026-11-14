@@ -7,7 +7,14 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.41/);
+assert.match(src, /@version\s+1\.9\.42/);
+assert.match(src, /data-mem3-enter-notes/);
+assert.match(src, /Enter Notes/);
+assert.match(src, /View Notes/);
+assert.match(src, /background:#6e7681; color:#ffffff/);
+assert.match(src, /extendsclass\.com\/api\/json-storage\/bin\/dcfefcf/);
+assert.match(src, /function clearNote/);
+assert.match(src, /if \(note\.by !== author\) return null/);
 assert.match(src, /function overallRate/);
 assert.match(src, /statsFor\(empId, panelName === 'BIGS'\)/);
 assert.match(src, /function centerEmployeeLine/);
@@ -61,6 +68,7 @@ assert.equal(summaryActions.includes("makeLeavingEarlyButton"), false);
 assert.equal(summaryActions.includes("makeIssueButton"), false);
 assert.match(summaryActions, /makeShowLeavingButton/);
 assert.match(summaryActions, /makeEarlyUnassignButton/);
+assert.match(summaryActions, /makeViewNotesButton/);
 assert.match(src, /mem3-leaving-list/);
 assert.match(src, /data-time-row/);
 assert.match(src, /placeholder = '00:00'/);
@@ -100,7 +108,9 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.41");
+assert.equal(entry.version, "1.9.42");
+assert.match(entry.detail, /View Notes/);
+assert.match(entry.detail, /cleared only by the person who wrote it/);
 assert.match(entry.detail, /lists those stations under Disabled/);
 assert.match(entry.detail, /red yield sign/);
 const leavingList = src.slice(src.indexOf("function openLeavingList"), src.indexOf("function closeLeavingOverlay"));

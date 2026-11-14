@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.41
+// @version      1.9.42
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.41';
+    const SCRIPT_VERSION = '1.9.42';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -4725,11 +4725,11 @@
 
     function ensureSummaryActions() {
         let actions = document.getElementById('mem3-summary-actions');
-        if (actions && actions.getAttribute('data-mem3-probe') !== 'actions-v1928') actions.remove();
-        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'actions-v1928') return actions;
+        if (actions && actions.getAttribute('data-mem3-probe') !== 'actions-v1942') actions.remove();
+        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'actions-v1942') return actions;
         actions = document.createElement('div');
         actions.id = 'mem3-summary-actions';
-        actions.setAttribute('data-mem3-probe', 'actions-v1928');
+        actions.setAttribute('data-mem3-probe', 'actions-v1942');
         actions.style.cssText = 'display:flex; gap:6px; align-items:flex-start; flex-wrap:wrap;';
         function actionButton(label, border) {
             const btn = document.createElement('button');
@@ -4754,6 +4754,7 @@
         });
         actions.appendChild(makeShowLeavingButton());
         actions.appendChild(makeEarlyUnassignButton());
+        actions.appendChild(makeViewNotesButton());
         actions.appendChild(copyBtn);
         return actions;
     }
@@ -5726,6 +5727,7 @@
             box.appendChild(dbg);
         }
         box.appendChild(makePopupLeavingButton(person));
+        box.appendChild(makePopupNotesButton(person));
         paintPopupLeaving(box, person);
         return box;
     }
@@ -5782,6 +5784,13 @@
                 ensurePopupClock(existing, popupPerson, existing.dataset.empId || '');
                 if (!existing.querySelector('[data-mem3-leaving-early]')) {
                     existing.appendChild(makePopupLeavingButton(popupPerson));
+                }
+                if (!existing.querySelector('[data-mem3-enter-notes]')) {
+                    const leaveBtn = existing.querySelector('[data-mem3-leaving-early]');
+                    const notesBtn = makePopupNotesButton(popupPerson);
+                    if (leaveBtn && leaveBtn.parentElement === existing) {
+                        existing.insertBefore(notesBtn, leaveBtn.nextSibling);
+                    } else existing.appendChild(notesBtn);
                 }
                 paintPopupLeaving(existing, popupPerson);
                 placeNameLeaving(host, popupPerson);
@@ -8335,7 +8344,507 @@
         if (!isAssignmentsPage() || !document.body) return;
         paintEarlyLog();
         refreshLeaving();
-        setInterval(function () { refreshLeaving(); }, LEAVING_POLL_MS);
+        refreshNotes();
+        setInterval(function () { refreshLeaving(); refreshNotes(); }, LEAVING_POLL_MS);
+    }
+
+    const NOTES_ID = 'mem3-notes-panel';
+    const NOTES_LIST_ID = 'mem3-notes-list';
+    const NOTES_KEY = 'mem3-notes-v1';
+    const NOTES_TOMB_MS = 12 * 60 * 60 * 1000;
+    const NOTES_SHARE_URL = 'https://extendsclass.com/api/json-storage/bin/dcfefcf';
+    let notesShareChain = Promise.resolve();
+    let notesShareError = '';
+    let noteSerial = 0;
+
+    function emptyNotes() {
+        return { notes: [], rev: 0 };
+    }
+
+    function loadNotes() {
+        let raw = '';
+        try {
+            if (typeof GM_getValue === 'function') raw = GM_getValue(NOTES_KEY, '') || '';
+        } catch (e) { raw = ''; }
+        if (!raw) {
+            try { raw = localStorage.getItem(NOTES_KEY) || ''; } catch (e2) { raw = ''; }
+        }
+        if (!raw) return emptyNotes();
+        try {
+            const doc = JSON.parse(raw);
+            if (!doc || typeof doc !== 'object' || !Array.isArray(doc.notes)) return emptyNotes();
+            return doc;
+        } catch (e3) {
+            return emptyNotes();
+        }
+    }
+
+    function saveNotesLocal(doc) {
+        const text = JSON.stringify(doc);
+        try {
+            if (typeof GM_setValue === 'function') GM_setValue(NOTES_KEY, text);
+        } catch (e) { /* the page copy below still records it */ }
+        try { localStorage.setItem(NOTES_KEY, text); } catch (e2) { /* storage can be blocked */ }
+    }
+
+    function noteStamp(note) {
+        if (!note) return 0;
+        let latest = 0;
+        if (typeof note.atMs === 'number' && note.atMs > latest) latest = note.atMs;
+        if (typeof note.clearedAtMs === 'number' && note.clearedAtMs > latest) latest = note.clearedAtMs;
+        return latest;
+    }
+
+    function noteText(text) {
+        return String(text || '').replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim().slice(0, 240);
+    }
+
+    function addNote(doc, about, by, text, now) {
+        const login = String(about || '').trim().toLowerCase();
+        const author = String(by || '').trim().toLowerCase();
+        const body = noteText(text);
+        if (!looksLikeLogin(login) || !looksLikeLogin(author) || !body) return null;
+        if (!doc.notes) doc.notes = [];
+        noteSerial += 1;
+        const note = {
+            id: author + '-' + login + '-' + now.getTime() + '-' + noteSerial,
+            about: login,
+            by: author,
+            text: body,
+            at: clockText(now),
+            atMs: now.getTime(),
+            status: 'open'
+        };
+        doc.notes.push(note);
+        return note;
+    }
+
+    function clearNote(doc, id, by, now) {
+        const author = String(by || '').trim().toLowerCase();
+        const list = doc.notes || [];
+        for (let i = 0; i < list.length; i++) {
+            const note = list[i];
+            if (!note || note.id !== id) continue;
+            if (note.by !== author) return null;
+            if (note.status === 'cleared') return note;
+            note.status = 'cleared';
+            note.clearedAt = clockText(now);
+            note.clearedAtMs = now.getTime();
+            return note;
+        }
+        return null;
+    }
+
+    function openNotes(doc) {
+        const list = (doc && doc.notes) || [];
+        const out = [];
+        for (let i = 0; i < list.length; i++) {
+            if (list[i] && list[i].status === 'open' && list[i].text) out.push(list[i]);
+        }
+        out.sort(function (a, b) { return (b.atMs || 0) - (a.atMs || 0); });
+        return out;
+    }
+
+    function pruneNotes(doc, now) {
+        const cutoff = now.getTime() - NOTES_TOMB_MS;
+        const keep = [];
+        const list = doc.notes || [];
+        for (let i = 0; i < list.length; i++) {
+            const note = list[i];
+            if (!note || !note.id) continue;
+            if (note.status === 'cleared' && (note.clearedAtMs || 0) < cutoff) continue;
+            keep.push(note);
+        }
+        doc.notes = keep;
+        return doc;
+    }
+
+    function mergeNotes(local, remote) {
+        const byId = Object.create(null);
+        function take(note) {
+            if (!note || !note.id) return;
+            const prev = byId[note.id];
+            const copy = JSON.parse(JSON.stringify(note));
+            if (!prev) {
+                byId[note.id] = copy;
+                return;
+            }
+            if (copy.status === 'cleared' && prev.status !== 'cleared') {
+                byId[note.id] = copy;
+                return;
+            }
+            if (prev.status === 'cleared' && copy.status !== 'cleared') return;
+            if (noteStamp(copy) >= noteStamp(prev)) byId[note.id] = copy;
+        }
+        const lists = [(local && local.notes) || [], (remote && remote.notes) || []];
+        for (let n = 0; n < lists.length; n++) {
+            for (let i = 0; i < lists[n].length; i++) take(lists[n][i]);
+        }
+        const out = emptyNotes();
+        const ids = Object.keys(byId);
+        for (let i = 0; i < ids.length; i++) out.notes.push(byId[ids[i]]);
+        out.rev = Math.max((local && local.rev) || 0, (remote && remote.rev) || 0);
+        return out;
+    }
+
+    function notesShareOn() {
+        return !!(NOTES_SHARE_URL && typeof GM_xmlhttpRequest === 'function');
+    }
+
+    function notesBody(doc) {
+        const copy = JSON.parse(JSON.stringify(doc || emptyNotes()));
+        delete copy.rev;
+        return JSON.stringify(copy);
+    }
+
+    function notesRequest(method, extra) {
+        const headers = {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-cache',
+            Pragma: 'no-cache'
+        };
+        if (extra && extra.baseRev != null) headers['X-Notes-Base'] = String(extra.baseRev);
+        let url = NOTES_SHARE_URL;
+        if (method === 'GET') url += '?t=' + Date.now();
+        return new Promise(function (resolve, reject) {
+            GM_xmlhttpRequest({
+                method: method,
+                url: url,
+                headers: headers,
+                data: extra && extra.doc ? JSON.stringify(extra.doc) : undefined,
+                timeout: 20000,
+                onload: function (res) { resolve(res || {}); },
+                onerror: function () { reject(new Error('shared notes')); },
+                ontimeout: function () { reject(new Error('shared notes timeout')); }
+            });
+        });
+    }
+
+    function readSharedNotes() {
+        return notesRequest('GET').then(function (res) {
+            if (!res || res.status < 200 || res.status >= 300) throw new Error('shared notes read');
+            const doc = parseSharedBody(res.responseText || '');
+            if (!doc || !Array.isArray(doc.notes)) return emptyNotes();
+            if (typeof doc.rev !== 'number') doc.rev = 0;
+            return doc;
+        });
+    }
+
+    function writeSharedNotes(doc, baseRev) {
+        return notesRequest('PUT', { doc: doc, baseRev: baseRev }).then(function (res) {
+            if (res && res.status === 409) return { conflict: true };
+            if (!res || res.status < 200 || res.status >= 300) throw new Error('shared notes write');
+            return { conflict: false };
+        });
+    }
+
+    function publishNotesOnce(localDoc, attempt) {
+        return readSharedNotes().then(function (remote) {
+            const merged = pruneNotes(mergeNotes(localDoc, remote), new Date());
+            const base = remote.rev || 0;
+            if (notesBody(merged) === notesBody(remote)) {
+                merged.rev = base;
+                saveNotesLocal(merged);
+                return merged;
+            }
+            merged.rev = base + 1;
+            return writeSharedNotes(merged, base).then(function (result) {
+                if (result.conflict) {
+                    if (attempt >= 4) throw new Error('notes conflict');
+                    return publishNotesOnce(localDoc, attempt + 1);
+                }
+                saveNotesLocal(merged);
+                return merged;
+            });
+        });
+    }
+
+    function publishNotes(doc) {
+        if (!notesShareOn()) return Promise.resolve(doc);
+        const job = notesShareChain.then(function () {
+            return publishNotesOnce(doc, 0);
+        }).then(function (next) {
+            notesShareError = '';
+            try {
+                const nodes = document.querySelectorAll('[data-notes-status]');
+                for (let i = 0; i < nodes.length; i++) {
+                    if (String(nodes[i].textContent || '').indexOf('shared notes did not load') !== -1) {
+                        nodes[i].textContent = 'Other computers can see it.';
+                    }
+                }
+            } catch (e) { /* the list is not open */ }
+            return next;
+        }, function (err) {
+            notesShareError = err && err.message ? err.message : 'shared notes failed';
+            throw err;
+        });
+        notesShareChain = job.then(function (next) { return next; }, function () { return null; });
+        return job;
+    }
+
+    function saveNotes(doc) {
+        pruneNotes(doc, new Date());
+        saveNotesLocal(doc);
+        if (notesShareOn()) return publishNotes(doc);
+        return Promise.resolve(doc);
+    }
+
+    function pullNotes() {
+        if (!notesShareOn()) return Promise.resolve(loadNotes());
+        return publishNotes(loadNotes());
+    }
+
+    function whenNotesShared() {
+        return notesShareChain;
+    }
+
+    function setNotesStatus(text) {
+        try {
+            const nodes = document.querySelectorAll('[data-notes-status]');
+            for (let i = 0; i < nodes.length; i++) nodes[i].textContent = text || '';
+        } catch (e) { /* the panel is not open */ }
+    }
+
+    function watchNotesShare(text, pending) {
+        if (!pending || !pending.then) return;
+        pending.then(function () {
+            try {
+                const nodes = document.querySelectorAll('[data-notes-status]');
+                for (let i = 0; i < nodes.length; i++) {
+                    if (nodes[i].textContent === text) nodes[i].textContent = text + ' Other computers can see it.';
+                }
+            } catch (e) { /* the panel is not open */ }
+        }, function () {
+            try {
+                const nodes = document.querySelectorAll('[data-notes-status]');
+                for (let i = 0; i < nodes.length; i++) {
+                    if (nodes[i].textContent === text) nodes[i].textContent = text + ' Saved here. The other computers did not get it.';
+                }
+            } catch (e2) { /* the panel is not open */ }
+        });
+    }
+
+    function refreshNotes() {
+        if (!isAssignmentsPage()) return;
+        pullNotes().then(function () {
+            paintNotesList();
+        }).catch(function () { /* the next pass tries again */ });
+    }
+
+    function noteLine(note) {
+        return personLabel(note.about) + ': ' + note.text;
+    }
+
+    function paintNotesList() {
+        const card = document.getElementById(NOTES_LIST_ID);
+        if (!card) return;
+        const list = card.querySelector('[data-notes-list]');
+        if (!list) return;
+        while (list.firstChild) list.removeChild(list.firstChild);
+        const actor = signedInLogin();
+        const rows = openNotes(loadNotes());
+        if (!rows.length) {
+            const empty = document.createElement('div');
+            empty.textContent = 'No notes.';
+            empty.style.cssText = 'color:#8b949e; font-size:12px;';
+            list.appendChild(empty);
+            return;
+        }
+        for (let i = 0; i < rows.length; i++) {
+            const note = rows[i];
+            const line = document.createElement('div');
+            line.style.cssText = 'display:flex; gap:8px; align-items:flex-start; justify-content:space-between; ' +
+                'padding:6px 0; border-top:1px solid #30363d;';
+            const label = document.createElement('div');
+            const title = document.createElement('div');
+            title.textContent = noteLine(note);
+            title.style.cssText = 'font-size:12px; font-weight:650; white-space:pre-wrap;';
+            const who = document.createElement('div');
+            who.textContent = personLabel(note.by) + ' at ' + note.at;
+            who.style.cssText = 'font-size:11px; color:#8b949e; margin-top:2px;';
+            label.appendChild(title);
+            label.appendChild(who);
+            line.appendChild(label);
+            if (actor && note.by === actor) {
+                const clear = document.createElement('button');
+                clear.type = 'button';
+                clear.textContent = 'Clear';
+                clear.style.cssText = 'flex:0 0 auto; padding:4px 8px; border-radius:6px; border:1px solid #8b949e; ' +
+                    'background:#6e7681; color:#ffffff; font:800 11px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+                clear.addEventListener('click', function (event) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const whoNow = signedInLogin();
+                    if (!looksLikeLogin(whoNow)) {
+                        setNotesStatus('Control Tower has not shown who is signed in.');
+                        return;
+                    }
+                    const current = loadNotes();
+                    const cleared = clearNote(current, note.id, whoNow, new Date());
+                    if (!cleared) {
+                        setNotesStatus('Only the person who wrote the note can clear it.');
+                        return;
+                    }
+                    const shared = saveNotes(current);
+                    const clearedText = 'Cleared the note on ' + personLabel(cleared.about) + '.';
+                    setNotesStatus(clearedText);
+                    watchNotesShare(clearedText, shared);
+                    paintNotesList();
+                });
+                line.appendChild(clear);
+            }
+            list.appendChild(line);
+        }
+    }
+
+    function openNotesList() {
+        closeLeavingOverlay(NOTES_LIST_ID);
+        const card = document.createElement('div');
+        card.id = NOTES_LIST_ID;
+        card.style.cssText = 'position:fixed; left:50%; top:50%; transform:translate(-50%, -50%); z-index:2147483647; ' +
+            'width:min(520px, calc(100vw - 24px)); max-height:min(70vh, 560px); overflow:hidden; padding:12px; ' +
+            'display:flex; flex-direction:column; border-radius:10px; background:#161b22; color:#fff; border:1px solid #30363d; ' +
+            'box-shadow:0 8px 24px rgba(0,0,0,.45); font-family:Segoe UI,system-ui,sans-serif;';
+        const header = document.createElement('div');
+        header.style.cssText = 'display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:4px;';
+        const title = document.createElement('div');
+        title.textContent = 'View Notes';
+        title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif;';
+        const ask = document.createElement('div');
+        ask.textContent = 'Notes from every computer running this script. A note can be cleared only by the person who wrote it.';
+        ask.style.cssText = 'font-size:12px; color:#8b949e; margin-bottom:8px;';
+        const list = document.createElement('div');
+        list.setAttribute('data-notes-list', '');
+        const status = document.createElement('div');
+        status.setAttribute('data-notes-status', '');
+        status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
+        const scroller = document.createElement('div');
+        scroller.style.cssText = 'overflow:auto; min-height:0; flex:1 1 auto;';
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = 'Close';
+        close.style.cssText = 'flex:0 0 auto; padding:7px 10px; border-radius:6px; border:1px solid #8b949e; ' +
+            'background:#0d1117; color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        close.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            closeLeavingOverlay(NOTES_LIST_ID);
+        });
+        header.appendChild(title);
+        header.appendChild(close);
+        scroller.appendChild(list);
+        scroller.appendChild(status);
+        card.appendChild(header);
+        card.appendChild(ask);
+        card.appendChild(signedInNote());
+        card.appendChild(scroller);
+        document.body.appendChild(card);
+        paintNotesList();
+        pullNotes().then(function () {
+            paintNotesList();
+        }).catch(function () {
+            setNotesStatus('Showing this computer. The shared notes did not load.');
+        });
+    }
+
+    function openNotesPanel(prefill) {
+        const name = String(prefill || '').trim().toLowerCase();
+        if (!looksLikeLogin(name)) return;
+        closeLeavingOverlay(NOTES_ID);
+        const card = document.createElement('div');
+        card.id = NOTES_ID;
+        card.style.cssText = 'position:fixed; left:50%; top:50%; transform:translate(-50%, -50%); z-index:2147483647; width:min(440px, calc(100vw - 24px)); ' +
+            'padding:12px; border-radius:10px; background:#161b22; color:#fff; border:1px solid #30363d; ' +
+            'box-shadow:0 8px 24px rgba(0,0,0,.45); font-family:Segoe UI,system-ui,sans-serif;';
+        const title = document.createElement('div');
+        title.textContent = 'Enter Notes';
+        title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif; margin-bottom:4px;';
+        const ask = document.createElement('div');
+        ask.textContent = 'Write a note for ' + personLabel(name) + '. Every computer running this script sees it.';
+        ask.style.cssText = 'font-size:12px; color:#8b949e; margin-bottom:8px;';
+        const area = document.createElement('textarea');
+        area.setAttribute('data-note', '');
+        area.setAttribute('maxlength', '240');
+        area.placeholder = 'Note';
+        area.style.cssText = 'display:block; width:100%; box-sizing:border-box; min-height:88px; resize:vertical; ' +
+            'padding:7px 8px; border-radius:6px; border:1px solid #30363d; background:#0d1117; color:#fff; ' +
+            'font:600 13px Segoe UI,system-ui,sans-serif;';
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; gap:6px; margin-top:8px;';
+        const save = document.createElement('button');
+        save.type = 'button';
+        save.textContent = 'Save';
+        save.style.cssText = 'flex:1 1 auto; padding:7px 10px; border-radius:6px; border:1px solid #8b949e; ' +
+            'background:#6e7681; color:#ffffff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = 'Close';
+        close.style.cssText = 'flex:0 0 auto; padding:7px 10px; border-radius:6px; border:1px solid #8b949e; ' +
+            'background:#0d1117; color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        const status = document.createElement('div');
+        status.setAttribute('data-notes-status', '');
+        status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
+        function submit() {
+            const actor = signedInLogin();
+            if (!looksLikeLogin(actor)) {
+                setNotesStatus('Control Tower has not shown who is signed in.');
+                return;
+            }
+            const doc = loadNotes();
+            const note = addNote(doc, name, actor, area.value, new Date());
+            if (!note) {
+                setNotesStatus('Write a note first.');
+                return;
+            }
+            const shared = saveNotes(doc);
+            const savedText = 'Saved the note for ' + personLabel(name) + '.';
+            setNotesStatus(savedText);
+            watchNotesShare(savedText, shared);
+            area.value = '';
+        }
+        save.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            submit();
+        });
+        close.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            closeLeavingOverlay(NOTES_ID);
+        });
+        row.appendChild(save);
+        row.appendChild(close);
+        card.appendChild(title);
+        card.appendChild(ask);
+        card.appendChild(signedInNote());
+        card.appendChild(area);
+        card.appendChild(row);
+        card.appendChild(status);
+        document.body.appendChild(card);
+        area.focus();
+    }
+
+    function makePopupNotesButton(person) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = 'Enter Notes';
+        btn.setAttribute('data-mem3-enter-notes', '');
+        btn.style.cssText = 'display:block; width:100%; box-sizing:border-box; margin-top:8px; padding:6px 8px; ' +
+            'border-radius:6px; border:1px solid #8b949e; background:#6e7681; color:#ffffff; cursor:pointer; ' +
+            'font:800 12px Segoe UI,system-ui,sans-serif; text-transform:none; letter-spacing:0;';
+        btn.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            const host = btn.closest('.' + POPUP_CLASS);
+            const login = (person && person.login) || (host && host.dataset.login) || '';
+            openNotesPanel(login);
+        });
+        return btn;
+    }
+
+    function makeViewNotesButton() {
+        return panelChipButton('View Notes', openNotesList);
     }
 
     function panelChipButton(label, onClick) {
