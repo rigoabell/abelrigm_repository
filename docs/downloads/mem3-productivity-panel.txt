@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.10.8
+// @version      1.10.9
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.10.8';
+    const SCRIPT_VERSION = '1.10.9';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -6365,22 +6365,35 @@
         return groupNameFromHeading((clone.textContent || '').replace(/\s+/g, ' ').trim());
     }
 
+    function inPageChrome(el) {
+        let node = el;
+        while (node && node !== document.body) {
+            const tag = String(node.tagName || '').toUpperCase();
+            if (tag === 'NAV' || tag === 'HEADER') return true;
+            if (tag === 'BUTTON' && node !== el) return true;
+            node = node.parentElement;
+        }
+        return false;
+    }
+
     function groupRoot(heading) {
+        if (!heading || inPageChrome(heading)) return null;
         let el = heading;
         for (let i = 0; i < 12 && el && el.parentElement; i++) {
             const parent = el.parentElement;
-            if (parent === document.body || parent === document.documentElement) {
-                return el.querySelector && el.querySelector('table') ? el : null;
-            }
+            if (!parent || parent === document.body || parent === document.documentElement) break;
+            if (String(parent.tagName || '').toUpperCase() === 'NAV') return null;
             const heads = parent.querySelectorAll('h3, h4, h5');
             let others = 0;
             for (let h = 0; h < heads.length; h++) {
+                if (inPageChrome(heads[h])) continue;
                 if (!el.contains(heads[h])) others++;
             }
-            if (others && el.querySelector && el.querySelector('table')) return el;
+            if (others && el.querySelector && el.querySelector('table') && !el.querySelector('nav')) return el;
             el = parent;
+            if (inPageChrome(el)) return null;
         }
-        return el && el.querySelector && el.querySelector('table') ? el : null;
+        return null;
     }
 
     function anchorInRoot(root, login) {
@@ -6563,11 +6576,16 @@
 
     function placeGroupUnassignButtons() {
         if (!isAssignmentsPage() || unassigning) return;
+        const stray = document.querySelectorAll('[data-mem3-unassign-group]');
+        for (let s = 0; s < stray.length; s++) {
+            if (inPageChrome(stray[s])) stray[s].remove();
+        }
         const heads = document.querySelectorAll('h3, h4, h5');
         const seen = [];
         for (let i = 0; i < heads.length; i++) {
             const heading = heads[i];
             if (heading.closest && heading.closest('#' + FLOOR_SUMMARY_ID)) continue;
+            if (inPageChrome(heading)) continue;
             const root = groupRoot(heading);
             if (!root || !root.querySelector || !root.querySelector('table')) continue;
             if (seen.indexOf(root) !== -1) continue;
@@ -7884,7 +7902,8 @@
         if (event && event.action === 'unassign') return actor + ' unassigned ' + who + when;
         if (event && event.action === 'miss') return actor + ' found ' + who + ' was not on a station' + when;
         if (event && event.action === 'drop') {
-            return who + ' fell off the early out. They were not on the station' + when;
+            const said = String(event.text || '').replace(/^\S+/, who);
+            return (said || (who + ' fell off the early out because they were no longer at the station')) + when;
         }
         if (event && event.action === 'fail') return actor + ' could not take ' + who + ' off' + when;
         if (event && event.action === 'back') {
@@ -7908,8 +7927,10 @@
         if (match) return actor + ' could not take ' + personLabel(match[1]) + ' off' + when;
         match = text.match(/^(\S+) was not on a station$/);
         if (match) return actor + ' found ' + personLabel(match[1]) + ' was not on a station' + when;
-        match = text.match(/^(\S+) fell off the early out$/);
-        if (match) return personLabel(match[1]) + ' fell off the early out. They were not on the station' + when;
+        match = text.match(/^(\S+) fell off the early out because they were no longer at (.+)$/);
+        if (match) {
+            return personLabel(match[1]) + ' fell off the early out because they were no longer at ' + match[2] + when;
+        }
         match = text.match(/^(\S+) back on (.+)$/);
         if (match) return actor + ' saw ' + personLabel(match[1]) + ' back on ' + match[2] + when;
         match = text.match(/^(\S+) already marked at (.+)$/);
@@ -7937,13 +7958,14 @@
     function activityKind(event) {
         if (!event) return '';
         if (event.action === 'mark' || event.action === 'update' || event.action === 'clear' ||
-            event.action === 'unassign' || event.action === 'miss') return event.action;
+            event.action === 'unassign' || event.action === 'miss' || event.action === 'drop') return event.action;
         const text = String(event.text || '');
         if (/^marked \S+ leaving at /.test(text)) return 'mark';
         if (/^updated \S+ /.test(text)) return 'update';
         if (/^cleared \S+ /.test(text)) return 'clear';
         if (/^unassigned \S+$/.test(text)) return 'unassign';
         if (/ was not on a station$/.test(text)) return 'miss';
+        if (/ fell off the early out because /.test(text)) return 'drop';
         return '';
     }
 
@@ -7954,6 +7976,8 @@
         let match = text.match(/^(?:marked|updated|cleared|unassigned) (\S+)/);
         if (match) return match[1].toLowerCase();
         match = text.match(/^(\S+) was not on a station$/);
+        if (match) return match[1].toLowerCase();
+        match = text.match(/^(\S+) fell off the early out because /);
         return match ? match[1].toLowerCase() : '';
     }
 
@@ -8442,16 +8466,40 @@
         return out;
     }
 
+    function fellOffPlace(station) {
+        const lines = leavingStationLines(station);
+        if (lines.length) return lines.join(', ');
+        const cleaned = cleanStationText(station);
+        return cleaned || 'the station';
+    }
+
     function dropFromEarlyOut(doc, row, now, by) {
         if (!row || !leavingOpen(row)) return false;
         const stamp = now || new Date();
+        const place = fellOffPlace(row.station);
+        const text = row.login + ' fell off the early out because they were no longer at ' + place;
         row.status = 'cancelled';
         row.clearedAt = clockText(stamp);
         row.clearedAtMs = stamp.getTime();
         row.clearedBy = '';
-        row.takenHow = 'left station';
-        recordActivity(doc, by || 'board', row.login + ' fell off the early out', stamp, {
-            action: 'drop', who: row.login, said: row.said, detail: row.station || ''
+        row.takenHow = 'no longer at the station';
+        row.fellOffAt = clockText(stamp);
+        row.fellOffAtMs = stamp.getTime();
+        row.fellWhy = 'no longer at the station';
+        if (!row.history) row.history = [];
+        row.history.push({ said: row.said, at: row.fellOffAt, why: row.fellWhy });
+        recordActivity(doc, by || 'board', text, stamp, {
+            action: 'drop', who: row.login, said: row.said, detail: place
+        });
+        pushEarlyRun(doc, {
+            at: row.fellOffAt,
+            by: by || 'board',
+            kind: 'drop',
+            shiftId: shiftId(stamp),
+            login: row.login,
+            said: row.said,
+            station: row.station || '',
+            summary: text
         });
         return true;
     }
