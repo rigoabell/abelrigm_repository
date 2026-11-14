@@ -7,8 +7,12 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.42/);
+assert.match(src, /@version\s+1\.9\.43/);
 assert.match(src, /data-mem3-enter-notes/);
+assert.match(src, /data-mem3-line-notes/);
+assert.match(src, /function lineNoteName/);
+assert.match(src, /lines\[i\]\.name !== 'BIGS'/);
+assert.match(src, /function uphHighlight/);
 assert.match(src, /Enter Notes/);
 assert.match(src, /View Notes/);
 assert.match(src, /background:#6e7681; color:#ffffff/);
@@ -108,7 +112,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.42");
+assert.equal(entry.version, "1.9.43");
 assert.match(entry.detail, /View Notes/);
 assert.match(entry.detail, /cleared only by the person who wrote it/);
 assert.match(entry.detail, /lists those stations under Disabled/);
@@ -257,7 +261,7 @@ const patched = src.replace(
         setDown(value) { FCLM_DOWN = value; },
         showUpdate(remote) { showUpdatePrompt(remote); },
         shiftId, parseLeaveTime, addLeaving, dueLeaving, noteBack, markTakenOff, cleanStationText, customerReturnsLines,
-        blendMediumLarge, overallRate, bodyColumn, placeBesideLogin,
+        blendMediumLarge, overallRate, bodyColumn, placeBesideLogin, extremeRanks, uphHighlight, lineNoteName,
         stationDisabled(row) { return stationIsDisabled(row); },
         stop() {
             refreshGeneration++;
@@ -665,6 +669,19 @@ try {
     const overall = api.overallRate(overallRow, overallHeaders);
     assert.equal(overall.units, 139);
     assert.ok(Math.abs(overall.uph - (139 / 5.36)) < 0.000001);
+    assert.equal(api.lineNoteName("LINE 3 ODD"), "CRET Line 3 (O)");
+    assert.equal(api.lineNoteName("BIGS"), "BIGs");
+    const ranks = api.extremeRanks([
+        { name: "LINE 1 ODD", avgUph: 20, idleMin: 10, clockedMin: 100 },
+        { name: "BIGS", avgUph: 5, idleMin: 50, clockedMin: 100 },
+        { name: "LINE 2 ODD", avgUph: 30, idleMin: 5, clockedMin: 100 }
+    ]);
+    assert.equal(ranks.worstUph, 20);
+    assert.equal(ranks.bestUph, 30);
+    assert.equal(ranks.worstIdle, 50);
+    assert.equal(api.uphHighlight({ name: "BIGS", avgUph: 5 }, ranks), "");
+    assert.equal(api.uphHighlight({ name: "LINE 1 ODD", avgUph: 20 }, ranks), "worst");
+    assert.equal(api.uphHighlight({ name: "BIGS", avgUph: 30, idleMin: 50, clockedMin: 100 }, { bestUph: 30, worstUph: 20 }), "best");
 
     sandbox.getComputedStyle = function () { return { display: "flex" }; };
     const overrideRow = makeNode("tr");

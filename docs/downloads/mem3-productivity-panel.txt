@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.42
+// @version      1.9.43
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.42';
+    const SCRIPT_VERSION = '1.9.43';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -2362,7 +2362,7 @@
             const idleShown = shownIdle(lines[i]);
             if (uph !== null) {
                 if (bestUph === null || uph > bestUph) bestUph = uph;
-                if (worstUph === null || uph < worstUph) worstUph = uph;
+                if (lines[i].name !== 'BIGS' && (worstUph === null || uph < worstUph)) worstUph = uph;
             }
             if (idleShown !== null) {
                 if (bestIdle === null || idleShown < bestIdle) bestIdle = idleShown;
@@ -2378,6 +2378,15 @@
         if (shown === null) return '';
         if (best !== null && shown === best) return 'best';
         if (worst !== null && shown === worst) return 'worst';
+        return '';
+    }
+
+    function uphHighlight(line, ranks) {
+        const shown = shownUph(line);
+        if (shown === null || !ranks) return '';
+        if (ranks.bestUph !== null && shown === ranks.bestUph) return 'best';
+        if (line && line.name === 'BIGS') return '';
+        if (ranks.worstUph !== null && shown === ranks.worstUph) return 'worst';
         return '';
     }
 
@@ -4605,6 +4614,13 @@
         return wrap;
     }
 
+    function lineNoteName(name) {
+        if (name === 'BIGS') return 'BIGs';
+        const labels = TARGET_SECTIONS[name];
+        const raw = labels && labels[0] ? labels[0] : name;
+        return raw.replace(/\bLINE\b/, 'Line');
+    }
+
     function panelTitle(name) {
         if (name === 'BIGS') return 'BIGs';
         const line = /^LINE\s+(\d+)\s+(ODD|EVEN)/i.exec(name);
@@ -4715,6 +4731,22 @@
         });
         addMetric(formatUnits(opts.units || 0), 'units', '#8b949e', '', opts.lead ? 16 : 13, { key: 'units' });
         addMetric(formatDuration(opts.idleMin || 0), 'hrs idle', '#8b949e', '', opts.lead ? 16 : 13, { key: 'idleHours' });
+
+        if (opts.noteFor) {
+            const noteBtn = document.createElement('button');
+            noteBtn.type = 'button';
+            noteBtn.textContent = 'Enter Notes';
+            noteBtn.setAttribute('data-mem3-line-notes', opts.noteFor);
+            noteBtn.style.cssText = 'align-self:flex-start; margin-top:4px; padding:4px 8px; border-radius:6px; ' +
+                'border:1px solid #8b949e; background:#6e7681; color:#ffffff; cursor:pointer; ' +
+                'font:800 11px Segoe UI,system-ui,sans-serif; white-space:nowrap;';
+            noteBtn.addEventListener('click', function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                openNotesPanel(opts.noteFor, 'line');
+            });
+            valueRow.appendChild(noteBtn);
+        }
 
         cell.appendChild(titleRow);
         cell.appendChild(valueRow);
@@ -5257,7 +5289,7 @@
             if (!paint(line.name, {
                 uphText: line.avgUph > 0 ? line.avgUph.toFixed(1) : '\u2014',
                 uph: line.avgUph,
-                uphRank: metricRank(shownUph(line), ranks.bestUph, ranks.worstUph),
+                uphRank: uphHighlight(line, ranks),
                 idlePct: sideIdlePct(line.idleMin || 0, line.clockedMin || 0),
                 idleRank: metricRank(shownIdle(line), ranks.bestIdle, ranks.worstIdle),
                 idleCount: idleIdsIn(line.empIds || []).idle.length,
@@ -5474,12 +5506,13 @@
                 units: line.totalUnits || 0,
                 idleMin: line.idleMin || 0,
                 idlePct: sideIdlePct(line.idleMin || 0, line.clockedMin || 0),
-                uphRank: metricRank(shownUph(line), ranks.bestUph, ranks.worstUph),
+                uphRank: uphHighlight(line, ranks),
                 idleRank: metricRank(shownIdle(line), ranks.bestIdle, ranks.worstIdle),
                 signed: line.signed || 0,
                 stations: line.stations || 0,
                 openStations: line.openStations || [],
                 disabledStations: line.disabledStations || [],
+                noteFor: lineNoteName(line.name),
                 title: panelTitle(line.name) + ' \u00b7 ' + gradingLabel() +
                     (line.avgUph > 0 ? '' : ' \u00b7 no rate this shift') +
                     ' \u00b7 ' + idleLabel(sideIdlePct(line.idleMin || 0, line.clockedMin || 0)) + ' IDLE \u00b7 ' +
@@ -8399,17 +8432,27 @@
         return String(text || '').replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim().slice(0, 240);
     }
 
-    function addNote(doc, about, by, text, now) {
-        const login = String(about || '').trim().toLowerCase();
+    function noteKey(text) {
+        return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48);
+    }
+
+    function addNote(doc, about, by, text, now, kind) {
         const author = String(by || '').trim().toLowerCase();
         const body = noteText(text);
-        if (!looksLikeLogin(login) || !looksLikeLogin(author) || !body) return null;
+        const lineNote = kind === 'line';
+        let target = String(about || '').trim();
+        if (!lineNote) target = target.toLowerCase();
+        if (!looksLikeLogin(author) || !body) return null;
+        if (lineNote) {
+            if (!target) return null;
+        } else if (!looksLikeLogin(target)) return null;
         if (!doc.notes) doc.notes = [];
         noteSerial += 1;
         const note = {
-            id: author + '-' + login + '-' + now.getTime() + '-' + noteSerial,
-            about: login,
+            id: author + '-' + noteKey(target) + '-' + now.getTime() + '-' + noteSerial,
+            about: target,
             by: author,
+            kind: lineNote ? 'line' : 'person',
             text: body,
             at: clockText(now),
             atMs: now.getTime(),
@@ -8633,7 +8676,7 @@
     }
 
     function noteLine(note) {
-        return personLabel(note.about) + ': ' + note.text;
+        return note.by + ' noted ' + note.about + ': ' + note.text;
     }
 
     function paintNotesList() {
@@ -8660,11 +8703,7 @@
             const title = document.createElement('div');
             title.textContent = noteLine(note);
             title.style.cssText = 'font-size:12px; font-weight:650; white-space:pre-wrap;';
-            const who = document.createElement('div');
-            who.textContent = personLabel(note.by) + ' at ' + note.at;
-            who.style.cssText = 'font-size:11px; color:#8b949e; margin-top:2px;';
             label.appendChild(title);
-            label.appendChild(who);
             line.appendChild(label);
             if (actor && note.by === actor) {
                 const clear = document.createElement('button');
@@ -8748,9 +8787,12 @@
         });
     }
 
-    function openNotesPanel(prefill) {
-        const name = String(prefill || '').trim().toLowerCase();
-        if (!looksLikeLogin(name)) return;
+    function openNotesPanel(prefill, kind) {
+        const lineNote = kind === 'line';
+        const name = lineNote ? String(prefill || '').trim() : String(prefill || '').trim().toLowerCase();
+        if (lineNote) {
+            if (!name) return;
+        } else if (!looksLikeLogin(name)) return;
         closeLeavingOverlay(NOTES_ID);
         const card = document.createElement('div');
         card.id = NOTES_ID;
@@ -8761,7 +8803,7 @@
         title.textContent = 'Enter Notes';
         title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif; margin-bottom:4px;';
         const ask = document.createElement('div');
-        ask.textContent = 'Write a note for ' + personLabel(name) + '. Every computer running this script sees it.';
+        ask.textContent = 'Write a note for ' + (lineNote ? name : personLabel(name)) + '. Every computer running this script sees it.';
         ask.style.cssText = 'font-size:12px; color:#8b949e; margin-bottom:8px;';
         const area = document.createElement('textarea');
         area.setAttribute('data-note', '');
@@ -8792,13 +8834,13 @@
                 return;
             }
             const doc = loadNotes();
-            const note = addNote(doc, name, actor, area.value, new Date());
+            const note = addNote(doc, name, actor, area.value, new Date(), lineNote ? 'line' : 'person');
             if (!note) {
                 setNotesStatus('Write a note first.');
                 return;
             }
             const shared = saveNotes(doc);
-            const savedText = 'Saved the note for ' + personLabel(name) + '.';
+            const savedText = 'Saved the note for ' + name + '.';
             setNotesStatus(savedText);
             watchNotesShare(savedText, shared);
             area.value = '';

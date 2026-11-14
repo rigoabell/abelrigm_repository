@@ -9,7 +9,7 @@ const patched = src.replace(
         addLeaving, saveLeaving, loadLeaving, clearMarkedLeave, shiftId,
         mergeLeaving, enableLeavingShare, publishLeaving, pullLeaving, whenLeavingShared,
         activityLine, leavingLine, loginFromWelcome, restoreLatestMarks,
-        addNote, clearNote, saveNotes, loadNotes, pullNotes, whenNotesShared, mergeNotes, openNotes
+        addNote, clearNote, saveNotes, loadNotes, pullNotes, whenNotesShared, mergeNotes, openNotes, noteLine
     };
 })();`
 );
@@ -231,6 +231,11 @@ const written = a.addNote(notesA, "brndbo", "abelrigm", "coaching on large", now
 assert.ok(written);
 assert.equal(written.about, "brndbo");
 assert.equal(written.by, "abelrigm");
+assert.equal(a.noteLine(written), "abelrigm noted brndbo: coaching on large");
+const lineDoc = { notes: [] };
+const lineNote = a.addNote(lineDoc, "CRET Line 3 (O)", "abelrigm", "short staffed", now, "line");
+assert.equal(a.noteLine(lineNote), "abelrigm noted CRET Line 3 (O): short staffed");
+assert.equal(a.addNote({ notes: [] }, "CRET Line 3 (O)", "abelrigm", "no", now), null);
 assert.equal(a.addNote({ notes: [] }, "brndbo", "otherpa", "   ", now), null);
 a.saveNotes(notesA);
 await finish(a.whenNotesShared());
