@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.44
+// @version      1.9.45
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.44';
+    const SCRIPT_VERSION = '1.9.45';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -2282,9 +2282,14 @@
         return Number(n.toFixed(1));
     }
 
-    function uphColor(uph) {
+    function uphColor(uph, bigs) {
         const shown = shownTenth(uph);
         if (shown === null || shown <= 0) return '#8b949e';
+        if (bigs) {
+            if (shown >= 19) return '#2ea043';
+            if (shown >= 16) return '#d29922';
+            return '#f85149';
+        }
         if (shown >= UPH_TARGET) return '#2ea043';
         if (shown >= UPH_TARGET * 0.75) return '#d29922';
         return '#f85149';
@@ -2813,7 +2818,7 @@
         const idleNow = showsIdleNow(time, empId);
         wrap.style.cssText = badgeGridStyle(idleNow);
         const noTime = !!(time && time.noData);
-        const color = (known && stats.hasData) ? uphColor(stats.uph) : '#8b949e';
+        const color = (known && stats.hasData) ? uphColor(stats.uph, personUsesBigsRate(empId)) : '#8b949e';
         const rateText = !known ? '?' : (stats.hasData ? ((stats.uph > 0 ? stats.uph.toFixed(1) : '0') + ' UPH') : uphGapText());
         const pct = idlePercent(time);
         const idleText = noTime ? windowGapText() : (idleLabel(pct) + ' IDLE');
@@ -4636,7 +4641,7 @@
     }
 
     function makeSummaryCell(opts) {
-        const c = uphColor(opts.uph);
+        const c = uphColor(opts.uph, opts.summaryKey === 'BIGS');
         const cell = document.createElement('div');
         cell.style.cssText = opts.lead
             ? 'display:flex; flex-direction:column; justify-content:center; gap:2px; ' +
@@ -5075,7 +5080,7 @@
         info.appendChild(idleField(
             'UPH',
             stats.hasData ? (stats.uph > 0 ? stats.uph.toFixed(1) : '0') : '\u2014',
-            stats.hasData ? uphColor(stats.uph) : '#8b949e'
+            stats.hasData ? uphColor(stats.uph, personUsesBigsRate(empId)) : '#8b949e'
         ));
         const pct = idlePercent(time);
         const idleRow = idleField('Idle', idleLabel(pct), idleColor(pct));
@@ -5232,7 +5237,7 @@
                 if (which === 'best') el.classList.add('mem3-pulse-best');
                 else if (which === 'worst') el.classList.add('mem3-pulse-worst');
             }
-            num('uph', spec.uphText, spec.uph > 0 ? uphColor(spec.uph) : '#c9d1d9');
+            num('uph', spec.uphText, spec.uph > 0 ? uphColor(spec.uph, key === 'BIGS') : '#c9d1d9');
             rank('uph', spec.uphRank || '');
             num('units', formatUnits(spec.units || 0), '#8b949e');
             num('idle', idleLabel(spec.idlePct), idleColor(spec.idlePct));
@@ -5508,12 +5513,12 @@
         node.setAttribute('data-sig', sig);
     }
 
-    function makeLineBadge(avgUph, totalUnits, withData, staffed, totalMin, idleMin, clockedMin, both, crSigned, crStations, openStations, disabledStations) {
+    function makeLineBadge(avgUph, totalUnits, withData, staffed, totalMin, idleMin, clockedMin, both, crSigned, crStations, openStations, disabledStations, bigs) {
         const wrap = document.createElement('span');
         wrap.className = SECTION_BADGE_CLASS;
         wrap.style.cssText = 'display:inline-flex; gap:10px; margin-left:14px; align-items:center; ' +
             'font-family:Segoe UI,system-ui,sans-serif; font-weight:normal; font-size:12px; vertical-align:middle;';
-        const c = uphColor(avgUph);
+        const c = uphColor(avgUph, bigs);
         const pct = sideIdlePct(idleMin, clockedMin);
         const rateGroup = document.createElement('span');
         rateGroup.style.cssText = 'display:inline-flex; align-items:baseline; gap:5px;';
@@ -5606,7 +5611,7 @@
 
         const firstH = findH5(sectionLabels[0]);
         if (firstH) {
-            const lineBadge = makeLineBadge(avgUph, totalUnits, withData, staffed, totalMin, idleMin, clockedMin, both, crSigned, crStations, openStations, disabledStations);
+            const lineBadge = makeLineBadge(avgUph, totalUnits, withData, staffed, totalMin, idleMin, clockedMin, both, crSigned, crStations, openStations, disabledStations, panelName === 'BIGS');
             const lineSig = avgUph.toFixed(1) + '|' + totalUnits + '|' + staffed + '|' +
                 (idleMin || 0) + '|' + (clockedMin || 0) + '|' + (crSigned || 0) + '/' + (crStations || 0) +
                 '|' + disabledStations.join(';');
@@ -5654,7 +5659,7 @@
     function makePopupLine(person, empId, stats) {
         const box = document.createElement('div');
         box.className = POPUP_CLASS;
-        const color = uphColor(stats.uph);
+        const color = uphColor(stats.uph, personUsesBigsRate(empId));
         box.style.cssText = 'margin:10px 0; padding:8px 10px; border-radius:8px; ' +
             'background:' + color + '22; border:1px solid ' + color + '; ' +
             'border-left:4px solid ' + color + '; ' +
