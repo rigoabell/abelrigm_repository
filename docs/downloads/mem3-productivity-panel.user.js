@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.10.4
+// @version      1.10.5
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.10.4';
+    const SCRIPT_VERSION = '1.10.5';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -8072,14 +8072,23 @@
         return null;
     }
 
-    function dueLeaving(rows, now) {
-        const nowMin = shiftMinute(now.getHours() * 60 + now.getMinutes());
+    function throughMinute(value) {
+        if (value && typeof value.getHours === 'function') {
+            return value.getHours() * 60 + value.getMinutes();
+        }
+        const n = Number(value);
+        if (!isFinite(n)) return 0;
+        return ((Math.floor(n) % 1440) + 1440) % 1440;
+    }
+
+    function dueLeaving(rows, through) {
+        const limit = shiftMinute(throughMinute(through));
         const out = [];
         const list = rows || [];
         for (let i = 0; i < list.length; i++) {
             const row = list[i];
             if (!row || row.status !== 'said') continue;
-            if (nowMin >= shiftMinute(row.saidMin)) out.push(row);
+            if (shiftMinute(row.saidMin) <= limit) out.push(row);
         }
         return out;
     }
@@ -8363,9 +8372,11 @@
         }
     }
 
-    async function unassignMarkedLeaves(by) {
+    async function unassignMarkedLeaves(by, throughMin) {
         const actor = String(by || loadActor() || '').trim().toLowerCase() || 'board';
         const now = new Date();
+        const through = typeof throughMin === 'number' ? throughMinute(throughMin) : throughMinute(now);
+        const throughLabel = formatLeaveTime(through);
         let blocked = '';
         if (!isAssignmentsPage()) blocked = 'Not on the assignments page.';
         else if (leavingBusy || unassigning) blocked = 'An unassign is already running.';
@@ -8383,12 +8394,13 @@
         }
         const doc = loadLeaving();
         const waiting = markedLeaving(shiftRows(doc, now));
-        const rows = dueLeaving(waiting, now);
+        const rows = dueLeaving(waiting, through);
         const run = {
             at: clockText(now),
             by: actor,
             kind: 'unassign',
             shiftId: shiftId(now),
+            through: throughLabel,
             waiting: waiting.map(function (row) {
                 return { login: row.login, said: row.said, station: row.station || '' };
             }),
@@ -8398,7 +8410,7 @@
         };
         if (!rows.length) {
             run.summary = waiting.length
-                ? 'No leave time has passed yet. ' + waiting.length + ' still waiting.'
+                ? 'Nobody is leaving through ' + throughLabel + '. ' + waiting.length + ' are later.'
                 : 'Nobody on this list is waiting.';
             recordActivity(doc, actor, run.summary, now, { action: 'note' });
             pushEarlyRun(doc, run);
@@ -8417,7 +8429,7 @@
         const skippedNames = [];
         const left = [];
         try {
-            recordActivity(doc, actor, 'started unassign for leave times that have passed', now, { action: 'note' });
+            recordActivity(doc, actor, 'started unassign through ' + throughLabel, now, { action: 'note' });
             paintEarlyProgress(0, rows.length, '');
             for (let i = 0; i < rows.length; i++) {
                 if (leavingStop) {
@@ -8528,7 +8540,7 @@
                 paintEarlyProgress(i + 1, rows.length, '');
             }
             const later = waiting.length - rows.length;
-            run.summary = 'Unassigned ' + off + '. ' + skippedNames.length +
+            run.summary = 'Through ' + throughLabel + '. Unassigned ' + off + '. ' + skippedNames.length +
                 ' were skipped because they were not on the marked station. ' +
                 (rows.length - off - skippedNames.length) + ' could not be taken off. ' +
                 later + ' are still waiting for their time.';
@@ -9739,6 +9751,35 @@
         const title = document.createElement('div');
         title.textContent = 'Unassign Early Outs';
         title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif; margin-bottom:8px;';
+        const throughAsk = document.createElement('div');
+        throughAsk.textContent = 'Through';
+        throughAsk.style.cssText = 'font-size:12px; font-weight:800; margin-bottom:2px;';
+        const throughHint = document.createElement('div');
+        throughHint.textContent = 'Anyone leaving at this time or earlier.';
+        throughHint.style.cssText = 'font-size:12px; color:#8b949e; margin-bottom:6px;';
+        const throughRow = document.createElement('div');
+        throughRow.style.cssText = 'display:flex; gap:6px; flex-wrap:nowrap; align-items:center; margin-bottom:8px;';
+        const throughTime = document.createElement('input');
+        throughTime.setAttribute('data-through', '');
+        throughTime.setAttribute('inputmode', 'numeric');
+        throughTime.setAttribute('maxlength', '5');
+        throughTime.setAttribute('autocomplete', 'off');
+        throughTime.placeholder = '00:00';
+        throughTime.style.cssText = leavingFieldStyle() + ' flex:0 0 76px; width:76px;';
+        const throughHalf = document.createElement('select');
+        throughHalf.setAttribute('data-through-half', '');
+        throughHalf.style.cssText = leavingFieldStyle() + ' flex:0 0 72px; width:72px;';
+        const throughAm = document.createElement('option');
+        throughAm.value = 'AM';
+        throughAm.textContent = 'AM';
+        const throughPm = document.createElement('option');
+        throughPm.value = 'PM';
+        throughPm.textContent = 'PM';
+        throughHalf.appendChild(throughAm);
+        throughHalf.appendChild(throughPm);
+        const nowClock = formatLeaveTime(new Date().getHours() * 60 + new Date().getMinutes());
+        throughTime.value = nowClock.slice(0, 5);
+        throughHalf.value = nowClock.slice(-2);
         const pass = document.createElement('input');
         pass.type = 'password';
         pass.placeholder = 'Password';
@@ -9768,14 +9809,30 @@
                 setLeavingStatus('Wrong password.');
                 return;
             }
+            const typed = finishLeaveTime(throughTime.value);
+            throughTime.value = typed;
+            const through = /^\d{2}:\d{2}$/.test(typed)
+                ? parseLeaveTime(typed + ' ' + (throughHalf.value || 'PM'))
+                : null;
+            if (through == null) {
+                setLeavingStatus('Enter a time like 12:00.');
+                return;
+            }
             pass.value = '';
             mountEarlyProgress(card);
-            unassignMarkedLeaves(actor);
+            unassignMarkedLeaves(actor, through);
         }
         go.addEventListener('click', function (event) {
             event.preventDefault();
             event.stopPropagation();
             submit();
+        });
+        throughTime.addEventListener('input', function () {
+            const next = maskLeaveTime(throughTime.value);
+            if (throughTime.value !== next) throughTime.value = next;
+        });
+        throughTime.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter') submit();
         });
         pass.addEventListener('keydown', function (event) {
             if (event.key === 'Enter') submit();
@@ -9790,8 +9847,13 @@
         const status = document.createElement('div');
         status.setAttribute('data-leaving-status', '');
         status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
+        throughRow.appendChild(throughTime);
+        throughRow.appendChild(throughHalf);
         card.appendChild(title);
         card.appendChild(signedInNote());
+        card.appendChild(throughAsk);
+        card.appendChild(throughHint);
+        card.appendChild(throughRow);
         card.appendChild(pass);
         card.appendChild(row);
         card.appendChild(status);

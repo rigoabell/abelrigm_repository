@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.10\.4/);
+assert.match(src, /@version\s+1\.10\.5/);
 assert.match(src, /if \(shown >= 19\) return '#2ea043'/);
 assert.match(src, /if \(shown >= 16\) return '#d29922'/);
 assert.match(src, /data-mem3-enter-notes/);
@@ -114,7 +114,8 @@ assert.match(src, /function clearMarkedLeave/);
 assert.match(src, /data-half/);
 assert.match(src, /am\.textContent = 'AM'/);
 assert.match(src, /pm\.textContent = 'PM'/);
-assert.match(src, /dueLeaving\(waiting, now\)/);
+assert.match(src, /dueLeaving\(waiting, through\)/);
+assert.match(src, /Anyone leaving at this time or earlier/);
 assert.match(src, /function openEarlyPass/);
 assert.match(src, /refreshLeaving\(\)/);
 assert.match(src, /const LEAVING_POLL_MS = 20000;/);
@@ -145,7 +146,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.10.4");
+assert.equal(entry.version, "1.10.5");
 assert.match(entry.detail, /stayed off the board for the last 3 seconds/);
 assert.match(entry.detail, /button's own handler/);
 assert.match(entry.detail, /not on the station they were marked from/);
@@ -811,6 +812,8 @@ try {
     const shiftRows = leaving.shifts[api.shiftId(noon)];
     assert.equal(api.dueLeaving(shiftRows, new Date(2026, 10, 13, 11, 59)).length, 0);
     assert.equal(api.dueLeaving(shiftRows, noon).length, 1);
+    assert.equal(api.dueLeaving(shiftRows, 11 * 60 + 30).length, 0);
+    assert.equal(api.dueLeaving(shiftRows, 12 * 60).length, 1);
     const moved = api.addLeaving(leaving, "wilrayni", 13 * 60 + 30, "CRET 2 Even", new Date(2026, 10, 13, 11, 40));
     assert.equal(moved.updated, true);
     assert.equal(moved.previous, "12:00 PM");
@@ -823,6 +826,7 @@ try {
     const nights = { shifts: {} };
     api.addLeaving(nights, "abelrigm", 60, "", night);
     assert.equal(api.dueLeaving(nights.shifts[api.shiftId(night)], night).length, 0);
+    assert.equal(api.dueLeaving(nights.shifts[api.shiftId(night)], 60).length, 1);
     assert.equal(api.dueLeaving(nights.shifts[api.shiftId(night)], new Date(2026, 10, 14, 1, 5)).length, 1);
     api.markTakenOff(marked.row, noon, "unassigned");
     assert.equal(marked.row.takenOffAt, "12:00 PM");
