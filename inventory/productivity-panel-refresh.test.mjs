@@ -7,7 +7,92 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.2/);
+assert.match(src, /@version\s+1\.10\.0/);
+assert.match(src, /if \(shown >= 19\) return '#2ea043'/);
+assert.match(src, /if \(shown >= 16\) return '#d29922'/);
+assert.match(src, /data-mem3-enter-notes/);
+assert.equal(src.includes("data-mem3-line-notes"), false);
+assert.match(src, /grid-template-columns:188px 188px/);
+assert.match(src, /lines\[i\]\.name !== 'BIGS'/);
+assert.match(src, /function uphHighlight/);
+assert.match(src, /Enter Notes/);
+assert.match(src, /View Notes/);
+assert.match(src, /background:#6e7681; color:#ffffff/);
+assert.match(src, /extendsclass\.com\/api\/json-storage\/bin\/dcfefcf/);
+assert.match(src, /function clearNote/);
+assert.match(src, /if \(note\.by !== author\) return null/);
+assert.match(src, /function overallRate/);
+assert.match(src, /statsFor\(empId, panelName === 'BIGS'\)/);
+assert.match(src, /function centerEmployeeLine/);
+assert.match(src, /stationList\('Disabled', disabled, '#8b949e'\)/);
+assert.match(src, /function pinAssignmentColumn/);
+assert.match(src, /tableLayout = 'fixed'/);
+assert.match(src, /width = '13em'/);
+assert.match(src, /function customerReturnsLines/);
+assert.match(src, /function layoutCustomerReturns/);
+assert.match(src, /mem3-cr-station/);
+assert.match(src, /max-content max-content/);
+assert.match(src, /placeBadgeCell\(spacer, col, 1\)/);
+assert.match(src, /placeBadgeCell\(rate, col, 2\)/);
+assert.match(src, /placeBadgeCell\(idle, col, 3\)/);
+assert.equal(src.includes("idle.style.top"), false);
+assert.match(src, /function rowIdleYield/);
+assert.equal(src.includes("placeBadgeCell(pill, 2, 1)"), false);
+assert.equal(src.includes("makePill('IDLE NOW'"), false);
+assert.match(src, /querySelectorAll\('\.mem3-clock-pill'\)/);
+assert.match(src, /function placeBesideLogin/);
+assert.match(src, /flexWrap = 'nowrap'/);
+assert.match(src, /data-mem3-refresh-count/);
+assert.match(src, /data-mem3-refresh-every/);
+assert.match(src, /minute \+ ' min'/);
+assert.match(src, /function loginFromWelcome/);
+assert.match(src, /function signedInLogin/);
+assert.equal(src.includes("Your login"), false);
+assert.match(src, /color:#f85149/);
+assert.match(src, /function placeNameLeaving/);
+assert.match(src, /function activityLine/);
+assert.match(src, /function personLabel/);
+assert.match(src, /Show History/);
+assert.match(src, /LEAVING_KEEP_MS = 12 \* 60 \* 60 \* 1000/);
+const leavingLineFn = src.slice(src.indexOf("function leavingLine"), src.indexOf("function setLeavingStatus"));
+assert.equal(leavingLineFn.includes("(was "), false);
+assert.match(src, /background:#f5c518; color:#000000/);
+assert.match(src, /data-leave-check/);
+assert.match(src, /data-early-fill/);
+assert.match(src, /data-early-stop/);
+assert.match(src, /leavingStop = true/);
+assert.equal(src.includes("bottom:16px"), false);
+assert.match(src, /for \(let tryN = 1; tryN <= 4; tryN\+\+\)/);
+assert.match(src, /extendsclass\.com\/api\/json-storage\/bin\/edfeccc/);
+assert.match(src, /Every computer running this script sees this list/);
+assert.match(src, /function cleanStationText/);
+assert.match(src, /Copy early debug/);
+assert.match(src, /function collectEarlyDebug/);
+assert.match(src, /Show Leaving Early/);
+const summaryActions = src.slice(src.indexOf("function ensureSummaryActions"), src.indexOf("function idleStretchMin"));
+assert.equal(summaryActions.includes("makeLeavingEarlyButton"), false);
+assert.equal(summaryActions.includes("makeIssueButton"), false);
+assert.match(summaryActions, /makeShowLeavingButton/);
+assert.match(summaryActions, /makeEarlyUnassignButton/);
+assert.match(summaryActions, /makeViewNotesButton/);
+assert.match(src, /mem3-leaving-list/);
+assert.match(src, /data-time-row/);
+assert.match(src, /placeholder = '00:00'/);
+assert.match(src, /data-mem3-leaving-early/);
+assert.match(src, /Leaving Early/);
+assert.match(src, /Unassign Early Outs/);
+assert.match(src, /function clearMarkedLeave/);
+assert.match(src, /data-half/);
+assert.match(src, /am\.textContent = 'AM'/);
+assert.match(src, /pm\.textContent = 'PM'/);
+assert.match(src, /dueLeaving\(waiting, now\)/);
+assert.match(src, /function openEarlyPass/);
+assert.match(src, /refreshLeaving\(\)/);
+assert.match(src, /const LEAVING_POLL_MS = 20000;/);
+assert.match(src, /LEAVING_ID = 'mem3-leaving-panel'/);
+assert.match(src, /What time are they leaving/);
+assert.match(src, /recordActivity\(/);
+assert.equal(src.includes("Saved on this computer"), false);
 assert.match(src, /function psBoardHolding/);
 assert.match(src, /data-mem3-ps-hold/);
 assert.match(src, /raw\.githubusercontent\.com\/rigoabell\/abelrigm_repository\/main\/docs\/downloads\/mem3-productivity-panel\.user\.js/);
@@ -29,7 +114,25 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.2");
+assert.equal(entry.version, "1.10.0");
+assert.match(entry.detail, /red below 16/);
+assert.match(entry.detail, /View Notes/);
+assert.match(entry.detail, /cleared only by the person who wrote it/);
+assert.match(entry.detail, /lists those stations under Disabled/);
+assert.match(entry.detail, /red yield sign/);
+const leavingList = src.slice(src.indexOf("function openLeavingList"), src.indexOf("function closeLeavingOverlay"));
+assert.ok(leavingList.indexOf("header.appendChild(close)") !== -1);
+assert.ok(leavingList.indexOf("card.appendChild(header)") < leavingList.indexOf("card.appendChild(scroller)"));
+assert.match(entry.detail, /clears every rate and idle time/);
+assert.match(entry.detail, /skips a station marked Disabled/);
+assert.match(src, /BIGS Line \+ Line Support/);
+assert.match(src, /if \(name === 'BIGS'\) return 'BIGs'/);
+assert.match(src, /gridRow = '1 \/ span 2'/);
+assert.match(entry.detail, /sits under L1 Odd/);
+assert.match(entry.detail, /Medium and Large EACH units/);
+assert.equal(entry.detail.includes("JPH is not used"), true);
+assert.equal(entry.detail.includes("keeps the last good number"), false);
+assert.match(entry.detail, /shares one leaving list/);
 assert.match(entry.detail, /types MEM3/);
 assert.match(entry.runsOn, /menu\.na\.aft\.amazonoperations\.app/);
 assert.equal(entry.file, "downloads/mem3-productivity-panel.txt");
@@ -160,6 +263,9 @@ const patched = src.replace(
         },
         setDown(value) { FCLM_DOWN = value; },
         showUpdate(remote) { showUpdatePrompt(remote); },
+        shiftId, parseLeaveTime, addLeaving, dueLeaving, noteBack, markTakenOff, cleanStationText, customerReturnsLines,
+        blendMediumLarge, overallRate, bodyColumn, placeBesideLogin, extremeRanks, uphHighlight, uphColor,
+        stationDisabled(row) { return stationIsDisabled(row); },
         stop() {
             refreshGeneration++;
             timeGeneration++;
@@ -167,6 +273,8 @@ const patched = src.replace(
             refreshBusy = false;
             TIME_LOADING = false;
             if (refreshTimer) clearTimeout(refreshTimer);
+            if (refreshClockTimer) clearInterval(refreshClockTimer);
+            refreshClockTimer = null;
             if (rollupRetryTimer) clearTimeout(rollupRetryTimer);
             if (livePaintTimer) clearTimeout(livePaintTimer);
             refreshTimer = null;
@@ -209,6 +317,22 @@ function makeNode(tag) {
         child.parentElement = node;
         child.parentNode = node;
         node.children.push(child);
+        syncSiblings(node);
+        return child;
+    };
+    node.insertBefore = function (child, before) {
+        if (child.parentElement && child.parentElement !== node) {
+            child.parentElement.children = child.parentElement.children.filter((item) => item !== child);
+            syncSiblings(child.parentElement);
+        } else if (child.parentElement === node) {
+            node.children = node.children.filter((item) => item !== child);
+        }
+        const idx = before ? node.children.indexOf(before) : -1;
+        if (idx === -1) node.children.push(child);
+        else node.children.splice(idx, 0, child);
+        child.parentElement = node;
+        child.parentNode = node;
+        syncSiblings(node);
         return child;
     };
     node.remove = function () {
@@ -217,6 +341,8 @@ function makeNode(tag) {
         parent.children = parent.children.filter((child) => child !== node);
         node.parentElement = null;
         node.parentNode = null;
+        node.nextSibling = null;
+        syncSiblings(parent);
     };
     node.closest = function () { return null; };
     node.addEventListener = function () {};
@@ -237,6 +363,13 @@ function makeNode(tag) {
     return node;
 }
 
+function syncSiblings(parent) {
+    if (!parent || !parent.children) return;
+    for (let i = 0; i < parent.children.length; i++) {
+        parent.children[i].nextSibling = i + 1 < parent.children.length ? parent.children[i + 1] : null;
+    }
+}
+
 function nodeMatches(node, sel) {
     if (sel.charAt(0) === ".") return node.className.split(/\s+/).includes(sel.slice(1));
     if (sel === "table") return node.tagName === "TABLE";
@@ -245,6 +378,7 @@ function nodeMatches(node, sel) {
     if (sel === "span") return node.tagName === "SPAN";
     if (sel === "a") return node.tagName === "A";
     if (sel === "button") return node.tagName === "BUTTON";
+    if (sel === "div") return node.tagName === "DIV";
     if (sel === "a[role=\"button\"]") return node.tagName === "A" && node.attrs.role === "button";
     if (sel === "a[mdn-link]") return node.tagName === "A" && Object.prototype.hasOwnProperty.call(node.attrs, "mdn-link");
     return false;
@@ -289,9 +423,12 @@ async function flush() {
 
 try {
     api.setRollup({ "99": { functions: {} } });
+    api.setTime("a", { hasTime: true, idleMin: 10, clockedMin: 100, totalMin: 100 });
     api.setBoard(["a", "b", "c", "d"]);
     const first = api.refreshData();
     await flush();
+    assert.equal(api.time("a"), null);
+    assert.equal(api.rollupKeys().length, 0);
     assert.equal(held.length, 4);
     assert.equal(detailsStarted, 4);
     const startedWhileHeld = detailsStarted;
@@ -313,7 +450,7 @@ try {
         await new Promise((resolve) => realSetTimeout(resolve, 700));
         await flush();
     }
-    assert.equal(api.rollupKeys().includes("99"), true);
+    assert.equal(api.rollupKeys().length, 0);
     assert.equal(api.state().loading, false);
     assert.equal(api.state().inFlight, 0);
     const kept = api.time("a") || api.time("b") || api.time("c") || api.time("d");
@@ -325,10 +462,11 @@ try {
     const failed = api.refreshData();
     await failed;
     await flush();
-    assert.equal(detailsStarted, beforeFail);
-    assert.equal(api.rollupKeys().includes("99"), true);
+    assert.ok(detailsStarted >= beforeFail);
+    assert.equal(api.rollupKeys().length, 0);
     const afterFail = api.time("a") || api.time("b");
-    assert.equal(afterFail.hasTime, true);
+    assert.equal(!!afterFail, true);
+    assert.equal(afterFail.hasTime, false);
 
     api.stop();
     api.setDown(true);
@@ -480,6 +618,184 @@ try {
     assert.match(prompt, /Refresh this screen/);
     assert.match(prompt, /F5/);
     assert.match(prompt, /If you do not refresh this screen/);
+
+    const blended = api.blendMediumLarge(49, 28.79, 89, 25.25);
+    const blendedHours = (49 / 28.79) + (89 / 25.25);
+    assert.equal(blended.units, 138);
+    assert.ok(Math.abs(blended.hours - blendedHours) < 0.000001);
+    assert.ok(Math.abs(blended.uph - (138 / blendedHours)) < 0.000001);
+    const heavyShift = api.blendMediumLarge(89, 25.25, 1, 7.56);
+    assert.equal(heavyShift.units, 90);
+    assert.ok(Math.abs(heavyShift.uph - (90 / ((89 / 25.25) + (1 / 7.56)))) < 0.000001);
+    const headers = [];
+    for (let i = 0; i < 21; i++) {
+        headers.push({
+            index: i,
+            header: i === 11 ? "ShipmentReturned / EACH-Small / UNIT" : "col " + i
+        });
+    }
+    const shortRow = { children: Array.from({ length: 19 }, () => ({ getAttribute: () => null })) };
+    const fullRow = { children: Array.from({ length: 21 }, () => ({ getAttribute: () => null })) };
+    assert.equal(api.bodyColumn(headers, shortRow, 13), 11);
+    assert.equal(api.bodyColumn(headers, shortRow, 15), 13);
+    assert.equal(api.bodyColumn(headers, shortRow, 1), 1);
+    assert.equal(api.bodyColumn(headers, fullRow, 13), 13);
+    const mediumOnly = api.blendMediumLarge(49, 28.79, 0, 0);
+    assert.equal(mediumOnly.units, 49);
+    assert.ok(Math.abs(mediumOnly.uph - 28.79) < 0.000001);
+    assert.equal(api.blendMediumLarge(10, 0, 0, 20).units, 0);
+    assert.equal(api.blendMediumLarge(0, 0, 0, 0).uph, 0);
+    function rateCell(text, className) {
+        return {
+            textContent: String(text),
+            className: className || "",
+            getAttribute() { return null; },
+            children: []
+        };
+    }
+    const overallHeaders = [
+        { index: 0, header: "Paid Hours / Total" },
+        { index: 1, header: "ShipmentReturned / EACH-Total / UNIT" },
+        { index: 2, header: "ShipmentReturned / EACH-Total / UPH" },
+        { index: 3, header: "ShipmentReturned / EACH-Medium / UNIT" },
+        { index: 4, header: "ShipmentReturned / EACH-Medium / UPH" }
+    ];
+    const overallRow = {
+        children: [
+            rateCell("5.36"),
+            rateCell("139", "each-total"),
+            rateCell("25.93", "each-total"),
+            rateCell("49", "each-medium"),
+            rateCell("28.79", "each-medium")
+        ]
+    };
+    const overall = api.overallRate(overallRow, overallHeaders);
+    assert.equal(overall.units, 139);
+    assert.ok(Math.abs(overall.uph - (139 / 5.36)) < 0.000001);
+    const ranks = api.extremeRanks([
+        { name: "LINE 1 ODD", avgUph: 20, idleMin: 10, clockedMin: 100 },
+        { name: "BIGS", avgUph: 5, idleMin: 50, clockedMin: 100 },
+        { name: "LINE 2 ODD", avgUph: 30, idleMin: 5, clockedMin: 100 }
+    ]);
+    assert.equal(ranks.worstUph, 20);
+    assert.equal(ranks.bestUph, 30);
+    assert.equal(ranks.worstIdle, 50);
+    assert.equal(api.uphHighlight({ name: "BIGS", avgUph: 5 }, ranks), "");
+    assert.equal(api.uphHighlight({ name: "LINE 1 ODD", avgUph: 20 }, ranks), "worst");
+    assert.equal(api.uphHighlight({ name: "BIGS", avgUph: 30, idleMin: 50, clockedMin: 100 }, { bestUph: 30, worstUph: 20 }), "best");
+    assert.equal(api.uphColor(15.9, true), "#f85149");
+    assert.equal(api.uphColor(16, true), "#d29922");
+    assert.equal(api.uphColor(18.9, true), "#d29922");
+    assert.equal(api.uphColor(19, true), "#2ea043");
+    assert.equal(api.uphColor(19), "#f85149");
+    assert.equal(api.uphColor(30), "#2ea043");
+
+    sandbox.getComputedStyle = function () { return { display: "flex" }; };
+    const overrideRow = makeNode("tr");
+    const overrideCell = makeNode("td");
+    const overrideLine = makeNode("div");
+    const overrideName = makeNode("div");
+    const overrideLogin = makeNode("a");
+    overrideLogin.textContent = "kimblnah";
+    const overrideBtn = makeNode("button");
+    overrideBtn.textContent = "Override";
+    const overrideBadge = makeNode("span");
+    overrideBadge.className = "mem3-uph-badge";
+    overrideName.appendChild(overrideLogin);
+    overrideLine.appendChild(makeNode("div"));
+    overrideLine.appendChild(overrideName);
+    overrideLine.appendChild(overrideBtn);
+    overrideCell.appendChild(overrideLine);
+    overrideRow.appendChild(overrideCell);
+    api.placeBesideLogin(overrideRow, overrideLogin, overrideBadge);
+    assert.equal(overrideBadge.parentElement, overrideLine);
+    assert.equal(overrideName.nextSibling, overrideBadge);
+    assert.equal(overrideBadge.nextSibling, overrideBtn);
+    assert.equal(overrideLine.style.flexWrap, "nowrap");
+    assert.equal(overrideLine.style.alignItems, "center");
+    const plainRow = makeNode("tr");
+    const plainCell = makeNode("td");
+    const plainLine = makeNode("div");
+    const plainName = makeNode("div");
+    const plainLogin = makeNode("a");
+    plainLogin.textContent = "sylvasde";
+    const plainBadge = makeNode("span");
+    plainName.appendChild(plainLogin);
+    plainLine.appendChild(plainName);
+    plainCell.appendChild(plainLine);
+    plainRow.appendChild(plainCell);
+    api.placeBesideLogin(plainRow, plainLogin, plainBadge);
+    assert.equal(plainBadge.parentElement, plainName);
+
+    const noon = new Date(2026, 10, 13, 12, 0);
+    assert.equal(api.shiftId(noon), "2026-11-13-days");
+    assert.equal(api.shiftId(new Date(2026, 10, 13, 1, 30)), "2026-11-12-nights");
+    assert.equal(api.parseLeaveTime("12:00 PM"), 720);
+    assert.equal(api.parseLeaveTime("12:00 AM"), 0);
+    assert.equal(api.parseLeaveTime("1:30 pm"), 13 * 60 + 30);
+    assert.equal(api.parseLeaveTime("12:00"), null);
+    assert.equal(
+        api.cleanStationText("Customer Returns 1st Half: Station 3-01 | 2nd Half: Station 3-39 18.8 UPH 20.9% IDLE IN"),
+        "Customer Returns 1st Half: Station 3-01 | 2nd Half: Station 3-39"
+    );
+    assert.equal(
+        JSON.stringify(api.customerReturnsLines("Customer Returns 1st Half: Station 4-23 | 2nd Half: Station 4-49")),
+        JSON.stringify(["Customer Returns", "1st Half: Station 4-23", "2nd Half: Station 4-49"])
+    );
+    assert.equal(
+        JSON.stringify(api.customerReturnsLines("Customer Returns\n1st Half: Station 4-20 | 2nd\nHalf: Station 4-22 18.4 UPH")),
+        JSON.stringify(["Customer Returns", "1st Half: Station 4-20", "2nd Half: Station 4-22"])
+    );
+    assert.equal(api.customerReturnsLines("CRET BIGS Processor Station 8-24"), null);
+    const openStation = stationTable([
+        ["Customer Returns 1st Half: Station 3-06 | 2nd Half: Station 3-70", ""]
+    ]).querySelector("tbody tr");
+    assert.equal(api.stationDisabled(openStation), false);
+    const disabledLabel = stationTable([
+        ["Customer Returns 1st Half: Station 3-08 | 2nd Half: Station 3-68", ""]
+    ]).querySelector("tbody tr");
+    const disabledMark = makeNode("span");
+    disabledMark.textContent = "Disabled";
+    disabledLabel.appendChild(disabledMark);
+    assert.equal(api.stationDisabled(disabledLabel), true);
+    const disabledInName = stationTable([
+        ["Customer Returns 1st Half: Station 4-02 Disabled | 2nd Half: Station 4-20", ""]
+    ]).querySelector("tbody tr");
+    assert.equal(api.stationDisabled(disabledInName), true);
+    const ariaDisabled = stationTable([
+        ["Customer Returns 1st Half: Station 4-04 | 2nd Half: Station 4-18", "abelrigm"]
+    ]).querySelector("tbody tr");
+    ariaDisabled.setAttribute("aria-disabled", "true");
+    assert.equal(api.stationDisabled(ariaDisabled), true);
+    assert.equal(api.parseLeaveTime("25:00"), null);
+    const leaving = { shifts: {} };
+    const marked = api.addLeaving(leaving, "Wilrayni", 720, "CRET 2 Even", noon);
+    assert.equal(marked.added, true);
+    assert.equal(marked.row.login, "wilrayni");
+    assert.equal(marked.row.status, "said");
+    assert.equal(api.addLeaving(leaving, "wilrayni", 720, "", noon).updated, false);
+    const shiftRows = leaving.shifts[api.shiftId(noon)];
+    assert.equal(api.dueLeaving(shiftRows, new Date(2026, 10, 13, 11, 59)).length, 0);
+    assert.equal(api.dueLeaving(shiftRows, noon).length, 1);
+    const moved = api.addLeaving(leaving, "wilrayni", 13 * 60 + 30, "CRET 2 Even", new Date(2026, 10, 13, 11, 40));
+    assert.equal(moved.updated, true);
+    assert.equal(moved.previous, "12:00 PM");
+    assert.equal(moved.row.said, "01:30 PM");
+    assert.equal(moved.row.history.length, 2);
+    assert.equal(moved.row.history[0].said, "12:00 PM");
+    assert.equal(api.dueLeaving(shiftRows, noon).length, 0);
+    assert.equal(api.dueLeaving(shiftRows, new Date(2026, 10, 13, 13, 30)).length, 1);
+    const night = new Date(2026, 10, 13, 23, 0);
+    const nights = { shifts: {} };
+    api.addLeaving(nights, "abelrigm", 60, "", night);
+    assert.equal(api.dueLeaving(nights.shifts[api.shiftId(night)], night).length, 0);
+    assert.equal(api.dueLeaving(nights.shifts[api.shiftId(night)], new Date(2026, 10, 14, 1, 5)).length, 1);
+    api.markTakenOff(marked.row, noon, "unassigned");
+    assert.equal(marked.row.takenOffAt, "12:00 PM");
+    assert.equal(api.noteBack(marked.row, "3 Odd", new Date(2026, 10, 13, 12, 40)), true);
+    assert.equal(marked.row.back, "3 Odd at 12:40 PM");
+    assert.equal(api.noteBack(marked.row, "3 Odd", new Date(2026, 10, 13, 12, 50)), false);
+    assert.equal(api.dueLeaving(shiftRows, noon).length, 0);
 } finally {
     if (api) api.stop();
 }
