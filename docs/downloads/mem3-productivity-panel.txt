@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.38
+// @version      1.9.39
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.38';
+    const SCRIPT_VERSION = '1.9.39';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -2124,8 +2124,8 @@
     // photos to the right of the line above. Lock the two-column tables to one width.
     function pinAssignmentColumn(cell) {
         if (!cell || !cell.style) return;
-        cell.style.width = '15em';
-        cell.style.maxWidth = '15em';
+        cell.style.width = '13em';
+        cell.style.maxWidth = '13em';
         cell.style.boxSizing = 'border-box';
         const table = cell.closest && cell.closest('table');
         if (!table || !table.style || !table.querySelectorAll) return;
@@ -2144,8 +2144,8 @@
             if (!first || !first.style) continue;
             const span = Number(first.getAttribute && first.getAttribute('colspan') || 1);
             if (span > 1) continue;
-            first.style.width = '15em';
-            first.style.maxWidth = '15em';
+            first.style.width = '13em';
+            first.style.maxWidth = '13em';
             first.style.boxSizing = 'border-box';
         }
     }
@@ -2647,8 +2647,8 @@
     function badgeGridStyle(withYield) {
         const cols = withYield ? 'max-content max-content' : 'max-content';
         return 'display:inline-grid; grid-template-columns:' + cols + '; ' +
-            'grid-template-rows:auto auto; column-gap:6px; row-gap:4px; margin-left:8px; ' +
-            'vertical-align:middle; flex:0 0 auto; align-self:center; align-items:center;';
+            'grid-template-rows:auto; column-gap:6px; align-items:center; margin-left:8px; ' +
+            'vertical-align:middle; flex:0 0 auto; align-self:center;';
     }
 
     function rowIdleYield(time, empId) {
@@ -2692,6 +2692,7 @@
         const tag = String(host.tagName || '').toUpperCase();
         if (tag === 'TR' || tag === 'TABLE') return;
         if (tag === 'TD') {
+            host.style.overflow = 'visible';
             host.style.verticalAlign = 'middle';
             host.style.display = 'flex';
             host.style.flexDirection = 'row';
@@ -2705,7 +2706,7 @@
         host.style.alignItems = 'center';
     }
 
-    // The photo, the login, and the UPH / idle stack share one horizontal center.
+    // The photo, the login, and the UPH share one horizontal center. Idle hangs under the UPH.
     function centerEmployeeLine(tr, loginEl, badge) {
         const host = (badge && badge.parentElement) || (loginEl && loginEl.parentElement);
         keepBadgeBesideLogin(host);
@@ -2764,18 +2765,23 @@
         wrap.title = rateText + ' \u00b7 ' + (noTime ? windowGapText() : timeText(time)) + (nowTitle ? ' \u00b7 ' + nowTitle : '');
         const rate = makePill(rateText, color, 16.5);
         const idle = makePill(idleText, noTime ? '#8b949e' : idleColor(pct), 16.5);
+        const rateAnchor = document.createElement('span');
+        rateAnchor.style.cssText = 'position:relative; display:inline-block;';
+        rateAnchor.appendChild(rate);
+        idle.style.position = 'absolute';
+        idle.style.left = '0';
+        idle.style.top = 'calc(100% + 4px)';
+        idle.style.whiteSpace = 'nowrap';
+        rateAnchor.appendChild(idle);
         const col = idleNow ? 2 : 1;
         if (idleNow) {
             const mark = rowIdleYield(time, empId);
             placeBadgeCell(mark, 1, 1);
-            mark.style.gridRow = '1 / span 2';
             mark.style.alignSelf = 'center';
             wrap.appendChild(mark);
         }
-        placeBadgeCell(rate, col, 1);
-        placeBadgeCell(idle, col, 2);
-        wrap.appendChild(rate);
-        wrap.appendChild(idle);
+        placeBadgeCell(rateAnchor, col, 1);
+        wrap.appendChild(rateAnchor);
         wrap.setAttribute('data-sig', (known ? '1' : '0') + '|' + rateText + '|' + idleText + '|' + idleNowSig(time, empId));
         return wrap;
     }
