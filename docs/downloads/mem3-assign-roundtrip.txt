@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Assign Round Trip (abelrigm)
 // @namespace    https://mem3.amazon.local/
-// @version      1.0.0
+// @version      1.1.0
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-assign-roundtrip.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-assign-roundtrip.user.js
 // @description  Unassign one Control Tower login, watch the station, then assign that same login back.
@@ -25,7 +25,8 @@
     // A login counts as off only after the last 3 seconds of a 12 second watch
     // still show them gone. A menu closing for a moment does not count.
 
-    const VERSION = '1.0.0';
+    const VERSION = '1.1.0';
+    const LINE_LABEL = 'CRET Line 1 (O) + Line Support';
     const PANEL_ID = 'mem3-assign-roundtrip';
     const METHODS = ['fiber', 'fiber-all', 'native'];
     const WATCH_MS = 12000;
@@ -58,6 +59,17 @@
 
     function isNoneLabel(value) {
         return /^none$/i.test(plain(value));
+    }
+
+    function isTargetHeading(text) {
+        const name = plain(text).toLowerCase().replace(/\d+(\.\d+)?\s*uph\s*avg.*/i, '').trim();
+        return name.indexOf('cret line 1 (o)') !== -1 && name.indexOf('line support') !== -1;
+    }
+
+    function isOtherLine(text) {
+        const name = plain(text).toLowerCase();
+        if (!name || isTargetHeading(name)) return false;
+        return /cret\s+line\s+\d|bigs\s+line|decant/i.test(name);
     }
 
     // Control Tower's assign field placeholder is "Search for login, badge, etc..."
@@ -358,6 +370,106 @@
         return out;
     }
 
+    function headingLabel(el) {
+        if (!el) return '';
+        const clone = el.cloneNode(true);
+        const junk = clone.querySelectorAll ? clone.querySelectorAll(PANEL_JUNK) : [];
+        for (let i = 0; i < junk.length; i++) junk[i].remove();
+        return plain(clone.textContent).replace(/\d+(\.\d+)?\s*UPH\s*avg.*/i, '').trim();
+    }
+
+    function ownText(el) {
+        let text = '';
+        const nodes = el && el.childNodes ? el.childNodes : [];
+        for (let i = 0; i < nodes.length; i++) {
+            if (nodes[i].nodeType === 3) text += nodes[i].textContent;
+        }
+        return plain(text);
+    }
+
+    function findTargetHeading() {
+        const heads = document.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"]');
+        for (let i = 0; i < heads.length; i++) {
+            if (inPanel(heads[i])) continue;
+            if (isTargetHeading(headingLabel(heads[i]))) return heads[i];
+        }
+        const nodes = document.querySelectorAll('div, span, button, a');
+        for (let i = 0; i < nodes.length; i++) {
+            if (inPanel(nodes[i])) continue;
+            const text = ownText(nodes[i]);
+            if (!text || text.length > 80) continue;
+            if (isTargetHeading(text)) return nodes[i];
+        }
+        return null;
+    }
+
+    function containsOtherLine(root, self) {
+        if (!root || !root.querySelectorAll) return false;
+        const heads = root.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"], div, span, button');
+        for (let i = 0; i < heads.length; i++) {
+            if (heads[i] === self) continue;
+            const label = heads[i].matches && heads[i].matches('h1, h2, h3, h4, h5, h6, [role="heading"]')
+                ? headingLabel(heads[i])
+                : ownText(heads[i]);
+            if (isOtherLine(label)) return true;
+        }
+        return false;
+    }
+
+    function groupRoot(heading) {
+        let el = heading ? heading.parentElement : null;
+        let best = null;
+        for (let i = 0; i < 8 && el; i++) {
+            if (containsOtherLine(el, heading)) break;
+            if (el.querySelector && el.querySelector('table')) best = el;
+            el = el.parentElement;
+        }
+        return best;
+    }
+
+    function tablesIn(root) {
+        const out = [];
+        if (!root || !root.querySelectorAll) return out;
+        const tables = root.querySelectorAll('table');
+        for (let i = 0; i < tables.length; i++) {
+            if (inPanel(tables[i]) || inTooltip(tables[i])) continue;
+            out.push(tables[i]);
+        }
+        return out;
+    }
+
+    function tablesFor(heading) {
+        const found = tablesIn(groupRoot(heading));
+        if (found.length) return found;
+        let sib = heading ? heading.nextElementSibling : null;
+        for (let i = 0; i < 4 && sib; i++) {
+            if (sib.tagName === 'TABLE' && !inTooltip(sib) && !inPanel(sib)) return [sib];
+            const nested = tablesIn(sib);
+            if (nested.length && !containsOtherLine(sib, heading)) return nested;
+            sib = sib.nextElementSibling;
+        }
+        return [];
+    }
+
+    function groupLogins(heading) {
+        const seen = Object.create(null);
+        const out = [];
+        const tables = tablesFor(heading);
+        for (let t = 0; t < tables.length; t++) {
+            const rows = tables[t].querySelectorAll('tbody tr');
+            for (let i = 0; i < rows.length; i++) {
+                const anchors = rowAnchors(rows[i]);
+                for (let a = 0; a < anchors.length; a++) {
+                    const login = normalizeLogin(anchors[a].textContent);
+                    if (!looksLikeLogin(login) || isNoneLabel(login) || seen[login]) continue;
+                    seen[login] = true;
+                    out.push(login);
+                }
+            }
+        }
+        return out;
+    }
+
     function tooltipIds() {
         const ids = Object.create(null);
         const tips = document.querySelectorAll('[id^="tooltip-"]');
@@ -575,8 +687,10 @@
         const go = panelQuery('[data-go]');
         const all = panelQuery('[data-all]');
         const stopBtn = panelQuery('[data-stop]');
+        const line = panelQuery('[data-line]');
         if (go) go.disabled = on;
         if (all) all.disabled = on;
+        if (line) line.disabled = on;
         if (stopBtn) stopBtn.disabled = !on;
     }
 
@@ -676,14 +790,20 @@
         log(mode + ' · unassign ' + login);
         const off = await unassignLogin(login, mode);
         log(off.text, { samples: off.samples || '', result: off.result || '' });
-        if (stop) return;
+        if (stop) return { stopped: true, off: !!off.ok, back: false, address: off.address };
         if (!off.ok) {
             log(mode + ' · skipped Assign. ' + login + ' did not stay off the station.');
-            return;
+            return { stopped: false, off: false, back: false };
         }
         log(mode + ' · assign ' + login + ' back on that station');
         const back = await assignLogin(login, mode, off.address);
         log(back.text, { samples: back.samples || '', result: back.result || '' });
+        return { stopped: !!stop, off: true, back: !!back.ok, address: off.address };
+    }
+
+    function pausePanel() {
+        const box = panelQuery('[data-pause]');
+        return !!(box && box.checked);
     }
 
     async function afterResume(login, address) {
@@ -716,7 +836,9 @@
         }
         stop = false;
         setBusy(true);
-        hold(true);
+        const pause = pausePanel();
+        if (pause) hold(true);
+        else log('Productivity panel was left alone.');
         let address = null;
         try {
             for (let i = 0; i < modes.length; i++) {
@@ -729,9 +851,57 @@
         } catch (e) {
             log('Stopped on an error · ' + (e && e.message ? e.message : String(e)));
         } finally {
-            await afterResume(login, address);
+            if (pause) await afterResume(login, address);
+            else hold(false);
             setBusy(false);
             setStatus(stop ? 'Stopped.' : 'Done.');
+        }
+    }
+
+    async function runLine(mode) {
+        if (busy) return;
+        const heading = findTargetHeading();
+        if (!heading) {
+            setStatus(LINE_LABEL + ' is not on this page.');
+            return;
+        }
+        const people = groupLogins(heading);
+        const title = headingLabel(heading) || ownText(heading) || LINE_LABEL;
+        if (!people.length) {
+            setStatus('Nobody is signed in on ' + title + '.');
+            return;
+        }
+        stop = false;
+        setBusy(true);
+        const pause = pausePanel();
+        if (pause) hold(true);
+        log(title + ' · ' + people.length + ' people · ' + mode +
+            (pause ? ' · productivity panel paused' : ' · productivity panel left alone'));
+        log(people.join(', '));
+        let address = null;
+        let last = '';
+        try {
+            for (let i = 0; i < people.length; i++) {
+                if (stop) break;
+                const login = people[i];
+                last = login;
+                setStatus((i + 1) + '/' + people.length + ' · ' + login);
+                const trip = await roundTrip(login, mode);
+                if (trip && trip.address) address = trip.address;
+                if (stop) break;
+                if (trip && trip.off && !trip.back) {
+                    log('Stopped. ' + login + ' is off the station and Assign did not put them back.');
+                    stop = true;
+                    break;
+                }
+            }
+        } catch (e) {
+            log('Stopped on an error · ' + (e && e.message ? e.message : String(e)));
+        } finally {
+            if (pause) await afterResume(last, address);
+            else hold(false);
+            setBusy(false);
+            setStatus(stop ? 'Stopped.' : 'Done. ' + people.length + ' people on ' + title + '.');
         }
     }
 
@@ -774,13 +944,15 @@
             '.head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;}',
             'strong{font-size:14px;} .ver{color:#8b949e;}',
             '.hint{margin:0 0 8px;color:#8b949e;}',
+            '.check{display:flex;align-items:center;gap:8px;margin-top:8px;color:#c9d1d9;}',
+            '.check input{width:auto;margin:0;}',
             'label{display:block;margin:6px 0;color:#c9d1d9;}',
             'input,select,button{font:13px Segoe UI,sans-serif;}',
             'input,select{width:100%;box-sizing:border-box;margin-top:3px;background:#0d1117;color:#e6edf3;',
             'border:1px solid #30363d;border-radius:6px;padding:6px 8px;}',
             '.actions{display:flex;gap:8px;margin-top:8px;}',
             'button{flex:1;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:7px 8px;cursor:pointer;}',
-            'button[data-go]{background:#238636;border-color:#2ea043;}',
+            'button[data-go],button[data-line]{background:#238636;border-color:#2ea043;}',
             'button:disabled{opacity:.45;cursor:default;}',
             '[data-status]{min-height:18px;margin-top:8px;color:#d29922;}',
             'pre{max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#0d1117;',
@@ -788,7 +960,7 @@
             '</style>',
             '<div class="box">',
             '<div class="head"><strong>Assign test</strong><span class="ver">', VERSION, '</span></div>',
-            '<p class="hint">Unassigns one person. If they stay off for 12 seconds, assigns that same login back through None.</p>',
+            '<p class="hint">Line 1 Odd + Support takes each person on CRET Line 1 (O) + Line Support off, and assigns that same person back only if they stay off. Leave Pause unchecked when the productivity panel is turned off.</p>',
             '<label>Login<input data-login list="logins" placeholder="abelrigm" autocomplete="off" spellcheck="false"></label>',
             '<datalist id="logins"></datalist>',
             '<label>Click<select data-method>',
@@ -796,13 +968,19 @@
             '<option value="fiber-all">fiber-all — the button and the boxes around it</option>',
             '<option value="native">native — a mouse click</option>',
             '</select></label>',
+            '<div class="actions"><button data-line>Line 1 Odd + Support, one by one</button></div>',
             '<div class="actions"><button data-go>Unassign, then assign back</button><button data-all>Try all 3</button></div>',
+            '<label class="check"><input type="checkbox" data-pause> Pause the productivity panel</label>',
             '<div class="actions"><button data-stop disabled>Stop</button><button data-copy>Copy log</button></div>',
             '<div data-status></div>',
             '<pre data-log></pre>',
             '</div>'
         ].join('');
         document.body.appendChild(host);
+        root.querySelector('[data-line]').addEventListener('click', function () {
+            const method = root.querySelector('[data-method]').value;
+            runLine(method);
+        });
         root.querySelector('[data-go]').addEventListener('click', function () {
             const method = root.querySelector('[data-method]').value;
             run([method]);
@@ -835,6 +1013,9 @@
             looksLikeLogin: looksLikeLogin,
             isNoneLabel: isNoneLabel,
             isSearchHint: isSearchHint,
+            isTargetHeading: isTargetHeading,
+            isOtherLine: isOtherLine,
+            lineLabel: LINE_LABEL,
             sampleText: sampleText
         };
     }

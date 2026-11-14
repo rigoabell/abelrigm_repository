@@ -125,8 +125,8 @@
     "name": "Assign Round Trip (abelrigm)",
     "category": "Control Tower",
     "summary": "Unassign one login, watch the station, then assign that same login back.",
-    "detail": "A separate panel on MEM3 assignments. Type one login and choose fiber, fiber-all, or a mouse click. It opens that person's menu, clicks Unassign once, and watches the station for 12 seconds. The person counts as off only when the last 3 seconds still show them gone. If they stay off, it clicks None on that same station, types the same login, and clicks Assign once, then watches again. Try all 3 runs those clicks in order on that one person. Copy log puts the checks on the clipboard. The productivity panel stays in place and pauses its row rewrites while a test is running.",
-    "version": "1.0.0",
+    "detail": "A separate panel on MEM3 assignments. Type one login and choose fiber, fiber-all, or a mouse click. It opens that person's menu, clicks Unassign once, and watches the station for 12 seconds. The person counts as off only when the last 3 seconds still show them gone. If they stay off, it clicks None on that same station, types the same login, and clicks Assign once, then watches again. Line 1 Odd + Support does that for each person signed in on CRET Line 1 (O) + Line Support, one at a time, and stops if someone stays off and Assign does not put them back. The productivity panel is left running unless Pause the productivity panel is checked. Copy log puts the checks on the clipboard.",
+    "version": "1.1.0",
     "runsOn": "beta.control-tower.meta.amazon.dev, control-tower.meta.amazon.dev",
     "file": "downloads/mem3-assign-roundtrip.txt",
     "downloadName": "Assign Round Trip (abelrigm).txt"

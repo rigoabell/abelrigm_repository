@@ -20,11 +20,12 @@ function bits(text) {
 test("catalog entry matches the script", () => {
     const entry = catalog.find((item) => item.id === "mem3-assign-roundtrip");
     assert.ok(entry);
-    assert.equal(entry.version, "1.0.0");
+    assert.equal(entry.version, "1.1.0");
     assert.equal(entry.category, "Control Tower");
     assert.equal(entry.file, "downloads/mem3-assign-roundtrip.txt");
     assert.equal(entry.downloadName, "Assign Round Trip (abelrigm).txt");
-    assert.match(src, /@version\s+1\.0\.0/);
+    assert.match(src, /@version\s+1\.1\.0/);
+    assert.equal(tool.lineLabel, "CRET Line 1 (O) + Line Support");
     assert.equal(src, published);
     assert.deepEqual(JSON.parse(JSON.stringify(tool.methods)), ["fiber", "fiber-all", "native"]);
     assert.equal(tool.watchMs, 12000);
@@ -61,4 +62,16 @@ test("the station mark ignores the login cell", () => {
     assert.equal(tool.isSearchHint("Search for login, badge, etc...", "search-field-845"), true);
     assert.equal(tool.isSearchHint("Find a station", "station-filter"), false);
     assert.equal(tool.sampleText([true, false, true]), "101");
+});
+
+test("line 1 odd plus support is the only group this button walks", () => {
+    assert.equal(tool.isTargetHeading("CRET Line 1 (O) + Line Support"), true);
+    assert.equal(tool.isTargetHeading("CRET Line 1 (O) + Line Support 22.4 UPH avg"), true);
+    assert.equal(tool.isTargetHeading("CRET Line 1 (E)"), false);
+    assert.equal(tool.isTargetHeading("CRET Line 1 (O)"), false);
+    assert.equal(tool.isTargetHeading("CRET Line 2 (O) + Line Support"), false);
+    assert.equal(tool.isTargetHeading("BIGS Line + Line Support"), false);
+    assert.equal(tool.isOtherLine("CRET Line 1 (E)"), true);
+    assert.equal(tool.isOtherLine("Line Support"), false);
+    assert.equal(tool.isOtherLine("CRET Line 1 (O) + Line Support"), false);
 });
