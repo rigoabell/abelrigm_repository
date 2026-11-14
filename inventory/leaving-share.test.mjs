@@ -8,7 +8,7 @@ const patched = src.replace(
     `globalThis.__mem3 = {
         addLeaving, saveLeaving, loadLeaving, clearMarkedLeave, shiftId,
         mergeLeaving, enableLeavingShare, publishLeaving, pullLeaving, whenLeavingShared,
-        activityLine, leavingLine, loginFromWelcome, restoreLatestMarks,
+        activityLine, leavingLine, leavingQuarterCounts, loginFromWelcome, restoreLatestMarks,
         addNote, clearNote, saveNotes, loadNotes, pullNotes, whenNotesShared, mergeNotes, openNotes, noteLine
     };
 })();`
@@ -153,7 +153,24 @@ assert.equal(
     }),
     "otherpa updated brndbo to leave at 03:00 PM at 02:10 PM"
 );
-assert.equal(b.leavingLine({ login: "brndbo", said: "03:00 PM", station: "Station 3-01" }), "brndbo leaving at 03:00 PM from Station 3-01");
+assert.equal(b.leavingLine({ login: "brndbo", said: "03:00 PM", station: "Station 3-01" }), "brndbo leaving at 03:00 PM\nStation 3-01");
+assert.equal(
+    b.leavingLine({
+        login: "justiwla",
+        said: "03:00 PM",
+        station: "Customer Returns 1st Half: Station 3-21 2nd Half: Station 3-19 Customer Returns 1st Half: Station 3-21 | 2nd Half: Station 3-19"
+    }),
+    "justiwla leaving at 03:00 PM\nCustomer Returns\n1st Half: Station 3-21\n2nd Half: Station 3-19"
+);
+assert.equal(
+    JSON.stringify(b.leavingQuarterCounts([
+        { saidMin: 720, said: "12:00 PM" },
+        { saidMin: 721, said: "12:01 PM" },
+        { saidMin: 930, said: "03:30 PM" },
+        { saidMin: 1331, said: "10:11 PM" }
+    ]).map((item) => item.label + " " + item.count)),
+    JSON.stringify(["12:00 PM 2", "03:30 PM 1", "10:00 PM 1"])
+);
 b.saveLeaving(docB);
 await finish(b.whenLeavingShared());
 

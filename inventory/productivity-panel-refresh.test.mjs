@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.10\.2/);
+assert.match(src, /@version\s+1\.10\.3/);
 assert.match(src, /if \(shown >= 19\) return '#2ea043'/);
 assert.match(src, /if \(shown >= 16\) return '#d29922'/);
 assert.match(src, /data-mem3-enter-notes/);
@@ -93,7 +93,11 @@ assert.match(src, /Every computer running this script sees this list/);
 assert.match(src, /function cleanStationText/);
 assert.match(src, /Copy early debug/);
 assert.match(src, /function collectEarlyDebug/);
-assert.match(src, /Show Leaving Early/);
+assert.match(src, /View Early Outs/);
+assert.equal(src.includes("Show Leaving Early"), false);
+assert.match(src, /function armClearButton/);
+assert.match(src, /const LIST_PHOTO_PX = 28;/);
+assert.match(src, /function leavingQuarterCounts/);
 const summaryActions = src.slice(src.indexOf("function ensureSummaryActions"), src.indexOf("function idleStretchMin"));
 assert.equal(summaryActions.includes("makeLeavingEarlyButton"), false);
 assert.equal(summaryActions.includes("makeIssueButton"), false);
@@ -139,7 +143,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.10.2");
+assert.equal(entry.version, "1.10.3");
 assert.match(entry.detail, /stayed off the board for the last 3 seconds/);
 assert.match(entry.detail, /button's own handler/);
 assert.match(entry.detail, /not on the station they were marked from/);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.10.2
+// @version      1.10.3
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.10.2';
+    const SCRIPT_VERSION = '1.10.3';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -8124,11 +8124,128 @@
         return changed;
     }
 
+    const LIST_PHOTO_PX = 28;
+
+    function photoForLogin(login) {
+        const key = String(login || '').trim().toLowerCase();
+        if (!key) return '';
+        const person = IDENTITY.byLogin[key];
+        const empId = person && resolveEmpId(person);
+        if (empId) {
+            const url = photoForEmp(empId);
+            if (url) return url;
+        }
+        try {
+            const tables = document.querySelectorAll('table');
+            for (let t = 0; t < tables.length; t++) {
+                if (tables[t].closest && tables[t].closest('#' + FLOOR_SUMMARY_ID)) continue;
+                const trs = tableRows(tables[t]);
+                for (let i = 0; i < trs.length; i++) {
+                    const found = findLoginInRow(trs[i]);
+                    if (!found || found.login !== key) continue;
+                    const url = badgePhotoUrl(avatarEl(trs[i]));
+                    if (url) return url;
+                }
+            }
+        } catch (e) { /* the board may be mid-draw */ }
+        return '';
+    }
+
+    function listPhoto(login) {
+        const photo = document.createElement('div');
+        photo.setAttribute('data-mem3-list-photo', '1');
+        const url = photoForLogin(login);
+        photo.style.cssText = 'flex:0 0 auto; width:' + LIST_PHOTO_PX + 'px; height:' + LIST_PHOTO_PX + 'px; ' +
+            'margin-top:1px; border-radius:50%; background:#21262d center/cover no-repeat;';
+        if (url) photo.style.backgroundImage = 'url("' + String(url).replace(/"/g, '') + '")';
+        return photo;
+    }
+
+    function armClearButton(clear, onConfirm) {
+        let armed = false;
+        clear.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            if (!armed) {
+                armed = true;
+                clear.textContent = 'Confirm';
+                clear.style.background = '#f85149';
+                clear.style.borderColor = '#f85149';
+                clear.style.color = '#ffffff';
+                return;
+            }
+            onConfirm();
+        });
+    }
+
+    function leavingStationLines(station) {
+        const lines = customerReturnsLines(station);
+        if (lines && lines.length) return lines;
+        const cleaned = cleanStationText(station);
+        if (!cleaned) return [];
+        return [cleaned];
+    }
+
     function leavingLine(row) {
-        let text = personLabel(row.login) + ' leaving at ' + row.said;
-        if (row.station) text += ' from ' + row.station;
-        if (row.status === 'stuck') text += ' · still on the station';
-        return text;
+        const lines = [personLabel(row.login) + ' leaving at ' + row.said];
+        const station = leavingStationLines(row.station);
+        for (let i = 0; i < station.length; i++) lines.push(station[i]);
+        if (row.status === 'stuck') lines.push('Still on the station');
+        return lines.join('\n');
+    }
+
+    function quarterStart(row) {
+        let min = row && typeof row.saidMin === 'number' ? row.saidMin : parseLeaveTime(row && row.said);
+        if (min == null || !isFinite(min)) return null;
+        min = ((min % 1440) + 1440) % 1440;
+        return Math.floor(min / 15) * 15;
+    }
+
+    function leavingQuarterCounts(rows) {
+        const buckets = Object.create(null);
+        const order = [];
+        const list = rows || [];
+        for (let i = 0; i < list.length; i++) {
+            const start = quarterStart(list[i]);
+            if (start == null) continue;
+            if (!buckets[start]) {
+                buckets[start] = 0;
+                order.push(start);
+            }
+            buckets[start] += 1;
+        }
+        order.sort(function (a, b) { return shiftMinute(a) - shiftMinute(b); });
+        const out = [];
+        for (let i = 0; i < order.length; i++) {
+            out.push({ label: formatLeaveTime(order[i]), count: buckets[order[i]] });
+        }
+        return out;
+    }
+
+    function leavingCopyText(rows) {
+        const list = rows || [];
+        const lines = [list.length + ' leaving early'];
+        const quarters = leavingQuarterCounts(list);
+        for (let i = 0; i < quarters.length; i++) lines.push(quarters[i].label + '\t' + quarters[i].count);
+        if (list.length) lines.push('');
+        for (let i = 0; i < list.length; i++) {
+            lines.push(leavingLine(list[i]));
+            if (i < list.length - 1) lines.push('');
+        }
+        return lines.join('\n');
+    }
+
+    function notesCopyText(rows) {
+        const list = rows || [];
+        const lines = [list.length + (list.length === 1 ? ' note' : ' notes')];
+        for (let i = 0; i < list.length; i++) {
+            const note = list[i];
+            const who = note.kind === 'line' ? note.about : personLabel(note.about);
+            lines.push('');
+            lines.push(who);
+            lines.push(note.text || '');
+        }
+        return lines.join('\n');
     }
 
     function setLeavingStatus(text) {
@@ -8773,23 +8890,15 @@
         for (let i = 0; i < rows.length; i++) {
             const note = rows[i];
             const line = document.createElement('div');
-            line.style.cssText = 'display:flex; gap:8px; align-items:flex-start; justify-content:space-between; ' +
+            line.style.cssText = 'display:flex; gap:8px; align-items:flex-start; ' +
                 'padding:6px 0; border-top:1px solid #30363d;';
-            const label = document.createElement('div');
-            const title = document.createElement('div');
-            title.textContent = noteLine(note);
-            title.style.cssText = 'font-size:12px; font-weight:650; white-space:pre-wrap;';
-            label.appendChild(title);
-            line.appendChild(label);
             if (actor && note.by === actor) {
                 const clear = document.createElement('button');
                 clear.type = 'button';
                 clear.textContent = 'Clear';
                 clear.style.cssText = 'flex:0 0 auto; padding:4px 8px; border-radius:6px; border:1px solid #8b949e; ' +
                     'background:#6e7681; color:#ffffff; font:800 11px Segoe UI,system-ui,sans-serif; cursor:pointer;';
-                clear.addEventListener('click', function (event) {
-                    event.preventDefault();
-                    event.stopPropagation();
+                armClearButton(clear, function () {
                     const whoNow = signedInLogin();
                     if (!looksLikeLogin(whoNow)) {
                         setNotesStatus('Control Tower has not shown who is signed in.');
@@ -8809,6 +8918,13 @@
                 });
                 line.appendChild(clear);
             }
+            if (note.kind !== 'line') line.appendChild(listPhoto(note.about));
+            const label = document.createElement('div');
+            const title = document.createElement('div');
+            title.textContent = noteLine(note);
+            title.style.cssText = 'font-size:12px; font-weight:650; white-space:pre-wrap;';
+            label.appendChild(title);
+            line.appendChild(label);
             list.appendChild(line);
         }
     }
@@ -8836,6 +8952,22 @@
         status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
         const scroller = document.createElement('div');
         scroller.style.cssText = 'overflow:auto; min-height:0; flex:1 1 auto;';
+        const copy = document.createElement('button');
+        copy.type = 'button';
+        copy.textContent = 'Copy';
+        copy.style.cssText = 'flex:0 0 auto; padding:7px 10px; border-radius:6px; border:1px solid #58a6ff; ' +
+            'background:#0d1117; color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        copy.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            copyText(notesCopyText(openNotes(loadNotes()))).then(function () {
+                copy.textContent = 'Copied';
+                setTimeout(function () { copy.textContent = 'Copy'; }, 1500);
+            }).catch(function () {
+                copy.textContent = 'Copy failed';
+                setTimeout(function () { copy.textContent = 'Copy'; }, 2000);
+            });
+        });
         const close = document.createElement('button');
         close.type = 'button';
         close.textContent = 'Close';
@@ -8846,8 +8978,12 @@
             event.stopPropagation();
             closeLeavingOverlay(NOTES_LIST_ID);
         });
+        const headerActions = document.createElement('div');
+        headerActions.style.cssText = 'display:flex; gap:6px; flex:0 0 auto;';
+        headerActions.appendChild(copy);
+        headerActions.appendChild(close);
         header.appendChild(title);
-        header.appendChild(close);
+        header.appendChild(headerActions);
         scroller.appendChild(list);
         scroller.appendChild(status);
         card.appendChild(header);
@@ -8985,7 +9121,7 @@
     }
 
     function makeShowLeavingButton() {
-        return panelChipButton('Show Leaving Early', openLeavingList);
+        return panelChipButton('View Early Outs', openLeavingList);
     }
 
     function makeEarlyUnassignButton() {
@@ -9036,7 +9172,7 @@
         if (restoreLatestMarks(doc, now)) saveLeaving(doc);
         const historyView = card.dataset.view === 'history';
         const title = card.querySelector('[data-leaving-title]');
-        if (title) title.textContent = historyView ? 'Leaving History' : 'Leaving Early';
+        if (title) title.textContent = historyView ? 'Leaving History' : 'Early Outs';
         const ask = card.querySelector('[data-leaving-ask]');
         if (ask) {
             ask.textContent = historyView
@@ -9046,7 +9182,7 @@
         const signed = card.querySelector('[data-signed-in]');
         if (signed) signed.style.display = historyView ? 'none' : '';
         const historyBtn = card.querySelector('[data-leaving-history]');
-        if (historyBtn) historyBtn.textContent = historyView ? 'Show Leaving' : 'Show History';
+        if (historyBtn) historyBtn.textContent = historyView ? 'Show Early Outs' : 'Show History';
         const list = card.querySelector('[data-leaving-list]');
         const activity = card.querySelector('[data-leaving-activity]');
         if (list) list.style.display = historyView ? 'none' : '';
@@ -9054,6 +9190,19 @@
         if (list) {
             while (list.firstChild) list.removeChild(list.firstChild);
             const rows = currentLeaving(doc, now);
+            const summary = document.createElement('div');
+            summary.style.cssText = 'font-size:12px; font-weight:800; padding-bottom:6px;';
+            const total = document.createElement('div');
+            total.textContent = rows.length + ' leaving early';
+            summary.appendChild(total);
+            const quarters = leavingQuarterCounts(rows);
+            for (let q = 0; q < quarters.length; q++) {
+                const bucket = document.createElement('div');
+                bucket.textContent = quarters[q].label + '  ' + quarters[q].count;
+                bucket.style.cssText = 'font-weight:650; color:#c9d1d9;';
+                summary.appendChild(bucket);
+            }
+            list.appendChild(summary);
             if (!rows.length) {
                 const empty = document.createElement('div');
                 empty.textContent = 'Nobody is leaving early.';
@@ -9063,20 +9212,14 @@
             for (let i = 0; i < rows.length; i++) {
                 const row = rows[i];
                 const line = document.createElement('div');
-                line.style.cssText = 'display:flex; gap:8px; align-items:center; justify-content:space-between; ' +
+                line.style.cssText = 'display:flex; gap:8px; align-items:flex-start; ' +
                     'padding:6px 0; border-top:1px solid #30363d;';
-                const label = document.createElement('div');
-                label.textContent = leavingLine(row);
-                label.style.cssText = 'font-size:12px; font-weight:650;';
-                line.appendChild(label);
                 const clear = document.createElement('button');
                 clear.type = 'button';
                 clear.textContent = 'Clear';
                 clear.style.cssText = 'flex:0 0 auto; padding:4px 8px; border-radius:6px; border:1px solid #f85149; ' +
                     'background:#0d1117; color:#fff; font:800 11px Segoe UI,system-ui,sans-serif; cursor:pointer;';
-                clear.addEventListener('click', function (event) {
-                    event.preventDefault();
-                    event.stopPropagation();
+                armClearButton(clear, function () {
                     const actor = requireActor();
                     if (!actor) return;
                     const current = loadLeaving();
@@ -9089,7 +9232,12 @@
                     watchLeavingShare(clearedText, shared);
                     paintEarlyLog();
                 });
+                const label = document.createElement('div');
+                label.textContent = leavingLine(row);
+                label.style.cssText = 'font-size:12px; font-weight:650; white-space:pre-wrap;';
                 line.appendChild(clear);
+                line.appendChild(listPhoto(row.login));
+                line.appendChild(label);
                 list.appendChild(line);
             }
         }
@@ -9123,7 +9271,7 @@
         header.style.cssText = 'display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:4px;';
         const title = document.createElement('div');
         title.setAttribute('data-leaving-title', '');
-        title.textContent = 'Leaving Early';
+        title.textContent = 'Early Outs';
         title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif;';
         const ask = document.createElement('div');
         ask.setAttribute('data-leaving-ask', '');
@@ -9178,7 +9326,25 @@
             card.dataset.view = card.dataset.view === 'history' ? 'list' : 'history';
             paintEarlyLog();
         });
+        const copyList = document.createElement('button');
+        copyList.type = 'button';
+        copyList.textContent = 'Copy';
+        copyList.style.cssText = 'padding:7px 10px; border-radius:6px; border:1px solid #58a6ff; background:#0d1117; ' +
+            'color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        copyList.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            const rows = currentLeaving(loadLeaving(), new Date());
+            copyText(leavingCopyText(rows)).then(function () {
+                copyList.textContent = 'Copied';
+                setTimeout(function () { copyList.textContent = 'Copy'; }, 1500);
+            }).catch(function () {
+                copyList.textContent = 'Copy failed';
+                setTimeout(function () { copyList.textContent = 'Copy'; }, 2000);
+            });
+        });
         actions.appendChild(history);
+        actions.appendChild(copyList);
         actions.appendChild(debug);
         header.appendChild(title);
         header.appendChild(close);
