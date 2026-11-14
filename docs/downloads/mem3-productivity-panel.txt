@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.2
+// @version      1.9.31
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -22,7 +22,9 @@
 // @connect      federate.amazon.com
 // @connect      gist.githubusercontent.com
 // @connect      gist.github.com
+// @connect      api.github.com
 // @connect      raw.githubusercontent.com
+// @connect      extendsclass.com
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setClipboard
 // @grant        GM_openInTab
@@ -37,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.2';
+    const SCRIPT_VERSION = '1.9.31';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -192,6 +194,7 @@
     const WINDOW_GROUPS = ['Shift', 'Halves', 'Quarters', 'Fast starts'];
     let ACTIVE_WINDOW = 'all';
     const REFRESH_MS = 5 * 60 * 1000;
+    const REFRESH_CHOICE_KEY = 'mem3-refresh-min';
     const IDLE_START_MIN = 11;
     const TIME_WORKERS = 4;
     const UPH_TARGET = 30;
@@ -206,6 +209,15 @@
         'LINE 4 ODD':  ['CRET Line 4 (O)'],
         'LINE 4 EVEN': ['CRET Line 4 (E)']
     };
+    const BIGS_GROUP = 'BIGS Line + Line Support';
+
+    function panelEntries() {
+        const out = [];
+        const keys = Object.keys(TARGET_SECTIONS);
+        for (let i = 0; i < keys.length; i++) out.push({ name: keys[i], labels: TARGET_SECTIONS[keys[i]] });
+        out.push({ name: 'BIGS', labels: [BIGS_GROUP] });
+        return out;
+    }
 
     const DECOR_CLASS = 'mem3-uph-badge';
     const BIGS_IDLE_CLASS = 'mem3-bigs-idle';
@@ -642,15 +654,152 @@
         return headers;
     }
 
+    // Medium and Large EACH rates blend into one UPH.
+    // Hours for a size are its units divided by that size's UPH.
+    // The rate is both sizes' units divided by both sizes' hours.
+    function blendMediumLarge(mediumUnits, mediumUph, largeUnits, largeUph) {
+        let units = 0;
+        let hours = 0;
+        function add(count, rate) {
+            if (!(count > 0) || !(rate > 0)) return;
+            units += count;
+            hours += count / rate;
+        }
+        add(mediumUnits, mediumUph);
+        add(largeUnits, largeUph);
+        return {
+            units: units,
+            hours: hours,
+            uph: hours > 0 ? (units / hours) : 0
+        };
+    }
+
+    function columnSpan(cell) {
+        return parseInt((cell && cell.getAttribute && cell.getAttribute('colspan')) || '1', 10) || 1;
+    }
+
+    function rowWidth(row) {
+        let n = 0;
+        const cells = row.children;
+        for (let i = 0; i < cells.length; i++) n += columnSpan(cells[i]);
+        return n;
+    }
+
+    function headerWidth(headers) {
+        let n = 0;
+        for (let i = 0; i < headers.length; i++) n = Math.max(n, headers[i].index + 1);
+        return n;
+    }
+
+    // Empty EACH-Small cells are often left out of the row. The header still
+    // has those columns, so a raw index reads Large as Medium and Heavy as Large.
+    function shipmentStart(headers) {
+        for (let i = 0; i < headers.length; i++) {
+            const h = headers[i].header.toLowerCase();
+            if ((/each-/.test(h) || h.indexOf('shipmentreturned') !== -1) && /\b(unit|uph)\b/.test(h)) {
+                return headers[i].index;
+            }
+        }
+        return headerWidth(headers);
+    }
+
+    function bodyColumn(headers, row, headerIndex) {
+        const deficit = Math.max(0, headerWidth(headers) - rowWidth(row));
+        const start = shipmentStart(headers);
+        return headerIndex >= start ? headerIndex - deficit : headerIndex;
+    }
+
+    function cellAt(row, col) {
+        if (col < 0) return null;
+        const cells = row.children;
+        let at = 0;
+        for (let i = 0; i < cells.length; i++) {
+            const span = columnSpan(cells[i]);
+            if (col >= at && col < at + span) return cells[i];
+            at += span;
+        }
+        return null;
+    }
+
+    function columnValue(row, headers, matcher) {
+        for (let i = 0; i < headers.length; i++) {
+            const h = headers[i].header.toLowerCase();
+            if (!matcher(h)) continue;
+            const cell = cellAt(row, bodyColumn(headers, row, headers[i].index));
+            if (!cell) continue;
+            const n = parseNumber(textOf(cell));
+            if (n === null) continue;
+            return { value: n, header: headers[i].header };
+        }
+        return { value: null, header: '' };
+    }
+
+    function eachSizeHeader(header, size) {
+        if (header.indexOf('paid hour') !== -1) return false;
+        if (/heavy/.test(header)) return false;
+        if (size === 'medium') return /each-medium|\bmedium\b/.test(header);
+        return /each-large|\blarge\b/.test(header) && !/x-?\s*large/.test(header);
+    }
+
+    function sizeFromClass(className) {
+        const c = String(className || '').toLowerCase();
+        if (!c || /heavy/.test(c)) return '';
+        if (/each-medium|size-medium/.test(c)) return 'medium';
+        if ((/each-large|size-large/.test(c)) && !/x-large|xlarge/.test(c)) return 'large';
+        return '';
+    }
+
+    // Paid hours for a size sits in front of that size's UNIT and UPH.
+    // The rate pair is the last two classed numbers, in that order.
+    function pairFromClasses(row) {
+        const found = { medium: [], large: [] };
+        const cells = row.children;
+        for (let i = 0; i < cells.length; i++) {
+            const size = sizeFromClass(cells[i].className);
+            if (!size) continue;
+            const n = parseNumber(textOf(cells[i]));
+            if (n === null) continue;
+            found[size].push(n);
+        }
+        function take(list) {
+            if (list.length < 2) return null;
+            return { units: list[list.length - 2], uph: list[list.length - 1] };
+        }
+        return { medium: take(found.medium), large: take(found.large) };
+    }
+
+    function sizePair(row, headers, size) {
+        const classed = pairFromClasses(row);
+        if (classed[size]) {
+            return {
+                units: classed[size].units || 0,
+                uph: classed[size].uph || 0,
+                unitHeader: size + ' class',
+                uphHeader: size + ' class'
+            };
+        }
+        const units = columnValue(row, headers, function (h) {
+            return eachSizeHeader(h, size) && /\bunits?\b/.test(h);
+        });
+        const uph = columnValue(row, headers, function (h) {
+            return eachSizeHeader(h, size) && /\buph\b/.test(h);
+        });
+        return {
+            units: units.value || 0,
+            uph: uph.value || 0,
+            unitHeader: units.header,
+            uphHeader: uph.header
+        };
+    }
+
     function bestNumber(row, headers, matcher) {
         let best = null;
         let bestHeader = '';
         let bestScore = -100;
-        const cells = row.children;
         for (let i = 0; i < headers.length; i++) {
             const h = headers[i].header.toLowerCase();
             if (!matcher(h)) continue;
-            const cell = cells[headers[i].index];
+            const cell = cellAt(row, bodyColumn(headers, row, headers[i].index));
             if (!cell) continue;
             const n = parseNumber(textOf(cell));
             if (n === null) continue;
@@ -667,10 +816,9 @@
     }
 
     function bestText(row, headers, matcher) {
-        const cells = row.children;
         for (let i = 0; i < headers.length; i++) {
             if (!matcher(headers[i].header.toLowerCase())) continue;
-            const cell = cells[headers[i].index];
+            const cell = cellAt(row, bodyColumn(headers, row, headers[i].index));
             if (cell) return textOf(cell);
         }
         return '';
@@ -713,24 +861,19 @@
             const empId = bestText(row, headers, function (h) { return /(^|\/ )id$/.test(h) || /employee id/.test(h); })
                 || textOf(row.children[1]);
             if (!/^\d+$/.test(empId)) { info.skippedRows++; continue; }
-            const unitsPick = bestNumber(row, headers, function (h) { return /\bunits?\b/.test(h); });
-            let uphPick = bestNumber(row, headers, function (h) { return /\buph\b/.test(h); });
-            if (uphPick.value === null) uphPick = bestNumber(row, headers, function (h) { return /\bjph\b/.test(h); });
-            const hoursPick = bestNumber(row, headers, function (h) { return /paid hours/.test(h); });
-            const units = unitsPick.value || 0;
-            const paidHours = hoursPick.value || 0;
-            let uph = uphPick.value;
-            if (units > 0 && paidHours > 0) uph = units / paidHours;
-            else if (uph === null) uph = 0;
+            const medium = sizePair(row, headers, 'medium');
+            const large = sizePair(row, headers, 'large');
+            const blended = blendMediumLarge(medium.units, medium.uph, large.units, large.uph);
+            if (!(blended.units > 0)) { info.skippedRows++; continue; }
             if (!pending[empId]) pending[empId] = { name: textOf(row.children[2]), rows: [] };
             pending[empId].rows.push({
-                units: units,
-                uph: uph,
-                hours: paidHours,
+                units: blended.units,
+                uph: blended.uph,
+                hours: blended.hours,
                 job: 'ShipmentReturned',
-                unitHeader: unitsPick.header,
-                uphHeader: uphPick.header,
-                hoursHeader: hoursPick.header
+                unitHeader: [medium.unitHeader, large.unitHeader].filter(Boolean).join(' + '),
+                uphHeader: [medium.uphHeader, large.uphHeader].filter(Boolean).join(' + '),
+                hoursHeader: 'units / size UPH'
             });
         }
 
@@ -892,6 +1035,8 @@
     let refreshBusy = false;
     let refreshDue = false;
     let refreshTimer = null;
+    let refreshClockTimer = null;
+    let nextRefreshAt = 0;
     let livePaintTimer = null;
     let BOARD_IDS = [];
     let BIGS_IDS = [];
@@ -1302,8 +1447,8 @@
         }
     }
 
-    function scheduleClockLoad() {
-        if (CLOCK.loadedAt && Date.now() - CLOCK.loadedAt < REFRESH_MS) {
+    function scheduleClockLoad(force) {
+        if (!force && CLOCK.loadedAt && Date.now() - CLOCK.loadedAt < refreshIntervalMs()) {
             paintAllClockRings();
             return Promise.resolve();
         }
@@ -1386,8 +1531,8 @@
         return (TIME_TRIES[empId] || 0) >= MAX_TIME_TRIES;
     }
 
-    // One read per associate. A later 5-minute rate refresh leaves that idle
-    // percent where it is. Reload and a window change clear the cache first.
+    // A full recalc deletes saved rows first. Someone new has no row yet
+    // and is read with everyone else on the next pass.
     function needsTimeThisCycle(empId) {
         const t = LAST_TIME[empId];
         if (t && (timeSettled(t) || t.gaveUp)) return false;
@@ -1494,9 +1639,9 @@
     function visibleEmpIds() {
         const ids = [];
         const seen = Object.create(null);
-        const keys = Object.keys(TARGET_SECTIONS);
-        for (let i = 0; i < keys.length; i++) {
-            const labels = TARGET_SECTIONS[keys[i]];
+        const panels = panelEntries();
+        for (let i = 0; i < panels.length; i++) {
+            const labels = panels[i].labels;
             for (let j = 0; j < labels.length; j++) {
                 const h = findH5(labels[j]);
                 const table = h ? findTable(h) : null;
@@ -1517,24 +1662,14 @@
     }
 
     function rememberTime(empId, record) {
-        const prev = LAST_TIME[empId];
-        const incomingGood = !!(record && (timeFound(record) || record.noData));
-        const prevGood = !!(prev && timeFound(prev));
-        if (prevGood && !incomingGood) {
-            prev.cycle = refreshCycle;
-            prev.gaveUp = true;
-            if (record && record.tries) prev.tries = record.tries;
-            recordTimeIssue(empId, record, true);
-            if (DEBUG.timeLoad) DEBUG.timeLoad.done = (DEBUG.timeLoad.done || 0) + 1;
-            scheduleLivePaint();
-            return;
-        }
         if (!record) return;
+        const incomingGood = !!(timeFound(record) || record.noData);
         record.cycle = refreshCycle;
         record.fetchedAt = Date.now();
         record.gaveUp = !incomingGood;
+        record.refreshing = false;
         LAST_TIME[empId] = record;
-        recordTimeIssue(empId, record, false);
+        recordTimeIssue(empId, record);
         if (!DEBUG.timeSample) {
             DEBUG.timeSample = {
                 empId: empId,
@@ -1602,12 +1737,11 @@
         if (panel) fillIssuePanel(panel);
     }
 
-    function recordTimeIssue(empId, record, keptEarlier) {
+    function recordTimeIssue(empId, record) {
         if (!empId || !record) return;
         const tries = record.tries || TIME_TRIES[empId] || 1;
         let reason = '';
-        if (keptEarlier) reason = 'Kept the earlier time because the new page failed';
-        else if (record.error) reason = record.error;
+        if (record.error) reason = record.error;
         else if (timeFound(record) && !(record.clockedMin > 0)) reason = 'Clock rows had no minutes';
         else if (!timeFound(record) && !record.noData) reason = 'Time Details page had no clock rows';
         else if (tries > 1) reason = 'Resolved on try ' + tries;
@@ -1808,6 +1942,48 @@
         return String(raw || '').replace(/\s+/g, ' ').trim();
     }
 
+    function directText(el) {
+        if (!el) return '';
+        const kids = el.children || [];
+        if (el.childNodes && el.childNodes.length) {
+            let text = '';
+            for (let i = 0; i < el.childNodes.length; i++) {
+                const node = el.childNodes[i];
+                if (node && node.nodeType === 3) text += node.textContent || '';
+            }
+            const direct = text.replace(/\s+/g, ' ').trim();
+            if (direct || kids.length) return direct;
+        }
+        if (kids.length) return '';
+        return String(el.textContent || '').replace(/\s+/g, ' ').trim();
+    }
+
+    // A disabled station stays on the board, but it is not an open station
+    // and it is not part of the utilization percent.
+    function stationIsDisabled(tr) {
+        if (!tr) return false;
+        if (String((tr.getAttribute && tr.getAttribute('aria-disabled')) || '').toLowerCase() === 'true') return true;
+        const cls = String(tr.className || '');
+        if (/(?:^|\s)(?:disabled|is-disabled|station-disabled)(?:\s|$)/i.test(cls)) return true;
+        const stack = [tr];
+        while (stack.length) {
+            const el = stack.pop();
+            const kids = el.children || [];
+            for (let i = 0; i < kids.length; i++) {
+                const child = kids[i];
+                const childCls = String(child.className || '');
+                if (childCls.indexOf(DECOR_CLASS) !== -1 || childCls.indexOf(BIGS_IDLE_CLASS) !== -1) continue;
+                stack.push(child);
+            }
+            if (el === tr) continue;
+            const own = directText(el);
+            if (own && /\bdisabled\b/i.test(own)) return true;
+            const label = el.getAttribute ? String(el.getAttribute('aria-label') || el.getAttribute('title') || '') : '';
+            if (/\bdisabled\b/i.test(label)) return true;
+        }
+        return false;
+    }
+
     // A Customer Returns station reads like:
     //   Customer Returns
     //   1st Half: Station 3-06 | 2nd Half: Station 3-70
@@ -1996,12 +2172,12 @@
         const node = document.getElementById(FLOOR_SUMMARY_ID);
         const bar = findToolbar();
         const headers = {};
-        const keys = Object.keys(TARGET_SECTIONS);
-        for (let i = 0; i < keys.length; i++) {
-            const label = TARGET_SECTIONS[keys[i]][0];
+        const panels = panelEntries();
+        for (let i = 0; i < panels.length; i++) {
+            const label = panels[i].labels[0];
             const h = findH5(label);
             const table = h ? findTable(h) : null;
-            headers[keys[i]] = {
+            headers[panels[i].name] = {
                 headerFound: !!h,
                 tableFound: !!table,
                 rows: table ? table.querySelectorAll('tbody tr').length : 0
@@ -2326,7 +2502,8 @@
         return rows;
     }
 
-    // BIGS stations are display-only. Their idle percent is not added to a side or to Total.
+    // BIGS Line + Line Support is the BIGs column and counts in Total.
+    // Any other row whose name contains BIGS keeps an idle badge only.
     function decorateBigsStations() {
         const ids = [];
         const seen = Object.create(null);
@@ -2678,6 +2855,16 @@
         };
     }
 
+    function cleanStationText(text) {
+        let station = String(text || '').replace(/\s+/g, ' ').trim();
+        station = station.replace(/\s+No UPH for\b.*$/i, '');
+        station = station.replace(/\s+\d+(?:\.\d+)?\s+UPH\b.*$/i, '');
+        station = station.replace(/\s+\d+(?:\.\d+)?%\s+IDLE\b.*$/i, '');
+        station = station.replace(/\s+[—–-]\s+IDLE\b.*$/i, '');
+        station = station.replace(/\s+IDLE NOW\b.*$/i, '');
+        return station.replace(/\s+/g, ' ').replace(/\s*\|\s*$/, '').trim();
+    }
+
     function unassignTarget(anchor) {
         const login = (anchor && anchor.textContent || '').replace(/\s+/g, ' ').trim();
         const person = IDENTITY.byLogin[login.toLowerCase()];
@@ -2687,7 +2874,7 @@
         if (login && station) {
             const idx = station.toLowerCase().lastIndexOf(login.toLowerCase());
             if (idx !== -1) station = station.slice(0, idx) + station.slice(idx + login.length);
-            station = station.replace(/\s+/g, ' ').replace(/\s*\|\s*$/, '').trim();
+            station = cleanStationText(station);
         }
         return {
             login: login,
@@ -2881,7 +3068,8 @@
             if (!pattern.test((btn.textContent || '').trim())) continue;
             if (btn.closest('#' + FLOOR_SUMMARY_ID) || btn.closest('#mem3-unassign-panel') ||
                 btn.closest('#mem3-run-panel') || btn.closest('#' + CORNER_DEBUG_ID) ||
-                btn.closest('#' + PHOTO_DEBUG_ID)) continue;
+                btn.closest('#' + PHOTO_DEBUG_ID) || btn.closest('#' + LEAVING_ID) ||
+                btn.closest('#mem3-early-pass') || btn.closest('#mem3-leaving-list')) continue;
             const rect = btn.getBoundingClientRect();
             if (rect.width < 1 || rect.height < 1) continue;
             return btn;
@@ -3002,7 +3190,8 @@
             if (!/^unassign$/i.test((btn.textContent || '').trim())) continue;
             if (btn.closest('#' + FLOOR_SUMMARY_ID) || btn.closest('#mem3-unassign-panel') ||
                 btn.closest('#mem3-run-panel') || btn.closest('#' + CORNER_DEBUG_ID) ||
-                btn.closest('#' + PHOTO_DEBUG_ID)) continue;
+                btn.closest('#' + PHOTO_DEBUG_ID) || btn.closest('#' + LEAVING_ID) ||
+                btn.closest('#mem3-early-pass') || btn.closest('#mem3-leaving-list')) continue;
             const tip = btn.closest('[id^="tooltip-"]');
             if (!tip || known[tip.id]) continue;
             const rect = btn.getBoundingClientRect();
@@ -4020,9 +4209,24 @@
     }
 
     function panelTitle(name) {
+        if (name === 'BIGS') return 'BIGs';
         const line = /^LINE\s+(\d+)\s+(ODD|EVEN)/i.exec(name);
         if (line) return 'L' + line[1] + ' ' + (line[2].toUpperCase() === 'ODD' ? 'Odd' : 'Even');
         return name;
+    }
+
+    function summaryColumn(name) {
+        const columns = {
+            'LINE 1 ODD': '2',
+            'LINE 1 EVEN': '3',
+            'LINE 2 ODD': '4',
+            'LINE 2 EVEN': '5',
+            'LINE 3 ODD': '6',
+            'LINE 3 EVEN': '7',
+            'LINE 4 ODD': '8',
+            'LINE 4 EVEN': '9'
+        };
+        return columns[name] || '';
     }
 
     function makeSummaryCell(opts) {
@@ -4124,11 +4328,11 @@
 
     function ensureSummaryActions() {
         let actions = document.getElementById('mem3-summary-actions');
-        if (actions && actions.getAttribute('data-mem3-probe') !== 'issues-v188') actions.remove();
-        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'issues-v188') return actions;
+        if (actions && actions.getAttribute('data-mem3-probe') !== 'actions-v1928') actions.remove();
+        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'actions-v1928') return actions;
         actions = document.createElement('div');
         actions.id = 'mem3-summary-actions';
-        actions.setAttribute('data-mem3-probe', 'issues-v188');
+        actions.setAttribute('data-mem3-probe', 'actions-v1928');
         actions.style.cssText = 'display:flex; gap:6px; align-items:flex-start; flex-wrap:wrap;';
         function actionButton(label, border) {
             const btn = document.createElement('button');
@@ -4151,7 +4355,8 @@
                 setTimeout(function () { copyBtn.textContent = 'Copy debug'; }, 2000);
             });
         });
-        actions.appendChild(makeIssueButton());
+        actions.appendChild(makeShowLeavingButton());
+        actions.appendChild(makeEarlyUnassignButton());
         actions.appendChild(copyBtn);
         return actions;
     }
@@ -4592,7 +4797,7 @@
     }
 
     function summaryStructureSig(data) {
-        return 'v46|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
+        return 'v47|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
             (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
             (data.floorOpen || []).join(';') + '|' +
             data.floorStaffed + '|' + (data.asOf || '') + '|' +
@@ -4733,6 +4938,33 @@
         nameRow.appendChild(makeInfoButton());
         titleWrap.appendChild(nameRow);
         titleWrap.appendChild(byline);
+        const refreshRow = document.createElement('div');
+        refreshRow.setAttribute('data-mem3-refresh', '');
+        refreshRow.style.cssText = 'display:flex; align-items:center; gap:6px; margin-top:4px;';
+        const count = document.createElement('div');
+        count.setAttribute('data-mem3-refresh-count', '');
+        count.style.cssText = 'font:800 12px Segoe UI,system-ui,sans-serif; color:#f5c518; min-width:108px;';
+        const every = document.createElement('select');
+        every.setAttribute('data-mem3-refresh-every', '');
+        every.style.cssText = 'padding:2px 4px; border-radius:6px; border:1px solid #30363d; background:#0d1117; ' +
+            'color:#fff; font:700 12px Segoe UI,system-ui,sans-serif;';
+        for (let minute = 1; minute <= 5; minute++) {
+            const opt = document.createElement('option');
+            opt.value = String(minute);
+            opt.textContent = minute + ' min';
+            every.appendChild(opt);
+        }
+        every.value = String(refreshMinutes());
+        every.addEventListener('change', function () {
+            const picked = parseInt(every.value, 10);
+            if (picked < 1 || picked > 5) return;
+            saveRefreshMinutes(picked);
+            scheduleNextRefresh();
+        });
+        refreshRow.appendChild(count);
+        refreshRow.appendChild(every);
+        titleWrap.appendChild(refreshRow);
+        paintRefreshCountdown();
         header.appendChild(titleWrap);
 
         const windows = document.createElement('div');
@@ -4795,16 +5027,19 @@
         node.appendChild(caption);
         if (!LAST_ROLLUP_AT) {
             const miss = document.createElement('div');
-            miss.textContent = 'No UPH \u2014 sign in to Midway, then Reload';
+            miss.textContent = refreshBusy
+                ? 'Recalculating UPH and idle'
+                : 'No UPH \u2014 sign in to Midway, then Reload';
             miss.style.cssText = 'font:700 12px Segoe UI,system-ui,sans-serif; color:#d29922;';
             node.appendChild(miss);
         }
 
         const metrics = document.createElement('div');
-        metrics.style.cssText = 'display:flex; align-items:flex-start; flex-wrap:nowrap; gap:0; width:100%; min-width:0;';
+        metrics.style.cssText = 'display:grid; grid-template-columns:minmax(0,1.15fr) repeat(8,minmax(0,1fr)); ' +
+            'grid-template-rows:auto auto; column-gap:0; row-gap:6px; width:100%; align-items:stretch;';
 
         const totalIds = lineIdsOf(data);
-        metrics.appendChild(makeSummaryCell({
+        const totalCell = makeSummaryCell({
             summaryKey: 'total',
             scopeLabel: 'Total',
             empIds: totalIds,
@@ -4818,12 +5053,17 @@
             stations: data.floorStations || 0,
             openStations: data.floorOpen || [],
             lead: true,
-            title: 'Average of the odd and even side rates. Total work time and IDLE time are summed once per associate from FCLM Time Details.'
-        }));
+            title: 'Average of the side rates and BIGs. Total work time and IDLE time are summed once per associate from FCLM Time Details.'
+        });
+        totalCell.style.gridColumn = '1';
+        totalCell.style.gridRow = '1 / span 2';
+        totalCell.style.alignSelf = 'stretch';
+        totalCell.style.height = '100%';
+        metrics.appendChild(totalCell);
 
         for (let i = 0; i < data.lines.length; i++) {
             const line = data.lines[i];
-            metrics.appendChild(makeSummaryCell({
+            const cell = makeSummaryCell({
                 summaryKey: line.name,
                 scopeLabel: panelTitle(line.name),
                 empIds: line.empIds || [],
@@ -4842,11 +5082,20 @@
                     (line.avgUph > 0 ? '' : ' \u00b7 no rate this shift') +
                     ' \u00b7 ' + idleLabel(sideIdlePct(line.idleMin || 0, line.clockedMin || 0)) + ' IDLE \u00b7 ' +
                     formatDuration(line.idleMin || 0) + ' / ' + formatDuration(line.clockedMin || 0) + ' clocked in'
-            }));
+            });
+            if (line.name === 'BIGS') {
+                cell.style.gridColumn = '2';
+                cell.style.gridRow = '2';
+            } else {
+                cell.style.gridColumn = summaryColumn(line.name);
+                cell.style.gridRow = '1';
+            }
+            metrics.appendChild(cell);
         }
 
         node.appendChild(metrics);
         header.appendChild(actions);
+        paintEarlyLog();
 
         const progress = document.createElement('div');
         progress.id = 'mem3-idle-progress';
@@ -4895,7 +5144,7 @@
                 const tr = trs[i];
                 total++;
                 const assignment = rowAssignmentText(tr);
-                const crStation = isCustomerReturnsStation(assignment);
+                const crStation = isCustomerReturnsStation(assignment) && !stationIsDisabled(tr);
                 if (crStation) crStations++;
 
                 const found = findLoginInRow(tr);
@@ -5067,6 +5316,8 @@
             });
             box.appendChild(dbg);
         }
+        box.appendChild(makePopupLeavingButton(person));
+        paintPopupLeaving(box, person);
         return box;
     }
 
@@ -5120,6 +5371,11 @@
                 if (timeNode) timeNode.remove();
                 const popupPerson = IDENTITY.byLogin[existing.dataset.login] || personFromText(existing.textContent || '');
                 ensurePopupClock(existing, popupPerson, existing.dataset.empId || '');
+                if (!existing.querySelector('[data-mem3-leaving-early]')) {
+                    existing.appendChild(makePopupLeavingButton(popupPerson));
+                }
+                paintPopupLeaving(existing, popupPerson);
+                placeNameLeaving(host, popupPerson);
                 continue;
             }
 
@@ -5135,6 +5391,7 @@
             while (anchor.parentElement && anchor.parentElement !== host) anchor = anchor.parentElement;
             if (anchor.parentElement === host) host.insertBefore(line, anchor);
             else host.appendChild(line);
+            placeNameLeaving(host, person);
         }
     }
 
@@ -5158,9 +5415,9 @@
        --------------------------------------------------------------- */
     function collectDebugSnapshot() {
         const sections = {};
-        const keys = Object.keys(TARGET_SECTIONS);
-        for (let i = 0; i < keys.length; i++) {
-            sections[keys[i]] = TARGET_SECTIONS[keys[i]].map(function (label) {
+        const panels = panelEntries();
+        for (let i = 0; i < panels.length; i++) {
+            sections[panels[i].name] = panels[i].labels.map(function (label) {
                 const h = findH5(label);
                 return { label: label, found: !!h, hasTable: !!(h && findTable(h)) };
             });
@@ -5265,9 +5522,9 @@
     // don't cause a badge rebuild when nothing actually changed.
     function tablesSignature() {
         let sig = '';
-        const keys = Object.keys(TARGET_SECTIONS);
-        for (let i = 0; i < keys.length; i++) {
-            const labels = TARGET_SECTIONS[keys[i]];
+        const panels = panelEntries();
+        for (let i = 0; i < panels.length; i++) {
+            const labels = panels[i].labels;
             for (let j = 0; j < labels.length; j++) {
                 const h = findH5(labels[j]);
                 const table = h ? findTable(h) : null;
@@ -5325,11 +5582,11 @@
             let floorTotalMin = 0, floorIdleMin = 0, floorClockedMin = 0, floorBoth = 0;
             const floorSeen = Object.create(null);
             BOARD_IDS = [];
-            const keys = Object.keys(TARGET_SECTIONS);
-            for (let i = 0; i < keys.length; i++) {
-                const s = decorateSection(keys[i], TARGET_SECTIONS[keys[i]]);
+            const panels = panelEntries();
+            for (let i = 0; i < panels.length; i++) {
+                const s = decorateSection(panels[i].name, panels[i].labels);
                 lineStats.push({
-                    name: keys[i],
+                    name: panels[i].name,
                     avgUph: s.avgUph,
                     totalUnits: s.totalUnits,
                     staffed: s.staffed,
@@ -5343,7 +5600,7 @@
                     openStations: s.openStations || [],
                     empIds: s.empIds || []
                 });
-                DEBUG.perLine[keys[i]] = lineStats[lineStats.length - 1];
+                DEBUG.perLine[panels[i].name] = lineStats[lineStats.length - 1];
                 if (s.avgUph > 0) avgList.push(s.avgUph);
                 floorUnits += s.totalUnits;
                 floorStaffed += s.staffed;
@@ -5353,7 +5610,7 @@
                 floorCrStations += s.crStations || 0;
                 floorCrSigned += s.crSigned || 0;
                 const opens = s.openStations || [];
-                for (let o = 0; o < opens.length; o++) floorOpen.push(panelTitle(keys[i]) + '  ' + opens[o]);
+                for (let o = 0; o < opens.length; o++) floorOpen.push(panelTitle(panels[i].name) + '  ' + opens[o]);
                 const ids = s.empIds || [];
                 for (let e = 0; e < ids.length; e++) {
                     if (floorSeen[ids[e]]) continue;
@@ -5426,9 +5683,9 @@
     function rowsMissingBadges() {
         try {
             if (!isAssignmentsPage() || !assignmentsReady()) return false;
-            const keys = Object.keys(TARGET_SECTIONS);
-            for (let i = 0; i < keys.length; i++) {
-                const labels = TARGET_SECTIONS[keys[i]];
+            const panels = panelEntries();
+            for (let i = 0; i < panels.length; i++) {
+                const labels = panels[i].labels;
                 for (let j = 0; j < labels.length; j++) {
                     const h = findH5(labels[j]);
                     const table = h ? findTable(h) : null;
@@ -5517,12 +5774,75 @@
         }, delay);
     }
 
+    function refreshMinutes() {
+        let raw = '';
+        try {
+            if (typeof GM_getValue === 'function') raw = GM_getValue(REFRESH_CHOICE_KEY, '') || '';
+        } catch (e) { raw = ''; }
+        if (!raw) {
+            try { raw = localStorage.getItem(REFRESH_CHOICE_KEY) || ''; } catch (e2) { raw = ''; }
+        }
+        const n = parseInt(raw, 10);
+        if (n >= 1 && n <= 5) return n;
+        return 5;
+    }
+
+    function saveRefreshMinutes(n) {
+        const text = String(n);
+        try {
+            if (typeof GM_setValue === 'function') GM_setValue(REFRESH_CHOICE_KEY, text);
+        } catch (e) { /* the page copy below still records it */ }
+        try { localStorage.setItem(REFRESH_CHOICE_KEY, text); } catch (e2) { /* storage can be blocked */ }
+    }
+
+    function refreshIntervalMs() {
+        return refreshMinutes() * 60 * 1000;
+    }
+
+    function paintRefreshCountdown() {
+        let nodes = [];
+        try { nodes = document.querySelectorAll('[data-mem3-refresh-count]'); } catch (e) { return; }
+        let text = 'Recalc now';
+        if (refreshBusy) text = 'Recalculating';
+        else if (nextRefreshAt) {
+            const sec = Math.max(0, Math.ceil((nextRefreshAt - Date.now()) / 1000));
+            const m = Math.floor(sec / 60);
+            const s = sec % 60;
+            text = 'Recalc in ' + m + ':' + (s < 10 ? '0' : '') + s;
+        }
+        for (let i = 0; i < nodes.length; i++) {
+            if (nodes[i].textContent !== text) nodes[i].textContent = text;
+        }
+    }
+
+    function armRefreshClock() {
+        if (refreshClockTimer) return;
+        refreshClockTimer = setInterval(paintRefreshCountdown, 1000);
+    }
+
+    // Drop every rate and idle time before the new pages come back,
+    // so the panel paints empty and then fills from this pass only.
+    function wipePanelForRefresh() {
+        clearTimeCache();
+        LAST_ROLLUP = {};
+        LAST_ROLLUP_AT = null;
+        DEBUG.rollupSize = 0;
+        DEBUG.rollupFunctions = null;
+        DEBUG.rollupParse = null;
+        lastIdentified = null;
+        try { clearDecorations(); } catch (e) { /* the board may not be up yet */ }
+    }
+
     function scheduleNextRefresh() {
         if (refreshTimer) clearTimeout(refreshTimer);
+        const wait = refreshIntervalMs();
+        nextRefreshAt = Date.now() + wait;
+        armRefreshClock();
+        paintRefreshCountdown();
         refreshTimer = setTimeout(function () {
             refreshTimer = null;
             refreshData();
-        }, REFRESH_MS);
+        }, wait);
     }
 
     function pagesHeld() {
@@ -5544,8 +5864,11 @@
         const gen = ++refreshGeneration;
         refreshBusy = true;
         refreshDue = false;
+        wipePanelForRefresh();
         scheduleNextRefresh();
+        paintRefreshCountdown();
         try {
+            try { render(); } catch (e0) { /* an empty paint can wait for the new pages */ }
             if (!identityLoaded) await loadIdentities();
             if (gen !== refreshGeneration) return;
             let next = null;
@@ -5557,7 +5880,7 @@
                 warn('refresh failed:', e);
             }
             if (gen !== refreshGeneration) return;
-            if (next && (Object.keys(next).length || !Object.keys(LAST_ROLLUP).length)) {
+            if (next) {
                 LAST_ROLLUP = next;
                 LAST_ROLLUP_AT = new Date();
                 rollupRetryN = 0;
@@ -5565,14 +5888,14 @@
                     clearTimeout(rollupRetryTimer);
                     rollupRetryTimer = null;
                 }
-            } else if (!Object.keys(LAST_ROLLUP).length) {
+            } else {
                 scheduleRollupRetry();
             }
             refreshCycle++;
             lastIdentified = null;
             render();
             if (gen !== refreshGeneration) return;
-            const clockDone = scheduleClockLoad();
+            const clockDone = scheduleClockLoad(true);
             await loadBoardTimes();
             if (gen !== refreshGeneration) return;
             await clockDone;
@@ -6026,13 +6349,13 @@
         const defGrid = document.createElement('div');
         defGrid.style.cssText = 'display:grid; grid-template-columns:1fr 1fr; gap:8px;';
         infoCard(defGrid, 'Rate',
-            'Primary Grading [1667843456854] from Function Rollup. ShipmentReturned units divided by that function’s paid hours. Photograph and problem-solve actions are not added in.');
+            'Primary Grading [1667843456854] from Function Rollup. Medium and Large EACH units, divided by the hours those units took. A size’s hours are its units divided by that size’s UPH. JPH is not used.');
         infoCard(defGrid, 'IDLE percent',
             'From FCLM Time Details for the selected window. Indirect time plus Time Off Task, divided by paid time clocked in.');
         infoCard(defGrid, 'Total',
             'The average of the side rates. Each person is counted once.');
         infoCard(defGrid, 'No data',
-            'No UPH for a window means that person has no Primary Grading rate in it. No data for a window means Time Details has no clock time, which is what you see when someone came in later.');
+            'No UPH for a window means that person has no Medium or Large Primary Grading units in it. No data for a window means Time Details has no clock time, which is what you see when someone came in later.');
         defs.appendChild(defGrid);
         card.appendChild(defs);
 
@@ -6041,10 +6364,11 @@
             ['Formula', 'Indirect time + Time Off Task, divided by paid time clocked in'],
             ['Counts', 'Indirect function time and Time Off Task in the selected window'],
             ['Does not count', 'Active graded time, or time outside the window'],
-            ['BIGS stations', 'A station whose name contains BIGS shows that associate’s idle percent on the row. It is left out of every side and out of Total.'],
+            ['BIGs', 'BIGS Line + Line Support. It sits under L1 Odd and has the same rate, idle percent, associates idle, units, and hours. Those associates count in Total.'],
+            ['Other BIGS rows', 'A station outside that group whose name contains BIGS shows idle on the row and stays out of the line totals.'],
             ['IDLE NOW', 'The latest function row is indirect or Time Off Task, and that row has lasted at least 11 minutes. A diamond in the function title is still that stretch. A shorter row is the lag after a scan. Someone who is clocked out is not counted. Earlier idle in the window still counts in the percent.'],
             ['ASSOCIATES IDLE', 'The number under the idle percent is how many associates on that side, or on the whole floor for Total, have been idle for at least 11 minutes. The white eye on the left opens that list.'],
-            ['View', 'The eye left of UPH lists that side from the lowest rate. The eye left of the idle percent lists it from the highest idle percent. Total does the same for everyone on the lines.'],
+            ['View', 'The eye left of UPH lists that side from the lowest rate. The eye left of the idle percent lists it from the highest idle percent. Total does the same for everyone on the lines and on BIGs.'],
             ['Hours idle', 'Under units, the idle hours are the indirect time plus Time Off Task already in the idle percent.']
         ]));
         card.appendChild(idleSec);
@@ -6052,7 +6376,8 @@
         const utilSec = infoSection('Station utilization');
         utilSec.appendChild(infoRows([
             ['What counts', 'Customer Returns stations only. A station reads “Customer Returns” and then the half assignment, such as Station 3-06.'],
-            ['Left out', 'Waterspiders and every other role on the line'],
+            ['Left out', 'Waterspiders, disabled stations, and every other role on the line'],
+            ['Disabled', 'A station marked Disabled is left out of the percent and is not listed as empty.'],
             ['Red sign', 'Under 90% of those stations have an associate signed in'],
             ['Yellow sign', '90% up to, but not including, 100%'],
             ['Green check', '100%'],
@@ -6075,7 +6400,7 @@
 
         const times = infoSection('Time frames');
         const timeNote = document.createElement('div');
-        timeNote.textContent = 'Days start at 6:00 AM. Nights start at 6:00 PM and use the same gaps. All shift is 6:00–5:59 (11 hr 59 min). UPH refreshes every 5 minutes. The idle percent is read once per associate. Reload, or picking a window, reads it again.';
+        timeNote.textContent = 'Days start at 6:00 AM. Nights start at 6:00 PM and use the same gaps. All shift is 6:00–5:59 (11 hr 59 min). Each recalculation clears the rates and idle times on the panel, then reads everyone again. Reload, or picking a window, starts that pass immediately.';
         timeNote.style.cssText = 'font-size:13px; font-weight:500; margin-bottom:8px;';
         times.appendChild(timeNote);
         times.appendChild(infoRows([
@@ -6430,7 +6755,13 @@
             node.closest('.' + SECTION_BADGE_CLASS) ||
             node.closest('.' + POPUP_CLASS) ||
             node.id === CORNER_DEBUG_ID ||
-            node.id === UPDATE_PROMPT_ID);
+            node.id === UPDATE_PROMPT_ID ||
+            node.id === LEAVING_ID ||
+            node.closest('#' + LEAVING_ID) ||
+            node.id === 'mem3-early-pass' ||
+            node.closest('#mem3-early-pass') ||
+            node.id === 'mem3-leaving-list' ||
+            node.closest('#mem3-leaving-list'));
     }
 
     function initLinePairs() {
@@ -6458,6 +6789,1811 @@
         if (document.body) linePairObs.observe(document.body, { childList: true, subtree: true });
     }
 
+    const LEAVING_ID = 'mem3-leaving-panel';
+    const LEAVING_KEY = 'mem3-leaving-v1';
+    const ACTOR_KEY = 'mem3-leaving-actor';
+    const LEAVING_POLL_MS = 20000;
+    const LEAVING_KEEP_MS = 12 * 60 * 60 * 1000;
+    const LEAVING_SHARE_URL = 'https://extendsclass.com/api/json-storage/bin/edfeccc';
+    let leavingShareChain = Promise.resolve();
+    let leavingShareError = '';
+    let leavingStop = false;
+    let leavingBusy = false;
+    let leavingHeld = false;
+
+    // Every install reads and writes this same list, so a mark on one computer shows on the others.
+    function leavingPad(n) {
+        return n < 10 ? '0' + n : String(n);
+    }
+
+    function shiftId(date) {
+        const hour = date.getHours();
+        const start = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+        if (hour < 6) start.setDate(start.getDate() - 1);
+        const name = (hour >= 6 && hour < 18) ? 'days' : 'nights';
+        return start.getFullYear() + '-' + leavingPad(start.getMonth() + 1) + '-' + leavingPad(start.getDate()) + '-' + name;
+    }
+
+    function formatLeaveTime(min) {
+        let hour = Math.floor(min / 60) % 24;
+        const minute = min % 60;
+        const suffix = hour >= 12 ? 'PM' : 'AM';
+        hour = hour % 12;
+        if (hour === 0) hour = 12;
+        return leavingPad(hour) + ':' + leavingPad(minute) + ' ' + suffix;
+    }
+
+    function maskLeaveTime(text) {
+        const raw = String(text || '');
+        if (raw.indexOf(':') !== -1) {
+            const bits = raw.split(':');
+            const hour = bits[0].replace(/\D/g, '').slice(0, 2);
+            const minute = (bits[1] || '').replace(/\D/g, '').slice(0, 2);
+            return hour + ':' + minute;
+        }
+        const digits = raw.replace(/\D/g, '').slice(0, 4);
+        if (digits.length <= 2) return digits;
+        return digits.slice(0, 2) + ':' + digits.slice(2);
+    }
+
+    function finishLeaveTime(text) {
+        const raw = String(text || '');
+        if (raw.indexOf(':') !== -1) {
+            const bits = raw.split(':');
+            const hour = bits[0].replace(/\D/g, '').slice(0, 2);
+            const minute = (bits[1] || '').replace(/\D/g, '').slice(0, 2);
+            if (!hour && !minute) return '';
+            return hour.padStart(2, '0') + ':' + minute.padStart(2, '0');
+        }
+        const digits = raw.replace(/\D/g, '').slice(0, 4);
+        if (!digits) return '';
+        if (digits.length <= 2) return digits.padStart(2, '0') + ':00';
+        return digits.slice(0, 2) + ':' + digits.slice(2).padStart(2, '0');
+    }
+
+    function clockText(date) {
+        return formatLeaveTime(date.getHours() * 60 + date.getMinutes());
+    }
+
+    function parseLeaveTime(text) {
+        const match = String(text || '').trim().match(/^(\d{1,2}):(\d{2})\s*(am|pm)$/i);
+        if (!match) return null;
+        let hour = parseInt(match[1], 10);
+        const minute = parseInt(match[2], 10);
+        if (hour < 1 || hour > 12 || minute > 59) return null;
+        const pm = match[3].toLowerCase() === 'pm';
+        if (hour === 12) hour = pm ? 12 : 0;
+        else if (pm) hour += 12;
+        return hour * 60 + minute;
+    }
+
+    function shiftMinute(min) {
+        if (min < 6 * 60) return min + 24 * 60;
+        return min;
+    }
+
+    function emptyLeaving() {
+        return { shifts: {} };
+    }
+
+    function loadLeaving() {
+        let raw = '';
+        try {
+            if (typeof GM_getValue === 'function') raw = GM_getValue(LEAVING_KEY, '') || '';
+        } catch (e) { raw = ''; }
+        if (!raw) {
+            try { raw = localStorage.getItem(LEAVING_KEY) || ''; } catch (e2) { raw = ''; }
+        }
+        if (!raw) return emptyLeaving();
+        try {
+            const doc = JSON.parse(raw);
+            if (!doc || typeof doc !== 'object' || !doc.shifts) return emptyLeaving();
+            return doc;
+        } catch (e3) {
+            return emptyLeaving();
+        }
+    }
+
+    function loadActor() {
+        let raw = '';
+        try {
+            if (typeof GM_getValue === 'function') raw = GM_getValue(ACTOR_KEY, '') || '';
+        } catch (e) { raw = ''; }
+        if (!raw) {
+            try { raw = localStorage.getItem(ACTOR_KEY) || ''; } catch (e2) { raw = ''; }
+        }
+        return String(raw || '').trim().toLowerCase();
+    }
+
+    function saveActor(login) {
+        const text = String(login || '').trim().toLowerCase();
+        try {
+            if (typeof GM_setValue === 'function') GM_setValue(ACTOR_KEY, text);
+        } catch (e) { /* the page copy below still records it */ }
+        try { localStorage.setItem(ACTOR_KEY, text); } catch (e2) { /* storage can be blocked */ }
+    }
+
+    function loginFromWelcome(text) {
+        const match = String(text || '').replace(/\s+/g, ' ').trim().match(/^welcome\s+([a-z][a-z0-9._-]{2,31})$/i);
+        if (!match) return '';
+        const login = match[1].toLowerCase();
+        if (login === 'back' || login === 'there' || login === 'user') return '';
+        return login;
+    }
+
+    function signedInLogin() {
+        try {
+            const nav = document.querySelector('#app-layout-content-1 nav') ||
+                document.querySelector('main nav') || document.querySelector('nav');
+            if (!nav) return '';
+            const nodes = nav.querySelectorAll('div');
+            for (let i = 0; i < nodes.length; i++) {
+                const login = loginFromWelcome(elementOwnText(nodes[i])) || loginFromWelcome(nodes[i].textContent);
+                if (!login) continue;
+                saveActor(login);
+                return login;
+            }
+        } catch (e) { /* this page has no welcome line */ }
+        return '';
+    }
+
+    function requireActor() {
+        const actor = signedInLogin();
+        if (looksLikeLogin(actor)) return actor;
+        setLeavingStatus('Control Tower has not shown who is signed in.');
+        return '';
+    }
+
+    function signedInNote() {
+        const note = document.createElement('div');
+        note.setAttribute('data-signed-in', '');
+        const actor = signedInLogin();
+        note.textContent = looksLikeLogin(actor)
+            ? 'Signed in as ' + personLabel(actor)
+            : 'Control Tower has not shown who is signed in.';
+        note.style.cssText = 'font-size:12px; color:#8b949e; margin-bottom:8px;';
+        return note;
+    }
+
+    function personLabel(login) {
+        const key = String(login || '').trim().toLowerCase();
+        if (!key || key === 'board') return 'The board';
+        const person = IDENTITY.byLogin[key];
+        if (person && person.name) return person.name;
+        return key;
+    }
+
+    function clockToMs(clock, now) {
+        const min = parseLeaveTime(clock);
+        if (min == null || !now) return 0;
+        const stamp = new Date(now.getFullYear(), now.getMonth(), now.getDate(),
+            Math.floor(min / 60) % 24, min % 60, 0, 0);
+        if (stamp.getTime() > now.getTime() + 60000) stamp.setDate(stamp.getDate() - 1);
+        return stamp.getTime();
+    }
+
+    function eventTime(item, now) {
+        if (item && typeof item.atMs === 'number' && item.atMs > 0) return item.atMs;
+        return clockToMs(item && item.at, now);
+    }
+
+    function rowTime(row, now) {
+        if (!row) return 0;
+        if (typeof row.markedAtMs === 'number' && row.markedAtMs > 0) return row.markedAtMs;
+        if (typeof row.clearedAtMs === 'number' && row.clearedAtMs > 0) return row.clearedAtMs;
+        return clockToMs(row.clearedAt || row.takenOffAt || row.markedAt, now);
+    }
+
+    function recordActivity(doc, by, text, now, extra) {
+        if (!doc.activity) doc.activity = {};
+        const id = shiftId(now);
+        if (!doc.activity[id]) doc.activity[id] = [];
+        const item = {
+            at: clockText(now),
+            atMs: now.getTime(),
+            by: String(by || '').trim().toLowerCase() || 'board',
+            text: text
+        };
+        if (extra) {
+            if (extra.action) item.action = extra.action;
+            if (extra.who) item.who = String(extra.who).trim().toLowerCase();
+            if (extra.said) item.said = extra.said;
+            if (extra.detail) item.detail = extra.detail;
+        }
+        doc.activity[id].push(item);
+    }
+
+    function activityLine(event) {
+        const actor = personLabel(event && event.by);
+        const when = event && event.at ? ' at ' + event.at : '';
+        const who = personLabel(event && event.who);
+        if (event && event.action === 'clear') {
+            return actor + ' cleared ' + who + ' from leaving at ' + event.said + when;
+        }
+        if (event && event.action === 'update') {
+            return actor + ' updated ' + who + ' to leave at ' + event.said + when;
+        }
+        if (event && event.action === 'mark') {
+            return actor + ' marked ' + who + ' leaving at ' + event.said +
+                (event.detail ? ' from ' + event.detail : '') + when;
+        }
+        if (event && event.action === 'same') {
+            return actor + ' left ' + who + ' leaving at ' + event.said + when;
+        }
+        if (event && event.action === 'unassign') return actor + ' unassigned ' + who + when;
+        if (event && event.action === 'miss') return actor + ' found ' + who + ' was not on a station' + when;
+        if (event && event.action === 'fail') return actor + ' could not take ' + who + ' off' + when;
+        if (event && event.action === 'back') {
+            return actor + ' saw ' + who + ' back on ' + (event.detail || '') + when;
+        }
+        const text = String((event && event.text) || '');
+        let match = text.match(/^cleared (\S+) marked at (.+)$/);
+        if (match) return actor + ' cleared ' + personLabel(match[1]) + ' from leaving at ' + match[2] + when;
+        match = text.match(/^cleared (\S+) from leaving at (.+)$/);
+        if (match) return actor + ' cleared ' + personLabel(match[1]) + ' from leaving at ' + match[2] + when;
+        match = text.match(/^updated (\S+) from .+ to (.+)$/);
+        if (match) return actor + ' updated ' + personLabel(match[1]) + ' to leave at ' + match[2] + when;
+        match = text.match(/^marked (\S+) leaving at (\d{1,2}:\d{2} [AP]M)(?: from (.+))?$/);
+        if (match) {
+            return actor + ' marked ' + personLabel(match[1]) + ' leaving at ' + match[2] +
+                (match[3] ? ' from ' + match[3] : '') + when;
+        }
+        match = text.match(/^unassigned (\S+)$/);
+        if (match) return actor + ' unassigned ' + personLabel(match[1]) + when;
+        match = text.match(/^could not take (\S+) off$/);
+        if (match) return actor + ' could not take ' + personLabel(match[1]) + ' off' + when;
+        match = text.match(/^(\S+) was not on a station$/);
+        if (match) return actor + ' found ' + personLabel(match[1]) + ' was not on a station' + when;
+        match = text.match(/^(\S+) back on (.+)$/);
+        if (match) return actor + ' saw ' + personLabel(match[1]) + ' back on ' + match[2] + when;
+        match = text.match(/^(\S+) already marked at (.+)$/);
+        if (match) return actor + ' left ' + personLabel(match[1]) + ' leaving at ' + match[2] + when;
+        if (event && event.action === 'note') return actor + ' ' + text + when;
+        return actor + (text ? ' ' + text : '') + when;
+    }
+
+    function recentActivity(doc, now) {
+        const cutoff = now.getTime() - LEAVING_KEEP_MS;
+        const out = [];
+        const act = (doc && doc.activity) || {};
+        const ids = Object.keys(act);
+        for (let n = 0; n < ids.length; n++) {
+            const list = act[ids[n]] || [];
+            for (let i = 0; i < list.length; i++) {
+                const when = eventTime(list[i], now);
+                if (when && when >= cutoff) out.push(list[i]);
+            }
+        }
+        out.sort(function (a, b) { return eventTime(b, now) - eventTime(a, now); });
+        return out;
+    }
+
+    function activityKind(event) {
+        if (!event) return '';
+        if (event.action === 'mark' || event.action === 'update' || event.action === 'clear' ||
+            event.action === 'unassign' || event.action === 'miss') return event.action;
+        const text = String(event.text || '');
+        if (/^marked \S+ leaving at /.test(text)) return 'mark';
+        if (/^updated \S+ /.test(text)) return 'update';
+        if (/^cleared \S+ /.test(text)) return 'clear';
+        if (/^unassigned \S+$/.test(text)) return 'unassign';
+        if (/ was not on a station$/.test(text)) return 'miss';
+        return '';
+    }
+
+    function activityWho(event) {
+        if (!event) return '';
+        if (event.who) return String(event.who).trim().toLowerCase();
+        const text = String(event.text || '');
+        let match = text.match(/^(?:marked|updated|cleared|unassigned) (\S+)/);
+        if (match) return match[1].toLowerCase();
+        match = text.match(/^(\S+) was not on a station$/);
+        return match ? match[1].toLowerCase() : '';
+    }
+
+    function activitySaid(event) {
+        if (!event) return '';
+        if (event.said) return event.said;
+        const text = String(event.text || '');
+        const match = text.match(/leaving at (\d{1,2}:\d{2}(?: [AP]M)?)|to leave at (\d{1,2}:\d{2} [AP]M)/);
+        return match ? (match[1] || match[2] || '') : '';
+    }
+
+    function restoreLatestMarks(doc, now) {
+        if (!doc) return false;
+        const events = recentActivity(doc, now);
+        const seen = Object.create(null);
+        let changed = false;
+        for (let i = 0; i < events.length; i++) {
+            const kind = activityKind(events[i]);
+            const who = activityWho(events[i]);
+            if (!kind || !who || seen[who]) continue;
+            seen[who] = true;
+            if (kind !== 'mark' && kind !== 'update') continue;
+            const said = activitySaid(events[i]);
+            if (!said) continue;
+            const rows = shiftRows(doc, now);
+            let open = null;
+            let same = null;
+            for (let r = 0; r < rows.length; r++) {
+                if (!rows[r] || rows[r].login !== who) continue;
+                if (leavingOpen(rows[r])) open = rows[r];
+                if (rows[r].id === who + '-' + said) same = rows[r];
+            }
+            if (open || !same) continue;
+            const when = eventTime(events[i], now);
+            const closedAt = rowRevisionTime(same, now);
+            if (when && closedAt && when <= closedAt) continue;
+            same.status = 'said';
+            same.said = said;
+            same.markedAt = events[i].at || same.markedAt;
+            if (when) same.markedAtMs = when;
+            same.clearedAt = '';
+            same.clearedAtMs = 0;
+            same.clearedBy = '';
+            same.takenOffAt = '';
+            same.takenHow = '';
+            same.back = '';
+            changed = true;
+        }
+        return changed;
+    }
+
+    function pruneLeaving(doc, now) {
+        if (!doc) return doc;
+        const cutoff = now.getTime() - LEAVING_KEEP_MS;
+        const shifts = doc.shifts || {};
+        Object.keys(shifts).forEach(function (id) {
+            const rows = shifts[id] || [];
+            const keep = [];
+            for (let i = 0; i < rows.length; i++) {
+                const row = rows[i];
+                if (!row) continue;
+                const open = row.status === 'said' || row.status === 'stuck';
+                const when = rowTime(row, now);
+                if (!when) {
+                    if (open) keep.push(row);
+                    continue;
+                }
+                if (when >= cutoff) keep.push(row);
+            }
+            if (keep.length) shifts[id] = keep;
+            else delete shifts[id];
+        });
+        function trimMap(bucket, timeOf) {
+            if (!bucket) return;
+            Object.keys(bucket).forEach(function (id) {
+                const list = bucket[id] || [];
+                const keep = [];
+                for (let i = 0; i < list.length; i++) {
+                    const when = timeOf(list[i], now);
+                    if (when && when >= cutoff) keep.push(list[i]);
+                }
+                if (keep.length) bucket[id] = keep;
+                else delete bucket[id];
+            });
+        }
+        trimMap(doc.activity, eventTime);
+        trimMap(doc.runs, eventTime);
+        return doc;
+    }
+
+    function saveLeavingLocal(doc) {
+        const text = JSON.stringify(doc);
+        try {
+            if (typeof GM_setValue === 'function') GM_setValue(LEAVING_KEY, text);
+        } catch (e) { /* the page copy below still records it */ }
+        try { localStorage.setItem(LEAVING_KEY, text); } catch (e2) { /* storage can be blocked */ }
+    }
+
+    function collapseOpenLeaving(rows) {
+        const list = rows || [];
+        const now = new Date();
+        const best = Object.create(null);
+        for (let i = 0; i < list.length; i++) {
+            const row = list[i];
+            if (!leavingOpen(row) || !row.login) continue;
+            const prev = best[row.login];
+            if (!prev || rowRevisionTime(row, now) >= rowRevisionTime(prev, now)) {
+                if (prev && prev !== row) {
+                    prev.status = 'cancelled';
+                    prev.takenHow = prev.takenHow || 'replaced';
+                }
+                best[row.login] = row;
+            } else {
+                row.status = 'cancelled';
+                row.takenHow = row.takenHow || 'replaced';
+            }
+        }
+        return list;
+    }
+
+    function saveLeaving(doc) {
+        restoreLatestMarks(doc, new Date());
+        const shifts = doc.shifts || {};
+        Object.keys(shifts).forEach(function (id) {
+            collapseOpenLeaving(shifts[id]);
+        });
+        pruneLeaving(doc, new Date());
+        saveLeavingLocal(doc);
+        if (leavingShareOn()) return publishLeaving(doc);
+        return Promise.resolve(doc);
+    }
+
+    function leavingShareOn() {
+        return !!(LEAVING_SHARE_URL && typeof GM_xmlhttpRequest === 'function');
+    }
+
+    function enableLeavingShare() {
+        // Sharing is already on for every install.
+    }
+
+    function parseSharedBody(text) {
+        const raw = String(text || '').replace(/^\uFEFF/, '');
+        const start = raw.indexOf('{');
+        if (start < 0) throw new Error('shared list');
+        let depth = 0;
+        let inStr = false;
+        let esc = false;
+        for (let i = start; i < raw.length; i++) {
+            const ch = raw.charAt(i);
+            if (inStr) {
+                if (esc) esc = false;
+                else if (ch === '\\') esc = true;
+                else if (ch === '"') inStr = false;
+                continue;
+            }
+            if (ch === '"') inStr = true;
+            else if (ch === '{') depth += 1;
+            else if (ch === '}') {
+                depth -= 1;
+                if (depth === 0) return JSON.parse(raw.slice(start, i + 1));
+            }
+        }
+        throw new Error('shared list');
+    }
+
+    function leavingStatusRank(status) {
+        if (status === 'cancelled') return 4;
+        if (status === 'off') return 3;
+        if (status === 'stuck') return 2;
+        if (status === 'said') return 1;
+        return 0;
+    }
+
+    function rowRevisionTime(row, now) {
+        if (!row) return 0;
+        let latest = 0;
+        if (typeof row.markedAtMs === 'number' && row.markedAtMs > latest) latest = row.markedAtMs;
+        if (typeof row.clearedAtMs === 'number' && row.clearedAtMs > latest) latest = row.clearedAtMs;
+        const clock = clockToMs(row.clearedAt || row.takenOffAt || row.markedAt, now);
+        if (clock > latest) latest = clock;
+        return latest;
+    }
+
+    function leavingOpen(row) {
+        return !!(row && (row.status === 'said' || row.status === 'stuck'));
+    }
+
+    function mergeLeavingRows(left, right) {
+        const byId = Object.create(null);
+        const now = new Date();
+        function take(row) {
+            if (!row || !row.id) return;
+            const prev = byId[row.id];
+            const copy = JSON.parse(JSON.stringify(row));
+            if (!prev) {
+                byId[row.id] = copy;
+                return;
+            }
+            const stampA = rowRevisionTime(prev, now);
+            const stampB = rowRevisionTime(copy, now);
+            const openA = leavingOpen(prev);
+            const openB = leavingOpen(copy);
+            if (openB && !openA && stampB > stampA) {
+                byId[row.id] = copy;
+                return;
+            }
+            if (openA && !openB && stampA > stampB) return;
+            const rankA = leavingStatusRank(prev.status);
+            const rankB = leavingStatusRank(copy.status);
+            const histA = (prev.history || []).length;
+            const histB = (copy.history || []).length;
+            if (rankB > rankA || (rankB === rankA && histB > histA) ||
+                (rankB === rankA && histB === histA && copy.back && !prev.back)) {
+                byId[row.id] = copy;
+            }
+        }
+        const lists = [left || [], right || []];
+        for (let n = 0; n < lists.length; n++) {
+            for (let i = 0; i < lists[n].length; i++) take(lists[n][i]);
+        }
+        const out = [];
+        const ids = Object.keys(byId);
+        for (let i = 0; i < ids.length; i++) out.push(byId[ids[i]]);
+        return out;
+    }
+
+    function mergeLeavingEvents(left, right, keyFn) {
+        const seen = Object.create(null);
+        const out = [];
+        function take(item) {
+            if (!item) return;
+            const key = keyFn(item);
+            if (seen[key]) return;
+            seen[key] = true;
+            out.push(item);
+        }
+        const lists = [left || [], right || []];
+        for (let n = 0; n < lists.length; n++) {
+            for (let i = 0; i < lists[n].length; i++) take(lists[n][i]);
+        }
+        return out;
+    }
+
+    function mergeLeaving(local, remote) {
+        const a = local && local.shifts ? local : emptyLeaving();
+        const b = remote && remote.shifts ? remote : emptyLeaving();
+        const out = emptyLeaving();
+        out.activity = {};
+        out.runs = {};
+        const shiftIds = Object.create(null);
+        const aShifts = a.shifts || {};
+        const bShifts = b.shifts || {};
+        Object.keys(aShifts).forEach(function (id) { shiftIds[id] = true; });
+        Object.keys(bShifts).forEach(function (id) { shiftIds[id] = true; });
+        Object.keys(shiftIds).forEach(function (id) {
+            out.shifts[id] = collapseOpenLeaving(mergeLeavingRows(aShifts[id], bShifts[id]));
+        });
+        const actIds = Object.create(null);
+        const aAct = a.activity || {};
+        const bAct = b.activity || {};
+        Object.keys(aAct).forEach(function (id) { actIds[id] = true; });
+        Object.keys(bAct).forEach(function (id) { actIds[id] = true; });
+        Object.keys(actIds).forEach(function (id) {
+            out.activity[id] = mergeLeavingEvents(aAct[id], bAct[id], function (item) {
+                return item.at + '|' + item.by + '|' + item.text;
+            });
+        });
+        const runIds = Object.create(null);
+        const aRuns = a.runs || {};
+        const bRuns = b.runs || {};
+        Object.keys(aRuns).forEach(function (id) { runIds[id] = true; });
+        Object.keys(bRuns).forEach(function (id) { runIds[id] = true; });
+        Object.keys(runIds).forEach(function (id) {
+            out.runs[id] = mergeLeavingEvents(aRuns[id], bRuns[id], function (item) {
+                return (item.at || '') + '|' + (item.by || '') + '|' + (item.kind || '') + '|' +
+                    (item.summary || '') + '|' + (item.login || '');
+            });
+        });
+        out.rev = Math.max(a.rev || 0, b.rev || 0);
+        return out;
+    }
+
+    function leavingBody(doc) {
+        const copy = JSON.parse(JSON.stringify(doc || emptyLeaving()));
+        delete copy.rev;
+        return JSON.stringify(copy);
+    }
+
+    function shareRequest(method, extra) {
+        const headers = {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-cache',
+            Pragma: 'no-cache'
+        };
+        if (extra && extra.baseRev != null) headers['X-Leaving-Base'] = String(extra.baseRev);
+        let url = LEAVING_SHARE_URL;
+        if (method === 'GET') url += '?t=' + Date.now();
+        return new Promise(function (resolve, reject) {
+            GM_xmlhttpRequest({
+                method: method,
+                url: url,
+                headers: headers,
+                data: extra && extra.doc ? JSON.stringify(extra.doc) : undefined,
+                timeout: 20000,
+                onload: function (res) { resolve(res || {}); },
+                onerror: function () { reject(new Error('shared list')); },
+                ontimeout: function () { reject(new Error('shared list timeout')); }
+            });
+        });
+    }
+
+    function readSharedLeaving() {
+        return shareRequest('GET').then(function (res) {
+            if (!res || res.status < 200 || res.status >= 300) throw new Error('shared list read');
+            const doc = parseSharedBody(res.responseText || '');
+            if (!doc || !doc.shifts) return emptyLeaving();
+            return doc;
+        });
+    }
+
+    function writeSharedLeaving(doc, baseRev) {
+        return shareRequest('PUT', { doc: doc, baseRev: baseRev }).then(function (res) {
+            if (res && res.status === 409) return { conflict: true };
+            if (!res || res.status < 200 || res.status >= 300) throw new Error('shared list write');
+            return { conflict: false };
+        });
+    }
+
+    function publishLeavingOnce(localDoc, attempt) {
+        return readSharedLeaving().then(function (remote) {
+            const merged = mergeLeaving(localDoc, remote);
+            const base = remote.rev || 0;
+            if (leavingBody(merged) === leavingBody(remote)) {
+                merged.rev = base;
+                saveLeavingLocal(merged);
+                return merged;
+            }
+            merged.rev = base + 1;
+            return writeSharedLeaving(merged, base).then(function (result) {
+                if (result.conflict) {
+                    if (attempt >= 4) throw new Error('gist conflict');
+                    return publishLeavingOnce(localDoc, attempt + 1);
+                }
+                saveLeavingLocal(merged);
+                return merged;
+            });
+        });
+    }
+
+    function publishLeaving(doc) {
+        if (!leavingShareOn()) return Promise.resolve(doc);
+        const job = leavingShareChain.then(function () {
+            return publishLeavingOnce(doc, 0);
+        }).then(function (next) {
+            leavingShareError = '';
+            try {
+                const nodes = document.querySelectorAll('[data-leaving-status]');
+                for (let i = 0; i < nodes.length; i++) {
+                    if (String(nodes[i].textContent || '').indexOf('shared list did not load') !== -1) {
+                        nodes[i].textContent = 'Other computers can see it.';
+                    }
+                }
+            } catch (e) { /* the list is not open */ }
+            return next;
+        }, function (err) {
+            leavingShareError = err && err.message ? err.message : 'shared list failed';
+            throw err;
+        });
+        leavingShareChain = job.then(function (next) { return next; }, function () { return null; });
+        return job;
+    }
+
+    function pullLeaving() {
+        if (!leavingShareOn()) return Promise.resolve(loadLeaving());
+        return publishLeaving(loadLeaving());
+    }
+
+    function whenLeavingShared() {
+        return leavingShareChain;
+    }
+
+    function shiftRows(doc, date) {
+        const id = shiftId(date);
+        if (!doc.shifts[id]) doc.shifts[id] = [];
+        return doc.shifts[id];
+    }
+
+    function addLeaving(doc, login, saidMin, station, now) {
+        const rows = shiftRows(doc, now);
+        const name = String(login || '').trim().toLowerCase();
+        const said = formatLeaveTime(saidMin);
+        const at = clockText(now);
+        let open = null;
+        for (let i = 0; i < rows.length; i++) {
+            if (rows[i].login !== name) continue;
+            if (rows[i].status !== 'said' && rows[i].status !== 'stuck') continue;
+            open = rows[i];
+            break;
+        }
+        if (open) {
+            if (!open.history) open.history = [{ said: open.said, at: open.markedAt }];
+            if (open.said === said) return { doc: doc, row: open, added: false, updated: false };
+            const previous = open.said;
+            open.history.push({ said: said, at: at });
+            open.said = said;
+            open.saidMin = saidMin;
+            open.markedAt = at;
+            open.markedAtMs = now.getTime();
+            open.id = name + '-' + said;
+            if (station) open.station = station;
+            return { doc: doc, row: open, added: false, updated: true, previous: previous };
+        }
+        let closed = null;
+        const nextId = name + '-' + said;
+        for (let i = 0; i < rows.length; i++) {
+            if (rows[i] && rows[i].id === nextId) closed = rows[i];
+        }
+        if (closed) {
+            closed.status = 'said';
+            closed.said = said;
+            closed.saidMin = saidMin;
+            closed.markedAt = at;
+            closed.markedAtMs = now.getTime();
+            closed.clearedAt = '';
+            closed.clearedAtMs = 0;
+            closed.clearedBy = '';
+            closed.takenOffAt = '';
+            closed.takenHow = '';
+            closed.back = '';
+            if (station) closed.station = station;
+            if (!closed.history) closed.history = [];
+            closed.history.push({ said: said, at: at });
+            return { doc: doc, row: closed, added: true, updated: false };
+        }
+        const row = {
+            id: name + '-' + said,
+            login: name,
+            said: said,
+            saidMin: saidMin,
+            station: station || '',
+            markedAt: at,
+            markedAtMs: now.getTime(),
+            status: 'said',
+            takenOffAt: '',
+            takenHow: '',
+            back: '',
+            history: [{ said: said, at: at }]
+        };
+        rows.push(row);
+        return { doc: doc, row: row, added: true, updated: false };
+    }
+
+    function cancelLeaving(doc, id, now) {
+        const rows = shiftRows(doc, now);
+        for (let i = 0; i < rows.length; i++) {
+            if (rows[i].id !== id) continue;
+            if (rows[i].status !== 'cancelled') {
+                rows[i].status = 'cancelled';
+                rows[i].clearedAt = clockText(now);
+                rows[i].clearedAtMs = now.getTime();
+            }
+            return rows[i];
+        }
+        return null;
+    }
+
+    function dueLeaving(rows, now) {
+        const nowMin = shiftMinute(now.getHours() * 60 + now.getMinutes());
+        const out = [];
+        const list = rows || [];
+        for (let i = 0; i < list.length; i++) {
+            const row = list[i];
+            if (!row || row.status !== 'said') continue;
+            if (nowMin >= shiftMinute(row.saidMin)) out.push(row);
+        }
+        return out;
+    }
+
+    function markTakenOff(row, now, how) {
+        row.status = 'off';
+        row.takenOffAt = clockText(now);
+        row.takenHow = how || '';
+        return row;
+    }
+
+    function noteBack(row, station, now) {
+        if (!row || row.status !== 'off' || !station || row.back) return false;
+        row.back = station + ' at ' + clockText(now);
+        return true;
+    }
+
+    function stationForLogin(login) {
+        try {
+            const anchor = findAnchorForPerson(login, '');
+            if (!anchor) return '';
+            const person = boardPersonFromAnchor(anchor);
+            return person.station || '';
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function noteReturns(doc, rows, now) {
+        let changed = false;
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            if (!row || row.status !== 'off') continue;
+            if (!loginStillOnBoard(row.login)) continue;
+            const where = stationForLogin(row.login) || 'a station';
+            if (!noteBack(row, where, now)) continue;
+            recordActivity(doc, 'board', row.login + ' back on ' + row.back, now, {
+                action: 'back', who: row.login, detail: row.back
+            });
+            changed = true;
+        }
+        return changed;
+    }
+
+    function leavingLine(row) {
+        let text = personLabel(row.login) + ' leaving at ' + row.said;
+        if (row.station) text += ' from ' + row.station;
+        if (row.status === 'stuck') text += ' · still on the station';
+        return text;
+    }
+
+    function setLeavingStatus(text) {
+        const nodes = document.querySelectorAll('[data-leaving-status]');
+        for (let i = 0; i < nodes.length; i++) nodes[i].textContent = text || '';
+    }
+
+    function watchLeavingShare(text, pending) {
+        if (!pending || !pending.then) return;
+        pending.then(function () {
+            const nodes = document.querySelectorAll('[data-leaving-status]');
+            for (let i = 0; i < nodes.length; i++) {
+                if (nodes[i].textContent === text) nodes[i].textContent = text + ' Other computers can see it.';
+            }
+        }, function () {
+            const nodes = document.querySelectorAll('[data-leaving-status]');
+            for (let i = 0; i < nodes.length; i++) {
+                if (nodes[i].textContent === text) nodes[i].textContent = text + ' Saved here. The other computers did not get it.';
+            }
+        });
+    }
+
+    function holdLeaving(on) {
+        const root = document.documentElement;
+        if (!root || !root.setAttribute) return;
+        if (on) {
+            if (!root.hasAttribute || !root.hasAttribute('data-mem3-ps-hold')) {
+                root.setAttribute('data-mem3-ps-hold', '1');
+                leavingHeld = true;
+            }
+            return;
+        }
+        if (leavingHeld && root.removeAttribute) {
+            root.removeAttribute('data-mem3-ps-hold');
+            leavingHeld = false;
+        }
+    }
+
+    function pushEarlyRun(doc, run) {
+        if (!doc.runs) doc.runs = {};
+        const id = run.shiftId || shiftId(new Date());
+        run.shiftId = id;
+        if (!doc.runs[id]) doc.runs[id] = [];
+        doc.runs[id].push(run);
+        if (doc.runs[id].length > 40) doc.runs[id].shift();
+    }
+
+    function slimEarlyClick(record, error) {
+        const tip = record && record.tooltip;
+        const buttons = [];
+        const list = (tip && tip.buttons) || [];
+        for (let i = 0; i < list.length; i++) {
+            const button = list[i];
+            if (!button) continue;
+            buttons.push({ text: button.text || '', visible: button.visible !== false });
+        }
+        return {
+            beforeCount: record ? record.beforeCount : null,
+            afterCount: record ? record.afterCount : null,
+            leftBoard: !!(record && record.leftBoard),
+            clickedUnassign: !!(record && record.clickedUnassign),
+            clickMethod: record ? (record.clickMethod || '') : '',
+            buttonGone: !!(record && record.buttonGone),
+            tooltipButtons: buttons,
+            error: error || ''
+        };
+    }
+
+    function collectEarlyDebug() {
+        const now = new Date();
+        const doc = loadLeaving();
+        const id = shiftId(now);
+        return {
+            script: 'Leaving Early',
+            version: SCRIPT_VERSION,
+            at: now.toISOString(),
+            shiftId: id,
+            actor: signedInLogin(),
+            share: leavingShareOn(),
+            shareError: leavingShareError,
+            rev: doc.rev || 0,
+            leavingBusy: leavingBusy,
+            unassigning: unassigning,
+            psHold: psBoardHolding(),
+            rows: (doc.shifts && doc.shifts[id]) || [],
+            activity: (doc.activity && doc.activity[id]) || [],
+            runs: (doc.runs && doc.runs[id]) || []
+        };
+    }
+
+    function markedLeaving(rows) {
+        const out = [];
+        const list = rows || [];
+        for (let i = 0; i < list.length; i++) {
+            if (list[i] && list[i].status === 'said') out.push(list[i]);
+        }
+        return out;
+    }
+
+    function refreshLeaving() {
+        if (!isAssignmentsPage()) return;
+        if (leavingBusy || unassigning) {
+            paintEarlyLog();
+            return;
+        }
+        const now = new Date();
+        const doc = loadLeaving();
+        if (noteReturns(doc, shiftRows(doc, now), now)) saveLeaving(doc);
+        paintEarlyLog();
+        if (leavingShareOn()) {
+            pullLeaving().then(function () {
+                paintEarlyLog();
+                decoratePopups();
+            }).catch(function () {});
+        }
+    }
+
+    async function unassignMarkedLeaves(by) {
+        const actor = String(by || loadActor() || '').trim().toLowerCase() || 'board';
+        const now = new Date();
+        let blocked = '';
+        if (!isAssignmentsPage()) blocked = 'Not on the assignments page.';
+        else if (leavingBusy || unassigning) blocked = 'An unassign is already running.';
+        else if (psBoardHolding()) blocked = 'The problem-solve sheet is holding the page.';
+        if (blocked) {
+            const doc = loadLeaving();
+            pushEarlyRun(doc, {
+                at: clockText(now), by: actor, kind: 'unassign', shiftId: shiftId(now),
+                summary: blocked, steps: []
+            });
+            saveLeaving(doc);
+            setLeavingStatus(blocked);
+            paintEarlyLog();
+            return;
+        }
+        const doc = loadLeaving();
+        const waiting = markedLeaving(shiftRows(doc, now));
+        const rows = dueLeaving(waiting, now);
+        const run = {
+            at: clockText(now),
+            by: actor,
+            kind: 'unassign',
+            shiftId: shiftId(now),
+            waiting: waiting.map(function (row) {
+                return { login: row.login, said: row.said, station: row.station || '' };
+            }),
+            due: rows.length,
+            steps: [],
+            summary: ''
+        };
+        if (!rows.length) {
+            run.summary = waiting.length
+                ? 'No leave time has passed yet. ' + waiting.length + ' still waiting.'
+                : 'Nobody on this list is waiting.';
+            recordActivity(doc, actor, run.summary, now, { action: 'note' });
+            pushEarlyRun(doc, run);
+            saveLeaving(doc);
+            setLeavingStatus(run.summary);
+            finishEarlyProgress(run.summary);
+            paintEarlyLog();
+            return;
+        }
+        leavingStop = false;
+        leavingBusy = true;
+        unassigning = true;
+        holdLeaving(true);
+        let off = 0;
+        let missed = 0;
+        const taken = [];
+        const left = [];
+        try {
+            recordActivity(doc, actor, 'started unassign for leave times that have passed', now, { action: 'note' });
+            paintEarlyProgress(0, rows.length, '');
+            for (let i = 0; i < rows.length; i++) {
+                if (leavingStop) {
+                    for (let j = i; j < rows.length; j++) left.push(rows[j].login);
+                    break;
+                }
+                const row = rows[i];
+                paintEarlyProgress(i, rows.length, row.login);
+                setLeavingStatus('Unassigning ' + (i + 1) + '/' + rows.length + ' · ' + row.login);
+                const anchor = findAnchorForPerson(row.login, '');
+                const stamp = new Date();
+                const step = {
+                    at: clockText(stamp),
+                    login: row.login,
+                    said: row.said,
+                    station: row.station || '',
+                    result: ''
+                };
+                if (!anchor || countLoginOnBoard(row.login) === 0) {
+                    markTakenOff(row, stamp, 'not on a station');
+                    step.result = 'not on a station';
+                    recordActivity(doc, actor, row.login + ' was not on a station', stamp, {
+                        action: 'miss', who: row.login
+                    });
+                    missed += 1;
+                    run.steps.push(step);
+                    paintEarlyProgress(i + 1, rows.length, '');
+                    continue;
+                }
+                const before = countLoginOnBoard(row.login);
+                step.beforeCount = before;
+                step.attempts = [];
+                let record = null;
+                let error = '';
+                for (let tryN = 1; tryN <= 4; tryN++) {
+                    if (leavingStop) break;
+                    if (countLoginOnBoard(row.login) < before) break;
+                    await closeAllAssociateMenus();
+                    const again = findAnchorForPerson(row.login, '');
+                    if (!again) break;
+                    record = { login: row.login, station: '', tries: tryN };
+                    error = '';
+                    try { await unassignAnchor(again, record); } catch (e) {
+                        error = e && e.message ? e.message : String(e || 'unassign failed');
+                    }
+                    const attempt = {
+                        try: tryN,
+                        clickMethod: record.clickMethod || '',
+                        buttonGone: !!record.buttonGone,
+                        afterCount: countLoginOnBoard(row.login)
+                    };
+                    if (error) attempt.error = error;
+                    step.attempts.push(attempt);
+                    if (attempt.afterCount < before) break;
+                    await sleep(300);
+                }
+                const click = slimEarlyClick(record, error);
+                step.afterCount = countLoginOnBoard(row.login);
+                step.leftBoard = step.afterCount < before;
+                step.clickedUnassign = click.clickedUnassign;
+                step.clickMethod = click.clickMethod;
+                step.buttonGone = click.buttonGone;
+                step.tooltipButtons = click.tooltipButtons;
+                step.tries = step.attempts.length;
+                if (error) step.error = error;
+                const gone = step.afterCount < before;
+                if (leavingStop && !gone) {
+                    left.push(row.login);
+                    for (let j = i + 1; j < rows.length; j++) left.push(rows[j].login);
+                    step.result = 'stopped';
+                    run.steps.push(step);
+                    break;
+                }
+                if (gone) {
+                    markTakenOff(row, stamp, 'unassigned');
+                    step.result = 'unassigned';
+                    recordActivity(doc, actor, 'unassigned ' + row.login, stamp, {
+                        action: 'unassign', who: row.login, said: row.said
+                    });
+                    taken.push(row.login);
+                    off += 1;
+                } else {
+                    step.result = 'could not take off';
+                    left.push(row.login);
+                    let closed = !!step.buttonGone;
+                    for (let a = 0; a < step.attempts.length; a++) {
+                        if (step.attempts[a].buttonGone) closed = true;
+                    }
+                    if (closed) step.note = 'Unassign closed but the login is still on the board.';
+                    recordActivity(doc, actor, 'could not take ' + row.login + ' off', stamp, {
+                        action: 'fail', who: row.login, said: row.said
+                    });
+                }
+                run.steps.push(step);
+                paintEarlyProgress(i + 1, rows.length, '');
+            }
+            const later = waiting.length - rows.length;
+            run.summary = 'Unassigned ' + off + '. ' + missed + ' were not on a station. ' +
+                (rows.length - off - missed) + ' could not be taken off. ' +
+                later + ' are still waiting for their time.';
+            if (taken.length) run.summary += ' Unassigned: ' + taken.join(', ') + '.';
+            if (leavingStop) {
+                run.stopped = true;
+                run.summary = 'Stopped. Unassigned ' + taken.length +
+                    (taken.length ? ': ' + taken.join(', ') : '') +
+                    '. Still to unassign: ' + (left.length ? left.join(', ') : 'nobody') + '.';
+                if (later) run.summary += ' ' + later + ' are still waiting for their time.';
+            }
+            run.off = off;
+            run.missed = missed;
+            run.failed = left.length;
+            run.stillWaiting = later;
+            run.taken = taken;
+            run.left = left;
+            recordActivity(doc, actor, run.summary, new Date(), { action: 'note' });
+            pushEarlyRun(doc, run);
+            saveLeaving(doc);
+            finishEarlyProgress(run.summary);
+        } catch (e) {
+            run.summary = e && e.message ? e.message : 'Unassign failed.';
+            run.error = run.summary;
+            pushEarlyRun(doc, run);
+            saveLeaving(doc);
+            finishEarlyProgress(run.summary);
+        } finally {
+            holdLeaving(false);
+            unassigning = false;
+            leavingBusy = false;
+            paintEarlyLog();
+        }
+    }
+
+    function startLeaving() {
+        if (!isAssignmentsPage() || !document.body) return;
+        paintEarlyLog();
+        refreshLeaving();
+        setInterval(function () { refreshLeaving(); }, LEAVING_POLL_MS);
+    }
+
+    function panelChipButton(label, onClick) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = label;
+        btn.style.cssText = 'flex:0 0 auto; padding:6px 10px; border-radius:8px; border:1px solid #30363d; ' +
+            'background:#0d1117; color:#ffffff; cursor:pointer; ' +
+            'font:800 12px Segoe UI,system-ui,sans-serif; letter-spacing:0; text-transform:none; white-space:nowrap;';
+        btn.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            onClick();
+        });
+        return btn;
+    }
+
+    function makeLeavingEarlyButton() {
+        return panelChipButton('Leaving Early', openLeavingPanel);
+    }
+
+    function makeShowLeavingButton() {
+        return panelChipButton('Show Leaving Early', openLeavingList);
+    }
+
+    function makeEarlyUnassignButton() {
+        return panelChipButton('Unassign Early Outs', openEarlyPass);
+    }
+
+    function clearMarkedLeave(doc, id, by, now) {
+        const row = cancelLeaving(doc, id, now);
+        if (!row || row.status !== 'cancelled') return null;
+        row.clearedBy = String(by || '').trim().toLowerCase();
+        recordActivity(doc, by, 'cleared ' + row.login + ' from leaving at ' + row.said, now, {
+            action: 'clear', who: row.login, said: row.said
+        });
+        pushEarlyRun(doc, {
+            at: clockText(now), by: by, kind: 'clear', shiftId: shiftId(now),
+            login: row.login, said: row.said, summary: 'cleared'
+        });
+        return row;
+    }
+
+    function currentLeaving(doc, now) {
+        const cutoff = now.getTime() - LEAVING_KEEP_MS;
+        const rows = shiftRows(doc, now).slice().filter(function (row) {
+            if (!row || !row.login) return false;
+            if (row.status !== 'said' && row.status !== 'stuck') return false;
+            const when = rowTime(row, now);
+            return !when || when >= cutoff;
+        });
+        const best = Object.create(null);
+        for (let i = 0; i < rows.length; i++) {
+            const prev = best[rows[i].login];
+            if (!prev || rowRevisionTime(rows[i], now) >= rowRevisionTime(prev, now)) best[rows[i].login] = rows[i];
+        }
+        const out = [];
+        const names = Object.keys(best);
+        for (let i = 0; i < names.length; i++) out.push(best[names[i]]);
+        out.sort(function (a, b) {
+            return shiftMinute(a.saidMin) - shiftMinute(b.saidMin);
+        });
+        return out;
+    }
+
+    function paintEarlyLog() {
+        const card = document.getElementById('mem3-leaving-list');
+        if (!card) return;
+        const now = new Date();
+        const doc = loadLeaving();
+        if (restoreLatestMarks(doc, now)) saveLeaving(doc);
+        const historyView = card.dataset.view === 'history';
+        const title = card.querySelector('[data-leaving-title]');
+        if (title) title.textContent = historyView ? 'Leaving History' : 'Leaving Early';
+        const ask = card.querySelector('[data-leaving-ask]');
+        if (ask) {
+            ask.textContent = historyView
+                ? 'Activity from the past 12 hours.'
+                : 'Who is leaving, at their latest time. The same list is on every computer running this script.';
+        }
+        const signed = card.querySelector('[data-signed-in]');
+        if (signed) signed.style.display = historyView ? 'none' : '';
+        const historyBtn = card.querySelector('[data-leaving-history]');
+        if (historyBtn) historyBtn.textContent = historyView ? 'Show Leaving' : 'Show History';
+        const list = card.querySelector('[data-leaving-list]');
+        const activity = card.querySelector('[data-leaving-activity]');
+        if (list) list.style.display = historyView ? 'none' : '';
+        if (activity) activity.style.display = historyView ? '' : 'none';
+        if (list) {
+            while (list.firstChild) list.removeChild(list.firstChild);
+            const rows = currentLeaving(doc, now);
+            if (!rows.length) {
+                const empty = document.createElement('div');
+                empty.textContent = 'Nobody is leaving early.';
+                empty.style.cssText = 'color:#8b949e; font-size:12px;';
+                list.appendChild(empty);
+            }
+            for (let i = 0; i < rows.length; i++) {
+                const row = rows[i];
+                const line = document.createElement('div');
+                line.style.cssText = 'display:flex; gap:8px; align-items:center; justify-content:space-between; ' +
+                    'padding:6px 0; border-top:1px solid #30363d;';
+                const label = document.createElement('div');
+                label.textContent = leavingLine(row);
+                label.style.cssText = 'font-size:12px; font-weight:650;';
+                line.appendChild(label);
+                const clear = document.createElement('button');
+                clear.type = 'button';
+                clear.textContent = 'Clear';
+                clear.style.cssText = 'flex:0 0 auto; padding:4px 8px; border-radius:6px; border:1px solid #f85149; ' +
+                    'background:#0d1117; color:#fff; font:800 11px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+                clear.addEventListener('click', function (event) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const actor = requireActor();
+                    if (!actor) return;
+                    const current = loadLeaving();
+                    const cleared = clearMarkedLeave(current, row.id, actor, new Date());
+                    if (!cleared) return;
+                    const shared = saveLeaving(current);
+                    const clearedText = personLabel(cleared.clearedBy) + ' cleared ' +
+                        personLabel(cleared.login) + ' at ' + cleared.clearedAt + '.';
+                    setLeavingStatus(clearedText);
+                    watchLeavingShare(clearedText, shared);
+                    paintEarlyLog();
+                });
+                line.appendChild(clear);
+                list.appendChild(line);
+            }
+        }
+        if (activity) {
+            while (activity.firstChild) activity.removeChild(activity.firstChild);
+            const events = recentActivity(doc, now);
+            if (!events.length) {
+                const empty = document.createElement('div');
+                empty.textContent = 'No activity in the past 12 hours.';
+                empty.style.cssText = 'color:#8b949e; font-size:12px;';
+                activity.appendChild(empty);
+            }
+            for (let i = 0; i < events.length; i++) {
+                const line = document.createElement('div');
+                line.textContent = activityLine(events[i]);
+                line.style.cssText = 'font-size:12px; padding:6px 0; border-top:1px solid #30363d;';
+                activity.appendChild(line);
+            }
+        }
+    }
+
+    function openLeavingList() {
+        closeLeavingOverlay('mem3-leaving-list');
+        const card = document.createElement('div');
+        card.id = 'mem3-leaving-list';
+        card.style.cssText = 'position:fixed; left:50%; top:50%; transform:translate(-50%, -50%); z-index:2147483647; ' +
+            'width:min(520px, calc(100vw - 24px)); max-height:min(70vh, 560px); overflow:hidden; padding:12px; ' +
+            'display:flex; flex-direction:column; border-radius:10px; background:#161b22; color:#fff; border:1px solid #30363d; ' +
+            'box-shadow:0 8px 24px rgba(0,0,0,.45); font-family:Segoe UI,system-ui,sans-serif;';
+        const header = document.createElement('div');
+        header.style.cssText = 'display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:4px;';
+        const title = document.createElement('div');
+        title.setAttribute('data-leaving-title', '');
+        title.textContent = 'Leaving Early';
+        title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif;';
+        const ask = document.createElement('div');
+        ask.setAttribute('data-leaving-ask', '');
+        ask.textContent = 'Who is leaving, at their latest time. The same list is on every computer running this script.';
+        ask.style.cssText = 'font-size:12px; color:#8b949e; margin-bottom:8px;';
+        const list = document.createElement('div');
+        list.setAttribute('data-leaving-list', '');
+        const activity = document.createElement('div');
+        activity.setAttribute('data-leaving-activity', '');
+        const status = document.createElement('div');
+        status.setAttribute('data-leaving-status', '');
+        status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
+        const scroller = document.createElement('div');
+        scroller.style.cssText = 'overflow:auto; min-height:0; flex:1 1 auto;';
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex; gap:6px; margin-top:8px; flex:0 0 auto;';
+        const debug = document.createElement('button');
+        debug.type = 'button';
+        debug.textContent = 'Copy early debug';
+        debug.style.cssText = 'padding:7px 10px; border-radius:6px; border:1px solid #58a6ff; background:#0d1117; ' +
+            'color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        debug.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            copyText(JSON.stringify(collectEarlyDebug(), null, 2)).then(function () {
+                debug.textContent = 'Copied';
+                setTimeout(function () { debug.textContent = 'Copy early debug'; }, 1500);
+            }).catch(function () {
+                debug.textContent = 'Copy failed';
+                setTimeout(function () { debug.textContent = 'Copy early debug'; }, 2000);
+            });
+        });
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = 'Close';
+        close.style.cssText = 'flex:0 0 auto; padding:7px 10px; border-radius:6px; border:1px solid #8b949e; ' +
+            'background:#0d1117; color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        close.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            closeLeavingOverlay('mem3-leaving-list');
+        });
+        const history = document.createElement('button');
+        history.type = 'button';
+        history.setAttribute('data-leaving-history', '');
+        history.textContent = 'Show History';
+        history.style.cssText = 'flex:1 1 auto; padding:7px 10px; border-radius:6px; border:1px solid #f5c518; ' +
+            'background:#f5c518; color:#000000; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        history.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            card.dataset.view = card.dataset.view === 'history' ? 'list' : 'history';
+            paintEarlyLog();
+        });
+        actions.appendChild(history);
+        actions.appendChild(debug);
+        header.appendChild(title);
+        header.appendChild(close);
+        scroller.appendChild(list);
+        scroller.appendChild(activity);
+        scroller.appendChild(status);
+        card.appendChild(header);
+        card.appendChild(ask);
+        card.appendChild(signedInNote());
+        card.appendChild(scroller);
+        card.appendChild(actions);
+        document.body.appendChild(card);
+        paintEarlyLog();
+        pullLeaving().then(function () {
+            paintEarlyLog();
+        }).catch(function () {
+            setLeavingStatus('Showing this computer. The shared list did not load.');
+        });
+    }
+
+    function closeLeavingOverlay(id) {
+        const old = document.getElementById(id);
+        if (old) old.remove();
+    }
+
+    function leavingFieldStyle() {
+        return 'flex:1 1 120px; min-width:0; padding:7px 8px; border-radius:6px; border:1px solid #30363d; ' +
+            'background:#0d1117; color:#fff; font:600 13px Segoe UI,system-ui,sans-serif;';
+    }
+
+    function openLeavingFor(login) {
+        const name = String(login || '').trim().toLowerCase();
+        if (!name) return null;
+        const rows = shiftRows(loadLeaving(), new Date());
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            if (!row || row.login !== name) continue;
+            if (row.status === 'said' || row.status === 'stuck') return row;
+        }
+        return null;
+    }
+
+    function compactName(text) {
+        return String(text || '').toLowerCase().replace(/[^a-z,]/g, '');
+    }
+
+    function elementOwnText(el) {
+        let text = '';
+        const nodes = el.childNodes || [];
+        for (let i = 0; i < nodes.length; i++) {
+            if (nodes[i].nodeType === 3) text += nodes[i].textContent || '';
+        }
+        return text.replace(/\s+/g, ' ').trim();
+    }
+
+    function findNameElement(host, person) {
+        const want = compactName(person && person.name);
+        if (!host || want.length < 3) return null;
+        const nodes = host.querySelectorAll('div, span, p, h1, h2, h3, h4, strong, b');
+        let exact = null;
+        let exactLen = 100000;
+        let loose = null;
+        let looseLen = 100000;
+        for (let i = 0; i < nodes.length; i++) {
+            const el = nodes[i];
+            if (el.closest && el.closest('.' + POPUP_CLASS)) continue;
+            if (el.getAttribute && el.getAttribute('data-mem3-leaving-note') != null) continue;
+            const own = compactName(elementOwnText(el));
+            const fullText = (el.textContent || '').replace(/\s+/g, ' ').trim();
+            const full = compactName(fullText);
+            if (own === want && fullText.length < exactLen) {
+                exact = el;
+                exactLen = fullText.length;
+            }
+            if (full.indexOf(want) === 0 && fullText.length < looseLen && fullText.length < 80) {
+                loose = el;
+                looseLen = fullText.length;
+            }
+        }
+        return exact || loose;
+    }
+
+    function placeNameLeaving(host, person) {
+        if (!host) return;
+        try {
+            const login = (person && person.login) || '';
+            const row = openLeavingFor(login);
+            const notes = host.querySelectorAll('[data-mem3-leaving-note]');
+            let note = notes[0] || null;
+            for (let i = 1; i < notes.length; i++) notes[i].remove();
+            if (!row) {
+                if (note) note.remove();
+                return;
+            }
+            if (!note) {
+                note = document.createElement('div');
+                note.setAttribute('data-mem3-leaving-note', '');
+            }
+            note.style.cssText = 'display:block; margin:2px 0 0; padding:0; background:none; border:0; ' +
+                'color:#f85149; font:700 13px Segoe UI,system-ui,sans-serif; line-height:1.2;';
+            note.textContent = 'Leaving at ' + row.said;
+            const nameEl = findNameElement(host, person);
+            const parent = nameEl && nameEl.parentElement ? nameEl.parentElement : host;
+            const after = nameEl ? nameEl.nextSibling : host.firstChild;
+            if (note.parentElement !== parent || note.previousSibling !== nameEl) {
+                parent.insertBefore(note, after);
+            }
+        } catch (e) { /* the card still opens without the leave line */ }
+    }
+
+    function paintPopupLeaving(box, person) {
+        if (!box) return;
+        const button = box.querySelector('[data-mem3-leaving-early]');
+        if (!button) return;
+        button.style.background = '#f5c518';
+        button.style.color = '#000000';
+        button.style.borderColor = '#c9a20a';
+    }
+
+    function showLeaveCheck(card) {
+        if (!card) return;
+        let tick = card.querySelector('[data-leave-check]');
+        if (!tick) {
+            tick = document.createElement('div');
+            tick.setAttribute('data-leave-check', '');
+            tick.textContent = '✓';
+            tick.style.cssText = 'position:absolute; left:50%; top:50%; transform:translate(-50%, -50%); ' +
+                'font:900 84px Segoe UI,system-ui,sans-serif; color:#3fb950; pointer-events:none; ' +
+                'text-shadow:0 0 18px rgba(63,185,80,.85); z-index:2; opacity:0;';
+            card.appendChild(tick);
+        }
+        if (tick._fade) clearTimeout(tick._fade);
+        tick.style.transition = 'none';
+        tick.style.opacity = '1';
+        tick._fade = setTimeout(function () {
+            tick.style.transition = 'opacity .6s linear';
+            tick.style.opacity = '0';
+        }, 3000);
+    }
+
+    function mountEarlyProgress(card) {
+        while (card.firstChild) card.removeChild(card.firstChild);
+        const title = document.createElement('div');
+        title.textContent = 'Unassign Early Outs';
+        title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif; margin-bottom:8px;';
+        const count = document.createElement('div');
+        count.setAttribute('data-early-count', '');
+        count.textContent = 'Starting';
+        count.style.cssText = 'font:800 13px Segoe UI,system-ui,sans-serif; margin-bottom:6px;';
+        const track = document.createElement('div');
+        track.style.cssText = 'height:12px; border-radius:6px; background:#0d1117; border:1px solid #30363d; overflow:hidden;';
+        const fill = document.createElement('div');
+        fill.setAttribute('data-early-fill', '');
+        fill.style.cssText = 'height:100%; width:0%; background:#3fb950;';
+        track.appendChild(fill);
+        const current = document.createElement('div');
+        current.setAttribute('data-early-current', '');
+        current.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
+        const status = document.createElement('div');
+        status.setAttribute('data-leaving-status', '');
+        status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
+        const stop = document.createElement('button');
+        stop.type = 'button';
+        stop.setAttribute('data-early-stop', '');
+        stop.textContent = 'Stop';
+        stop.style.cssText = 'margin-top:10px; padding:7px 10px; border-radius:6px; border:1px solid #f85149; ' +
+            'background:#0d1117; color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        stop.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            leavingStop = true;
+            stop.disabled = true;
+            stop.textContent = 'Stopping';
+        });
+        card.appendChild(title);
+        card.appendChild(count);
+        card.appendChild(track);
+        card.appendChild(current);
+        card.appendChild(status);
+        card.appendChild(stop);
+    }
+
+    function paintEarlyProgress(done, total, login) {
+        const card = document.getElementById('mem3-early-pass');
+        if (!card) return;
+        const fill = card.querySelector('[data-early-fill]');
+        const count = card.querySelector('[data-early-count]');
+        const current = card.querySelector('[data-early-current]');
+        const width = total ? Math.round((done / total) * 100) : 0;
+        if (fill) fill.style.width = width + '%';
+        if (count) count.textContent = done + ' of ' + total;
+        if (current) current.textContent = login ? 'Unassigning ' + login : '';
+    }
+
+    function finishEarlyProgress(text) {
+        const card = document.getElementById('mem3-early-pass');
+        setLeavingStatus(text);
+        if (!card) return;
+        const current = card.querySelector('[data-early-current]');
+        if (current) current.textContent = '';
+        const stop = card.querySelector('[data-early-stop]');
+        if (!stop) return;
+        const close = stop.cloneNode(true);
+        close.disabled = false;
+        close.textContent = 'Close';
+        close.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            closeLeavingOverlay('mem3-early-pass');
+        });
+        stop.replaceWith(close);
+    }
+
+    function makePopupLeavingButton(person) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = 'Leaving Early';
+        btn.setAttribute('data-mem3-leaving-early', '');
+        btn.style.cssText = 'display:block; width:100%; box-sizing:border-box; margin-top:8px; padding:6px 8px; ' +
+            'border-radius:6px; border:1px solid #c9a20a; background:#f5c518; color:#000000; cursor:pointer; ' +
+            'font:800 12px Segoe UI,system-ui,sans-serif; text-transform:none; letter-spacing:0;';
+        btn.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            const host = btn.closest('.' + POPUP_CLASS);
+            const login = (person && person.login) || (host && host.dataset.login) || '';
+            openLeavingPanel(login);
+        });
+        return btn;
+    }
+
+    function openLeavingPanel(prefill) {
+        closeLeavingOverlay(LEAVING_ID);
+        const card = document.createElement('div');
+        card.id = LEAVING_ID;
+        card.style.cssText = 'position:fixed; left:50%; top:50%; transform:translate(-50%, -50%); z-index:2147483647; width:min(440px, calc(100vw - 24px)); ' +
+            'padding:12px; border-radius:10px; background:#161b22; color:#fff; border:1px solid #30363d; ' +
+            'box-shadow:0 8px 24px rgba(0,0,0,.45); font-family:Segoe UI,system-ui,sans-serif;';
+        const title = document.createElement('div');
+        title.textContent = 'Leaving Early';
+        title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif; margin-bottom:4px;';
+        const ask = document.createElement('div');
+        ask.textContent = 'What time are they leaving? Every computer running this script sees this list.';
+        ask.style.cssText = 'font-size:12px; color:#8b949e; margin-bottom:8px;';
+        const form = document.createElement('div');
+        form.style.cssText = 'display:flex; flex-direction:column; gap:6px;';
+        const loginRow = document.createElement('div');
+        loginRow.style.cssText = 'display:flex; gap:6px; flex-wrap:wrap;';
+        const timeRow = document.createElement('div');
+        timeRow.setAttribute('data-time-row', '');
+        timeRow.style.cssText = 'display:flex; gap:6px; flex-wrap:nowrap; align-items:center;';
+        const login = document.createElement('input');
+        login.setAttribute('data-login', '');
+        login.placeholder = 'Associate login';
+        if (prefill && looksLikeLogin(prefill)) login.value = String(prefill).trim().toLowerCase();
+        login.style.cssText = leavingFieldStyle();
+        const time = document.createElement('input');
+        time.setAttribute('data-time', '');
+        time.setAttribute('inputmode', 'numeric');
+        time.setAttribute('maxlength', '5');
+        time.setAttribute('autocomplete', 'off');
+        time.placeholder = '00:00';
+        time.style.cssText = leavingFieldStyle() + ' flex:0 0 76px; width:76px;';
+        const half = document.createElement('select');
+        half.setAttribute('data-half', '');
+        half.style.cssText = leavingFieldStyle() + ' flex:0 0 72px; width:72px;';
+        const am = document.createElement('option');
+        am.value = 'AM';
+        am.textContent = 'AM';
+        const pm = document.createElement('option');
+        pm.value = 'PM';
+        pm.textContent = 'PM';
+        half.appendChild(am);
+        half.appendChild(pm);
+        half.value = 'PM';
+        const mark = document.createElement('button');
+        mark.type = 'button';
+        mark.textContent = 'Mark';
+        mark.style.cssText = 'padding:7px 10px; border-radius:6px; border:1px solid #3fb950; background:#238636; ' +
+            'color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = 'Close';
+        close.style.cssText = 'padding:7px 10px; border-radius:6px; border:1px solid #8b949e; background:#0d1117; ' +
+            'color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        function submit() {
+            const actor = requireActor();
+            const who = String(login.value || '').trim().toLowerCase();
+            const typed = finishLeaveTime(time.value);
+            time.value = typed;
+            const saidMin = /^\d{2}:\d{2}$/.test(typed)
+                ? parseLeaveTime(typed + ' ' + (half.value || 'PM'))
+                : null;
+            if (!actor) return;
+            if (!looksLikeLogin(who)) {
+                setLeavingStatus('Enter a login.');
+                return;
+            }
+            if (saidMin == null) {
+                setLeavingStatus('Enter a time like 12:00.');
+                return;
+            }
+            const now = new Date();
+            const doc = loadLeaving();
+            const station = stationForLogin(who);
+            const result = addLeaving(doc, who, saidMin, station, now);
+            if (result.updated) {
+                recordActivity(doc, actor, 'updated ' + who + ' to leave at ' + result.row.said, now, {
+                    action: 'update', who: who, said: result.row.said
+                });
+            } else if (result.added) {
+                recordActivity(doc, actor, 'marked ' + who + ' leaving at ' + result.row.said +
+                    (station ? ' from ' + station : ''), now, {
+                    action: 'mark', who: who, said: result.row.said, detail: station || ''
+                });
+            } else {
+                recordActivity(doc, actor, who + ' already marked at ' + result.row.said, now, {
+                    action: 'same', who: who, said: result.row.said
+                });
+            }
+            pushEarlyRun(doc, {
+                at: clockText(now), by: actor, kind: result.updated ? 'update' : (result.added ? 'mark' : 'same'),
+                shiftId: shiftId(now), login: who, said: result.row.said,
+                previous: result.previous || '', station: station || '',
+                summary: result.updated ? 'updated' : (result.added ? 'marked' : 'already marked')
+            });
+            const shared = saveLeaving(doc);
+            paintEarlyLog();
+            let markedText = who + ' is already marked at ' + result.row.said + '.';
+            if (result.updated) {
+                markedText = 'Updated ' + who + ' from ' + result.previous + ' to ' + result.row.said + '.';
+            } else if (result.added) {
+                markedText = 'Marked ' + who + ' at ' + result.row.said + (station ? ' from ' + station : '') + '.';
+            }
+            setLeavingStatus(markedText);
+            watchLeavingShare(markedText, shared);
+            decoratePopups();
+            if (result.added || result.updated) {
+                showLeaveCheck(card);
+                login.value = '';
+            }
+        }
+        mark.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            submit();
+        });
+        login.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter') submit();
+        });
+        time.addEventListener('input', function () {
+            const next = maskLeaveTime(time.value);
+            if (time.value !== next) time.value = next;
+        });
+        time.addEventListener('blur', function () {
+            const next = finishLeaveTime(time.value);
+            if (/^\d{2}:\d{2}$/.test(next)) time.value = next;
+        });
+        time.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter') submit();
+        });
+        close.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            closeLeavingOverlay(LEAVING_ID);
+        });
+        loginRow.appendChild(login);
+        timeRow.appendChild(time);
+        timeRow.appendChild(half);
+        timeRow.appendChild(mark);
+        timeRow.appendChild(close);
+        form.appendChild(loginRow);
+        form.appendChild(timeRow);
+        const status = document.createElement('div');
+        status.setAttribute('data-leaving-status', '');
+        status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
+        card.appendChild(title);
+        card.appendChild(ask);
+        card.appendChild(signedInNote());
+        card.appendChild(form);
+        card.appendChild(status);
+        document.body.appendChild(card);
+        if (login.value) time.focus();
+        else login.focus();
+    }
+
+    function openEarlyPass() {
+        if (leavingBusy || unassigning) return;
+        closeLeavingOverlay('mem3-early-pass');
+        const card = document.createElement('div');
+        card.id = 'mem3-early-pass';
+        card.style.cssText = 'position:fixed; left:50%; top:50%; transform:translate(-50%, -50%); z-index:2147483647; ' +
+            'width:min(440px, calc(100vw - 24px)); padding:12px; border-radius:10px; background:#161b22; color:#fff; ' +
+            'border:1px solid #30363d; box-shadow:0 8px 24px rgba(0,0,0,.45); font-family:Segoe UI,system-ui,sans-serif;';
+        const title = document.createElement('div');
+        title.textContent = 'Unassign Early Outs';
+        title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif; margin-bottom:8px;';
+        const pass = document.createElement('input');
+        pass.type = 'password';
+        pass.placeholder = 'Password';
+        pass.setAttribute('autocomplete', 'off');
+        pass.style.cssText = leavingFieldStyle() + ' width:100%; box-sizing:border-box;';
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; gap:6px; margin-top:8px;';
+        const go = document.createElement('button');
+        go.type = 'button';
+        go.textContent = 'Run';
+        go.style.cssText = 'padding:7px 10px; border-radius:6px; border:1px solid #f85149; background:#0d1117; ' +
+            'color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = 'Close';
+        close.style.cssText = go.style.cssText;
+        function submit() {
+            const actor = requireActor();
+            if (!actor) return;
+            if (pass.value !== UNASSIGN_PASSWORD) {
+                const doc = loadLeaving();
+                pushEarlyRun(doc, {
+                    at: clockText(new Date()), by: actor, kind: 'unassign',
+                    shiftId: shiftId(new Date()), summary: 'Wrong password.', steps: []
+                });
+                saveLeaving(doc);
+                setLeavingStatus('Wrong password.');
+                return;
+            }
+            pass.value = '';
+            mountEarlyProgress(card);
+            unassignMarkedLeaves(actor);
+        }
+        go.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            submit();
+        });
+        pass.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter') submit();
+        });
+        close.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            closeLeavingOverlay('mem3-early-pass');
+        });
+        row.appendChild(go);
+        row.appendChild(close);
+        const status = document.createElement('div');
+        status.setAttribute('data-leaving-status', '');
+        status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
+        card.appendChild(title);
+        card.appendChild(signedInNote());
+        card.appendChild(pass);
+        card.appendChild(row);
+        card.appendChild(status);
+        document.body.appendChild(card);
+        pass.focus();
+    }
+
     function init() {
         const staleRun = document.getElementById('mem3-run-panel');
         if (staleRun) staleRun.remove();
@@ -6470,6 +8606,7 @@
         showAssignments();
         initLinePairs();
         setInterval(repairBoard, 1000);
+        startLeaving();
     }
 
     const MENU_IDP_SELECTION_URL = 'https://d34wrqb3xn2znf.cloudfront.net/idp-selection?redirect_uri=https%3A%2F%2Fmenu.na.aft.amazonoperations.app%2Fdo%2Fmfa%2Flogin&nonce=5f50a80c5db87e9cc23b0bc2124a6b6de1e21c0b83cd318714aff390c61ec6fb&scope=openid+tenantId%3A1545ed74-d2cd-11ec-9d64-0242ac120002&client_id=fc-menu-prod-na&state&response_type=code&otp&user_code&authorize_url=https%3A%2F%2Fprod.us-east-1.federated-auth.aft.a2z.com%2F1545ed74-d2cd-11ec-9d64-0242ac120002%2Fauthorize&data=%5B%7B%22id%22%3A%22amazon-federate-prod%22%2C%22displayString%22%3A%22IT+Service+Login%22%7D%2C%7B%22id%22%3A%22maask-prod-na%22%2C%22displayString%22%3A%22Login+with+MAASK%22%7D%5D&code_challenge&code_challenge_method&referrer=https%3A%2F%2Fmenu.na.aft.amazonoperations.app%2Fmidway%2Flogin&ui_locales=en_US';
