@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.36
+// @version      1.9.37
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.36';
+    const SCRIPT_VERSION = '1.9.37';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -4416,7 +4416,7 @@
         if (shade) shade.remove();
     }
 
-    function makeYieldSign(signed, stations, openStations, clickPanel) {
+    function makeYieldSign(signed, stations, openStations, clickPanel, disabledStations) {
         if (!(stations > 0)) return null;
         const pct = (signed / stations) * 100;
         const shown = Math.round(pct);
@@ -4471,21 +4471,29 @@
         tip.appendChild(title);
         tip.appendChild(ratio);
         const open = openStations || [];
-        const sub = document.createElement('span');
-        sub.className = 'mem3-yield-sub';
-        if (!open.length) {
-            sub.textContent = 'Every station is signed in';
+        const disabled = disabledStations || [];
+        function stationList(heading, items, color) {
+            if (!items.length) return;
+            const sub = document.createElement('span');
+            sub.className = 'mem3-yield-sub';
+            sub.textContent = heading;
             tip.appendChild(sub);
-        } else {
-            sub.textContent = 'Empty stations';
-            tip.appendChild(sub);
-            for (let i = 0; i < open.length; i++) {
+            for (let i = 0; i < items.length; i++) {
                 const row = document.createElement('span');
                 row.className = 'mem3-yield-station';
-                row.textContent = open[i];
+                row.textContent = items[i];
+                if (color) row.style.color = color;
                 tip.appendChild(row);
             }
         }
+        if (!open.length) {
+            const sub = document.createElement('span');
+            sub.className = 'mem3-yield-sub';
+            sub.textContent = disabled.length ? 'No empty stations' : 'Every station is signed in';
+            tip.appendChild(sub);
+        }
+        stationList('Empty stations', open);
+        stationList('Disabled', disabled, '#8b949e');
         wrap.appendChild(mark);
         wrap.appendChild(tip);
         if (clickPanel) {
@@ -4562,7 +4570,7 @@
         const titleRow = document.createElement('div');
         titleRow.style.cssText = 'display:flex; align-items:center; gap:6px; min-width:0;';
         titleRow.appendChild(kicker);
-        const yieldSign = makeYieldSign(opts.signed, opts.stations, opts.openStations, !!opts.lead);
+        const yieldSign = makeYieldSign(opts.signed, opts.stations, opts.openStations, !!opts.lead, opts.disabledStations);
         if (yieldSign) titleRow.appendChild(yieldSign);
 
         const valueRow = document.createElement('div');
@@ -5110,11 +5118,13 @@
         return 'v47|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
             (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
             (data.floorOpen || []).join(';') + '|' +
+            (data.floorDisabled || []).join(';') + '|' +
             data.floorStaffed + '|' + (data.asOf || '') + '|' +
             (data.lines || []).map(function (l) {
                 return l.name + ':' + l.withData + ':' + l.staffed + ':' +
                     (l.signed || 0) + '/' + (l.stations || 0) + ':' +
-                    (l.openStations || []).join(';') + ':' + (l.empIds || []).join('.');
+                    (l.openStations || []).join(';') + ':' +
+                    (l.disabledStations || []).join(';') + ':' + (l.empIds || []).join('.');
             }).join(',');
     }
 
@@ -5362,6 +5372,7 @@
             signed: data.floorSigned || 0,
             stations: data.floorStations || 0,
             openStations: data.floorOpen || [],
+            disabledStations: data.floorDisabled || [],
             lead: true,
             title: 'Average of the side rates and BIGs. Total work time and IDLE time are summed once per associate from FCLM Time Details.'
         });
@@ -5388,6 +5399,7 @@
                 signed: line.signed || 0,
                 stations: line.stations || 0,
                 openStations: line.openStations || [],
+                disabledStations: line.disabledStations || [],
                 title: panelTitle(line.name) + ' \u00b7 ' + gradingLabel() +
                     (line.avgUph > 0 ? '' : ' \u00b7 no rate this shift') +
                     ' \u00b7 ' + idleLabel(sideIdlePct(line.idleMin || 0, line.clockedMin || 0)) + ' IDLE \u00b7 ' +
@@ -5418,7 +5430,7 @@
         node.setAttribute('data-sig', sig);
     }
 
-    function makeLineBadge(avgUph, totalUnits, withData, staffed, totalMin, idleMin, clockedMin, both, crSigned, crStations, openStations) {
+    function makeLineBadge(avgUph, totalUnits, withData, staffed, totalMin, idleMin, clockedMin, both, crSigned, crStations, openStations, disabledStations) {
         const wrap = document.createElement('span');
         wrap.className = SECTION_BADGE_CLASS;
         wrap.style.cssText = 'display:inline-flex; gap:10px; margin-left:14px; align-items:center; ' +
@@ -5431,7 +5443,7 @@
         rateGroup.appendChild(makeUnitsHint(totalUnits, 12));
         wrap.appendChild(rateGroup);
         wrap.appendChild(makePill(idleLabel(pct) + ' IDLE', idleColor(pct), 18));
-        const sign = makeYieldSign(crSigned, crStations, openStations);
+        const sign = makeYieldSign(crSigned, crStations, openStations, false, disabledStations);
         if (sign) wrap.appendChild(sign);
         return wrap;
     }
@@ -5442,6 +5454,7 @@
         let totalUnits = 0, staffed = 0, total = 0, withData = 0, totalMin = 0, idleMin = 0, clockedMin = 0, both = 0;
         let crStations = 0, crSigned = 0;
         const openStations = [];
+        const disabledStations = [];
 
         for (let s = 0; s < sectionLabels.length; s++) {
             const h = findH5(sectionLabels[s]);
@@ -5454,7 +5467,13 @@
                 const tr = trs[i];
                 total++;
                 const assignment = rowAssignmentText(tr);
-                const crStation = isCustomerReturnsStation(assignment) && !stationIsDisabled(tr);
+                const returnsStation = isCustomerReturnsStation(assignment);
+                const disabled = returnsStation && stationIsDisabled(tr);
+                if (disabled) {
+                    const disabledLabel = formatOpenStation(assignment);
+                    if (disabledLabel) disabledStations.push(disabledLabel);
+                }
+                const crStation = returnsStation && !disabled;
                 if (crStation) crStations++;
 
                 const found = findLoginInRow(tr);
@@ -5509,9 +5528,10 @@
 
         const firstH = findH5(sectionLabels[0]);
         if (firstH) {
-            const lineBadge = makeLineBadge(avgUph, totalUnits, withData, staffed, totalMin, idleMin, clockedMin, both, crSigned, crStations, openStations);
+            const lineBadge = makeLineBadge(avgUph, totalUnits, withData, staffed, totalMin, idleMin, clockedMin, both, crSigned, crStations, openStations, disabledStations);
             const lineSig = avgUph.toFixed(1) + '|' + totalUnits + '|' + staffed + '|' +
-                (idleMin || 0) + '|' + (clockedMin || 0) + '|' + (crSigned || 0) + '/' + (crStations || 0);
+                (idleMin || 0) + '|' + (clockedMin || 0) + '|' + (crSigned || 0) + '/' + (crStations || 0) +
+                '|' + disabledStations.join(';');
             lineBadge.setAttribute('data-sig', lineSig);
             const existingLine = firstH.querySelector('.' + SECTION_BADGE_CLASS);
             if (!existingLine) firstH.appendChild(lineBadge);
@@ -5522,7 +5542,7 @@
         return {
             avgUph: avgUph, totalUnits: totalUnits, staffed: staffed, total: total, withData: withData,
             totalMin: totalMin, idleMin: idleMin, clockedMin: clockedMin, both: both, empIds: empIds,
-            crStations: crStations, crSigned: crSigned, openStations: openStations
+            crStations: crStations, crSigned: crSigned, openStations: openStations, disabledStations: disabledStations
         };
     }
 
@@ -5889,6 +5909,7 @@
             let floorUnits = 0, floorStaffed = 0, floorTotal = 0, floorRated = 0;
             let floorCrStations = 0, floorCrSigned = 0;
             const floorOpen = [];
+            const floorDisabled = [];
             let floorTotalMin = 0, floorIdleMin = 0, floorClockedMin = 0, floorBoth = 0;
             const floorSeen = Object.create(null);
             BOARD_IDS = [];
@@ -5908,6 +5929,7 @@
                     stations: s.crStations,
                     signed: s.crSigned,
                     openStations: s.openStations || [],
+                    disabledStations: s.disabledStations || [],
                     empIds: s.empIds || []
                 });
                 DEBUG.perLine[panels[i].name] = lineStats[lineStats.length - 1];
@@ -5921,6 +5943,8 @@
                 floorCrSigned += s.crSigned || 0;
                 const opens = s.openStations || [];
                 for (let o = 0; o < opens.length; o++) floorOpen.push(panelTitle(panels[i].name) + '  ' + opens[o]);
+                const disabledList = s.disabledStations || [];
+                for (let d = 0; d < disabledList.length; d++) floorDisabled.push(panelTitle(panels[i].name) + '  ' + disabledList[d]);
                 const ids = s.empIds || [];
                 for (let e = 0; e < ids.length; e++) {
                     if (floorSeen[ids[e]]) continue;
@@ -5959,6 +5983,7 @@
                 floorStations: floorCrStations,
                 floorSigned: floorCrSigned,
                 floorOpen: floorOpen,
+                floorDisabled: floorDisabled,
                 asOf: LAST_ROLLUP_AT ? LAST_ROLLUP_AT.toLocaleTimeString() : '',
                 lines: lineStats
             });
@@ -6688,11 +6713,11 @@
         utilSec.appendChild(infoRows([
             ['What counts', 'Customer Returns stations only. A station reads “Customer Returns” and then the half assignment, such as Station 3-06.'],
             ['Left out', 'Waterspiders, disabled stations, and every other role on the line'],
-            ['Disabled', 'A station marked Disabled is left out of the percent and is not listed as empty.'],
+            ['Disabled', 'A station marked Disabled is left out of the percent and is not listed as empty. The utilization popup lists it under Disabled.'],
             ['Red sign', 'Under 90% of those stations have an associate signed in'],
             ['Yellow sign', '90% up to, but not including, 100%'],
             ['Green check', '100%'],
-            ['Hover', 'On a side, hover shows Utilization, the percent, and the empty stations. On Total, click the sign to open that same panel.']
+            ['Hover', 'On a side, hover shows Utilization, the percent, the empty stations, and the disabled stations. On Total, click the sign to open that same panel.']
         ]));
         card.appendChild(utilSec);
 
