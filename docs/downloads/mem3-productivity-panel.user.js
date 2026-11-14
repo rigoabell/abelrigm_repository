@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.35
+// @version      1.9.36
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.35';
+    const SCRIPT_VERSION = '1.9.36';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -2120,6 +2120,36 @@
         }
     }
 
+    // Each line is its own table, so a wide Assignment column pushes that line's
+    // photos to the right of the line above. Lock the two-column tables to one width.
+    function pinAssignmentColumn(cell) {
+        if (!cell || !cell.style) return;
+        cell.style.width = '18em';
+        cell.style.maxWidth = '18em';
+        cell.style.boxSizing = 'border-box';
+        const table = cell.closest && cell.closest('table');
+        if (!table || !table.style || !table.querySelectorAll) return;
+        const rows = table.querySelectorAll('tr');
+        let twoCol = false;
+        for (let i = 0; i < rows.length; i++) {
+            const cells = rows[i].children || [];
+            if (cells.length > 2) return;
+            if (cells.length === 2) twoCol = true;
+        }
+        if (!twoCol) return;
+        table.style.tableLayout = 'fixed';
+        table.style.width = '100%';
+        for (let i = 0; i < rows.length; i++) {
+            const first = rows[i].children && rows[i].children[0];
+            if (!first || !first.style) continue;
+            const span = Number(first.getAttribute && first.getAttribute('colspan') || 1);
+            if (span > 1) continue;
+            first.style.width = '18em';
+            first.style.maxWidth = '18em';
+            first.style.boxSizing = 'border-box';
+        }
+    }
+
     function layoutCustomerReturns(tr) {
         if (!tr) return;
         const cell = customerReturnsCell(tr);
@@ -2148,6 +2178,7 @@
         }
         const hiddenOk = source !== cell && source.getAttribute && source.getAttribute('data-mem3-cr-hidden') === '1';
         const flatOk = source === cell && cell.getAttribute && cell.getAttribute('data-mem3-cr-flat') === '1';
+        pinAssignmentColumn(cell);
         if (block && block.getAttribute('data-sig') === sig && (hiddenOk || flatOk)) return;
         if (!block) {
             block = document.createElement('div');
@@ -2162,7 +2193,7 @@
         block.className = 'mem3-cr-station';
         block.setAttribute('data-sig', sig);
         block.style.cssText = 'display:flex; flex-direction:column; align-items:flex-start; gap:1px; ' +
-            'line-height:1.3; min-width:max-content;';
+            'line-height:1.3;';
         copyStationFont(source, block);
         fillStationBlock(block, lines);
         if (source !== cell) hideStationSource(source);
