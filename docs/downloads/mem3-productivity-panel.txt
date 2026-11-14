@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.10.1
+// @version      1.10.2
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.10.1';
+    const SCRIPT_VERSION = '1.10.2';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -3327,6 +3327,39 @@
             out.push(anchors[i]);
         }
         return out;
+    }
+
+    function stationCodes(text) {
+        const found = String(text || '').match(/\d+-\d+/g);
+        const out = [];
+        if (!found) return out;
+        for (let i = 0; i < found.length; i++) {
+            if (out.indexOf(found[i]) === -1) out.push(found[i]);
+        }
+        out.sort();
+        return out;
+    }
+
+    function sameStation(marked, live) {
+        const left = stationCodes(marked);
+        const right = stationCodes(live);
+        if (!left.length || left.length !== right.length) return false;
+        for (let i = 0; i < left.length; i++) {
+            if (left[i] !== right[i]) return false;
+        }
+        return true;
+    }
+
+    function anchorOnMarkedStation(login, station) {
+        const want = String(login || '').trim().toLowerCase();
+        if (!want || !stationCodes(station).length) return null;
+        const anchors = boardAnchors(true);
+        for (let i = 0; i < anchors.length; i++) {
+            const person = boardPersonFromAnchor(anchors[i]);
+            if (String(person.login || '').toLowerCase() !== want) continue;
+            if (sameStation(station, person.station)) return anchors[i];
+        }
+        return null;
     }
 
     function findAnchorByLogin(login) {
@@ -8263,8 +8296,8 @@
         unassigning = true;
         holdLeaving(true);
         let off = 0;
-        let missed = 0;
         const taken = [];
+        const skippedNames = [];
         const left = [];
         try {
             recordActivity(doc, actor, 'started unassign for leave times that have passed', now, { action: 'note' });
@@ -8277,7 +8310,7 @@
                 const row = rows[i];
                 paintEarlyProgress(i, rows.length, row.login);
                 setLeavingStatus('Unassigning ' + (i + 1) + '/' + rows.length + ' · ' + row.login);
-                const anchor = findAnchorForPerson(row.login, '');
+                const anchor = anchorOnMarkedStation(row.login, row.station);
                 const stamp = new Date();
                 const step = {
                     at: clockText(stamp),
@@ -8286,13 +8319,10 @@
                     station: row.station || '',
                     result: ''
                 };
-                if (!anchor || countLoginOnBoard(row.login) === 0) {
-                    markTakenOff(row, stamp, 'not on a station');
-                    step.result = 'not on a station';
-                    recordActivity(doc, actor, row.login + ' was not on a station', stamp, {
-                        action: 'miss', who: row.login
-                    });
-                    missed += 1;
+                if (!anchor) {
+                    step.result = 'skipped';
+                    step.note = 'Not on the marked station.';
+                    skippedNames.push(row.login);
                     run.steps.push(step);
                     paintEarlyProgress(i + 1, rows.length, '');
                     continue;
@@ -8306,7 +8336,7 @@
                     if (leavingStop) break;
                     if (record && record.leftBoard) break;
                     await closeAllAssociateMenus();
-                    const again = findAnchorForPerson(row.login, '');
+                    const again = anchorOnMarkedStation(row.login, row.station);
                     if (!again) {
                         const watched = await watchUnassign(row.login, '');
                         if (!record) record = { login: row.login, tries: tryN };
@@ -8381,10 +8411,12 @@
                 paintEarlyProgress(i + 1, rows.length, '');
             }
             const later = waiting.length - rows.length;
-            run.summary = 'Unassigned ' + off + '. ' + missed + ' were not on a station. ' +
-                (rows.length - off - missed) + ' could not be taken off. ' +
+            run.summary = 'Unassigned ' + off + '. ' + skippedNames.length +
+                ' were skipped because they were not on the marked station. ' +
+                (rows.length - off - skippedNames.length) + ' could not be taken off. ' +
                 later + ' are still waiting for their time.';
             if (taken.length) run.summary += ' Unassigned: ' + taken.join(', ') + '.';
+            if (skippedNames.length) run.summary += ' Skipped: ' + skippedNames.join(', ') + '.';
             if (leavingStop) {
                 run.stopped = true;
                 run.summary = 'Stopped. Unassigned ' + taken.length +
@@ -8393,7 +8425,8 @@
                 if (later) run.summary += ' ' + later + ' are still waiting for their time.';
             }
             run.off = off;
-            run.missed = missed;
+            run.missed = 0;
+            run.skipped = skippedNames;
             run.failed = left.length;
             run.stillWaiting = later;
             run.taken = taken;

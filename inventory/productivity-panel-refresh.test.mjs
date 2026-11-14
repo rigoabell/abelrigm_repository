@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.10\.1/);
+assert.match(src, /@version\s+1\.10\.2/);
 assert.match(src, /if \(shown >= 19\) return '#2ea043'/);
 assert.match(src, /if \(shown >= 16\) return '#d29922'/);
 assert.match(src, /data-mem3-enter-notes/);
@@ -68,6 +68,26 @@ assert.match(src, /const UNASSIGN_WATCH_MS = 10000;/);
 assert.match(src, /const UNASSIGN_HOLD = 6;/);
 assert.equal(src.includes("tryN === 2 ? 'inner'"), false);
 assert.match(src, /function heldOff/);
+assert.match(src, /function sameStation/);
+assert.match(src, /function anchorOnMarkedStation/);
+assert.equal(src.includes("markTakenOff(row, stamp, 'not on a station')"), false);
+assert.match(src, /step\.result = 'skipped'/);
+const stationFns = src.slice(src.indexOf("function stationCodes"), src.indexOf("function anchorOnMarkedStation"));
+const stationBox = {};
+vm.runInNewContext(stationFns + "\n" + [
+    "same = sameStation(",
+    "'Customer Returns 1st Half: Station 1-05 2nd Half: Station 1-35 Customer Returns 1st Half: Station 1-05 | 2nd Half: Station 1-35',",
+    "'Customer Returns 1st Half: Station 1-05 | 2nd Half: Station 1-35'",
+    ");",
+    "moved = sameStation(",
+    "'Customer Returns 1st Half: Station 3-66 2nd Half: Station 3-10',",
+    "'Customer Returns 1st Half: Station 1-05 2nd Half: Station 1-35'",
+    ");",
+    "gone = sameStation('Customer Returns 1st Half: Station 3-66 2nd Half: Station 3-10', '');"
+].join("\n"), stationBox);
+assert.equal(stationBox.same, true);
+assert.equal(stationBox.moved, false);
+assert.equal(stationBox.gone, false);
 assert.match(src, /extendsclass\.com\/api\/json-storage\/bin\/edfeccc/);
 assert.match(src, /Every computer running this script sees this list/);
 assert.match(src, /function cleanStationText/);
@@ -119,9 +139,10 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.10.1");
+assert.equal(entry.version, "1.10.2");
 assert.match(entry.detail, /stayed off the board for the last 3 seconds/);
 assert.match(entry.detail, /button's own handler/);
+assert.match(entry.detail, /not on the station they were marked from/);
 assert.match(entry.detail, /red below 16/);
 assert.match(entry.detail, /View Notes/);
 assert.match(entry.detail, /cleared only by the person who wrote it/);
