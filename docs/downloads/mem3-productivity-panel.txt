@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.34
+// @version      1.9.35
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.34';
+    const SCRIPT_VERSION = '1.9.35';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -1920,9 +1920,31 @@
         return null;
     }
 
+    function textSkipping(el, skipClass) {
+        if (!el) return '';
+        const cls = String(el.className || '');
+        if (skipClass && cls.indexOf(skipClass) !== -1) return '';
+        const nodes = el.childNodes;
+        if (nodes && nodes.length) {
+            let text = '';
+            for (let i = 0; i < nodes.length; i++) {
+                const node = nodes[i];
+                if (!node) continue;
+                if (node.nodeType === 3) text += node.textContent || '';
+                else text += ' ' + textSkipping(node, skipClass);
+            }
+            return text;
+        }
+        const kids = el.children || [];
+        if (!kids.length) return String(el.textContent || '');
+        let text = '';
+        for (let i = 0; i < kids.length; i++) text += ' ' + textSkipping(kids[i], skipClass);
+        return text;
+    }
+
     function rowAssignmentText(tr) {
         const td = tr.querySelector('td');
-        const raw = td ? td.textContent : tr.textContent;
+        const raw = td ? textSkipping(td, 'mem3-cr-station') : (tr.textContent || '');
         return String(raw || '').replace(/\s+/g, ' ').trim();
     }
 
@@ -1992,6 +2014,180 @@
         if (code(match[1])) parts.push('1st Half ' + code(match[1]));
         if (code(match[2])) parts.push('2nd Half ' + code(match[2]));
         return parts.join(' | ');
+    }
+
+    // Board cells read "1st Half: Station 4-23 | 2nd Half: Station 4-49" and wrap
+    // wherever the column runs out. Every Customer Returns row gets the same 3 lines.
+    function customerReturnsLines(text) {
+        const cleaned = cleanStationText(text);
+        if (!isCustomerReturnsStation(cleaned)) return null;
+        const match = cleaned.match(/1st\s*half:?\s*(.*?)(?:\s*\|\s*|\s+)(?=2nd\s*half\b)\s*2nd\s*half:?\s*(.*)$/i);
+        if (!match) return null;
+        function halfLine(label, value) {
+            const raw = String(value || '').replace(/\s+/g, ' ').trim();
+            const code = raw.match(/(\d+)\s*-\s*(\d+)/);
+            if (code) return label + ': Station ' + code[1] + '-' + code[2];
+            const rest = raw.replace(/^station\b\s*/i, '').trim();
+            if (!rest || /^none$/i.test(rest)) return label + ': None';
+            return label + ': Station ' + rest;
+        }
+        return [
+            'Customer Returns',
+            halfLine('1st Half', match[1]),
+            halfLine('2nd Half', match[2])
+        ];
+    }
+
+    function findStationNode(root) {
+        let best = null;
+        function visit(el) {
+            const kids = el.children || [];
+            for (let i = 0; i < kids.length; i++) {
+                const child = kids[i];
+                const cls = String(child.className || '');
+                if (cls.indexOf('mem3-cr-station') !== -1 || cls.indexOf(DECOR_CLASS) !== -1 || cls.indexOf(BIGS_IDLE_CLASS) !== -1) continue;
+                const text = textSkipping(child, 'mem3-cr-station');
+                if (!isCustomerReturnsStation(text) || !/1st\s*half/i.test(text)) continue;
+                best = child;
+                visit(child);
+            }
+        }
+        visit(root);
+        return best;
+    }
+
+    function customerReturnsCell(tr) {
+        if (!tr || !tr.querySelectorAll) return null;
+        const tds = tr.querySelectorAll('td');
+        let fallback = null;
+        for (let i = 0; i < tds.length; i++) {
+            const text = textSkipping(tds[i], 'mem3-cr-station');
+            if (!isCustomerReturnsStation(text)) continue;
+            if (findStationNode(tds[i])) return tds[i];
+            if (!fallback) fallback = tds[i];
+        }
+        return fallback;
+    }
+
+    function hideStationSource(el) {
+        if (!el || !el.style) return;
+        el.setAttribute('data-mem3-cr-hidden', '1');
+        el.setAttribute('aria-hidden', 'true');
+        el.style.position = 'absolute';
+        el.style.width = '1px';
+        el.style.height = '1px';
+        el.style.overflow = 'hidden';
+        el.style.clip = 'rect(0, 0, 0, 0)';
+        el.style.whiteSpace = 'nowrap';
+        el.style.padding = '0';
+        el.style.margin = '0';
+        el.style.pointerEvents = 'none';
+    }
+
+    function restoreStationSource(el) {
+        if (!el || !el.style) return;
+        el.removeAttribute('data-mem3-cr-hidden');
+        el.removeAttribute('aria-hidden');
+        el.style.position = '';
+        el.style.width = '';
+        el.style.height = '';
+        el.style.overflow = '';
+        el.style.clip = '';
+        el.style.whiteSpace = '';
+        el.style.padding = '';
+        el.style.margin = '';
+        el.style.pointerEvents = '';
+    }
+
+    function copyStationFont(from, to) {
+        if (!window.getComputedStyle || !from || !to || !to.style) return;
+        let cs = null;
+        try { cs = window.getComputedStyle(from); } catch (e) { cs = null; }
+        if (!cs) return;
+        if (cs.fontSize && cs.fontSize !== '0px') to.style.fontSize = cs.fontSize;
+        if (cs.fontWeight) to.style.fontWeight = cs.fontWeight;
+        if (cs.fontFamily) to.style.fontFamily = cs.fontFamily;
+        if (cs.color) to.style.color = cs.color;
+    }
+
+    function fillStationBlock(block, lines) {
+        while (block.firstChild) block.removeChild(block.firstChild);
+        for (let i = 0; i < lines.length; i++) {
+            const row = document.createElement('div');
+            row.textContent = lines[i];
+            row.style.whiteSpace = 'nowrap';
+            block.appendChild(row);
+        }
+    }
+
+    function layoutCustomerReturns(tr) {
+        if (!tr) return;
+        const cell = customerReturnsCell(tr);
+        const stale = tr.querySelectorAll ? tr.querySelectorAll('.mem3-cr-station') : [];
+        if (!cell) {
+            for (let i = 0; i < stale.length; i++) stale[i].remove();
+            const hidden = tr.querySelectorAll ? tr.querySelectorAll('[data-mem3-cr-hidden]') : [];
+            for (let i = 0; i < hidden.length; i++) restoreStationSource(hidden[i]);
+            return;
+        }
+        const source = findStationNode(cell) || cell;
+        const lines = customerReturnsLines(textSkipping(source, 'mem3-cr-station'));
+        if (!lines) return;
+        const sig = lines.join('\n');
+        let block = source.nextElementSibling;
+        if (!block || String(block.className || '').indexOf('mem3-cr-station') === -1) {
+            const parent = source.parentElement || cell;
+            const kids = parent.children || [];
+            block = null;
+            for (let i = 0; i < kids.length; i++) {
+                if (String(kids[i].className || '').indexOf('mem3-cr-station') !== -1) {
+                    block = kids[i];
+                    break;
+                }
+            }
+        }
+        const hiddenOk = source !== cell && source.getAttribute && source.getAttribute('data-mem3-cr-hidden') === '1';
+        const flatOk = source === cell && cell.getAttribute && cell.getAttribute('data-mem3-cr-flat') === '1';
+        if (block && block.getAttribute('data-sig') === sig && (hiddenOk || flatOk)) return;
+        if (!block) {
+            block = document.createElement('div');
+            block.className = 'mem3-cr-station';
+            const parent = source.parentElement || cell;
+            if (source !== cell && parent.insertBefore) parent.insertBefore(block, source);
+            else if (cell.insertBefore) cell.insertBefore(block, cell.firstChild);
+            else cell.appendChild(block);
+        } else if (source !== cell && source.parentElement && block.parentElement === source.parentElement && block !== source.nextElementSibling) {
+            source.parentElement.insertBefore(block, source);
+        }
+        block.className = 'mem3-cr-station';
+        block.setAttribute('data-sig', sig);
+        block.style.cssText = 'display:flex; flex-direction:column; align-items:flex-start; gap:1px; ' +
+            'line-height:1.3; min-width:max-content;';
+        copyStationFont(source, block);
+        fillStationBlock(block, lines);
+        if (source !== cell) hideStationSource(source);
+        else {
+            const kids = cell.children || [];
+            for (let i = 0; i < kids.length; i++) {
+                if (kids[i] === block) continue;
+                hideStationSource(kids[i]);
+            }
+            cell.setAttribute('data-mem3-cr-flat', '1');
+            cell.style.fontSize = '0';
+            cell.style.lineHeight = '0';
+            if (!block.style.fontSize) block.style.fontSize = '13px';
+            block.style.lineHeight = '1.3';
+        }
+    }
+
+    function layoutAllCustomerReturns() {
+        const tables = document.querySelectorAll('table');
+        for (let t = 0; t < tables.length; t++) {
+            const table = tables[t];
+            if (table.closest && table.closest('#' + FLOOR_SUMMARY_ID)) continue;
+            const trs = tableRows(table);
+            for (let i = 0; i < trs.length; i++) layoutCustomerReturns(trs[i]);
+        }
     }
 
     function badgeHost(el, tr) {
@@ -5736,6 +5932,7 @@
                 lines: lineStats
             });
             decoratePopups();
+            layoutAllCustomerReturns();
         } catch (e) {
             DEBUG.lastRunError = (e && e.message) ? e.message : String(e);
             warn('render failed:', e);

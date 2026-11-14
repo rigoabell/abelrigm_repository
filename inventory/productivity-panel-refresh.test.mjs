@@ -7,7 +7,10 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.34/);
+assert.match(src, /@version\s+1\.9\.35/);
+assert.match(src, /function customerReturnsLines/);
+assert.match(src, /function layoutCustomerReturns/);
+assert.match(src, /mem3-cr-station/);
 assert.match(src, /max-content max-content/);
 assert.match(src, /placeBadgeCell\(rate, col, 1\)/);
 assert.match(src, /placeBadgeCell\(idle, col, 2\)/);
@@ -89,7 +92,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.34");
+assert.equal(entry.version, "1.9.35");
 assert.match(entry.detail, /red yield sign/);
 const leavingList = src.slice(src.indexOf("function openLeavingList"), src.indexOf("function closeLeavingOverlay"));
 assert.ok(leavingList.indexOf("header.appendChild(close)") !== -1);
@@ -234,7 +237,7 @@ const patched = src.replace(
         },
         setDown(value) { FCLM_DOWN = value; },
         showUpdate(remote) { showUpdatePrompt(remote); },
-        shiftId, parseLeaveTime, addLeaving, dueLeaving, noteBack, markTakenOff, cleanStationText,
+        shiftId, parseLeaveTime, addLeaving, dueLeaving, noteBack, markTakenOff, cleanStationText, customerReturnsLines,
         blendMediumLarge, bodyColumn, placeBesideLogin,
         stationDisabled(row) { return stationIsDisabled(row); },
         stop() {
@@ -665,6 +668,15 @@ try {
         api.cleanStationText("Customer Returns 1st Half: Station 3-01 | 2nd Half: Station 3-39 18.8 UPH 20.9% IDLE IN"),
         "Customer Returns 1st Half: Station 3-01 | 2nd Half: Station 3-39"
     );
+    assert.equal(
+        JSON.stringify(api.customerReturnsLines("Customer Returns 1st Half: Station 4-23 | 2nd Half: Station 4-49")),
+        JSON.stringify(["Customer Returns", "1st Half: Station 4-23", "2nd Half: Station 4-49"])
+    );
+    assert.equal(
+        JSON.stringify(api.customerReturnsLines("Customer Returns\n1st Half: Station 4-20 | 2nd\nHalf: Station 4-22 18.4 UPH")),
+        JSON.stringify(["Customer Returns", "1st Half: Station 4-20", "2nd Half: Station 4-22"])
+    );
+    assert.equal(api.customerReturnsLines("CRET BIGS Processor Station 8-24"), null);
     const openStation = stationTable([
         ["Customer Returns 1st Half: Station 3-06 | 2nd Half: Station 3-70", ""]
     ]).querySelector("tbody tr");
