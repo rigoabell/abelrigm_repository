@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.33
+// @version      1.9.34
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.33';
+    const SCRIPT_VERSION = '1.9.34';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -1375,28 +1375,10 @@
         avatar.appendChild(ring);
     }
 
-    function paintClockPill(tr, status) {
-        const badge = tr.querySelector('.' + DECOR_CLASS);
-        if (!badge) return;
-        let pill = badge.querySelector('.mem3-clock-pill');
-        const label = clockLabel(status);
-        if (!label) {
-            if (pill) pill.remove();
-            return;
-        }
-        if (!pill) {
-            pill = makePill(label.short, label.color, 16.5);
-            pill.classList.add('mem3-clock-pill');
-            placeBadgeCell(pill, 2, 1);
-            badge.appendChild(pill);
-            return;
-        }
-        placeBadgeCell(pill, 2, 1);
-        if (pill.textContent !== label.short) {
-            pill.textContent = label.short;
-            pill.style.borderColor = label.color;
-            pill.style.background = label.color + '33';
-        }
+    function paintClockPill(tr) {
+        if (!tr || !tr.querySelectorAll) return;
+        const pills = tr.querySelectorAll('.mem3-clock-pill');
+        for (let i = 0; i < pills.length; i++) pills[i].remove();
     }
 
     function ensurePopupClock(box, person, empId) {
@@ -1439,7 +1421,7 @@
             for (let m = 0; m < leftover.length; m++) leftover[m].classList.remove('mem3-clock-in', 'mem3-clock-out');
             if (avatar) paintClockOverlay(tr, avatar, status);
             else clearClockDecor(tr);
-            paintClockPill(tr, status);
+            paintClockPill(tr);
         }
         const popups = document.querySelectorAll('.' + POPUP_CLASS);
         for (let i = 0; i < popups.length; i++) {
@@ -2435,10 +2417,24 @@
         el.style.justifySelf = 'start';
     }
 
-    function badgeGridStyle() {
-        return 'display:inline-grid; grid-template-columns:max-content max-content; ' +
+    function badgeGridStyle(withYield) {
+        const cols = withYield ? 'max-content max-content' : 'max-content';
+        return 'display:inline-grid; grid-template-columns:' + cols + '; ' +
             'grid-template-rows:auto auto; column-gap:6px; row-gap:4px; margin-left:8px; ' +
-            'vertical-align:middle; flex:0 0 auto; align-self:center;';
+            'vertical-align:middle; flex:0 0 auto; align-self:center; align-items:center;';
+    }
+
+    function rowIdleYield(time, empId) {
+        const mark = idleNowYield();
+        mark.classList.add('mem3-idle-now');
+        mark.title = idleNowTitle(time, empId) || 'Idle now';
+        mark.style.marginLeft = '0';
+        const svg = mark.firstChild;
+        if (svg && svg.setAttribute) {
+            svg.setAttribute('width', '28');
+            svg.setAttribute('height', '26');
+        }
+        return mark;
     }
 
     function loosenBadgeHost(host) {
@@ -2504,7 +2500,8 @@
     function makeBadge(stats, known, time, empId) {
         const wrap = document.createElement('span');
         wrap.className = DECOR_CLASS;
-        wrap.style.cssText = badgeGridStyle();
+        const idleNow = showsIdleNow(time, empId);
+        wrap.style.cssText = badgeGridStyle(idleNow);
         const noTime = !!(time && time.noData);
         const color = (known && stats.hasData) ? uphColor(stats.uph) : '#8b949e';
         const rateText = !known ? '?' : (stats.hasData ? ((stats.uph > 0 ? stats.uph.toFixed(1) : '0') + ' UPH') : uphGapText());
@@ -2514,16 +2511,18 @@
         wrap.title = rateText + ' \u00b7 ' + (noTime ? windowGapText() : timeText(time)) + (nowTitle ? ' \u00b7 ' + nowTitle : '');
         const rate = makePill(rateText, color, 16.5);
         const idle = makePill(idleText, noTime ? '#8b949e' : idleColor(pct), 16.5);
-        placeBadgeCell(rate, 1, 1);
-        placeBadgeCell(idle, 1, 2);
+        const col = idleNow ? 2 : 1;
+        if (idleNow) {
+            const mark = rowIdleYield(time, empId);
+            placeBadgeCell(mark, 1, 1);
+            mark.style.gridRow = '1 / span 2';
+            mark.style.alignSelf = 'center';
+            wrap.appendChild(mark);
+        }
+        placeBadgeCell(rate, col, 1);
+        placeBadgeCell(idle, col, 2);
         wrap.appendChild(rate);
         wrap.appendChild(idle);
-        if (showsIdleNow(time, empId)) {
-            const now = makePill('IDLE NOW', '#f85149', 16.5);
-            now.className = 'mem3-idle-now';
-            placeBadgeCell(now, 2, 2);
-            wrap.appendChild(now);
-        }
         wrap.setAttribute('data-sig', (known ? '1' : '0') + '|' + rateText + '|' + idleText + '|' + idleNowSig(time, empId));
         return wrap;
     }
@@ -2559,12 +2558,8 @@
         const idleText = noTime ? windowGapText() : (idleLabel(pct) + ' IDLE');
         const nowTitle = idleNowTitle(time, empId);
         wrap.title = (noTime ? windowGapText() : timeText(time)) + (nowTitle ? ' \u00b7 ' + nowTitle : '');
+        if (showsIdleNow(time, empId)) wrap.appendChild(rowIdleYield(time, empId));
         wrap.appendChild(makePill(idleText, noTime ? '#8b949e' : idleColor(pct), 16.5));
-        if (showsIdleNow(time, empId)) {
-            const now = makePill('IDLE NOW', '#f85149', 16.5);
-            now.className = 'mem3-idle-now';
-            wrap.appendChild(now);
-        }
         wrap.setAttribute('data-sig', idleText + '|' + idleNowSig(time, empId));
         return wrap;
     }
@@ -6454,7 +6449,7 @@
             ['Does not count', 'Active graded time, or time outside the window'],
             ['BIGs', 'BIGS Line + Line Support. It sits under L1 Odd and has the same rate, idle percent, associates idle, units, and hours. Those associates count in Total.'],
             ['Other BIGS rows', 'A station outside that group whose name contains BIGS shows idle on the row and stays out of the line totals.'],
-            ['IDLE NOW', 'The latest function row is indirect or Time Off Task, and that row has lasted at least 11 minutes. A diamond in the function title is still that stretch. A shorter row is the lag after a scan. Someone who is clocked out is not counted. Earlier idle in the window still counts in the percent.'],
+            ['Idle now', 'A red yield sign sits between the login and the UPH and idle percent. The latest function row is indirect or Time Off Task, and that row has lasted at least 11 minutes. A diamond in the function title is still that stretch. A shorter row is the lag after a scan. Someone who is clocked out is not counted. Earlier idle in the window still counts in the percent. In or Out stays on the photo ring.'],
             ['ASSOCIATES IDLE', 'The number under the idle percent is how many associates on that side, or on the whole floor for Total, have been idle for at least 11 minutes. The white eye on the left opens that list.'],
             ['View', 'The eye left of UPH lists that side from the lowest rate. The eye left of the idle percent lists it from the highest idle percent. Total does the same for everyone on the lines and on BIGs.'],
             ['Hours idle', 'Under units, the idle hours are the indirect time plus Time Off Task already in the idle percent.']

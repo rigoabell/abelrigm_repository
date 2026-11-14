@@ -7,12 +7,15 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.33/);
-assert.match(src, /grid-template-columns:max-content max-content/);
-assert.match(src, /placeBadgeCell\(rate, 1, 1\)/);
-assert.match(src, /placeBadgeCell\(idle, 1, 2\)/);
-assert.match(src, /placeBadgeCell\(now, 2, 2\)/);
-assert.match(src, /placeBadgeCell\(pill, 2, 1\)/);
+assert.match(src, /@version\s+1\.9\.34/);
+assert.match(src, /max-content max-content/);
+assert.match(src, /placeBadgeCell\(rate, col, 1\)/);
+assert.match(src, /placeBadgeCell\(idle, col, 2\)/);
+assert.match(src, /function rowIdleYield/);
+assert.match(src, /mark\.style\.gridRow = '1 \/ span 2'/);
+assert.equal(src.includes("placeBadgeCell(pill, 2, 1)"), false);
+assert.equal(src.includes("makePill('IDLE NOW'"), false);
+assert.match(src, /querySelectorAll\('\.mem3-clock-pill'\)/);
 assert.match(src, /function placeBesideLogin/);
 assert.match(src, /flexWrap = 'nowrap'/);
 assert.match(src, /data-mem3-refresh-count/);
@@ -86,7 +89,8 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.33");
+assert.equal(entry.version, "1.9.34");
+assert.match(entry.detail, /red yield sign/);
 const leavingList = src.slice(src.indexOf("function openLeavingList"), src.indexOf("function closeLeavingOverlay"));
 assert.ok(leavingList.indexOf("header.appendChild(close)") !== -1);
 assert.ok(leavingList.indexOf("card.appendChild(header)") < leavingList.indexOf("card.appendChild(scroller)"));
