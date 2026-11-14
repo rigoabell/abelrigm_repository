@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.10.6
+// @version      1.10.7
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.10.6';
+    const SCRIPT_VERSION = '1.10.7';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -1327,24 +1327,69 @@
         return Math.abs(r.width - r.height) <= 14;
     }
 
+    function pageComputedStyle(el) {
+        try {
+            const win = pageWindow();
+            if (win && win.getComputedStyle) return win.getComputedStyle(el);
+        } catch (e) { /* the page window may be mid-draw */ }
+        try {
+            if (window.getComputedStyle) return window.getComputedStyle(el);
+        } catch (e2) { /* ignore */ }
+        return null;
+    }
+
+    function elementBackground(el) {
+        if (!el) return '';
+        const inline = el.style && el.style.backgroundImage;
+        if (inline && inline !== 'none') return inline;
+        const attr = el.getAttribute ? (el.getAttribute('style') || '') : '';
+        const fromAttr = /url\(\s*(['"]?)(.*?)\1\s*\)/i.exec(attr);
+        if (fromAttr && fromAttr[2]) return 'url("' + fromAttr[2] + '")';
+        const cs = pageComputedStyle(el);
+        return (cs && cs.backgroundImage) || '';
+    }
+
+    function avatarNodes(tr) {
+        const out = [];
+        if (!tr || !tr.querySelectorAll) return out;
+        const seen = [];
+        function take(list) {
+            for (let i = 0; i < list.length; i++) {
+                if (seen.indexOf(list[i]) !== -1) continue;
+                seen.push(list[i]);
+                out.push(list[i]);
+            }
+        }
+        take(tr.querySelectorAll('div, span, img'));
+        const hosts = tr.querySelectorAll('*');
+        for (let i = 0; i < hosts.length; i++) {
+            const root = hosts[i].shadowRoot;
+            if (!root || !root.querySelectorAll) continue;
+            take(root.querySelectorAll('div, span, img'));
+        }
+        return out;
+    }
+
     function avatarEl(tr) {
-        const nodes = tr.querySelectorAll('div, span');
+        const nodes = avatarNodes(tr);
         let fallback = null;
+        let imgFallback = null;
         for (let i = 0; i < nodes.length; i++) {
             const el = nodes[i];
-            const bg = window.getComputedStyle ? (window.getComputedStyle(el).backgroundImage || '') : '';
+            if (String(el.tagName || '').toUpperCase() === 'IMG') {
+                const src = el.getAttribute('src') || el.currentSrc || el.src || '';
+                if (!src || src.indexOf('data:image/svg') === 0) continue;
+                const ir = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 32, height: 32 };
+                if (ir.width >= 18 && ir.height >= 18 && ir.width <= 96 && ir.height <= 96) return el;
+                if (!imgFallback) imgFallback = el;
+                continue;
+            }
+            const bg = elementBackground(el);
             if (!bg || bg === 'none') continue;
-            if (bg.indexOf('badgephotos') !== -1) return el;
-            if (!fallback && isAvatarBox(el)) fallback = el;
+            if (/badgephoto|employeephoto|avatar|portrait/i.test(bg)) return el;
+            if (!fallback && isAvatarBox(el) && /url\(/i.test(bg)) fallback = el;
         }
-        if (fallback) return fallback;
-        const imgs = tr.querySelectorAll('img');
-        for (let i = 0; i < imgs.length; i++) {
-            const img = imgs[i];
-            const ir = img.getBoundingClientRect();
-            if (ir.width >= 18 && ir.height >= 18 && ir.width <= 96 && ir.height <= 96) return img;
-        }
-        return null;
+        return fallback || imgFallback;
     }
 
     function cssImageUrl(value) {
@@ -1355,14 +1400,10 @@
     function badgePhotoUrl(el) {
         if (!el) return '';
         if (String(el.tagName || '').toUpperCase() === 'IMG') {
-            const src = el.getAttribute('src') || el.src || '';
-            if (src) return src;
+            const src = el.getAttribute('src') || el.currentSrc || el.src || '';
+            if (src && src.indexOf('data:image/svg') !== 0) return src;
         }
-        const inline = el.style && el.style.backgroundImage;
-        const fromInline = cssImageUrl(inline);
-        if (fromInline) return fromInline;
-        if (!window.getComputedStyle) return '';
-        return cssImageUrl(window.getComputedStyle(el).backgroundImage || '');
+        return cssImageUrl(elementBackground(el));
     }
 
     const CLOCK_PHOTO_PX = 32;
@@ -1400,7 +1441,7 @@
         }
         const photos = tr.querySelectorAll('div, span');
         for (let i = 0; i < photos.length; i++) {
-            const bg = window.getComputedStyle(photos[i]).backgroundImage || '';
+            const bg = elementBackground(photos[i]);
             if (bg.indexOf('badgephotos') !== -1) restoreAvatar(photos[i]);
         }
         const pill = tr.querySelector('.mem3-clock-pill');
@@ -1740,17 +1781,50 @@
         if (panel) fillIssuePanel(panel);
     }
 
+    const PHOTO_BY_LOGIN = Object.create(null);
+    let photoSaveTimer = 0;
+
+    function loadPhotoCache() {
+        try {
+            if (typeof GM_getValue !== 'function') return;
+            const raw = GM_getValue('mem3-badge-photos', '');
+            const parsed = raw ? JSON.parse(raw) : null;
+            if (!parsed || typeof parsed !== 'object') return;
+            const keys = Object.keys(parsed);
+            for (let i = 0; i < keys.length; i++) {
+                if (typeof parsed[keys[i]] === 'string' && parsed[keys[i]]) PHOTO_BY_LOGIN[keys[i]] = parsed[keys[i]];
+            }
+        } catch (e) { /* this browser has no saved faces */ }
+    }
+
+    function rememberPhoto(login, url) {
+        const key = String(login || '').trim().toLowerCase();
+        const src = String(url || '').trim();
+        if (!key || !src || src.length > 2000 || PHOTO_BY_LOGIN[key] === src) return;
+        PHOTO_BY_LOGIN[key] = src;
+        if (photoSaveTimer) return;
+        photoSaveTimer = setTimeout(function () {
+            photoSaveTimer = 0;
+            try {
+                if (typeof GM_setValue === 'function') GM_setValue('mem3-badge-photos', JSON.stringify(PHOTO_BY_LOGIN));
+            } catch (e) { /* ignore */ }
+        }, 400);
+    }
+
     function rememberBoardPerson(empId, person, line, station, photo) {
         if (!empId) return;
         const prev = BOARD_PEOPLE[empId] || {};
+        const login = (person && person.login) || prev.login || '';
+        const kept = photo || prev.photo || '';
         BOARD_PEOPLE[empId] = {
-            login: (person && person.login) || prev.login || '',
+            login: login,
             name: (person && person.name) || prev.name || '',
             badge: (person && person.badge) || prev.badge || '',
             line: line || prev.line || '',
             station: station || prev.station || '',
-            photo: photo || prev.photo || ''
+            photo: kept
         };
+        if (kept) rememberPhoto(login, kept);
     }
 
     function noteTimeIssue(empId, reason, extra) {
@@ -2505,7 +2579,7 @@
         if (!el || !el.getBoundingClientRect) return null;
         const r = el.getBoundingClientRect();
         let cs = null;
-        try { cs = window.getComputedStyle(el); } catch (e) { cs = null; }
+        cs = pageComputedStyle(el);
         const out = {
             tag: el.tagName || '',
             id: el.id || '',
@@ -5081,6 +5155,7 @@
                 const url = badgePhotoUrl(avatarEl(trs[i]));
                 if (!url) continue;
                 if (BOARD_PEOPLE[empId]) BOARD_PEOPLE[empId].photo = url;
+                rememberPhoto(login, url);
                 return url;
             }
         }
@@ -8376,26 +8451,50 @@
 
     const LIST_PHOTO_PX = 42;
 
+    function rowShowsLogin(tr, login) {
+        const want = String(login || '').trim().toLowerCase();
+        if (!want || !tr || !tr.querySelectorAll) return false;
+        const anchors = tr.querySelectorAll('a[role="button"], a[mdn-link]');
+        for (let i = 0; i < anchors.length; i++) {
+            const text = (anchors[i].textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            if (text === want) return true;
+        }
+        return false;
+    }
+
+    function photoFromBoard(login) {
+        const tables = document.querySelectorAll('table');
+        for (let t = 0; t < tables.length; t++) {
+            if (tables[t].closest && tables[t].closest('#' + FLOOR_SUMMARY_ID)) continue;
+            const trs = tableRows(tables[t]);
+            for (let i = 0; i < trs.length; i++) {
+                const found = findLoginInRow(trs[i]);
+                if (!(found && found.login === login) && !rowShowsLogin(trs[i], login)) continue;
+                const url = badgePhotoUrl(avatarEl(trs[i]));
+                if (url) return url;
+            }
+        }
+        return '';
+    }
+
     function photoForLogin(login) {
         const key = String(login || '').trim().toLowerCase();
         if (!key) return '';
+        if (PHOTO_BY_LOGIN[key]) return PHOTO_BY_LOGIN[key];
         const person = IDENTITY.byLogin[key];
         const empId = person && resolveEmpId(person);
         if (empId) {
             const url = photoForEmp(empId);
-            if (url) return url;
+            if (url) {
+                rememberPhoto(key, url);
+                return url;
+            }
         }
         try {
-            const tables = document.querySelectorAll('table');
-            for (let t = 0; t < tables.length; t++) {
-                if (tables[t].closest && tables[t].closest('#' + FLOOR_SUMMARY_ID)) continue;
-                const trs = tableRows(tables[t]);
-                for (let i = 0; i < trs.length; i++) {
-                    const found = findLoginInRow(trs[i]);
-                    if (!found || found.login !== key) continue;
-                    const url = badgePhotoUrl(avatarEl(trs[i]));
-                    if (url) return url;
-                }
+            const url = photoFromBoard(key);
+            if (url) {
+                rememberPhoto(key, url);
+                return url;
             }
         } catch (e) { /* the board may be mid-draw */ }
         return '';
@@ -8406,8 +8505,14 @@
         photo.setAttribute('data-mem3-list-photo', '1');
         const url = photoForLogin(login);
         photo.style.cssText = 'flex:0 0 auto; width:' + LIST_PHOTO_PX + 'px; height:' + LIST_PHOTO_PX + 'px; ' +
-            'margin-top:1px; border-radius:50%; background:#21262d center/cover no-repeat;';
-        if (url) photo.style.backgroundImage = 'url("' + String(url).replace(/"/g, '') + '")';
+            'margin-top:1px; border-radius:50%; overflow:hidden; background:#21262d;';
+        if (url) {
+            const img = document.createElement('img');
+            img.alt = '';
+            img.src = url;
+            img.style.cssText = 'width:100%; height:100%; object-fit:cover; display:block;';
+            photo.appendChild(img);
+        }
         return photo;
     }
 
@@ -10109,6 +10214,7 @@
         if (staleSummary && !staleSummary.firstChild) staleSummary.remove();
         placeCornerDebugButton();
         removeCornerPhotoDebugButton();
+        loadPhotoCache();
         installNetworkSniffer();
         watchRoute();
         showAssignments();

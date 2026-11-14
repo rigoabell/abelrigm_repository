@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.10\.6/);
+assert.match(src, /@version\s+1\.10\.7/);
 assert.match(src, /if \(shown >= 19\) return '#2ea043'/);
 assert.match(src, /if \(shown >= 16\) return '#d29922'/);
 assert.match(src, /data-mem3-enter-notes/);
@@ -120,6 +120,9 @@ assert.match(src, /Unassign Group/);
 assert.match(src, /data-mem3-unassign-group/);
 assert.match(src, /function groupRoot/);
 assert.match(src, /function peopleInGroup/);
+assert.match(src, /function pageComputedStyle/);
+assert.match(src, /PHOTO_BY_LOGIN/);
+assert.match(src, /function rowShowsLogin/);
 assert.match(src, /function openEarlyPass/);
 assert.match(src, /refreshLeaving\(\)/);
 assert.match(src, /const LEAVING_POLL_MS = 20000;/);
@@ -150,7 +153,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.10.6");
+assert.equal(entry.version, "1.10.7");
 assert.match(entry.detail, /stayed off the board for the last 3 seconds/);
 assert.match(entry.detail, /button's own handler/);
 assert.match(entry.detail, /not on the station they were marked from/);
