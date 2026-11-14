@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.30/);
+assert.match(src, /@version\s+1\.9\.31/);
 assert.match(src, /data-mem3-refresh-count/);
 assert.match(src, /data-mem3-refresh-every/);
 assert.match(src, /minute \+ ' min'/);
@@ -79,7 +79,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.30");
+assert.equal(entry.version, "1.9.31");
 const leavingList = src.slice(src.indexOf("function openLeavingList"), src.indexOf("function closeLeavingOverlay"));
 assert.ok(leavingList.indexOf("header.appendChild(close)") !== -1);
 assert.ok(leavingList.indexOf("card.appendChild(header)") < leavingList.indexOf("card.appendChild(scroller)"));
@@ -224,7 +224,7 @@ const patched = src.replace(
         setDown(value) { FCLM_DOWN = value; },
         showUpdate(remote) { showUpdatePrompt(remote); },
         shiftId, parseLeaveTime, addLeaving, dueLeaving, noteBack, markTakenOff, cleanStationText,
-        blendMediumLarge,
+        blendMediumLarge, bodyColumn,
         stationDisabled(row) { return stationIsDisabled(row); },
         stop() {
             refreshGeneration++;
@@ -553,11 +553,27 @@ try {
     assert.match(prompt, /F5/);
     assert.match(prompt, /If you do not refresh this screen/);
 
-    const blended = api.blendMediumLarge(49, 28.79, 81, 20.65);
-    const blendedHours = (49 / 28.79) + (81 / 20.65);
-    assert.equal(blended.units, 130);
+    const blended = api.blendMediumLarge(49, 28.79, 89, 25.25);
+    const blendedHours = (49 / 28.79) + (89 / 25.25);
+    assert.equal(blended.units, 138);
     assert.ok(Math.abs(blended.hours - blendedHours) < 0.000001);
-    assert.ok(Math.abs(blended.uph - (130 / blendedHours)) < 0.000001);
+    assert.ok(Math.abs(blended.uph - (138 / blendedHours)) < 0.000001);
+    const heavyShift = api.blendMediumLarge(89, 25.25, 1, 7.56);
+    assert.equal(heavyShift.units, 90);
+    assert.ok(Math.abs(heavyShift.uph - (90 / ((89 / 25.25) + (1 / 7.56)))) < 0.000001);
+    const headers = [];
+    for (let i = 0; i < 21; i++) {
+        headers.push({
+            index: i,
+            header: i === 11 ? "ShipmentReturned / EACH-Small / UNIT" : "col " + i
+        });
+    }
+    const shortRow = { children: Array.from({ length: 19 }, () => ({ getAttribute: () => null })) };
+    const fullRow = { children: Array.from({ length: 21 }, () => ({ getAttribute: () => null })) };
+    assert.equal(api.bodyColumn(headers, shortRow, 13), 11);
+    assert.equal(api.bodyColumn(headers, shortRow, 15), 13);
+    assert.equal(api.bodyColumn(headers, shortRow, 1), 1);
+    assert.equal(api.bodyColumn(headers, fullRow, 13), 13);
     const mediumOnly = api.blendMediumLarge(49, 28.79, 0, 0);
     assert.equal(mediumOnly.units, 49);
     assert.ok(Math.abs(mediumOnly.uph - 28.79) < 0.000001);

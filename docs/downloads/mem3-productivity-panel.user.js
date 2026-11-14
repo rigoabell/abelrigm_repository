@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.30
+// @version      1.9.31
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.30';
+    const SCRIPT_VERSION = '1.9.31';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -674,12 +674,58 @@
         };
     }
 
-    function columnValue(row, headers, matcher) {
+    function columnSpan(cell) {
+        return parseInt((cell && cell.getAttribute && cell.getAttribute('colspan')) || '1', 10) || 1;
+    }
+
+    function rowWidth(row) {
+        let n = 0;
         const cells = row.children;
+        for (let i = 0; i < cells.length; i++) n += columnSpan(cells[i]);
+        return n;
+    }
+
+    function headerWidth(headers) {
+        let n = 0;
+        for (let i = 0; i < headers.length; i++) n = Math.max(n, headers[i].index + 1);
+        return n;
+    }
+
+    // Empty EACH-Small cells are often left out of the row. The header still
+    // has those columns, so a raw index reads Large as Medium and Heavy as Large.
+    function shipmentStart(headers) {
+        for (let i = 0; i < headers.length; i++) {
+            const h = headers[i].header.toLowerCase();
+            if ((/each-/.test(h) || h.indexOf('shipmentreturned') !== -1) && /\b(unit|uph)\b/.test(h)) {
+                return headers[i].index;
+            }
+        }
+        return headerWidth(headers);
+    }
+
+    function bodyColumn(headers, row, headerIndex) {
+        const deficit = Math.max(0, headerWidth(headers) - rowWidth(row));
+        const start = shipmentStart(headers);
+        return headerIndex >= start ? headerIndex - deficit : headerIndex;
+    }
+
+    function cellAt(row, col) {
+        if (col < 0) return null;
+        const cells = row.children;
+        let at = 0;
+        for (let i = 0; i < cells.length; i++) {
+            const span = columnSpan(cells[i]);
+            if (col >= at && col < at + span) return cells[i];
+            at += span;
+        }
+        return null;
+    }
+
+    function columnValue(row, headers, matcher) {
         for (let i = 0; i < headers.length; i++) {
             const h = headers[i].header.toLowerCase();
             if (!matcher(h)) continue;
-            const cell = cells[headers[i].index];
+            const cell = cellAt(row, bodyColumn(headers, row, headers[i].index));
             if (!cell) continue;
             const n = parseNumber(textOf(cell));
             if (n === null) continue;
@@ -690,11 +736,48 @@
 
     function eachSizeHeader(header, size) {
         if (header.indexOf('paid hour') !== -1) return false;
-        if (size === 'medium') return /\bmedium\b/.test(header);
-        return /\blarge\b/.test(header) && !/x-?\s*large/.test(header);
+        if (/heavy/.test(header)) return false;
+        if (size === 'medium') return /each-medium|\bmedium\b/.test(header);
+        return /each-large|\blarge\b/.test(header) && !/x-?\s*large/.test(header);
+    }
+
+    function sizeFromClass(className) {
+        const c = String(className || '').toLowerCase();
+        if (!c || /heavy/.test(c)) return '';
+        if (/each-medium|size-medium/.test(c)) return 'medium';
+        if ((/each-large|size-large/.test(c)) && !/x-large|xlarge/.test(c)) return 'large';
+        return '';
+    }
+
+    // Paid hours for a size sits in front of that size's UNIT and UPH.
+    // The rate pair is the last two classed numbers, in that order.
+    function pairFromClasses(row) {
+        const found = { medium: [], large: [] };
+        const cells = row.children;
+        for (let i = 0; i < cells.length; i++) {
+            const size = sizeFromClass(cells[i].className);
+            if (!size) continue;
+            const n = parseNumber(textOf(cells[i]));
+            if (n === null) continue;
+            found[size].push(n);
+        }
+        function take(list) {
+            if (list.length < 2) return null;
+            return { units: list[list.length - 2], uph: list[list.length - 1] };
+        }
+        return { medium: take(found.medium), large: take(found.large) };
     }
 
     function sizePair(row, headers, size) {
+        const classed = pairFromClasses(row);
+        if (classed[size]) {
+            return {
+                units: classed[size].units || 0,
+                uph: classed[size].uph || 0,
+                unitHeader: size + ' class',
+                uphHeader: size + ' class'
+            };
+        }
         const units = columnValue(row, headers, function (h) {
             return eachSizeHeader(h, size) && /\bunits?\b/.test(h);
         });
@@ -713,11 +796,10 @@
         let best = null;
         let bestHeader = '';
         let bestScore = -100;
-        const cells = row.children;
         for (let i = 0; i < headers.length; i++) {
             const h = headers[i].header.toLowerCase();
             if (!matcher(h)) continue;
-            const cell = cells[headers[i].index];
+            const cell = cellAt(row, bodyColumn(headers, row, headers[i].index));
             if (!cell) continue;
             const n = parseNumber(textOf(cell));
             if (n === null) continue;
@@ -734,10 +816,9 @@
     }
 
     function bestText(row, headers, matcher) {
-        const cells = row.children;
         for (let i = 0; i < headers.length; i++) {
             if (!matcher(headers[i].header.toLowerCase())) continue;
-            const cell = cells[headers[i].index];
+            const cell = cellAt(row, bodyColumn(headers, row, headers[i].index));
             if (cell) return textOf(cell);
         }
         return '';
