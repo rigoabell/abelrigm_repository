@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.32
+// @version      1.9.33
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.32';
+    const SCRIPT_VERSION = '1.9.33';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -2451,6 +2451,56 @@
         }
     }
 
+    function rowHasOverride(el) {
+        if (!el || !el.querySelectorAll) return false;
+        const nodes = el.querySelectorAll('button, a, span, div');
+        for (let i = 0; i < nodes.length; i++) {
+            const node = nodes[i];
+            const cls = String(node.className || '');
+            if (cls.indexOf(DECOR_CLASS) !== -1 || cls.indexOf(BIGS_IDLE_CLASS) !== -1) continue;
+            if (/^override$/i.test(directText(node).replace(/\s+/g, ' ').trim())) return true;
+        }
+        return false;
+    }
+
+    function keepBadgeBesideLogin(host) {
+        if (!host || !host.style) return;
+        loosenBadgeHost(host);
+        let display = '';
+        try {
+            display = window.getComputedStyle ? (window.getComputedStyle(host).display || '') : '';
+        } catch (e) {
+            display = '';
+        }
+        if (display.indexOf('flex') === -1) return;
+        host.style.flexWrap = 'nowrap';
+        host.style.alignItems = 'center';
+    }
+
+    // Override lives in the same row as the name. The grid has to be a sibling
+    // of the name box, placed before Override, or a tight row wraps it under the login.
+    function placeBesideLogin(tr, loginEl, badge) {
+        let node = loginEl;
+        while (node && node.parentElement && node.parentElement !== tr) {
+            const parent = node.parentElement;
+            const tag = String(parent.tagName || '').toUpperCase();
+            if (tag === 'TD' || tag === 'TR' || tag === 'TABLE') break;
+            if (rowHasOverride(parent) && !rowHasOverride(node)) {
+                keepBadgeBesideLogin(parent);
+                const before = node.nextSibling;
+                if (before !== badge) {
+                    if (before) parent.insertBefore(badge, before);
+                    else parent.appendChild(badge);
+                }
+                return;
+            }
+            node = parent;
+        }
+        const host = badgeHost(loginEl, tr);
+        keepBadgeBesideLogin(host);
+        if (badge.parentElement !== host) host.appendChild(badge);
+    }
+
     function makeBadge(stats, known, time, empId) {
         const wrap = document.createElement('span');
         wrap.className = DECOR_CLASS;
@@ -2479,17 +2529,21 @@
     }
 
     function placeRowBadge(tr, found, stats, known, time, empId) {
-        const badge = makeBadge(stats, known, time, empId);
-        const sig = badge.getAttribute('data-sig');
+        const preview = makeBadge(stats, known, time, empId);
+        const sig = preview.getAttribute('data-sig');
         const existing = tr.querySelector('.' + DECOR_CLASS);
-        if (existing && existing.getAttribute('data-sig') === sig) return;
-        if (existing && existing.parentNode) existing.parentNode.replaceChild(badge, existing);
-        else {
-            const host = badgeHost(found.el, tr);
-            loosenBadgeHost(host);
-            host.appendChild(badge);
+        let badge = preview;
+        if (existing && existing.getAttribute('data-sig') === sig) {
+            badge = existing;
+        } else if (existing && existing.parentNode) {
+            existing.parentNode.replaceChild(preview, existing);
         }
-        loosenBadgeHost(badge.parentElement);
+        if (found && found.el) placeBesideLogin(tr, found.el, badge);
+        else {
+            const host = badgeHost(null, tr);
+            keepBadgeBesideLogin(host);
+            if (badge.parentElement !== host) host.appendChild(badge);
+        }
     }
 
     function assignmentHasBigs(text) {

@@ -7,12 +7,14 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.32/);
+assert.match(src, /@version\s+1\.9\.33/);
 assert.match(src, /grid-template-columns:max-content max-content/);
 assert.match(src, /placeBadgeCell\(rate, 1, 1\)/);
 assert.match(src, /placeBadgeCell\(idle, 1, 2\)/);
 assert.match(src, /placeBadgeCell\(now, 2, 2\)/);
 assert.match(src, /placeBadgeCell\(pill, 2, 1\)/);
+assert.match(src, /function placeBesideLogin/);
+assert.match(src, /flexWrap = 'nowrap'/);
 assert.match(src, /data-mem3-refresh-count/);
 assert.match(src, /data-mem3-refresh-every/);
 assert.match(src, /minute \+ ' min'/);
@@ -84,7 +86,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.32");
+assert.equal(entry.version, "1.9.33");
 const leavingList = src.slice(src.indexOf("function openLeavingList"), src.indexOf("function closeLeavingOverlay"));
 assert.ok(leavingList.indexOf("header.appendChild(close)") !== -1);
 assert.ok(leavingList.indexOf("card.appendChild(header)") < leavingList.indexOf("card.appendChild(scroller)"));
@@ -229,7 +231,7 @@ const patched = src.replace(
         setDown(value) { FCLM_DOWN = value; },
         showUpdate(remote) { showUpdatePrompt(remote); },
         shiftId, parseLeaveTime, addLeaving, dueLeaving, noteBack, markTakenOff, cleanStationText,
-        blendMediumLarge, bodyColumn,
+        blendMediumLarge, bodyColumn, placeBesideLogin,
         stationDisabled(row) { return stationIsDisabled(row); },
         stop() {
             refreshGeneration++;
@@ -282,6 +284,22 @@ function makeNode(tag) {
         child.parentElement = node;
         child.parentNode = node;
         node.children.push(child);
+        syncSiblings(node);
+        return child;
+    };
+    node.insertBefore = function (child, before) {
+        if (child.parentElement && child.parentElement !== node) {
+            child.parentElement.children = child.parentElement.children.filter((item) => item !== child);
+            syncSiblings(child.parentElement);
+        } else if (child.parentElement === node) {
+            node.children = node.children.filter((item) => item !== child);
+        }
+        const idx = before ? node.children.indexOf(before) : -1;
+        if (idx === -1) node.children.push(child);
+        else node.children.splice(idx, 0, child);
+        child.parentElement = node;
+        child.parentNode = node;
+        syncSiblings(node);
         return child;
     };
     node.remove = function () {
@@ -290,6 +308,8 @@ function makeNode(tag) {
         parent.children = parent.children.filter((child) => child !== node);
         node.parentElement = null;
         node.parentNode = null;
+        node.nextSibling = null;
+        syncSiblings(parent);
     };
     node.closest = function () { return null; };
     node.addEventListener = function () {};
@@ -310,6 +330,13 @@ function makeNode(tag) {
     return node;
 }
 
+function syncSiblings(parent) {
+    if (!parent || !parent.children) return;
+    for (let i = 0; i < parent.children.length; i++) {
+        parent.children[i].nextSibling = i + 1 < parent.children.length ? parent.children[i + 1] : null;
+    }
+}
+
 function nodeMatches(node, sel) {
     if (sel.charAt(0) === ".") return node.className.split(/\s+/).includes(sel.slice(1));
     if (sel === "table") return node.tagName === "TABLE";
@@ -318,6 +345,7 @@ function nodeMatches(node, sel) {
     if (sel === "span") return node.tagName === "SPAN";
     if (sel === "a") return node.tagName === "A";
     if (sel === "button") return node.tagName === "BUTTON";
+    if (sel === "div") return node.tagName === "DIV";
     if (sel === "a[role=\"button\"]") return node.tagName === "A" && node.attrs.role === "button";
     if (sel === "a[mdn-link]") return node.tagName === "A" && Object.prototype.hasOwnProperty.call(node.attrs, "mdn-link");
     return false;
@@ -584,6 +612,43 @@ try {
     assert.ok(Math.abs(mediumOnly.uph - 28.79) < 0.000001);
     assert.equal(api.blendMediumLarge(10, 0, 0, 20).units, 0);
     assert.equal(api.blendMediumLarge(0, 0, 0, 0).uph, 0);
+
+    sandbox.getComputedStyle = function () { return { display: "flex" }; };
+    const overrideRow = makeNode("tr");
+    const overrideCell = makeNode("td");
+    const overrideLine = makeNode("div");
+    const overrideName = makeNode("div");
+    const overrideLogin = makeNode("a");
+    overrideLogin.textContent = "kimblnah";
+    const overrideBtn = makeNode("button");
+    overrideBtn.textContent = "Override";
+    const overrideBadge = makeNode("span");
+    overrideBadge.className = "mem3-uph-badge";
+    overrideName.appendChild(overrideLogin);
+    overrideLine.appendChild(makeNode("div"));
+    overrideLine.appendChild(overrideName);
+    overrideLine.appendChild(overrideBtn);
+    overrideCell.appendChild(overrideLine);
+    overrideRow.appendChild(overrideCell);
+    api.placeBesideLogin(overrideRow, overrideLogin, overrideBadge);
+    assert.equal(overrideBadge.parentElement, overrideLine);
+    assert.equal(overrideName.nextSibling, overrideBadge);
+    assert.equal(overrideBadge.nextSibling, overrideBtn);
+    assert.equal(overrideLine.style.flexWrap, "nowrap");
+    assert.equal(overrideLine.style.alignItems, "center");
+    const plainRow = makeNode("tr");
+    const plainCell = makeNode("td");
+    const plainLine = makeNode("div");
+    const plainName = makeNode("div");
+    const plainLogin = makeNode("a");
+    plainLogin.textContent = "sylvasde";
+    const plainBadge = makeNode("span");
+    plainName.appendChild(plainLogin);
+    plainLine.appendChild(plainName);
+    plainCell.appendChild(plainLine);
+    plainRow.appendChild(plainCell);
+    api.placeBesideLogin(plainRow, plainLogin, plainBadge);
+    assert.equal(plainBadge.parentElement, plainName);
 
     const noon = new Date(2026, 10, 13, 12, 0);
     assert.equal(api.shiftId(noon), "2026-11-13-days");
