@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.10\.10/);
+assert.match(src, /@version\s+1\.10\.11/);
 assert.match(src, /if \(shown >= 19\) return '#2ea043'/);
 assert.match(src, /if \(shown >= 16\) return '#d29922'/);
 assert.match(src, /data-mem3-enter-notes/);
@@ -158,7 +158,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.10.10");
+assert.equal(entry.version, "1.10.11");
 assert.match(entry.detail, /stayed off the board for the last 3 seconds/);
 assert.match(entry.detail, /button's own handler/);
 assert.match(entry.detail, /no longer at the station they were marked from/);
@@ -311,7 +311,7 @@ const patched = src.replace(
         setDown(value) { FCLM_DOWN = value; },
         showUpdate(remote) { showUpdatePrompt(remote); },
         shiftId, parseLeaveTime, addLeaving, dueLeaving, noteBack, markTakenOff, cleanStationText, customerReturnsLines,
-        blendMediumLarge, overallRate, bodyColumn, sizePair, placeBesideLogin, extremeRanks, uphHighlight, uphColor,
+        blendMediumLarge, overallRate, bodyColumn, sizePair, excludedFromBigsIdle, placeBesideLogin, extremeRanks, uphHighlight, uphColor,
         stationDisabled(row) { return stationIsDisabled(row); },
         stop() {
             refreshGeneration++;
@@ -789,6 +789,14 @@ try {
     const shiftedPair = api.sizePair({ children: shiftedCells }, shiftedHeaders, "medium");
     assert.equal(shiftedPair.units, 49);
     assert.ok(Math.abs(shiftedPair.uph - 28.79) < 0.000001);
+    assert.equal(api.excludedFromBigsIdle("CRETS Waterspider"), true);
+    assert.equal(api.excludedFromBigsIdle("CRETS Water Spider"), true);
+    assert.equal(api.excludedFromBigsIdle("CRETS EOL"), true);
+    assert.equal(api.excludedFromBigsIdle("CRETS EOL 2"), true);
+    assert.equal(api.excludedFromBigsIdle("CRETS End of Line"), true);
+    assert.equal(api.excludedFromBigsIdle("Customer Returns 1st Half Station 1-01"), false);
+    assert.equal(api.excludedFromBigsIdle("BIGS Station 8-10"), false);
+    assert.match(entry.detail, /CRETS Waterspider and both CRETS EOL/);
     const ranks = api.extremeRanks([
         { name: "LINE 1 ODD", avgUph: 20, idleMin: 10, clockedMin: 100 },
         { name: "BIGS", avgUph: 5, idleMin: 50, clockedMin: 100 },

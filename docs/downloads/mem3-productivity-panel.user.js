@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.10.10
+// @version      1.10.11
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.10.10';
+    const SCRIPT_VERSION = '1.10.11';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -2177,6 +2177,16 @@
     //   Customer Returns
     //   1st Half: Station 3-06 | 2nd Half: Station 3-70
     // Waterspiders and other roles on the same line are not stations.
+    // CRETS Waterspider and both CRETS EOL rows stay on the board.
+    // Their time stays out of the BIGS Line + Line Support idle percent.
+    function excludedFromBigsIdle(text) {
+        const t = String(text || '').replace(/\s+/g, ' ');
+        if (!/\bcrets?\b/i.test(t)) return false;
+        if (/water\s*spider/i.test(t)) return true;
+        if (/\beol\b/i.test(t) || /end\s+of\s+line/i.test(t)) return true;
+        return false;
+    }
+
     function isCustomerReturnsStation(text) {
         const t = String(text || '').replace(/\s+/g, ' ').trim();
         const split = t.match(/^(.*?)\s*1st\s*half\b/i);
@@ -4931,7 +4941,8 @@
         const idlePct = opts.idlePct;
         const ic = idleColor(idlePct);
         const scopeIds = opts.empIds || [];
-        const idleCount = idleIdsIn(scopeIds).idle.length;
+        const idleScope = opts.idleIds || scopeIds;
+        const idleCount = idleIdsIn(idleScope).idle.length;
         cell.setAttribute('data-summary', opts.summaryKey || '');
         function viewButton(title, onClick) {
             const btn = document.createElement('button');
@@ -4979,12 +4990,12 @@
         addMetric(idleLabel(idlePct), 'IDLE', ic, opts.idleRank || '', size, {
             key: 'idle',
             viewTitle: 'View idle percent, highest first',
-            onView: function () { openRosterPopup(scopeLabel, scopeIds, 'idle'); }
+            onView: function () { openRosterPopup(scopeLabel, idleScope, 'idle'); }
         });
         addMetric(String(idleCount), 'ASSOCIATES IDLE', idleCount > 0 ? '#f85149' : '#c9d1d9', '', size, {
             key: 'idleCount',
             viewTitle: 'View associates idle for 11 minutes',
-            onView: function () { openRosterPopup(scopeLabel, scopeIds, 'idleNow'); }
+            onView: function () { openRosterPopup(scopeLabel, idleScope, 'idleNow'); }
         });
         addMetric(formatUnits(opts.units || 0), 'units', '#8b949e', '', opts.lead ? 16 : 13, { key: 'units' });
         addMetric(formatDuration(opts.idleMin || 0), 'hrs idle', '#8b949e', '', opts.lead ? 16 : 13, { key: 'idleHours' });
@@ -5059,6 +5070,16 @@
         const lines = (data && data.lines) || [];
         for (let i = 0; i < lines.length; i++) {
             const list = lines[i].empIds || [];
+            for (let j = 0; j < list.length; j++) ids.push(list[j]);
+        }
+        return uniqueIds(ids);
+    }
+
+    function lineIdleIdsOf(data) {
+        const ids = [];
+        const lines = (data && data.lines) || [];
+        for (let i = 0; i < lines.length; i++) {
+            const list = lines[i].idleIds || lines[i].empIds || [];
             for (let j = 0; j < list.length; j++) ids.push(list[j]);
         }
         return uniqueIds(ids);
@@ -5467,7 +5488,8 @@
                 return l.name + ':' + l.withData + ':' + l.staffed + ':' +
                     (l.signed || 0) + '/' + (l.stations || 0) + ':' +
                     (l.openStations || []).join(';') + ':' +
-                    (l.disabledStations || []).join(';') + ':' + (l.empIds || []).join('.');
+                    (l.disabledStations || []).join(';') + ':' + (l.empIds || []).join('.') +
+                    ':' + (l.idleIds || []).join('.');
             }).join(',');
     }
 
@@ -5507,11 +5529,12 @@
             return true;
         }
         const totalIds = lineIdsOf(data);
+        const totalIdleIds = lineIdleIdsOf(data);
         if (!paint('total', {
             uphText: data.floorAvg > 0 ? data.floorAvg.toFixed(1) : '\u2014',
             uph: data.floorAvg,
             idlePct: sideIdlePct(data.floorIdleMin || 0, data.floorClockedMin || 0),
-            idleCount: idleIdsIn(totalIds).idle.length,
+            idleCount: idleIdsIn(totalIdleIds).idle.length,
             units: data.floorUnits || 0,
             idleMin: data.floorIdleMin || 0
         })) return false;
@@ -5523,7 +5546,7 @@
                 uphRank: uphHighlight(line, ranks),
                 idlePct: sideIdlePct(line.idleMin || 0, line.clockedMin || 0),
                 idleRank: metricRank(shownIdle(line), ranks.bestIdle, ranks.worstIdle),
-                idleCount: idleIdsIn(line.empIds || []).idle.length,
+                idleCount: idleIdsIn(line.idleIds || line.empIds || []).idle.length,
                 units: line.totalUnits || 0,
                 idleMin: line.idleMin || 0
             })) return false;
@@ -5706,6 +5729,7 @@
             summaryKey: 'total',
             scopeLabel: 'Total',
             empIds: totalIds,
+            idleIds: lineIdleIdsOf(data),
             kicker: 'Total',
             value: data.floorAvg > 0 ? data.floorAvg.toFixed(1) : '\u2014',
             uph: data.floorAvg,
@@ -5731,6 +5755,7 @@
                 summaryKey: line.name,
                 scopeLabel: panelTitle(line.name),
                 empIds: line.empIds || [],
+                idleIds: line.idleIds || line.empIds || [],
                 kicker: panelTitle(line.name),
                 value: line.avgUph > 0 ? line.avgUph.toFixed(1) : '\u2014',
                 uph: line.avgUph,
@@ -5794,6 +5819,8 @@
     function decorateSection(panelName, sectionLabels) {
         const uphList = [];
         const empIds = [];
+        const idleIds = [];
+        const idleLeftOut = [];
         let totalUnits = 0, staffed = 0, total = 0, withData = 0, totalMin = 0, idleMin = 0, clockedMin = 0, both = 0;
         let crStations = 0, crSigned = 0;
         const openStations = [];
@@ -5836,14 +5863,17 @@
                 const empId = resolveEmpId(person);
                 const stats = statsFor(empId, panelName === 'BIGS');
                 const time = timeFor(empId);
+                const skipIdle = panelName === 'BIGS' && excludedFromBigsIdle(assignment);
+                if (skipIdle && idleLeftOut.indexOf(assignment) === -1) idleLeftOut.push(assignment);
                 if (empId) {
                     if (empIds.indexOf(empId) === -1) empIds.push(empId);
+                    if (!skipIdle && idleIds.indexOf(empId) === -1) idleIds.push(empId);
                     rememberBoardPerson(empId, person, panelName, rowAssignmentText(tr), badgePhotoUrl(avatarEl(tr)));
                 }
                 if (stats.hasData) withData++;
                 if (stats.hasData && showsIdle(time)) both++;
                 if (stats.uph > 0) { uphList.push(stats.uph); totalUnits += stats.units; }
-                if (time && time.hasTime) {
+                if (!skipIdle && time && time.hasTime) {
                     totalMin += time.totalMin;
                     idleMin += time.idleMin;
                     clockedMin += time.clockedMin || 0;
@@ -5900,6 +5930,7 @@
         return {
             avgUph: avgUph, totalUnits: totalUnits, staffed: staffed, total: total, withData: withData,
             totalMin: totalMin, idleMin: idleMin, clockedMin: clockedMin, both: both, empIds: empIds,
+            idleIds: idleIds, idleLeftOut: idleLeftOut,
             crStations: crStations, crSigned: crSigned, openStations: openStations, disabledStations: disabledStations
         };
     }
@@ -6296,7 +6327,9 @@
                     signed: s.crSigned,
                     openStations: s.openStations || [],
                     disabledStations: s.disabledStations || [],
-                    empIds: s.empIds || []
+                    empIds: s.empIds || [],
+                    idleIds: s.idleIds || s.empIds || [],
+                    idleLeftOut: s.idleLeftOut || []
                 });
                 DEBUG.perLine[panels[i].name] = lineStats[lineStats.length - 1];
                 if (s.avgUph > 0) avgList.push(s.avgUph);
@@ -6312,12 +6345,15 @@
                 const disabledList = s.disabledStations || [];
                 for (let d = 0; d < disabledList.length; d++) floorDisabled.push(panelTitle(panels[i].name) + '  ' + disabledList[d]);
                 const ids = s.empIds || [];
+                const countedIdle = Object.create(null);
+                const idleList = s.idleIds || ids;
+                for (let n = 0; n < idleList.length; n++) countedIdle[idleList[n]] = true;
                 for (let e = 0; e < ids.length; e++) {
                     if (floorSeen[ids[e]]) continue;
                     floorSeen[ids[e]] = true;
                     BOARD_IDS.push(ids[e]);
                     const t = LAST_TIME[ids[e]];
-                    if (t && t.hasTime) {
+                    if (t && t.hasTime && countedIdle[ids[e]]) {
                         floorTotalMin += t.totalMin;
                         floorIdleMin += t.idleMin;
                         floorClockedMin += t.clockedMin || 0;
@@ -7320,7 +7356,7 @@
             ['Formula', 'Indirect time + Time Off Task, divided by paid time clocked in'],
             ['Counts', 'Indirect function time and Time Off Task in the selected window'],
             ['Does not count', 'Active graded time, or time outside the window'],
-            ['BIGs', 'BIGS Line + Line Support. It sits under L1 Odd and has the same rate, idle percent, associates idle, units, and hours. Those associates count in Total.'],
+            ['BIGs', 'BIGS Line + Line Support. It sits under L1 Odd and has the same rate, idle percent, associates idle, units, and hours. Those associates count in Total. The idle percent leaves out CRETS Waterspider and both CRETS EOL rows. Their own row still shows a rate and an idle percent.'],
             ['Other BIGS rows', 'A station outside that group whose name contains BIGS shows idle on the row and stays out of the line totals.'],
             ['Idle now', 'A red yield sign sits between the login and the UPH and idle percent. The latest function row is indirect or Time Off Task, and that row has lasted at least 11 minutes. A diamond in the function title is still that stretch. A shorter row is the lag after a scan. Someone who is clocked out is not counted. Earlier idle in the window still counts in the percent. In or Out stays on the photo ring.'],
             ['ASSOCIATES IDLE', 'The number under the idle percent is how many associates on that side, or on the whole floor for Total, have been idle for at least 11 minutes. The white eye on the left opens that list.'],
