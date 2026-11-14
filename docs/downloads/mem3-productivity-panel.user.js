@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.10.7
+// @version      1.10.8
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.10.7';
+    const SCRIPT_VERSION = '1.10.8';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -3957,6 +3957,34 @@
         return text;
     }
 
+    function missingFromMarkedStation(login, station) {
+        if (!stationCodes(station).length) return false;
+        let anchors = [];
+        try { anchors = boardAnchors(true); } catch (e) { return false; }
+        if (!anchors.length) return false;
+        return !anchorOnMarkedStation(login, station);
+    }
+
+    async function stayedOffStation(login, station) {
+        if (!stationCodes(station).length) return false;
+        const samples = [];
+        const start = Date.now();
+        while (Date.now() - start < UNASSIGN_WATCH_MS) {
+            if (RUN_STOP || leavingStop) return false;
+            if (!missingFromMarkedStation(login, station)) samples.push(false);
+            else samples.push(true);
+            if (samples.length >= UNASSIGN_HOLD) {
+                let held = true;
+                for (let i = samples.length - UNASSIGN_HOLD; i < samples.length; i++) {
+                    if (!samples[i]) { held = false; break; }
+                }
+                if (held) return true;
+            }
+            await sleep(UNASSIGN_SAMPLE_MS);
+        }
+        return false;
+    }
+
     async function watchUnassign(login, station) {
         const samples = [];
         const start = Date.now();
@@ -7855,6 +7883,9 @@
         }
         if (event && event.action === 'unassign') return actor + ' unassigned ' + who + when;
         if (event && event.action === 'miss') return actor + ' found ' + who + ' was not on a station' + when;
+        if (event && event.action === 'drop') {
+            return who + ' fell off the early out. They were not on the station' + when;
+        }
         if (event && event.action === 'fail') return actor + ' could not take ' + who + ' off' + when;
         if (event && event.action === 'back') {
             return actor + ' saw ' + who + ' back on ' + (event.detail || '') + when;
@@ -7877,6 +7908,8 @@
         if (match) return actor + ' could not take ' + personLabel(match[1]) + ' off' + when;
         match = text.match(/^(\S+) was not on a station$/);
         if (match) return actor + ' found ' + personLabel(match[1]) + ' was not on a station' + when;
+        match = text.match(/^(\S+) fell off the early out$/);
+        if (match) return personLabel(match[1]) + ' fell off the early out. They were not on the station' + when;
         match = text.match(/^(\S+) back on (.+)$/);
         if (match) return actor + ' saw ' + personLabel(match[1]) + ' back on ' + match[2] + when;
         match = text.match(/^(\S+) already marked at (.+)$/);
@@ -8409,6 +8442,20 @@
         return out;
     }
 
+    function dropFromEarlyOut(doc, row, now, by) {
+        if (!row || !leavingOpen(row)) return false;
+        const stamp = now || new Date();
+        row.status = 'cancelled';
+        row.clearedAt = clockText(stamp);
+        row.clearedAtMs = stamp.getTime();
+        row.clearedBy = '';
+        row.takenHow = 'left station';
+        recordActivity(doc, by || 'board', row.login + ' fell off the early out', stamp, {
+            action: 'drop', who: row.login, said: row.said, detail: row.station || ''
+        });
+        return true;
+    }
+
     function markTakenOff(row, now, how) {
         row.status = 'off';
         row.takenOffAt = clockText(now);
@@ -8709,6 +8756,7 @@
         const now = new Date();
         const doc = loadLeaving();
         if (noteReturns(doc, shiftRows(doc, now), now)) saveLeaving(doc);
+        watchMarkedStations();
         paintEarlyLog();
         if (leavingShareOn()) {
             pullLeaving().then(function () {
@@ -8772,7 +8820,7 @@
         holdLeaving(true);
         let off = 0;
         const taken = [];
-        const skippedNames = [];
+        const fellNames = [];
         const left = [];
         try {
             recordActivity(doc, actor, 'started unassign through ' + throughLabel, now, { action: 'note' });
@@ -8785,7 +8833,7 @@
                 const row = rows[i];
                 paintEarlyProgress(i, rows.length, row.login);
                 setLeavingStatus('Unassigning ' + (i + 1) + '/' + rows.length + ' · ' + row.login);
-                const anchor = anchorOnMarkedStation(row.login, row.station);
+                let anchor = anchorOnMarkedStation(row.login, row.station);
                 const stamp = new Date();
                 const step = {
                     at: clockText(stamp),
@@ -8795,9 +8843,28 @@
                     result: ''
                 };
                 if (!anchor) {
+                    const gone = await stayedOffStation(row.login, row.station);
+                    anchor = anchorOnMarkedStation(row.login, row.station);
+                    if (!anchor && gone && !leavingStop) {
+                        dropFromEarlyOut(doc, row, stamp, actor);
+                        step.result = 'fell off';
+                        step.note = 'Not on the marked station.';
+                        fellNames.push(row.login);
+                        run.steps.push(step);
+                        paintEarlyProgress(i + 1, rows.length, '');
+                        continue;
+                    }
+                }
+                if (!anchor) {
+                    if (leavingStop) {
+                        left.push(row.login);
+                        for (let j = i + 1; j < rows.length; j++) left.push(rows[j].login);
+                        step.result = 'stopped';
+                        run.steps.push(step);
+                        break;
+                    }
                     step.result = 'skipped';
-                    step.note = 'Not on the marked station.';
-                    skippedNames.push(row.login);
+                    step.note = 'The station check did not hold.';
                     run.steps.push(step);
                     paintEarlyProgress(i + 1, rows.length, '');
                     continue;
@@ -8886,12 +8953,12 @@
                 paintEarlyProgress(i + 1, rows.length, '');
             }
             const later = waiting.length - rows.length;
-            run.summary = 'Through ' + throughLabel + '. Unassigned ' + off + '. ' + skippedNames.length +
-                ' were skipped because they were not on the marked station. ' +
-                (rows.length - off - skippedNames.length) + ' could not be taken off. ' +
+            run.summary = 'Through ' + throughLabel + '. Unassigned ' + off + '. ' + fellNames.length +
+                ' fell off because they were not on the station. ' +
+                (rows.length - off - fellNames.length) + ' could not be taken off. ' +
                 later + ' are still waiting for their time.';
             if (taken.length) run.summary += ' Unassigned: ' + taken.join(', ') + '.';
-            if (skippedNames.length) run.summary += ' Skipped: ' + skippedNames.join(', ') + '.';
+            if (fellNames.length) run.summary += ' Fell off: ' + fellNames.join(', ') + '.';
             if (leavingStop) {
                 run.stopped = true;
                 run.summary = 'Stopped. Unassigned ' + taken.length +
@@ -8901,7 +8968,7 @@
             }
             run.off = off;
             run.missed = 0;
-            run.skipped = skippedNames;
+            run.fell = fellNames;
             run.failed = left.length;
             run.stillWaiting = later;
             run.taken = taken;
@@ -8921,6 +8988,43 @@
             unassigning = false;
             leavingBusy = false;
             paintEarlyLog();
+        }
+    }
+
+    let leftStationWatch = false;
+
+    async function watchMarkedStations() {
+        if (leftStationWatch || leavingBusy || unassigning || !isAssignmentsPage()) return;
+        const now = new Date();
+        const doc = loadLeaving();
+        const open = markedLeaving(shiftRows(doc, now));
+        const absent = [];
+        for (let i = 0; i < open.length; i++) {
+            if (missingFromMarkedStation(open[i].login, open[i].station)) absent.push(open[i]);
+        }
+        if (!absent.length) return;
+        leftStationWatch = true;
+        try {
+            for (let i = 0; i < absent.length; i++) {
+                if (leavingBusy || unassigning) return;
+                const row = absent[i];
+                const gone = await stayedOffStation(row.login, row.station);
+                if (!gone || leavingBusy || unassigning) continue;
+                const fresh = loadLeaving();
+                const liveRows = shiftRows(fresh, new Date());
+                let live = null;
+                for (let r = 0; r < liveRows.length; r++) {
+                    if (liveRows[r] && liveRows[r].id === row.id) live = liveRows[r];
+                }
+                if (!live || !leavingOpen(live)) continue;
+                if (!missingFromMarkedStation(live.login, live.station)) continue;
+                const stamp = new Date();
+                if (!dropFromEarlyOut(fresh, live, stamp, 'board')) continue;
+                saveLeaving(fresh);
+                paintEarlyLog();
+            }
+        } finally {
+            leftStationWatch = false;
         }
     }
 
