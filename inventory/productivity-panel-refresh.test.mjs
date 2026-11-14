@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.10\.9/);
+assert.match(src, /@version\s+1\.10\.10/);
 assert.match(src, /if \(shown >= 19\) return '#2ea043'/);
 assert.match(src, /if \(shown >= 16\) return '#d29922'/);
 assert.match(src, /data-mem3-enter-notes/);
@@ -158,7 +158,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.10.9");
+assert.equal(entry.version, "1.10.10");
 assert.match(entry.detail, /stayed off the board for the last 3 seconds/);
 assert.match(entry.detail, /button's own handler/);
 assert.match(entry.detail, /no longer at the station they were marked from/);
@@ -311,7 +311,7 @@ const patched = src.replace(
         setDown(value) { FCLM_DOWN = value; },
         showUpdate(remote) { showUpdatePrompt(remote); },
         shiftId, parseLeaveTime, addLeaving, dueLeaving, noteBack, markTakenOff, cleanStationText, customerReturnsLines,
-        blendMediumLarge, overallRate, bodyColumn, placeBesideLogin, extremeRanks, uphHighlight, uphColor,
+        blendMediumLarge, overallRate, bodyColumn, sizePair, placeBesideLogin, extremeRanks, uphHighlight, uphColor,
         stationDisabled(row) { return stationIsDisabled(row); },
         stop() {
             refreshGeneration++;
@@ -719,6 +719,76 @@ try {
     const overall = api.overallRate(overallRow, overallHeaders);
     assert.equal(overall.units, 139);
     assert.ok(Math.abs(overall.uph - (139 / 5.36)) < 0.000001);
+    const bigsHeaders = [
+        { index: 0, header: "Paid Hours / Total" },
+        { index: 1, header: "ShipmentReturned / EACH-Medium / Paid Hours" },
+        { index: 2, header: "ShipmentReturned / EACH-Medium / UNIT" },
+        { index: 3, header: "ShipmentReturned / EACH-Medium / UPH" },
+        { index: 4, header: "ShipmentReturned / EACH-Medium / JPH" },
+        { index: 5, header: "ShipmentReturned / EACH-Large / Paid Hours" },
+        { index: 6, header: "ShipmentReturned / EACH-Large / UNIT" },
+        { index: 7, header: "ShipmentReturned / EACH-Large / UPH" },
+        { index: 8, header: "ShipmentReturned / EACH-Large / JPH" }
+    ];
+    const bigsRow = {
+        children: [
+            rateCell("6.2"),
+            rateCell("1.4", "each-medium"),
+            rateCell("49", "each-medium"),
+            rateCell("28.79", "each-medium"),
+            rateCell("4.1", "each-medium"),
+            rateCell("2.1", "each-large"),
+            rateCell("89", "each-large"),
+            rateCell("25.25", "each-large"),
+            rateCell("3.2", "each-large")
+        ]
+    };
+    const mediumPair = api.sizePair(bigsRow, bigsHeaders, "medium");
+    const largePair = api.sizePair(bigsRow, bigsHeaders, "large");
+    assert.equal(mediumPair.units, 49);
+    assert.ok(Math.abs(mediumPair.uph - 28.79) < 0.000001);
+    assert.equal(largePair.units, 89);
+    assert.ok(Math.abs(largePair.uph - 25.25) < 0.000001);
+    const bigsBlend = api.blendMediumLarge(mediumPair.units, mediumPair.uph, largePair.units, largePair.uph);
+    assert.ok(bigsBlend.uph > 20);
+    const classOnly = {
+        children: [
+            rateCell("49", "each-medium"),
+            rateCell("28.79", "each-medium")
+        ]
+    };
+    const classPair = api.sizePair(classOnly, [], "medium");
+    assert.equal(classPair.units, 49);
+    assert.ok(Math.abs(classPair.uph - 28.79) < 0.000001);
+    const trailingJph = {
+        children: [
+            rateCell("1.4", "each-medium"),
+            rateCell("49", "each-medium"),
+            rateCell("28.79", "each-medium"),
+            rateCell("4.1", "each-medium")
+        ]
+    };
+    const trailingPair = api.sizePair(trailingJph, [], "medium");
+    assert.equal(trailingPair.units, 49);
+    assert.ok(Math.abs(trailingPair.uph - 28.79) < 0.000001);
+    const shiftedHeaders = [];
+    for (let i = 0; i < 21; i++) {
+        let label = "col " + i;
+        if (i === 11) label = "ShipmentReturned / EACH-Small / UNIT";
+        if (i === 12) label = "ShipmentReturned / EACH-Small / UPH";
+        if (i === 13) label = "ShipmentReturned / EACH-Medium / UNIT";
+        if (i === 14) label = "ShipmentReturned / EACH-Medium / UPH";
+        if (i === 15) label = "ShipmentReturned / EACH-Medium / JPH";
+        shiftedHeaders.push({ index: i, header: label });
+    }
+    const shiftedCells = [];
+    for (let i = 0; i < 19; i++) shiftedCells.push(rateCell("0"));
+    shiftedCells[11] = rateCell("49", "each-medium");
+    shiftedCells[12] = rateCell("28.79", "each-medium");
+    shiftedCells[13] = rateCell("4.1", "each-medium");
+    const shiftedPair = api.sizePair({ children: shiftedCells }, shiftedHeaders, "medium");
+    assert.equal(shiftedPair.units, 49);
+    assert.ok(Math.abs(shiftedPair.uph - 28.79) < 0.000001);
     const ranks = api.extremeRanks([
         { name: "LINE 1 ODD", avgUph: 20, idleMin: 10, clockedMin: 100 },
         { name: "BIGS", avgUph: 5, idleMin: 50, clockedMin: 100 },

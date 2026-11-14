@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.10.9
+// @version      1.10.10
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.10.9';
+    const SCRIPT_VERSION = '1.10.10';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -749,46 +749,100 @@
         return '';
     }
 
-    // Paid hours for a size sits in front of that size's UNIT and UPH.
-    // The rate pair is the last two classed numbers, in that order.
-    function pairFromClasses(row) {
-        const found = { medium: [], large: [] };
-        const cells = row.children;
-        for (let i = 0; i < cells.length; i++) {
-            const size = sizeFromClass(cells[i].className);
-            if (!size) continue;
-            const n = parseNumber(textOf(cells[i]));
-            if (n === null) continue;
-            found[size].push(n);
+    function sizeFromHeader(header) {
+        const h = String(header || '').toLowerCase();
+        if (!h || /heavy/.test(h) || /x-?\s*large/.test(h)) return '';
+        if (/each-medium|\bmedium\b/.test(h)) return 'medium';
+        if (/each-large|\blarge\b/.test(h)) return 'large';
+        return '';
+    }
+
+    function headerAt(headers, index) {
+        for (let i = 0; i < (headers || []).length; i++) {
+            if (headers[i].index === index) return headers[i].header;
         }
-        function take(list) {
-            if (list.length < 2) return null;
-            return { units: list[list.length - 2], uph: list[list.length - 1] };
-        }
-        return { medium: take(found.medium), large: take(found.large) };
+        return '';
+    }
+
+    // A short row drops empty size cells, so the body column sits left of the header.
+    function headerIndexForBody(headers, row, bodyCol) {
+        const deficit = Math.max(0, headerWidth(headers) - rowWidth(row));
+        const start = shipmentStart(headers);
+        return bodyCol >= start ? bodyCol + deficit : bodyCol;
+    }
+
+    // Paid hours, UNIT, UPH, and JPH often share one size class. The rate is UNIT and UPH.
+    function metricKind(className, header) {
+        const blob = (String(className || '') + ' ' + String(header || '')).toLowerCase();
+        if (/\bjph\b/.test(blob)) return 'jph';
+        if (/\buph\b/.test(blob)) return 'uph';
+        if (/\bunits?\b/.test(blob)) return 'units';
+        if (/paid hour|\bhours\b/.test(blob)) return 'hours';
+        return '';
     }
 
     function sizePair(row, headers, size) {
-        const classed = pairFromClasses(row);
-        if (classed[size]) {
-            return {
-                units: classed[size].units || 0,
-                uph: classed[size].uph || 0,
-                unitHeader: size + ' class',
-                uphHeader: size + ' class'
-            };
+        const picked = { units: null, uph: null, unitHeader: '', uphHeader: '' };
+        const bare = [];
+        const cells = row.children || [];
+        let col = 0;
+        for (let i = 0; i < cells.length; i++) {
+            const cell = cells[i];
+            const header = headerAt(headers, headerIndexForBody(headers, row, col));
+            const sizeName = sizeFromClass(cell.className) || sizeFromHeader(header);
+            if (sizeName === size) {
+                const n = parseNumber(textOf(cell));
+                const kind = metricKind(cell.className, header);
+                if (n !== null) {
+                    if (kind === 'units' && picked.units === null) {
+                        picked.units = n;
+                        picked.unitHeader = header;
+                    } else if (kind === 'uph' && picked.uph === null) {
+                        picked.uph = n;
+                        picked.uphHeader = header;
+                    } else if (kind !== 'hours' && kind !== 'jph') bare.push(n);
+                }
+            }
+            col += columnSpan(cell);
         }
-        const units = columnValue(row, headers, function (h) {
-            return eachSizeHeader(h, size) && /\bunits?\b/.test(h);
-        });
-        const uph = columnValue(row, headers, function (h) {
-            return eachSizeHeader(h, size) && /\buph\b/.test(h);
-        });
+        if (picked.units === null) {
+            const hit = columnValue(row, headers, function (h) {
+                return eachSizeHeader(h, size) && /\bunits?\b/.test(h);
+            });
+            if (hit.value !== null) {
+                picked.units = hit.value;
+                picked.unitHeader = hit.header;
+            }
+        }
+        if (picked.uph === null) {
+            const hit = columnValue(row, headers, function (h) {
+                return eachSizeHeader(h, size) && /\buph\b/.test(h);
+            });
+            if (hit.value !== null) {
+                picked.uph = hit.value;
+                picked.uphHeader = hit.header;
+            }
+        }
+        // Unlabeled cells stay in the old order: paid hours, then UNIT, then UPH.
+        // A fourth number is JPH and is not the rate.
+        if (picked.units === null || picked.uph === null) {
+            const list = bare.length >= 4 ? bare.slice(1, 3) : bare;
+            if (list.length >= 2) {
+                if (picked.units === null) {
+                    picked.units = list[list.length - 2];
+                    picked.unitHeader = size + ' class';
+                }
+                if (picked.uph === null) {
+                    picked.uph = list[list.length - 1];
+                    picked.uphHeader = size + ' class';
+                }
+            }
+        }
         return {
-            units: units.value || 0,
-            uph: uph.value || 0,
-            unitHeader: units.header,
-            uphHeader: uph.header
+            units: picked.units || 0,
+            uph: picked.uph || 0,
+            unitHeader: picked.unitHeader,
+            uphHeader: picked.uphHeader
         };
     }
 
@@ -897,6 +951,10 @@
                 bigsUnits: blended.units,
                 bigsUph: blended.uph,
                 bigsHours: blended.hours,
+                mediumUnits: medium.units,
+                mediumUph: medium.uph,
+                largeUnits: large.units,
+                largeUph: large.uph,
                 job: 'ShipmentReturned',
                 unitHeader: overall.unitHeader,
                 uphHeader: overall.uphHeader,
@@ -929,7 +987,11 @@
                 uph: chosen.uph,
                 bigsUnits: chosen.bigsUnits || 0,
                 bigsHours: chosen.bigsHours > 0 ? chosen.bigsHours : (chosen.bigsUph > 0 ? chosen.bigsUnits / chosen.bigsUph : 0),
-                bigsUph: chosen.bigsUph || 0
+                bigsUph: chosen.bigsUph || 0,
+                mediumUnits: chosen.mediumUnits || 0,
+                mediumUph: chosen.mediumUph || 0,
+                largeUnits: chosen.largeUnits || 0,
+                largeUph: chosen.largeUph || 0
             };
             info.keptRows++;
             if (!info.sample) {
@@ -5787,15 +5849,30 @@
                     clockedMin += time.clockedMin || 0;
                 }
 
-                if (DEBUG.sampleMatched.length < 16) {
+                let sampled = 0;
+                for (let n = 0; n < DEBUG.sampleMatched.length; n++) {
+                    if (DEBUG.sampleMatched[n].panel === panelName) sampled++;
+                }
+                if (sampled < 2) {
                     const entry = empId ? LAST_ROLLUP[empId] : null;
+                    const slot = entry && entry.functions && entry.functions[PRIMARY_GRADING.name];
                     DEBUG.sampleMatched.push({
                         panel: panelName,
                         login: found.login,
                         empId: empId,
                         fns: entry ? Object.keys(entry.functions || {}) : [],
                         shown: stats,
-                        popupWouldShow: statsFor(empId, panelName === 'BIGS')
+                        popupWouldShow: statsFor(empId, panelName === 'BIGS'),
+                        sizes: slot ? {
+                            units: slot.units,
+                            uph: slot.uph,
+                            mediumUnits: slot.mediumUnits,
+                            mediumUph: slot.mediumUph,
+                            largeUnits: slot.largeUnits,
+                            largeUph: slot.largeUph,
+                            bigsUnits: slot.bigsUnits,
+                            bigsUph: slot.bigsUph
+                        } : null
                     });
                 }
 
@@ -7228,7 +7305,7 @@
         const defGrid = document.createElement('div');
         defGrid.style.cssText = 'display:grid; grid-template-columns:1fr 1fr; gap:8px;';
         infoCard(defGrid, 'Rate',
-            'Primary Grading [1667843456854] from Function Rollup. Customer Returns uses the overall rate, total units divided by paid hours. BIGs uses Medium and Large EACH units divided by the hours those units took. JPH is not used.');
+            'Primary Grading [1667843456854] from Function Rollup. Customer Returns uses the overall rate, total units divided by paid hours. BIGs uses Medium and Large EACH units divided by the hours those units took. The rate reads the UNIT and UPH columns. Paid hours and JPH are left out.');
         infoCard(defGrid, 'IDLE percent',
             'From FCLM Time Details for the selected window. Indirect time plus Time Off Task, divided by paid time clocked in.');
         infoCard(defGrid, 'Total',
