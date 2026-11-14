@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.31
+// @version      1.9.32
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.31';
+    const SCRIPT_VERSION = '1.9.32';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -1387,9 +1387,11 @@
         if (!pill) {
             pill = makePill(label.short, label.color, 16.5);
             pill.classList.add('mem3-clock-pill');
+            placeBadgeCell(pill, 2, 1);
             badge.appendChild(pill);
             return;
         }
+        placeBadgeCell(pill, 2, 1);
         if (pill.textContent !== label.short) {
             pill.textContent = label.short;
             pill.style.borderColor = label.color;
@@ -2427,10 +2429,32 @@
         for (let i = 0; i < nodes.length; i++) nodes[i].remove();
     }
 
+    function placeBadgeCell(el, col, row) {
+        el.style.gridColumn = String(col);
+        el.style.gridRow = String(row);
+        el.style.justifySelf = 'start';
+    }
+
+    function badgeGridStyle() {
+        return 'display:inline-grid; grid-template-columns:max-content max-content; ' +
+            'grid-template-rows:auto auto; column-gap:6px; row-gap:4px; margin-left:8px; ' +
+            'vertical-align:middle; flex:0 0 auto; align-self:center;';
+    }
+
+    function loosenBadgeHost(host) {
+        let node = host;
+        for (let i = 0; i < 4 && node && node.style; i++) {
+            node.style.overflow = 'visible';
+            const tag = String(node.tagName || '').toUpperCase();
+            if (tag === 'TD' || tag === 'TR') break;
+            node = node.parentElement;
+        }
+    }
+
     function makeBadge(stats, known, time, empId) {
         const wrap = document.createElement('span');
         wrap.className = DECOR_CLASS;
-        wrap.style.cssText = 'display:inline-flex; align-items:center; gap:6px; margin-left:8px; vertical-align:middle;';
+        wrap.style.cssText = badgeGridStyle();
         const noTime = !!(time && time.noData);
         const color = (known && stats.hasData) ? uphColor(stats.uph) : '#8b949e';
         const rateText = !known ? '?' : (stats.hasData ? ((stats.uph > 0 ? stats.uph.toFixed(1) : '0') + ' UPH') : uphGapText());
@@ -2438,11 +2462,16 @@
         const idleText = noTime ? windowGapText() : (idleLabel(pct) + ' IDLE');
         const nowTitle = idleNowTitle(time, empId);
         wrap.title = rateText + ' \u00b7 ' + (noTime ? windowGapText() : timeText(time)) + (nowTitle ? ' \u00b7 ' + nowTitle : '');
-        wrap.appendChild(makePill(rateText, color, 16.5));
-        wrap.appendChild(makePill(idleText, noTime ? '#8b949e' : idleColor(pct), 16.5));
+        const rate = makePill(rateText, color, 16.5);
+        const idle = makePill(idleText, noTime ? '#8b949e' : idleColor(pct), 16.5);
+        placeBadgeCell(rate, 1, 1);
+        placeBadgeCell(idle, 1, 2);
+        wrap.appendChild(rate);
+        wrap.appendChild(idle);
         if (showsIdleNow(time, empId)) {
             const now = makePill('IDLE NOW', '#f85149', 16.5);
             now.className = 'mem3-idle-now';
+            placeBadgeCell(now, 2, 2);
             wrap.appendChild(now);
         }
         wrap.setAttribute('data-sig', (known ? '1' : '0') + '|' + rateText + '|' + idleText + '|' + idleNowSig(time, empId));
@@ -2455,7 +2484,12 @@
         const existing = tr.querySelector('.' + DECOR_CLASS);
         if (existing && existing.getAttribute('data-sig') === sig) return;
         if (existing && existing.parentNode) existing.parentNode.replaceChild(badge, existing);
-        else badgeHost(found.el, tr).appendChild(badge);
+        else {
+            const host = badgeHost(found.el, tr);
+            loosenBadgeHost(host);
+            host.appendChild(badge);
+        }
+        loosenBadgeHost(badge.parentElement);
     }
 
     function assignmentHasBigs(text) {
