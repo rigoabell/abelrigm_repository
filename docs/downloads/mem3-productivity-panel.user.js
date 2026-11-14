@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.10.3
+// @version      1.10.4
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.10.3';
+    const SCRIPT_VERSION = '1.10.4';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -8124,7 +8124,7 @@
         return changed;
     }
 
-    const LIST_PHOTO_PX = 28;
+    const LIST_PHOTO_PX = 42;
 
     function photoForLogin(login) {
         const key = String(login || '').trim().toLowerCase();
@@ -9577,30 +9577,41 @@
     }
 
     function openLeavingPanel(prefill) {
+        const who = String(prefill || '').trim().toLowerCase();
         closeLeavingOverlay(LEAVING_ID);
         const card = document.createElement('div');
         card.id = LEAVING_ID;
         card.style.cssText = 'position:fixed; left:50%; top:50%; transform:translate(-50%, -50%); z-index:2147483647; width:min(440px, calc(100vw - 24px)); ' +
             'padding:12px; border-radius:10px; background:#161b22; color:#fff; border:1px solid #30363d; ' +
             'box-shadow:0 8px 24px rgba(0,0,0,.45); font-family:Segoe UI,system-ui,sans-serif;';
-        const title = document.createElement('div');
-        title.textContent = 'Leaving Early';
-        title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif; margin-bottom:4px;';
-        const ask = document.createElement('div');
-        ask.textContent = 'What time are they leaving? Every computer running this script sees this list.';
-        ask.style.cssText = 'font-size:12px; color:#8b949e; margin-bottom:8px;';
-        const form = document.createElement('div');
-        form.style.cssText = 'display:flex; flex-direction:column; gap:6px;';
-        const loginRow = document.createElement('div');
-        loginRow.style.cssText = 'display:flex; gap:6px; flex-wrap:wrap;';
+        const head = document.createElement('div');
+        head.style.cssText = 'display:flex; gap:10px; align-items:flex-start; margin-bottom:12px;';
+        head.appendChild(listPhoto(who));
+        const info = document.createElement('div');
+        info.style.cssText = 'min-width:0;';
+        const nameText = personLabel(who);
+        if (nameText && nameText.toLowerCase() !== who) {
+            const name = document.createElement('div');
+            name.textContent = nameText;
+            name.style.cssText = 'font:800 15px Segoe UI,system-ui,sans-serif; line-height:1.25;';
+            info.appendChild(name);
+        }
+        const loginLine = document.createElement('div');
+        loginLine.textContent = who || 'No associate on this card.';
+        loginLine.style.cssText = 'font-size:13px; font-weight:650; color:#c9d1d9; line-height:1.3;';
+        info.appendChild(loginLine);
+        const station = looksLikeLogin(who) ? stationForLogin(who) : '';
+        const stationLines = leavingStationLines(station);
+        for (let i = 0; i < stationLines.length; i++) {
+            const line = document.createElement('div');
+            line.textContent = stationLines[i];
+            line.style.cssText = 'font-size:12px; line-height:1.35; color:#ffffff;';
+            info.appendChild(line);
+        }
+        head.appendChild(info);
         const timeRow = document.createElement('div');
         timeRow.setAttribute('data-time-row', '');
         timeRow.style.cssText = 'display:flex; gap:6px; flex-wrap:nowrap; align-items:center;';
-        const login = document.createElement('input');
-        login.setAttribute('data-login', '');
-        login.placeholder = 'Associate login';
-        if (prefill && looksLikeLogin(prefill)) login.value = String(prefill).trim().toLowerCase();
-        login.style.cssText = leavingFieldStyle();
         const time = document.createElement('input');
         time.setAttribute('data-time', '');
         time.setAttribute('inputmode', 'numeric');
@@ -9630,9 +9641,11 @@
         close.textContent = 'Close';
         close.style.cssText = 'padding:7px 10px; border-radius:6px; border:1px solid #8b949e; background:#0d1117; ' +
             'color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        const status = document.createElement('div');
+        status.setAttribute('data-leaving-status', '');
+        status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
         function submit() {
             const actor = requireActor();
-            const who = String(login.value || '').trim().toLowerCase();
             const typed = finishLeaveTime(time.value);
             time.value = typed;
             const saidMin = /^\d{2}:\d{2}$/.test(typed)
@@ -9640,7 +9653,7 @@
                 : null;
             if (!actor) return;
             if (!looksLikeLogin(who)) {
-                setLeavingStatus('Enter a login.');
+                setLeavingStatus('No associate on this card.');
                 return;
             }
             if (saidMin == null) {
@@ -9649,16 +9662,16 @@
             }
             const now = new Date();
             const doc = loadLeaving();
-            const station = stationForLogin(who);
-            const result = addLeaving(doc, who, saidMin, station, now);
+            const markedStation = stationForLogin(who);
+            const result = addLeaving(doc, who, saidMin, markedStation, now);
             if (result.updated) {
                 recordActivity(doc, actor, 'updated ' + who + ' to leave at ' + result.row.said, now, {
                     action: 'update', who: who, said: result.row.said
                 });
             } else if (result.added) {
                 recordActivity(doc, actor, 'marked ' + who + ' leaving at ' + result.row.said +
-                    (station ? ' from ' + station : ''), now, {
-                    action: 'mark', who: who, said: result.row.said, detail: station || ''
+                    (markedStation ? ' from ' + markedStation : ''), now, {
+                    action: 'mark', who: who, said: result.row.said, detail: markedStation || ''
                 });
             } else {
                 recordActivity(doc, actor, who + ' already marked at ' + result.row.said, now, {
@@ -9668,7 +9681,7 @@
             pushEarlyRun(doc, {
                 at: clockText(now), by: actor, kind: result.updated ? 'update' : (result.added ? 'mark' : 'same'),
                 shiftId: shiftId(now), login: who, said: result.row.said,
-                previous: result.previous || '', station: station || '',
+                previous: result.previous || '', station: markedStation || '',
                 summary: result.updated ? 'updated' : (result.added ? 'marked' : 'already marked')
             });
             const shared = saveLeaving(doc);
@@ -9677,23 +9690,16 @@
             if (result.updated) {
                 markedText = 'Updated ' + who + ' from ' + result.previous + ' to ' + result.row.said + '.';
             } else if (result.added) {
-                markedText = 'Marked ' + who + ' at ' + result.row.said + (station ? ' from ' + station : '') + '.';
+                markedText = 'Marked ' + who + ' at ' + result.row.said + (markedStation ? ' from ' + markedStation : '') + '.';
             }
-            setLeavingStatus(markedText);
             watchLeavingShare(markedText, shared);
             decoratePopups();
-            if (result.added || result.updated) {
-                showLeaveCheck(card);
-                login.value = '';
-            }
+            closeLeavingOverlay(LEAVING_ID);
         }
         mark.addEventListener('click', function (event) {
             event.preventDefault();
             event.stopPropagation();
             submit();
-        });
-        login.addEventListener('keydown', function (event) {
-            if (event.key === 'Enter') submit();
         });
         time.addEventListener('input', function () {
             const next = maskLeaveTime(time.value);
@@ -9711,24 +9717,15 @@
             event.stopPropagation();
             closeLeavingOverlay(LEAVING_ID);
         });
-        loginRow.appendChild(login);
         timeRow.appendChild(time);
         timeRow.appendChild(half);
         timeRow.appendChild(mark);
         timeRow.appendChild(close);
-        form.appendChild(loginRow);
-        form.appendChild(timeRow);
-        const status = document.createElement('div');
-        status.setAttribute('data-leaving-status', '');
-        status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
-        card.appendChild(title);
-        card.appendChild(ask);
-        card.appendChild(signedInNote());
-        card.appendChild(form);
+        card.appendChild(head);
+        card.appendChild(timeRow);
         card.appendChild(status);
         document.body.appendChild(card);
-        if (login.value) time.focus();
-        else login.focus();
+        time.focus();
     }
 
     function openEarlyPass() {
