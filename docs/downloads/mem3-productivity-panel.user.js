@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.10.0
+// @version      1.10.1
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.10.0';
+    const SCRIPT_VERSION = '1.10.1';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -3826,16 +3826,61 @@
         }
     }
 
+    const UNASSIGN_WATCH_MS = 10000;
+    const UNASSIGN_SAMPLE_MS = 500;
+    const UNASSIGN_HOLD = 6;
+
+    function stillAssigned(login, station) {
+        if (station) return rowStillOnBoard(login, station);
+        return countLoginOnBoard(login) > 0;
+    }
+
+    function heldOff(samples) {
+        if (!samples || samples.length < UNASSIGN_HOLD) return false;
+        for (let i = samples.length - UNASSIGN_HOLD; i < samples.length; i++) {
+            if (samples[i]) return false;
+        }
+        return true;
+    }
+
+    function sampleBits(samples) {
+        let text = '';
+        const list = samples || [];
+        for (let i = 0; i < list.length; i++) text += list[i] ? '1' : '0';
+        return text;
+    }
+
+    async function watchUnassign(login, station) {
+        const samples = [];
+        const start = Date.now();
+        while (Date.now() - start < UNASSIGN_WATCH_MS) {
+            if (RUN_STOP || leavingStop) break;
+            samples.push(!!stillAssigned(login, station));
+            if (heldOff(samples)) break;
+            await sleep(UNASSIGN_SAMPLE_MS);
+        }
+        return { gone: heldOff(samples), samples: sampleBits(samples) };
+    }
+
+    function noteUnassignWatch(record, watched) {
+        if (!record) return;
+        record.leftBoard = !!watched.gone;
+        record.samples = watched.samples || '';
+        record.afterCount = countLoginOnBoard(record.login || '');
+    }
+
     async function unassignAnchor(anchor, record) {
         const login = (record && (record.login || (record.target && record.target.login)))
             || ((anchor.textContent || '').replace(/\s+/g, ' ').trim());
         const before = countLoginOnBoard(login);
-        if (record) record.beforeCount = before;
-        if (login && before === 0) {
-            if (record) record.leftBoard = true;
-            return true;
-        }
         const station = record && record.station ? record.station : '';
+        if (record) record.beforeCount = before;
+        if (record) record.login = record.login || login;
+        if (login && before === 0) {
+            const watched = await watchUnassign(login, station);
+            noteUnassignWatch(record, watched);
+            return watched.gone;
+        }
         const opened = await openAssociateMenu(anchor, login, station);
         if (opened.anchor) anchor = opened.anchor;
         if (record) {
@@ -3846,27 +3891,17 @@
         const target = opened.button;
         await sleep(250);
         if (record) record.clickedUnassign = true;
-        const tryN = (record && record.tries) || 1;
-        const mode = tryN === 2 ? 'inner' : (tryN === 3 || tryN === 6 ? 'native' : 'all');
-        const via = clickUnassignButton(target, mode);
-        if (record) record.clickMethod = via || mode;
-        const gone = await waitFor(function () {
-            if (!target.isConnected) return true;
+        const via = clickUnassignButton(target, 'inner');
+        if (record) record.clickMethod = via || 'fiber';
+        const watched = await watchUnassign(login, station);
+        const buttonGone = !target.isConnected || (function () {
             const rect = target.getBoundingClientRect();
-            return (rect.width < 1 || rect.height < 1) ? true : null;
-        }, 2500);
-        if (record) record.buttonGone = !!gone;
-        const dropped = await waitFor(function () {
-            if (station) return rowStillOnBoard(login, station) ? null : true;
-            return countLoginOnBoard(login) < before ? true : null;
-        }, 5000);
-        if (!dropped) await closeAllAssociateMenus();
-        const left = station ? !rowStillOnBoard(login, station) : countLoginOnBoard(login) < before;
-        if (record) {
-            record.leftBoard = left;
-            record.afterCount = countLoginOnBoard(login);
-        }
-        return left;
+            return rect.width < 1 || rect.height < 1;
+        })();
+        if (record) record.buttonGone = buttonGone;
+        if (!watched.gone) await closeAllAssociateMenus();
+        noteUnassignWatch(record, watched);
+        return watched.gone;
     }
 
     async function unassignCount(button, limit) {
@@ -3923,6 +3958,8 @@
                     detail: person.station || 'Opening menu',
                     stats: 'Copied Name, Login, Station for reassign'
                 });
+                let stayedOff = false;
+                let watchedOnce = false;
                 while (rowStillOnBoard(login, person.station) && person.tries < 4 && !RUN_STOP) {
                     person.tries++;
                     await closeAllAssociateMenus();
@@ -3933,11 +3970,20 @@
                     person.name = fresh.name || person.name;
                     person.empId = fresh.empId || person.empId;
                     await sleep(80);
+                    watchedOnce = true;
                     const ok = await unassignAnchor(anchor, person);
-                    if (ok) break;
+                    if (ok) {
+                        stayedOff = true;
+                        break;
+                    }
                     await sleep(300);
                 }
-                person.leftBoard = !rowStillOnBoard(login, person.station);
+                if (!stayedOff && !watchedOnce) {
+                    const watched = await watchUnassign(login, person.station);
+                    stayedOff = watched.gone;
+                    person.samples = watched.samples;
+                }
+                person.leftBoard = stayedOff;
                 if (person.leftBoard) left++;
                 await sleep(400);
             }
@@ -4036,6 +4082,8 @@
                         detail: 'Pass ' + pass + ' · ' + (person.station || 'Opening menu'),
                         stats: 'Copied reassign list · left ' + left + ' · still ' + (remaining.length - i)
                     });
+                    let stayedOff = false;
+                    let watchedOnce = false;
                     while (rowStillOnBoard(person.login, person.station) && person.tries < MAX_TRIES && !RUN_STOP) {
                         person.tries++;
                         await closeAllAssociateMenus();
@@ -4047,11 +4095,20 @@
                         person.empId = fresh.empId || person.empId;
                         try { anchor.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e1) { /* ignore */ }
                         await sleep(80);
+                        watchedOnce = true;
                         const ok = await unassignAnchor(anchor, person);
-                        if (ok) break;
+                        if (ok) {
+                            stayedOff = true;
+                            break;
+                        }
                         await sleep(300);
                     }
-                    person.leftBoard = !rowStillOnBoard(person.login, person.station);
+                    if (!stayedOff && !watchedOnce) {
+                        const watched = await watchUnassign(person.login, person.station);
+                        stayedOff = watched.gone;
+                        person.samples = watched.samples;
+                    }
+                    person.leftBoard = stayedOff;
                     if (person.leftBoard) {
                         left++;
                         progress++;
@@ -8247,10 +8304,23 @@
                 let error = '';
                 for (let tryN = 1; tryN <= 4; tryN++) {
                     if (leavingStop) break;
-                    if (countLoginOnBoard(row.login) < before) break;
+                    if (record && record.leftBoard) break;
                     await closeAllAssociateMenus();
                     const again = findAnchorForPerson(row.login, '');
-                    if (!again) break;
+                    if (!again) {
+                        const watched = await watchUnassign(row.login, '');
+                        if (!record) record = { login: row.login, tries: tryN };
+                        noteUnassignWatch(record, watched);
+                        step.attempts.push({
+                            try: tryN,
+                            clickMethod: record.clickMethod || '',
+                            buttonGone: !!record.buttonGone,
+                            afterCount: countLoginOnBoard(row.login),
+                            samples: watched.samples,
+                            leftBoard: watched.gone
+                        });
+                        break;
+                    }
                     record = { login: row.login, station: '', tries: tryN };
                     error = '';
                     try { await unassignAnchor(again, record); } catch (e) {
@@ -8260,23 +8330,26 @@
                         try: tryN,
                         clickMethod: record.clickMethod || '',
                         buttonGone: !!record.buttonGone,
-                        afterCount: countLoginOnBoard(row.login)
+                        afterCount: countLoginOnBoard(row.login),
+                        samples: record.samples || '',
+                        leftBoard: !!record.leftBoard
                     };
                     if (error) attempt.error = error;
                     step.attempts.push(attempt);
-                    if (attempt.afterCount < before) break;
+                    if (record.leftBoard) break;
                     await sleep(300);
                 }
                 const click = slimEarlyClick(record, error);
                 step.afterCount = countLoginOnBoard(row.login);
-                step.leftBoard = step.afterCount < before;
+                step.leftBoard = !!(record && record.leftBoard);
+                if (record && record.samples) step.samples = record.samples;
                 step.clickedUnassign = click.clickedUnassign;
                 step.clickMethod = click.clickMethod;
                 step.buttonGone = click.buttonGone;
                 step.tooltipButtons = click.tooltipButtons;
                 step.tries = step.attempts.length;
                 if (error) step.error = error;
-                const gone = step.afterCount < before;
+                const gone = !!step.leftBoard;
                 if (leavingStop && !gone) {
                     left.push(row.login);
                     for (let j = i + 1; j < rows.length; j++) left.push(rows[j].login);

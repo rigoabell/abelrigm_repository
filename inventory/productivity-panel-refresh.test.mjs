@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.10\.0/);
+assert.match(src, /@version\s+1\.10\.1/);
 assert.match(src, /if \(shown >= 19\) return '#2ea043'/);
 assert.match(src, /if \(shown >= 16\) return '#d29922'/);
 assert.match(src, /data-mem3-enter-notes/);
@@ -63,6 +63,11 @@ assert.match(src, /data-early-stop/);
 assert.match(src, /leavingStop = true/);
 assert.equal(src.includes("bottom:16px"), false);
 assert.match(src, /for \(let tryN = 1; tryN <= 4; tryN\+\+\)/);
+assert.match(src, /clickUnassignButton\(target, 'inner'\)/);
+assert.match(src, /const UNASSIGN_WATCH_MS = 10000;/);
+assert.match(src, /const UNASSIGN_HOLD = 6;/);
+assert.equal(src.includes("tryN === 2 ? 'inner'"), false);
+assert.match(src, /function heldOff/);
 assert.match(src, /extendsclass\.com\/api\/json-storage\/bin\/edfeccc/);
 assert.match(src, /Every computer running this script sees this list/);
 assert.match(src, /function cleanStationText/);
@@ -114,7 +119,9 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.10.0");
+assert.equal(entry.version, "1.10.1");
+assert.match(entry.detail, /stayed off the board for the last 3 seconds/);
+assert.match(entry.detail, /button's own handler/);
 assert.match(entry.detail, /red below 16/);
 assert.match(entry.detail, /View Notes/);
 assert.match(entry.detail, /cleared only by the person who wrote it/);
