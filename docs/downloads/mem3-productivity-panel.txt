@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.9.40
+// @version      1.9.41
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.9.40';
+    const SCRIPT_VERSION = '1.9.41';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -654,9 +654,9 @@
         return headers;
     }
 
-    // Medium and Large EACH rates blend into one UPH.
-    // Hours for a size are its units divided by that size's UPH.
-    // The rate is both sizes' units divided by both sizes' hours.
+    // BIGs uses Medium and Large EACH. Hours for a size are its units divided by
+    // that size's UPH. The rate is both sizes' units divided by both sizes' hours.
+    // Customer Returns uses the overall rate: total units divided by paid hours.
     function blendMediumLarge(mediumUnits, mediumUph, largeUnits, largeUph) {
         let units = 0;
         let hours = 0;
@@ -815,6 +815,26 @@
         return { value: best, header: bestHeader };
     }
 
+    function overallRate(row, headers) {
+        const unitsPick = bestNumber(row, headers, function (h) { return /\bunits?\b/.test(h); });
+        let uphPick = bestNumber(row, headers, function (h) { return /\buph\b/.test(h); });
+        if (uphPick.value === null) uphPick = bestNumber(row, headers, function (h) { return /\bjph\b/.test(h); });
+        const hoursPick = bestNumber(row, headers, function (h) { return /paid hours/.test(h); });
+        const units = unitsPick.value || 0;
+        const paidHours = hoursPick.value || 0;
+        let uph = uphPick.value;
+        if (units > 0 && paidHours > 0) uph = units / paidHours;
+        else if (uph === null) uph = 0;
+        return {
+            units: units,
+            hours: paidHours,
+            uph: uph || 0,
+            unitHeader: unitsPick.header,
+            uphHeader: (units > 0 && paidHours > 0) ? 'units / paid hours' : uphPick.header,
+            hoursHeader: hoursPick.header
+        };
+    }
+
     function bestText(row, headers, matcher) {
         for (let i = 0; i < headers.length; i++) {
             if (!matcher(headers[i].header.toLowerCase())) continue;
@@ -861,19 +881,26 @@
             const empId = bestText(row, headers, function (h) { return /(^|\/ )id$/.test(h) || /employee id/.test(h); })
                 || textOf(row.children[1]);
             if (!/^\d+$/.test(empId)) { info.skippedRows++; continue; }
+            const overall = overallRate(row, headers);
             const medium = sizePair(row, headers, 'medium');
             const large = sizePair(row, headers, 'large');
             const blended = blendMediumLarge(medium.units, medium.uph, large.units, large.uph);
-            if (!(blended.units > 0)) { info.skippedRows++; continue; }
+            if (!(overall.units > 0) && !(overall.uph > 0) && !(blended.units > 0)) {
+                info.skippedRows++;
+                continue;
+            }
             if (!pending[empId]) pending[empId] = { name: textOf(row.children[2]), rows: [] };
             pending[empId].rows.push({
-                units: blended.units,
-                uph: blended.uph,
-                hours: blended.hours,
+                units: overall.units,
+                uph: overall.uph,
+                hours: overall.hours,
+                bigsUnits: blended.units,
+                bigsUph: blended.uph,
+                bigsHours: blended.hours,
                 job: 'ShipmentReturned',
-                unitHeader: [medium.unitHeader, large.unitHeader].filter(Boolean).join(' + '),
-                uphHeader: [medium.uphHeader, large.uphHeader].filter(Boolean).join(' + '),
-                hoursHeader: 'units / size UPH'
+                unitHeader: overall.unitHeader,
+                uphHeader: overall.uphHeader,
+                hoursHeader: overall.hoursHeader
             });
         }
 
@@ -881,14 +908,17 @@
         for (let i = 0; i < ids.length; i++) {
             const empId = ids[i];
             const rows = pending[empId].rows;
+            function rowUnits(row) {
+                return Math.max(row.units || 0, row.bigsUnits || 0);
+            }
             let chosen = null;
             for (let r = 0; r < rows.length; r++) {
                 if (!/shipment\s*returned/i.test(rows[r].job || '')) continue;
-                if (!chosen || rows[r].units > chosen.units) chosen = rows[r];
+                if (!chosen || rowUnits(rows[r]) > rowUnits(chosen)) chosen = rows[r];
             }
             if (!chosen) {
                 for (let r = 0; r < rows.length; r++) {
-                    if (!chosen || rows[r].units > chosen.units) chosen = rows[r];
+                    if (!chosen || rowUnits(rows[r]) > rowUnits(chosen)) chosen = rows[r];
                 }
             }
             if (!chosen) { info.skippedRows++; continue; }
@@ -896,7 +926,10 @@
             byEmpId[empId].functions[PRIMARY_GRADING.name] = {
                 units: chosen.units,
                 hours: chosen.hours > 0 ? chosen.hours : (chosen.uph > 0 ? chosen.units / chosen.uph : 0),
-                uph: chosen.uph
+                uph: chosen.uph,
+                bigsUnits: chosen.bigsUnits || 0,
+                bigsHours: chosen.bigsHours > 0 ? chosen.bigsHours : (chosen.bigsUph > 0 ? chosen.bigsUnits / chosen.bigsUph : 0),
+                bigsUph: chosen.bigsUph || 0
             };
             info.keptRows++;
             if (!info.sample) {
@@ -925,7 +958,12 @@
             const keys = Object.keys(fns);
             for (let k = 0; k < keys.length; k++) {
                 const slot = fns[keys[k]];
-                addFunctionSample(target[id], keys[k], slot.units, slot.uph);
+                const merged = addFunctionSample(target[id], keys[k], slot.units, slot.uph);
+                if (slot.bigsUnits > 0 && slot.bigsUph > 0) {
+                    merged.bigsUnits = (merged.bigsUnits || 0) + slot.bigsUnits;
+                    merged.bigsHours = (merged.bigsHours || 0) + (slot.bigsHours > 0 ? slot.bigsHours : (slot.bigsUnits / slot.bigsUph));
+                    merged.bigsUph = merged.bigsHours > 0 ? (merged.bigsUnits / merged.bigsHours) : 0;
+                }
             }
         }
     }
@@ -987,15 +1025,24 @@
         return PRIMARY_GRADING.name + ' [' + PRIMARY_GRADING.id + ']';
     }
 
-    function statsFor(empId) {
+    function personUsesBigsRate(empId) {
+        const line = (BOARD_PEOPLE[empId] && BOARD_PEOPLE[empId].line) || '';
+        return line === 'BIGS';
+    }
+
+    function statsFor(empId, forBigs) {
         const entry = empId ? LAST_ROLLUP[empId] : null;
         const empty = { uph: 0, units: 0, hasData: false, fn: gradingLabel() };
         if (!entry) return empty;
         const slot = entry.functions && entry.functions[PRIMARY_GRADING.name];
         if (!slot) return empty;
+        const bigs = forBigs === true || (forBigs !== false && personUsesBigsRate(empId));
+        const units = bigs ? (slot.bigsUnits || 0) : (slot.units || 0);
+        const uph = bigs ? (slot.bigsUph || 0) : (slot.uph || 0);
+        if (!(units > 0) && !(uph > 0)) return empty;
         return {
-            uph: slot.uph || 0,
-            units: slot.units || 0,
+            uph: uph,
+            units: units,
             hasData: true,
             fn: gradingLabel()
         };
@@ -5523,7 +5570,7 @@
 
                 const person = IDENTITY.byLogin[found.login];
                 const empId = resolveEmpId(person);
-                const stats = statsFor(empId);
+                const stats = statsFor(empId, panelName === 'BIGS');
                 const time = timeFor(empId);
                 if (empId) {
                     if (empIds.indexOf(empId) === -1) empIds.push(empId);
@@ -5546,7 +5593,7 @@
                         empId: empId,
                         fns: entry ? Object.keys(entry.functions || {}) : [],
                         shown: stats,
-                        popupWouldShow: statsFor(empId)
+                        popupWouldShow: statsFor(empId, panelName === 'BIGS')
                     });
                 }
 
@@ -6717,13 +6764,13 @@
         const defGrid = document.createElement('div');
         defGrid.style.cssText = 'display:grid; grid-template-columns:1fr 1fr; gap:8px;';
         infoCard(defGrid, 'Rate',
-            'Primary Grading [1667843456854] from Function Rollup. Medium and Large EACH units, divided by the hours those units took. A size’s hours are its units divided by that size’s UPH. JPH is not used.');
+            'Primary Grading [1667843456854] from Function Rollup. Customer Returns uses the overall rate, total units divided by paid hours. BIGs uses Medium and Large EACH units divided by the hours those units took. JPH is not used.');
         infoCard(defGrid, 'IDLE percent',
             'From FCLM Time Details for the selected window. Indirect time plus Time Off Task, divided by paid time clocked in.');
         infoCard(defGrid, 'Total',
             'The average of the side rates. Each person is counted once.');
         infoCard(defGrid, 'No data',
-            'No UPH for a window means that person has no Medium or Large Primary Grading units in it. No data for a window means Time Details has no clock time, which is what you see when someone came in later.');
+            'No UPH for a window means a Customer Returns person has no overall Primary Grading units, or a BIGs person has no Medium or Large units. No data for a window means Time Details has no clock time, which is what you see when someone came in later.');
         defs.appendChild(defGrid);
         card.appendChild(defs);
 

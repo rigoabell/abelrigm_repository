@@ -7,7 +7,9 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.9\.40/);
+assert.match(src, /@version\s+1\.9\.41/);
+assert.match(src, /function overallRate/);
+assert.match(src, /statsFor\(empId, panelName === 'BIGS'\)/);
 assert.match(src, /function centerEmployeeLine/);
 assert.match(src, /stationList\('Disabled', disabled, '#8b949e'\)/);
 assert.match(src, /function pinAssignmentColumn/);
@@ -98,7 +100,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.9.40");
+assert.equal(entry.version, "1.9.41");
 assert.match(entry.detail, /lists those stations under Disabled/);
 assert.match(entry.detail, /red yield sign/);
 const leavingList = src.slice(src.indexOf("function openLeavingList"), src.indexOf("function closeLeavingOverlay"));
@@ -245,7 +247,7 @@ const patched = src.replace(
         setDown(value) { FCLM_DOWN = value; },
         showUpdate(remote) { showUpdatePrompt(remote); },
         shiftId, parseLeaveTime, addLeaving, dueLeaving, noteBack, markTakenOff, cleanStationText, customerReturnsLines,
-        blendMediumLarge, bodyColumn, placeBesideLogin,
+        blendMediumLarge, overallRate, bodyColumn, placeBesideLogin,
         stationDisabled(row) { return stationIsDisabled(row); },
         stop() {
             refreshGeneration++;
@@ -626,6 +628,33 @@ try {
     assert.ok(Math.abs(mediumOnly.uph - 28.79) < 0.000001);
     assert.equal(api.blendMediumLarge(10, 0, 0, 20).units, 0);
     assert.equal(api.blendMediumLarge(0, 0, 0, 0).uph, 0);
+    function rateCell(text, className) {
+        return {
+            textContent: String(text),
+            className: className || "",
+            getAttribute() { return null; },
+            children: []
+        };
+    }
+    const overallHeaders = [
+        { index: 0, header: "Paid Hours / Total" },
+        { index: 1, header: "ShipmentReturned / EACH-Total / UNIT" },
+        { index: 2, header: "ShipmentReturned / EACH-Total / UPH" },
+        { index: 3, header: "ShipmentReturned / EACH-Medium / UNIT" },
+        { index: 4, header: "ShipmentReturned / EACH-Medium / UPH" }
+    ];
+    const overallRow = {
+        children: [
+            rateCell("5.36"),
+            rateCell("139", "each-total"),
+            rateCell("25.93", "each-total"),
+            rateCell("49", "each-medium"),
+            rateCell("28.79", "each-medium")
+        ]
+    };
+    const overall = api.overallRate(overallRow, overallHeaders);
+    assert.equal(overall.units, 139);
+    assert.ok(Math.abs(overall.uph - (139 / 5.36)) < 0.000001);
 
     sandbox.getComputedStyle = function () { return { display: "flex" }; };
     const overrideRow = makeNode("tr");
