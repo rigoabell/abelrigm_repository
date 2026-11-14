@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Assign Round Trip (abelrigm)
 // @namespace    https://mem3.amazon.local/
-// @version      1.1.0
+// @version      1.2.0
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-assign-roundtrip.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-assign-roundtrip.user.js
 // @description  Unassign one Control Tower login, watch the station, then assign that same login back.
@@ -25,7 +25,7 @@
     // A login counts as off only after the last 3 seconds of a 12 second watch
     // still show them gone. A menu closing for a moment does not count.
 
-    const VERSION = '1.1.0';
+    const VERSION = '1.2.0';
     const LINE_LABEL = 'CRET Line 1 (O) + Line Support';
     const PANEL_ID = 'mem3-assign-roundtrip';
     const METHODS = ['fiber', 'fiber-all', 'native'];
@@ -64,6 +64,27 @@
     function isTargetHeading(text) {
         const name = plain(text).toLowerCase().replace(/\d+(\.\d+)?\s*uph\s*avg.*/i, '').trim();
         return name.indexOf('cret line 1 (o)') !== -1 && name.indexOf('line support') !== -1;
+    }
+
+    function classifyEmployee(anchorText, cellText) {
+        const anchor = plain(anchorText);
+        if (isNoneLabel(anchor)) return { employee: 'None', login: '' };
+        if (looksLikeLogin(anchor)) return { employee: normalizeLogin(anchor), login: normalizeLogin(anchor) };
+        let raw = plain(cellText).replace(/\boverride\b/ig, '');
+        raw = plain(raw);
+        if (/^disabled$/i.test(raw)) return { employee: 'DISABLED', login: '' };
+        if (!raw || isNoneLabel(raw)) return { employee: 'None', login: '' };
+        if (looksLikeLogin(raw)) return { employee: normalizeLogin(raw), login: normalizeLogin(raw) };
+        return { employee: raw, login: '' };
+    }
+
+    function rosterTable(title, rows) {
+        const lines = [title || LINE_LABEL, 'Assignment\tEmployee'];
+        const list = rows || [];
+        for (let i = 0; i < list.length; i++) {
+            lines.push(plain(list[i].assignment) + '\t' + (list[i].employee || 'None'));
+        }
+        return lines.join('\n');
     }
 
     function isOtherLine(text) {
@@ -451,20 +472,40 @@
         return [];
     }
 
-    function groupLogins(heading) {
-        const seen = Object.create(null);
+    function readRoster(heading) {
         const out = [];
         const tables = tablesFor(heading);
         for (let t = 0; t < tables.length; t++) {
             const rows = tables[t].querySelectorAll('tbody tr');
             for (let i = 0; i < rows.length; i++) {
-                const anchors = rowAnchors(rows[i]);
-                for (let a = 0; a < anchors.length; a++) {
-                    const login = normalizeLogin(anchors[a].textContent);
-                    if (!looksLikeLogin(login) || isNoneLabel(login) || seen[login]) continue;
-                    seen[login] = true;
-                    out.push(login);
+                const cells = rows[i].querySelectorAll('td');
+                if (cells.length < 2) continue;
+                const assignment = cleanText(cells[0]);
+                if (!assignment || /^assignment$/i.test(assignment)) continue;
+                let chosen = null;
+                for (let c = 1; c < cells.length; c++) {
+                    const anchors = rowAnchors(cells[c]);
+                    let anchorText = '';
+                    for (let a = 0; a < anchors.length; a++) {
+                        const text = plain(anchors[a].textContent);
+                        if (isNoneLabel(text) || looksLikeLogin(text)) {
+                            anchorText = text;
+                            break;
+                        }
+                    }
+                    const who = classifyEmployee(anchorText, cleanText(cells[c]));
+                    if (!chosen) chosen = who;
+                    if (who.login || who.employee === 'DISABLED') {
+                        chosen = who;
+                        break;
+                    }
                 }
+                if (!chosen) chosen = { employee: 'None', login: '' };
+                out.push({
+                    assignment: assignment,
+                    employee: chosen.employee,
+                    login: chosen.login
+                });
             }
         }
         return out;
@@ -865,19 +906,25 @@
             setStatus(LINE_LABEL + ' is not on this page.');
             return;
         }
-        const people = groupLogins(heading);
+        const roster = readRoster(heading);
         const title = headingLabel(heading) || ownText(heading) || LINE_LABEL;
+        const table = rosterTable(title, roster);
+        const people = [];
+        for (let i = 0; i < roster.length; i++) {
+            if (roster[i].login) people.push(roster[i].login);
+        }
+        log(table);
+        copyText(table, 'Copied the original roster.');
         if (!people.length) {
-            setStatus('Nobody is signed in on ' + title + '.');
+            setStatus('Copied the roster. Nobody is signed in on ' + title + '.');
             return;
         }
         stop = false;
         setBusy(true);
         const pause = pausePanel();
         if (pause) hold(true);
-        log(title + ' · ' + people.length + ' people · ' + mode +
+        log(title + ' · ' + people.length + ' signed in · ' + mode +
             (pause ? ' · productivity panel paused' : ' · productivity panel left alone'));
-        log(people.join(', '));
         let address = null;
         let last = '';
         try {
@@ -912,6 +959,29 @@
         const html = [];
         for (let i = 0; i < names.length; i++) html.push('<option value="' + names[i] + '"></option>');
         list.innerHTML = html.join('');
+    }
+
+    function copyText(text, okStatus) {
+        const done = function () { setStatus(okStatus || 'Copied.'); };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, function () {
+                setStatus('The table is in the box below.');
+            });
+            return;
+        }
+        setStatus('The table is in the box below.');
+    }
+
+    function copyRoster() {
+        const heading = findTargetHeading();
+        if (!heading) {
+            setStatus(LINE_LABEL + ' is not on this page.');
+            return;
+        }
+        const title = headingLabel(heading) || ownText(heading) || LINE_LABEL;
+        const table = rosterTable(title, readRoster(heading));
+        log(table);
+        copyText(table, 'Copied the original roster.');
     }
 
     function copyLog() {
@@ -960,8 +1030,8 @@
             '</style>',
             '<div class="box">',
             '<div class="head"><strong>Assign test</strong><span class="ver">', VERSION, '</span></div>',
-            '<p class="hint">Line 1 Odd + Support takes each person on CRET Line 1 (O) + Line Support off, and assigns that same person back only if they stay off. Leave Pause unchecked when the productivity panel is turned off.</p>',
-            '<label>Login<input data-login list="logins" placeholder="abelrigm" autocomplete="off" spellcheck="false"></label>',
+            '<p class="hint">Line 1 Odd + Support reads CRET Line 1 (O) + Line Support, copies who is on each station, then unassigns each signed-in person and assigns that same person back if they stay off. No login to type. None and disabled stations stay as they are. Leave Pause unchecked when the productivity panel is turned off.</p>',
+            '<label>One person, optional<input data-login list="logins" placeholder="abelrigm" autocomplete="off" spellcheck="false"></label>',
             '<datalist id="logins"></datalist>',
             '<label>Click<select data-method>',
             '<option value="fiber">fiber — the button only</option>',
@@ -971,7 +1041,7 @@
             '<div class="actions"><button data-line>Line 1 Odd + Support, one by one</button></div>',
             '<div class="actions"><button data-go>Unassign, then assign back</button><button data-all>Try all 3</button></div>',
             '<label class="check"><input type="checkbox" data-pause> Pause the productivity panel</label>',
-            '<div class="actions"><button data-stop disabled>Stop</button><button data-copy>Copy log</button></div>',
+            '<div class="actions"><button data-roster>Copy roster</button><button data-stop disabled>Stop</button><button data-copy>Copy log</button></div>',
             '<div data-status></div>',
             '<pre data-log></pre>',
             '</div>'
@@ -990,6 +1060,7 @@
             stop = true;
             setStatus('Stopping after this check.');
         });
+        root.querySelector('[data-roster]').addEventListener('click', copyRoster);
         root.querySelector('[data-copy]').addEventListener('click', copyLog);
         root.querySelector('[data-login]').addEventListener('focus', refreshLogins);
         refreshLogins();
@@ -1015,6 +1086,8 @@
             isSearchHint: isSearchHint,
             isTargetHeading: isTargetHeading,
             isOtherLine: isOtherLine,
+            classifyEmployee: classifyEmployee,
+            rosterTable: rosterTable,
             lineLabel: LINE_LABEL,
             sampleText: sampleText
         };

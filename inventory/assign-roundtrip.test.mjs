@@ -20,11 +20,11 @@ function bits(text) {
 test("catalog entry matches the script", () => {
     const entry = catalog.find((item) => item.id === "mem3-assign-roundtrip");
     assert.ok(entry);
-    assert.equal(entry.version, "1.1.0");
+    assert.equal(entry.version, "1.2.0");
     assert.equal(entry.category, "Control Tower");
     assert.equal(entry.file, "downloads/mem3-assign-roundtrip.txt");
     assert.equal(entry.downloadName, "Assign Round Trip (abelrigm).txt");
-    assert.match(src, /@version\s+1\.1\.0/);
+    assert.match(src, /@version\s+1\.2\.0/);
     assert.equal(tool.lineLabel, "CRET Line 1 (O) + Line Support");
     assert.equal(src, published);
     assert.deepEqual(JSON.parse(JSON.stringify(tool.methods)), ["fiber", "fiber-all", "native"]);
@@ -74,4 +74,24 @@ test("line 1 odd plus support is the only group this button walks", () => {
     assert.equal(tool.isOtherLine("CRET Line 1 (E)"), true);
     assert.equal(tool.isOtherLine("Line Support"), false);
     assert.equal(tool.isOtherLine("CRET Line 1 (O) + Line Support"), false);
+});
+
+test("the roster table keeps the station and who was on it", () => {
+    const who = (anchor, cell) => JSON.parse(JSON.stringify(tool.classifyEmployee(anchor, cell)));
+    assert.deepEqual(who("None", "None"), { employee: "None", login: "" });
+    assert.deepEqual(who("", "DISABLED"), { employee: "DISABLED", login: "" });
+    assert.deepEqual(who("pmakaela", "pmakaela Override"), { employee: "pmakaela", login: "pmakaela" });
+    assert.deepEqual(who("", "anyisim Override"), { employee: "anyisim", login: "anyisim" });
+    const table = tool.rosterTable("CRET Line 1 (O) + Line Support", [
+        { assignment: "Customer Returns 1st Half: Station 1-01 | 2nd Half: Station 1-39", employee: "None" },
+        { assignment: "Customer Returns 1st Half: Station 1-03 | 2nd Half: Station 1-37", employee: "DISABLED" },
+        { assignment: "Customer Returns 1st Half: Station 1-05 | 2nd Half: Station 1-35", employee: "pmakaela" }
+    ]);
+    assert.equal(table, [
+        "CRET Line 1 (O) + Line Support",
+        "Assignment\tEmployee",
+        "Customer Returns 1st Half: Station 1-01 | 2nd Half: Station 1-39\tNone",
+        "Customer Returns 1st Half: Station 1-03 | 2nd Half: Station 1-37\tDISABLED",
+        "Customer Returns 1st Half: Station 1-05 | 2nd Half: Station 1-35\tpmakaela"
+    ].join("\n"));
 });
