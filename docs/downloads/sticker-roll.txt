@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sticker Roll (abelrigm)
 // @namespace    https://github.com/rigoabell/abelrigm_repository
-// @version      1.1.0
+// @version      1.1.1
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/sticker-roll.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/sticker-roll.user.js
 // @description  Print a side roll of stickers from a list. Each sticker has a QR code above the value. Click through two colors.
@@ -27,7 +27,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.1.0';
+  const VERSION = '1.1.1';
   const STORAGE_KEY = 'abelrigm.stickerRoll.v1';
   const MAX_STICKERS = 500;
   const MAX_LISTS = 30;
@@ -167,7 +167,7 @@
     next.marks = alignMarks(next.values, raw.marks);
     next.rollVisible = raw.rollVisible === true && next.values.length > 0;
     next.panelOpen = raw.panelOpen === true;
-    next.hidden = raw.hidden === true;
+    next.hidden = false;
     next.lists = sanitizeLists(raw.lists);
     return next;
   }
@@ -513,10 +513,7 @@
   }
 
   function hideUi() {
-    state.hidden = true;
-    state.panelOpen = false;
-    if (root) root.hidden = true;
-    flush();
+    setPanel(false);
   }
 
   function onPrint() {
@@ -646,11 +643,13 @@
       'font-size:11px;line-height:1.2;}',
       '#sr-root[data-roll="on"][data-side="left"] #sr-bar{left:248px;right:0;}',
       '#sr-root[data-roll="on"][data-side="right"] #sr-bar{left:0;right:248px;}',
-      '#sr-launch{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:4;',
-      'width:42px;height:42px;margin:0;padding:0;border-radius:50%;border:1px solid rgba(0,0,0,.14);',
-      'background:rgba(255,255,255,.94);box-shadow:0 2px 10px rgba(0,0,0,.14);cursor:pointer;',
-      'font-size:22px;line-height:1;display:flex;align-items:center;justify-content:center;}',
-      '#sr-launch:hover{background:#fff;}',
+      '#sr-launch{position:absolute !important;top:12px !important;left:50% !important;transform:translateX(-50%) !important;',
+      'z-index:4 !important;width:48px !important;height:48px !important;margin:0 !important;padding:0 !important;',
+      'border-radius:50% !important;border:2px solid #222 !important;background:#fff4cc !important;',
+      'box-shadow:0 2px 10px rgba(0,0,0,.28) !important;cursor:pointer !important;opacity:1 !important;',
+      'visibility:visible !important;font-size:26px !important;line-height:1 !important;',
+      'display:flex !important;align-items:center !important;justify-content:center !important;}',
+      '#sr-launch:hover{background:#ffe08a !important;}',
       '#sr-bar,#sr-ink{z-index:3;}',
       '#sr-roll{z-index:1;}',
       '#sr-bar:has(#sr-list:focus){align-items:flex-start;border-radius:14px;background:#fff;}',
@@ -912,12 +911,12 @@
 
   if (typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('Show sticker roll', showUi);
-    GM_registerMenuCommand('Hide sticker roll', hideUi);
+    GM_registerMenuCommand('Close sticker panel', hideUi);
     GM_registerMenuCommand('Move sticker roll', () => {
       showUi();
       setSide(state.side === 'left' ? 'right' : 'left');
     });
   }
 
-  if (!state.hidden) mount();
+  mount();
 })();
