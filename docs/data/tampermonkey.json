@@ -443,9 +443,9 @@
     "id": "sticker-roll",
     "name": "Sticker Roll (abelrigm)",
     "category": "Labels",
-    "summary": "Print a side roll of stickers from a pasted list, with a QR code and two click colors.",
-    "detail": "On any page, a sticker button at the top center opens the panel. Print builds a roll of stickers on the left or right, and the close button turns the panel back into that button. Each sticker shows a QR code above the value. A click turns it the first color, the next click the second color, and a third click returns it to white. Both colors are set on the panel. Swatches on the opposite bottom corner paint a sticker that color directly, and those swatches change the two colors too. Name a list to save it, open it from History, or export the values.",
-    "version": "1.1.1",
+    "summary": "Print a side roll of stickers from a pasted list, with a 2D barcode and two click colors.",
+    "detail": "On any page, a small sticker button at the top center opens a panel that matches the stickers. Print builds a roll on the left or right. Each sticker shows a 2D barcode above the value. A click turns it the first color, the next click the second color, and a third click returns it to white. Colors and the paint mode are set in the panel. The close button is red and turns the panel back into the sticker button. Drag the handle at the bottom of the roll to make the stickers and the roll thicker or thinner. Name a list to save it, open it from History, or export the values.",
+    "version": "1.2.0",
     "runsOn": "Any page",
     "file": "downloads/sticker-roll.txt",
     "downloadName": "Sticker Roll (abelrigm).txt"
