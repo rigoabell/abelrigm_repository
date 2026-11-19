@@ -11,7 +11,7 @@ const readme = fs.readFileSync(new URL("README.md", root), "utf8");
 
 assert.equal(src, pasted);
 assert.match(src, /@name\s+Sticker Roll \(abelrigm\)/);
-assert.match(src, /@version\s+1\.2\.0/);
+assert.match(src, /@version\s+1\.3\.0/);
 assert.match(src, /id = 'sr-launch'/);
 assert.match(src, /🏷️/);
 assert.match(src, /@match\s+https:\/\/\*\/\*/);
@@ -20,7 +20,8 @@ assert.match(src, /@noframes/);
 assert.match(src, /@grant\s+GM_getValue/);
 assert.match(src, /@grant\s+GM_setValue/);
 assert.match(src, /el\('button', '', 'Print'\)/);
-assert.match(src, /qrcode-generator@1\.4\.4/);
+assert.match(src, /code128Bits/);
+assert.match(src, /roll\.hidden = !\(state\.rollVisible && state\.panelOpen\)/);
 assert.match(src, /#sr-grip/);
 assert.match(src, /#d01212/);
 assert.equal(src.includes("#sr-ink"), false);
@@ -29,14 +30,15 @@ assert.equal(src.includes("innerHTML"), false);
 
 const entry = catalog.find((item) => item.id === "sticker-roll");
 assert.ok(entry);
-assert.equal(entry.version, "1.2.0");
+assert.equal(entry.version, "1.3.0");
 assert.match(entry.detail, /sticker button/);
 assert.match(entry.detail, /close button/);
 assert.equal(entry.category, "Labels");
 assert.equal(entry.file, "downloads/sticker-roll.txt");
 assert.equal(entry.downloadName, "Sticker Roll (abelrigm).txt");
 assert.equal(entry.runsOn, "Any page");
-assert.match(entry.summary, /2D barcode/);
+assert.match(entry.summary, /barcode/);
+assert.match(entry.detail, /hides the panel and the printed roll/);
 assert.match(entry.detail, /Drag/);
 assert.match(entry.detail, /third click/);
 assert.match(entry.detail, /History/);
@@ -63,6 +65,7 @@ const sandbox = {
   TypeError,
   Date,
   parseInt,
+  encodeURIComponent,
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
@@ -70,7 +73,7 @@ vm.runInContext(src, sandbox, { filename: "sticker-roll.user.js" });
 const api = sandbox.__sr;
 const fromVm = (value) => JSON.parse(JSON.stringify(value));
 
-assert.equal(api.VERSION, "1.2.0");
+assert.equal(api.VERSION, "1.3.0");
 assert.deepEqual(fromVm(api.parseList("a\nb\n\n c ")), ["a", "b", "c"]);
 assert.deepEqual(fromVm(api.parseList("a, b; c\td")), ["a", "b", "c", "d"]);
 assert.deepEqual(fromVm(api.parseList("keep, this\nnext")), ["keep, this", "next"]);
@@ -166,25 +169,10 @@ assert.equal(api.clampScale(1), 1);
 assert.equal(api.clampScale(0.1), api.MIN_SCALE);
 assert.equal(api.clampScale(9), api.MAX_SCALE);
 assert.equal(api.clampScale("nope"), 1);
-assert.match(api.qrDataUrl("LPN-1001"), /^data:image\//);
-
-const calls = [];
-sandbox.qrcode = Object.assign(function (type, level) {
-  calls.push(["make", type, level]);
-  return {
-    addData(text) { calls.push(["data", text]); },
-    make() { calls.push(["built"]); },
-    createDataURL(cell, margin) {
-      calls.push(["url", cell, margin]);
-      return "data:image/gif;base64,abc";
-    },
-  };
-}, {
-  stringToBytesFuncs: { "UTF-8": function () { return []; } },
-});
-assert.equal(api.qrDataUrl("LPN1"), "data:image/gif;base64,abc");
-assert.deepEqual(calls[0], ["make", 0, "M"]);
-assert.deepEqual(calls[1], ["data", "LPN1"]);
-assert.equal(api.qrDataUrl(""), "");
-sandbox.qrcode = function () { throw new Error("too big"); };
-assert.equal(api.qrDataUrl("LPN1"), "");
+assert.equal(api.barcodeDataUrl(""), "");
+assert.match(api.barcodeDataUrl("ABC-abc-1234"), /^data:image\/svg\+xml/);
+assert.notEqual(api.code128Bits("ABC"), api.code128Bits("ABD"));
+assert.equal(
+  api.code128Bits("ABC-abc-1234"),
+  "11010010000101000110001000101100010001000110100110111001001011000010010000110100001011001001101110010011100110110011100101100101110011001001110101100100001100011101011",
+);
