@@ -1,10 +1,9 @@
 {
-  "fileName": "Current_Inventory_De_1794670975379.csv",
-  "bytes": 45749735,
-  "savedAt": "2026-11-14T15:43:37.753Z",
+  "fileName": "Current_Inventory_De_1795116851365.csv",
+  "bytes": 37435690,
+  "savedAt": "2026-11-19T19:46:14.642Z",
   "parts": [
-    "part-000",
-    "part-001"
+    "latest.csv"
   ],
-  "assignmentEpoch": "6a79b7af-20c4-49b1-9ae1-861ca2f9de7e"
+  "assignmentEpoch": "f54fc819-c6f6-439a-9555-561c106a9b9c"
 }
