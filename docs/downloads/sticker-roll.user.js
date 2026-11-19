@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sticker Roll (abelrigm)
 // @namespace    https://github.com/rigoabell/abelrigm_repository
-// @version      1.3.3
+// @version      1.3.4
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/sticker-roll.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/sticker-roll.user.js
 // @description  Print a side roll of stickers from a list. Each sticker has a barcode above the value. Click through two colors.
@@ -23,6 +23,7 @@
   Colors and paint mode are set in the panel. Drag the handle at the bottom of the roll to resize it.
   The red close button hides the panel and leaves the printed list up.
   The X on the printed list removes that list.
+  The scroll position on the printed list is saved, so a refresh stays on the same barcode.
   Name a list to save it. Saved lists show up in History on other tabs.
   Export writes the values to a text file.
 */
@@ -30,7 +31,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.3.3';
+  const VERSION = '1.3.4';
   const STORAGE_KEY = 'abelrigm.stickerRoll.v1';
   const MAX_STICKERS = 500;
   const MAX_LISTS = 30;
@@ -164,7 +165,14 @@
       hidden: false,
       lists: [],
       listsUpdated: 0,
+      scrollTop: 0,
     };
+  }
+
+  function clampScroll(value) {
+    const number = Number(value);
+    if (!isFinite(number) || number <= 0) return 0;
+    return Math.round(Math.min(number, 1000000));
   }
 
   function shouldTakeLists(localUpdated, incomingUpdated) {
@@ -195,6 +203,7 @@
     next.lists = sanitizeLists(raw.lists);
     const updated = Number(raw.listsUpdated);
     next.listsUpdated = isFinite(updated) && updated > 0 ? updated : 0;
+    next.scrollTop = clampScroll(raw.scrollTop);
     return next;
   }
 
@@ -355,6 +364,7 @@
     exportBody: exportBody,
     exportFileName: exportFileName,
     shouldTakeLists: shouldTakeLists,
+    clampScroll: clampScroll,
     code128Bits: code128Bits,
     barcodeDataUrl: barcodeDataUrl,
   };
@@ -411,6 +421,7 @@
       hidden: state.hidden,
       lists: state.lists,
       listsUpdated: state.listsUpdated,
+      scrollTop: state.scrollTop,
     };
   }
 
@@ -518,6 +529,13 @@
       roll.append(button);
     });
     syncShell();
+    restoreScroll();
+  }
+
+  function restoreScroll() {
+    const box = root && root.querySelector('#sr-stickers');
+    if (!box) return;
+    box.scrollTop = clampScroll(state.scrollTop);
   }
 
   function fillHistory() {
@@ -598,6 +616,7 @@
       box.focus();
       return;
     }
+    if (!sameValues(state.values, printed.values)) state.scrollTop = 0;
     state.values = printed.values;
     state.marks = printed.marks;
     state.draft = box.value;
@@ -616,6 +635,7 @@
         setStatus('Print a list first');
         return;
       }
+      if (!sameValues(state.values, printed.values)) state.scrollTop = 0;
       state.values = printed.values;
       state.marks = printed.marks;
       state.draft = root.querySelector('#sr-list').value;
@@ -648,6 +668,7 @@
   function onLoad(id) {
     const entry = state.lists.find((list) => list.id === id);
     if (!entry) return;
+    if (!sameValues(state.values, entry.values)) state.scrollTop = 0;
     state.name = entry.name;
     state.values = entry.values.slice();
     state.marks = entry.marks.slice();
@@ -919,6 +940,12 @@
     stickers.id = 'sr-stickers';
     stickers.setAttribute('role', 'list');
     stickers.setAttribute('aria-label', 'Sticker roll');
+    stickers.addEventListener('scroll', () => {
+      const top = clampScroll(stickers.scrollTop);
+      if (top === state.scrollTop) return;
+      state.scrollTop = top;
+      persist();
+    });
     const grip = el('div');
     grip.id = 'sr-grip';
     grip.tabIndex = 0;

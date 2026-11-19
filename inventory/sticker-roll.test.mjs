@@ -11,7 +11,7 @@ const readme = fs.readFileSync(new URL("README.md", root), "utf8");
 
 assert.equal(src, pasted);
 assert.match(src, /@name\s+Sticker Roll \(abelrigm\)/);
-assert.match(src, /@version\s+1\.3\.3/);
+assert.match(src, /@version\s+1\.3\.4/);
 assert.match(src, /id = 'sr-launch'/);
 assert.match(src, /🏷️/);
 assert.match(src, /@match\s+https:\/\/\*\/\*/);
@@ -33,7 +33,7 @@ assert.equal(src.includes("innerHTML"), false);
 
 const entry = catalog.find((item) => item.id === "sticker-roll");
 assert.ok(entry);
-assert.equal(entry.version, "1.3.3");
+assert.equal(entry.version, "1.3.4");
 assert.match(entry.detail, /sticker button/);
 assert.match(entry.detail, /close button/);
 assert.equal(entry.category, "Labels");
@@ -77,7 +77,7 @@ vm.runInContext(src, sandbox, { filename: "sticker-roll.user.js" });
 const api = sandbox.__sr;
 const fromVm = (value) => JSON.parse(JSON.stringify(value));
 
-assert.equal(api.VERSION, "1.3.3");
+assert.equal(api.VERSION, "1.3.4");
 assert.deepEqual(fromVm(api.parseList("a\nb\n\n c ")), ["a", "b", "c"]);
 assert.deepEqual(fromVm(api.parseList("a, b; c\td")), ["a", "b", "c", "d"]);
 assert.deepEqual(fromVm(api.parseList("keep, this\nnext")), ["keep, this", "next"]);
@@ -170,6 +170,9 @@ assert.equal(api.sanitizeState(null).panelOpen, false);
 assert.equal(api.sanitizeState({ panelOpen: true }).panelOpen, true);
 assert.equal(api.sanitizeState({ hidden: true }).hidden, false);
 assert.equal(api.sanitizeState({ listsUpdated: 40 }).listsUpdated, 40);
+assert.equal(api.clampScroll(240), 240);
+assert.equal(api.clampScroll(-8), 0);
+assert.equal(api.sanitizeState({ scrollTop: 480 }).scrollTop, 480);
 assert.equal(api.shouldTakeLists(10, 11), true);
 assert.equal(api.shouldTakeLists(11, 11), false);
 assert.equal(api.shouldTakeLists(12, 11), false);
