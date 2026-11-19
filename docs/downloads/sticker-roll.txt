@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sticker Roll (abelrigm)
 // @namespace    https://github.com/rigoabell/abelrigm_repository
-// @version      1.3.2
+// @version      1.3.3
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/sticker-roll.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/sticker-roll.user.js
 // @description  Print a side roll of stickers from a list. Each sticker has a barcode above the value. Click through two colors.
@@ -21,7 +21,8 @@
   A roll of stickers sits on the left or the right. A linear barcode is on top, the value underneath.
   Click a sticker: first color, second color, then white again.
   Colors and paint mode are set in the panel. Drag the handle at the bottom of the roll to resize it.
-  The red close button hides the roll. The sticker button shows that same roll again.
+  The red close button hides the panel and leaves the printed list up.
+  The X on the printed list removes that list.
   Name a list to save it. Saved lists show up in History on other tabs.
   Export writes the values to a text file.
 */
@@ -29,7 +30,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.3.2';
+  const VERSION = '1.3.3';
   const STORAGE_KEY = 'abelrigm.stickerRoll.v1';
   const MAX_STICKERS = 500;
   const MAX_LISTS = 30;
@@ -483,7 +484,7 @@
       }
     });
     const roll = root.querySelector('#sr-roll');
-    if (roll) roll.hidden = !(state.rollVisible && state.panelOpen);
+    if (roll) roll.hidden = !state.rollVisible;
   }
 
   function repaintStickers() {
@@ -580,6 +581,13 @@
 
   function hideUi() {
     setPanel(false);
+  }
+
+  function dismissRoll() {
+    state.rollVisible = false;
+    if (!root) return;
+    syncShell();
+    persist();
   }
 
   function onPrint() {
@@ -740,6 +748,11 @@
       '#sr-hide{width:22px !important;height:22px !important;padding:0 !important;border-radius:50% !important;',
       'background:#d01212 !important;color:#fff !important;font-size:14px !important;font-weight:700 !important;}',
       '#sr-hide:hover{background:#a30e0e !important;}',
+      '#sr-rollbar{flex:none;height:32px;display:flex;align-items:center;justify-content:flex-end;padding:6px 8px 0;}',
+      '#sr-dismiss{width:22px !important;height:22px !important;margin:0 !important;padding:0 !important;',
+      'border:0 !important;border-radius:50% !important;background:#d01212 !important;color:#fff !important;',
+      'font-size:14px !important;font-weight:700 !important;line-height:1 !important;cursor:pointer !important;}',
+      '#sr-dismiss:hover{background:#a30e0e !important;}',
       '#sr-status{min-width:0;max-width:88px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#888;}',
       '#sr-key{color:#888;font-size:10px;font-weight:700;}',
       '#sr-bar .sr-mode{border:1px solid rgba(0,0,0,.08);background:#fff;border-radius:8px;padding:3px 7px;}',
@@ -893,6 +906,15 @@
 
     const roll = el('div');
     roll.id = 'sr-roll';
+    const rollBar = el('div');
+    rollBar.id = 'sr-rollbar';
+    const dismiss = el('button', '', '×');
+    dismiss.id = 'sr-dismiss';
+    dismiss.type = 'button';
+    dismiss.dataset.action = 'dismiss';
+    dismiss.title = 'Remove the printed list';
+    dismiss.setAttribute('aria-label', 'Remove the printed list');
+    rollBar.append(dismiss);
     const stickers = el('div');
     stickers.id = 'sr-stickers';
     stickers.setAttribute('role', 'list');
@@ -905,7 +927,7 @@
     grip.setAttribute('aria-orientation', 'horizontal');
     grip.setAttribute('aria-label', 'Resize the roll');
     grip.append(el('i'));
-    roll.append(stickers, grip);
+    roll.append(rollBar, stickers, grip);
     grip.addEventListener('pointerdown', (event) => {
       if (event.button != null && event.button !== 0) return;
       event.preventDefault();
@@ -946,6 +968,7 @@
       else if (kind === 'delete') onDelete();
       else if (kind === 'open') setPanel(true);
       else if (kind === 'hide') setPanel(false);
+      else if (kind === 'dismiss') dismissRoll();
     }
     root.addEventListener('pointerdown', (event) => {
       event.stopPropagation();
