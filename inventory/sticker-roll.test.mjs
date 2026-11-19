@@ -11,7 +11,7 @@ const readme = fs.readFileSync(new URL("README.md", root), "utf8");
 
 assert.equal(src, pasted);
 assert.match(src, /@name\s+Sticker Roll \(abelrigm\)/);
-assert.match(src, /@version\s+1\.1\.1/);
+assert.match(src, /@version\s+1\.2\.0/);
 assert.match(src, /id = 'sr-launch'/);
 assert.match(src, /🏷️/);
 assert.match(src, /@match\s+https:\/\/\*\/\*/);
@@ -21,19 +21,23 @@ assert.match(src, /@grant\s+GM_getValue/);
 assert.match(src, /@grant\s+GM_setValue/);
 assert.match(src, /el\('button', '', 'Print'\)/);
 assert.match(src, /qrcode-generator@1\.4\.4/);
+assert.match(src, /#sr-grip/);
+assert.match(src, /#d01212/);
+assert.equal(src.includes("#sr-ink"), false);
 assert.equal(src.includes("eval("), false);
 assert.equal(src.includes("innerHTML"), false);
 
 const entry = catalog.find((item) => item.id === "sticker-roll");
 assert.ok(entry);
-assert.equal(entry.version, "1.1.1");
+assert.equal(entry.version, "1.2.0");
 assert.match(entry.detail, /sticker button/);
 assert.match(entry.detail, /close button/);
 assert.equal(entry.category, "Labels");
 assert.equal(entry.file, "downloads/sticker-roll.txt");
 assert.equal(entry.downloadName, "Sticker Roll (abelrigm).txt");
 assert.equal(entry.runsOn, "Any page");
-assert.match(entry.summary, /QR code/);
+assert.match(entry.summary, /2D barcode/);
+assert.match(entry.detail, /Drag/);
 assert.match(entry.detail, /third click/);
 assert.match(entry.detail, /History/);
 assert.equal(fs.existsSync(new URL("docs/" + entry.file, root)), true);
@@ -66,7 +70,7 @@ vm.runInContext(src, sandbox, { filename: "sticker-roll.user.js" });
 const api = sandbox.__sr;
 const fromVm = (value) => JSON.parse(JSON.stringify(value));
 
-assert.equal(api.VERSION, "1.1.1");
+assert.equal(api.VERSION, "1.2.0");
 assert.deepEqual(fromVm(api.parseList("a\nb\n\n c ")), ["a", "b", "c"]);
 assert.deepEqual(fromVm(api.parseList("a, b; c\td")), ["a", "b", "c", "d"]);
 assert.deepEqual(fromVm(api.parseList("keep, this\nnext")), ["keep, this", "next"]);
@@ -158,6 +162,11 @@ assert.equal(api.sanitizeState(null).mode, "cycle");
 assert.equal(api.sanitizeState(null).panelOpen, false);
 assert.equal(api.sanitizeState({ panelOpen: true }).panelOpen, true);
 assert.equal(api.sanitizeState({ hidden: true }).hidden, false);
+assert.equal(api.clampScale(1), 1);
+assert.equal(api.clampScale(0.1), api.MIN_SCALE);
+assert.equal(api.clampScale(9), api.MAX_SCALE);
+assert.equal(api.clampScale("nope"), 1);
+assert.match(api.qrDataUrl("LPN-1001"), /^data:image\//);
 
 const calls = [];
 sandbox.qrcode = Object.assign(function (type, level) {
