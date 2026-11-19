@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sticker Roll (abelrigm)
 // @namespace    https://github.com/rigoabell/abelrigm_repository
-// @version      1.3.1
+// @version      1.3.2
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/sticker-roll.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/sticker-roll.user.js
 // @description  Print a side roll of stickers from a list. Each sticker has a barcode above the value. Click through two colors.
@@ -11,6 +11,7 @@
 // @noframes
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_addValueChangeListener
 // @grant        GM_registerMenuCommand
 // @run-at       document-idle
 // ==/UserScript==
@@ -21,13 +22,14 @@
   Click a sticker: first color, second color, then white again.
   Colors and paint mode are set in the panel. Drag the handle at the bottom of the roll to resize it.
   The red close button hides the roll. The sticker button shows that same roll again.
-  Name a list to save it, open it from History, or Export the values.
+  Name a list to save it. Saved lists show up in History on other tabs.
+  Export writes the values to a text file.
 */
 
 (function () {
   'use strict';
 
-  const VERSION = '1.3.1';
+  const VERSION = '1.3.2';
   const STORAGE_KEY = 'abelrigm.stickerRoll.v1';
   const MAX_STICKERS = 500;
   const MAX_LISTS = 30;
@@ -160,7 +162,16 @@
       scale: 1,
       hidden: false,
       lists: [],
+      listsUpdated: 0,
     };
+  }
+
+  function shouldTakeLists(localUpdated, incomingUpdated) {
+    const incoming = Number(incomingUpdated);
+    const local = Number(localUpdated);
+    if (!isFinite(incoming)) return false;
+    if (!isFinite(local)) return incoming > 0;
+    return incoming > local;
   }
 
   function sanitizeState(raw) {
@@ -181,6 +192,8 @@
     next.scale = clampScale(raw.scale);
     next.hidden = false;
     next.lists = sanitizeLists(raw.lists);
+    const updated = Number(raw.listsUpdated);
+    next.listsUpdated = isFinite(updated) && updated > 0 ? updated : 0;
     return next;
   }
 
@@ -340,6 +353,7 @@
     upsertList: upsertList,
     exportBody: exportBody,
     exportFileName: exportFileName,
+    shouldTakeLists: shouldTakeLists,
     code128Bits: code128Bits,
     barcodeDataUrl: barcodeDataUrl,
   };
@@ -353,7 +367,10 @@
 
   function storageGet() {
     try {
-      if (typeof GM_getValue === 'function') return GM_getValue(STORAGE_KEY, null);
+      if (typeof GM_getValue === 'function') {
+        const stored = GM_getValue(STORAGE_KEY, null);
+        if (stored != null && stored !== '') return stored;
+      }
     } catch (error) { /* use the page store */ }
     try {
       return localStorage.getItem(STORAGE_KEY);
@@ -362,15 +379,13 @@
     }
   }
 
-  function storageSet(payload) {
+  function storageSet(data) {
+    const json = JSON.stringify(data);
     try {
-      if (typeof GM_setValue === 'function') {
-        GM_setValue(STORAGE_KEY, payload);
-        return;
-      }
+      if (typeof GM_setValue === 'function') GM_setValue(STORAGE_KEY, json);
     } catch (error) { /* use the page store */ }
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+      localStorage.setItem(STORAGE_KEY, json);
     } catch (error) { /* private mode */ }
   }
 
@@ -394,6 +409,7 @@
       scale: state.scale,
       hidden: state.hidden,
       lists: state.lists,
+      listsUpdated: state.listsUpdated,
     };
   }
 
@@ -612,12 +628,13 @@
       return;
     }
     state.lists = saved.lists;
+    state.listsUpdated = Date.now();
     state.name = saved.entry.name;
     nameInput.value = saved.entry.name;
     fillHistory();
     root.querySelector('#sr-history').value = saved.entry.id;
     setStatus('Saved');
-    persist();
+    flush();
   }
 
   function onLoad(id) {
@@ -642,9 +659,10 @@
       return;
     }
     state.lists = state.lists.filter((list) => list.id !== select.value);
+    state.listsUpdated = Date.now();
     fillHistory();
     setStatus('Deleted');
-    persist();
+    flush();
   }
 
   function onExport() {
@@ -702,12 +720,12 @@
       '#sr-launch:hover{background:#fff !important;}',
       '#sr-bar{z-index:3;}',
       '#sr-roll{z-index:1;}',
-      '#sr-bar:has(#sr-list:focus){align-items:flex-start;border-radius:16px;background:#fff;}',
-      '#sr-list{width:148px;height:22px;margin:0;padding:3px 8px;resize:none;overflow:hidden;',
+      '.sr-list-slot{position:relative;width:148px;height:22px;flex:none;}',
+      '#sr-list{width:100%;height:22px;margin:0;padding:3px 8px;resize:none;overflow:hidden;',
       'border:1px solid transparent;border-radius:999px;background:rgba(255,255,255,.55);',
       'color:#333;font:inherit;outline:none;}',
       '#sr-list::placeholder{color:#9a9a9a;}',
-      '#sr-list:focus{width:220px;height:92px;overflow:auto;border-radius:8px;',
+      '#sr-list:focus{position:absolute;left:0;top:0;z-index:6;height:92px;overflow:auto;border-radius:8px;',
       'border-color:rgba(0,0,0,.14);background:#fff;}',
       '#sr-name{width:76px;height:22px;margin:0;padding:2px 7px;border:1px solid transparent;',
       'border-radius:999px;background:rgba(255,255,255,.55);color:#333;font:inherit;outline:none;}',
@@ -776,6 +794,8 @@
     list.title = 'One value per line. Commas work on a single line. Ctrl+Enter prints.';
     list.value = state.draft || state.values.join('\n');
     list.setAttribute('aria-label', 'Sticker values');
+    const listSlot = el('span', 'sr-list-slot');
+    listSlot.append(list);
 
     const print = el('button', '', 'Print');
     print.id = 'sr-print';
@@ -862,7 +882,7 @@
     status.id = 'sr-status';
     status.setAttribute('aria-live', 'polite');
 
-    bar.append(list, print, side, cycle, paint1, color1, paint2, color2, paintWhite, name, save, history, exportButton, del, hide, status);
+    bar.append(listSlot, print, side, cycle, paint1, color1, paint2, color2, paintWhite, name, save, history, exportButton, del, hide, status);
 
     const launch = el('button', '', '🏷️');
     launch.id = 'sr-launch';
@@ -917,21 +937,42 @@
     });
 
     root.append(launch, bar, roll);
-    root.addEventListener('pointerdown', (event) => event.stopPropagation());
+    let handledAt = 0;
+    function runAction(kind) {
+      if (kind === 'print') onPrint();
+      else if (kind === 'side') setSide(state.side === 'left' ? 'right' : 'left');
+      else if (kind === 'save') onSave();
+      else if (kind === 'export') onExport();
+      else if (kind === 'delete') onDelete();
+      else if (kind === 'open') setPanel(true);
+      else if (kind === 'hide') setPanel(false);
+    }
+    root.addEventListener('pointerdown', (event) => {
+      event.stopPropagation();
+      if (event.button != null && event.button !== 0) return;
+      const action = event.target.closest('[data-action]');
+      const modeButton = event.target.closest('[data-mode]');
+      if (action && action.dataset.action) {
+        handledAt = Date.now();
+        runAction(action.dataset.action);
+      } else if (modeButton && bar.contains(modeButton)) {
+        handledAt = Date.now();
+        setMode(modeButton.dataset.mode);
+      }
+    });
     root.addEventListener('mousedown', (event) => event.stopPropagation());
     root.addEventListener('click', (event) => {
       const action = event.target.closest('[data-action]');
       const modeButton = event.target.closest('[data-mode]');
+      if (handledAt && Date.now() - handledAt < 700) {
+        handledAt = 0;
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       if (action) {
         event.preventDefault();
-        const kind = action.dataset.action;
-        if (kind === 'print') onPrint();
-        else if (kind === 'side') setSide(state.side === 'left' ? 'right' : 'left');
-        else if (kind === 'save') onSave();
-        else if (kind === 'export') onExport();
-        else if (kind === 'delete') onDelete();
-        else if (kind === 'open') setPanel(true);
-        else if (kind === 'hide') setPanel(false);
+        runAction(action.dataset.action);
       } else if (modeButton && bar.contains(modeButton)) {
         event.preventDefault();
         setMode(modeButton.dataset.mode);
@@ -979,10 +1020,27 @@
     else syncShell();
   }
 
+  function pullLists(raw) {
+    const incoming = readStored(raw);
+    if (!shouldTakeLists(state.listsUpdated, incoming.listsUpdated)) return;
+    state.lists = incoming.lists;
+    state.listsUpdated = incoming.listsUpdated;
+    if (root) fillHistory();
+  }
+
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flush();
+    else pullLists(storageGet());
   });
   window.addEventListener('pagehide', flush);
+  window.addEventListener('storage', (event) => {
+    if (event.key === STORAGE_KEY) pullLists(event.newValue);
+  });
+  if (typeof GM_addValueChangeListener === 'function') {
+    GM_addValueChangeListener(STORAGE_KEY, (key, oldValue, newValue, remote) => {
+      if (remote) pullLists(newValue);
+    });
+  }
 
   if (typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('Show sticker roll', showUi);
