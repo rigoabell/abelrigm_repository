@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sticker Roll (abelrigm)
 // @namespace    https://github.com/rigoabell/abelrigm_repository
-// @version      1.0.0
+// @version      1.1.0
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/sticker-roll.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/sticker-roll.user.js
 // @description  Print a side roll of stickers from a list. Each sticker has a QR code above the value. Click through two colors.
@@ -17,7 +17,7 @@
 // ==/UserScript==
 
 /*
-  Paste a list in the bar at the top and press Print.
+  A sticker button at the top center opens the panel. Paste a list and press Print.
   A roll of stickers sits on the left or the right. QR code on top, value underneath.
   Click a sticker: first color, second color, then white again.
   The swatches on the opposite bottom corner paint that color directly.
@@ -27,7 +27,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.1.0';
   const STORAGE_KEY = 'abelrigm.stickerRoll.v1';
   const MAX_STICKERS = 500;
   const MAX_LISTS = 30;
@@ -146,6 +146,7 @@
       values: [],
       marks: [],
       rollVisible: false,
+      panelOpen: false,
       hidden: false,
       lists: [],
     };
@@ -165,6 +166,7 @@
       : [];
     next.marks = alignMarks(next.values, raw.marks);
     next.rollVisible = raw.rollVisible === true && next.values.length > 0;
+    next.panelOpen = raw.panelOpen === true;
     next.hidden = raw.hidden === true;
     next.lists = sanitizeLists(raw.lists);
     return next;
@@ -327,6 +329,7 @@
       values: state.values,
       marks: state.marks,
       rollVisible: state.rollVisible,
+      panelOpen: state.panelOpen,
       hidden: state.hidden,
       lists: state.lists,
     };
@@ -374,7 +377,12 @@
     if (!root) return;
     root.dataset.side = state.side;
     root.dataset.roll = state.rollVisible ? 'on' : 'off';
+    root.dataset.panel = state.panelOpen ? 'open' : 'closed';
     root.hidden = state.hidden;
+    const bar = root.querySelector('#sr-bar');
+    const launch = root.querySelector('#sr-launch');
+    if (bar) bar.hidden = !state.panelOpen;
+    if (launch) launch.hidden = state.panelOpen;
     const sideButton = root.querySelector('[data-action="side"]');
     if (sideButton) {
       sideButton.textContent = state.side === 'right' ? 'Right' : 'Left';
@@ -488,15 +496,25 @@
     persist();
   }
 
-  function showUi() {
+  function setPanel(open) {
+    state.panelOpen = open === true;
     state.hidden = false;
+    if (!state.panelOpen && root) {
+      const box = root.querySelector('#sr-list');
+      if (box) box.blur();
+    }
     if (!root) mount();
-    else root.hidden = false;
+    else syncShell();
     persist();
+  }
+
+  function showUi() {
+    setPanel(true);
   }
 
   function hideUi() {
     state.hidden = true;
+    state.panelOpen = false;
     if (root) root.hidden = true;
     flush();
   }
@@ -514,6 +532,7 @@
     state.draft = box.value;
     state.rollVisible = true;
     state.hidden = false;
+    state.panelOpen = true;
     renderRoll();
     setStatus(printed.status);
     persist();
@@ -617,7 +636,7 @@
       'font-family:"Segoe UI",system-ui,-apple-system,sans-serif;color:#2a2a2a;}',
       '#sr-root[hidden]{display:none !important;}',
       '#sr-root *,#sr-root *::before,#sr-root *::after{box-sizing:border-box;}',
-      '#sr-bar,#sr-roll,#sr-ink{pointer-events:auto;}',
+      '#sr-launch,#sr-bar,#sr-roll,#sr-ink{pointer-events:auto;}',
       '#sr-bar{position:absolute;top:8px;left:0;right:0;width:max-content;max-width:calc(100% - 16px);',
       'margin:0 auto;transform:none;',
       'display:flex;align-items:center;gap:5px;flex-wrap:wrap;justify-content:center;',
@@ -627,6 +646,11 @@
       'font-size:11px;line-height:1.2;}',
       '#sr-root[data-roll="on"][data-side="left"] #sr-bar{left:248px;right:0;}',
       '#sr-root[data-roll="on"][data-side="right"] #sr-bar{left:0;right:248px;}',
+      '#sr-launch{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:4;',
+      'width:42px;height:42px;margin:0;padding:0;border-radius:50%;border:1px solid rgba(0,0,0,.14);',
+      'background:rgba(255,255,255,.94);box-shadow:0 2px 10px rgba(0,0,0,.14);cursor:pointer;',
+      'font-size:22px;line-height:1;display:flex;align-items:center;justify-content:center;}',
+      '#sr-launch:hover{background:#fff;}',
       '#sr-bar,#sr-ink{z-index:3;}',
       '#sr-roll{z-index:1;}',
       '#sr-bar:has(#sr-list:focus){align-items:flex-start;border-radius:14px;background:#fff;}',
@@ -680,7 +704,7 @@
       'box-shadow:0 8px 24px rgba(0,0,0,.14);}',
       '#sr-root[data-side="left"] #sr-ink{right:16px;}',
       '#sr-root[data-side="right"] #sr-ink{left:16px;}',
-      '#sr-ink[hidden],#sr-roll[hidden]{display:none !important;}',
+      '#sr-launch[hidden],#sr-bar[hidden],#sr-ink[hidden],#sr-roll[hidden]{display:none !important;}',
       '.sr-cycle,.sr-swatch{all:unset;box-sizing:border-box;cursor:pointer;border-radius:8px;',
       'font:600 11px/1 "Segoe UI",system-ui,sans-serif;text-align:center;}',
       '.sr-cycle{height:24px;background:#f3f3f1;color:#333;border:1px solid rgba(0,0,0,.08);}',
@@ -764,14 +788,21 @@
     const hide = el('button', 'sr-hide', '×');
     hide.type = 'button';
     hide.dataset.action = 'hide';
-    hide.title = 'Hide. The Tampermonkey menu shows it again.';
-    hide.setAttribute('aria-label', 'Hide sticker roll');
+    hide.title = 'Close the panel';
+    hide.setAttribute('aria-label', 'Close the panel');
 
     const status = el('span', '', '');
     status.id = 'sr-status';
     status.setAttribute('aria-live', 'polite');
 
     bar.append(list, print, side, key1, color1, key2, color2, name, save, history, exportButton, del, hide, status);
+
+    const launch = el('button', '', '🏷️');
+    launch.id = 'sr-launch';
+    launch.type = 'button';
+    launch.dataset.action = 'open';
+    launch.title = 'Open sticker roll';
+    launch.setAttribute('aria-label', 'Open sticker roll');
 
     const roll = el('div');
     roll.id = 'sr-roll';
@@ -811,7 +842,7 @@
     const hint = el('div', 'sr-hint', '');
     ink.append(cycle, inkRow('1', '1'), inkRow('2', '2'), inkRow('0', 'White'), hint);
 
-    root.append(bar, roll, ink);
+    root.append(launch, bar, roll, ink);
     root.addEventListener('pointerdown', (event) => event.stopPropagation());
     root.addEventListener('mousedown', (event) => event.stopPropagation());
     root.addEventListener('click', (event) => {
@@ -825,7 +856,8 @@
         else if (kind === 'save') onSave();
         else if (kind === 'export') onExport();
         else if (kind === 'delete') onDelete();
-        else if (kind === 'hide') hideUi();
+        else if (kind === 'open') setPanel(true);
+        else if (kind === 'hide') setPanel(false);
       } else if (modeButton && ink.contains(modeButton)) {
         event.preventDefault();
         setMode(modeButton.dataset.mode);
