@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sticker Roll (abelrigm)
 // @namespace    https://github.com/rigoabell/abelrigm_repository
-// @version      1.3.0
+// @version      1.3.1
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/sticker-roll.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/sticker-roll.user.js
 // @description  Print a side roll of stickers from a list. Each sticker has a barcode above the value. Click through two colors.
@@ -27,7 +27,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.3.0';
+  const VERSION = '1.3.1';
   const STORAGE_KEY = 'abelrigm.stickerRoll.v1';
   const MAX_STICKERS = 500;
   const MAX_LISTS = 30;
@@ -287,7 +287,7 @@
   function barcodeDataUrl(text) {
     const bits = code128Bits(text);
     if (!bits) return '';
-    const quiet = 10;
+    const quiet = 2;
     const height = 60;
     const width = bits.length + quiet * 2;
     let x = quiet;
@@ -307,7 +307,7 @@
       }
     }
     paint();
-    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + width + ' ' + height + '" shape-rendering="crispEdges">'
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="none" shape-rendering="crispEdges">'
       + '<rect width="100%" height="100%" fill="#fff"/>' + bars + '</svg>';
     return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
   }
@@ -753,8 +753,9 @@
       'background:linear-gradient(180deg,rgba(255,255,255,.55),rgba(255,255,255,0));pointer-events:none;}',
       '.sr-sticker:focus-visible{outline:2px solid #222;outline-offset:2px;}',
       '.sr-sticker:active{transform:scale(.985);}',
-      '.sr-code{width:100%;height:calc(46px * var(--sr-scale, 1));object-fit:fill;',
-      'background:#fff;padding:0;border-radius:2px;',
+      '.sr-code{align-self:stretch;display:block;width:calc(100% + calc(10px * var(--sr-scale, 1)));',
+      'height:calc(46px * var(--sr-scale, 1));margin:0 calc(-5px * var(--sr-scale, 1));',
+      'object-fit:fill;background:#fff;padding:0;border-radius:2px;',
       'position:relative;z-index:1;pointer-events:none;}',
       '.sr-value{position:relative;z-index:1;margin-top:calc(3px * var(--sr-scale, 1));max-width:100%;text-align:center;',
       'font-weight:600;font-size:calc(13px * var(--sr-scale, 1));line-height:1.15;letter-spacing:0;',

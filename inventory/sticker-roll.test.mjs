@@ -11,7 +11,7 @@ const readme = fs.readFileSync(new URL("README.md", root), "utf8");
 
 assert.equal(src, pasted);
 assert.match(src, /@name\s+Sticker Roll \(abelrigm\)/);
-assert.match(src, /@version\s+1\.3\.0/);
+assert.match(src, /@version\s+1\.3\.1/);
 assert.match(src, /id = 'sr-launch'/);
 assert.match(src, /🏷️/);
 assert.match(src, /@match\s+https:\/\/\*\/\*/);
@@ -30,7 +30,7 @@ assert.equal(src.includes("innerHTML"), false);
 
 const entry = catalog.find((item) => item.id === "sticker-roll");
 assert.ok(entry);
-assert.equal(entry.version, "1.3.0");
+assert.equal(entry.version, "1.3.1");
 assert.match(entry.detail, /sticker button/);
 assert.match(entry.detail, /close button/);
 assert.equal(entry.category, "Labels");
@@ -73,7 +73,7 @@ vm.runInContext(src, sandbox, { filename: "sticker-roll.user.js" });
 const api = sandbox.__sr;
 const fromVm = (value) => JSON.parse(JSON.stringify(value));
 
-assert.equal(api.VERSION, "1.3.0");
+assert.equal(api.VERSION, "1.3.1");
 assert.deepEqual(fromVm(api.parseList("a\nb\n\n c ")), ["a", "b", "c"]);
 assert.deepEqual(fromVm(api.parseList("a, b; c\td")), ["a", "b", "c", "d"]);
 assert.deepEqual(fromVm(api.parseList("keep, this\nnext")), ["keep, this", "next"]);
@@ -171,6 +171,7 @@ assert.equal(api.clampScale(9), api.MAX_SCALE);
 assert.equal(api.clampScale("nope"), 1);
 assert.equal(api.barcodeDataUrl(""), "");
 assert.match(api.barcodeDataUrl("ABC-abc-1234"), /^data:image\/svg\+xml/);
+assert.match(api.barcodeDataUrl("ABC-abc-1234"), /preserveAspectRatio/);
 assert.notEqual(api.code128Bits("ABC"), api.code128Bits("ABD"));
 assert.equal(
   api.code128Bits("ABC-abc-1234"),
