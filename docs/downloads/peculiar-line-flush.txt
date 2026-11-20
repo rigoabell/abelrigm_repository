@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.58
+// @version      2.9.59
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -54,7 +54,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.58";
+  const VERSION = "2.9.59";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2461,6 +2461,33 @@
     return { ok: true, error: "" };
   }
 
+  function containerJustMoved(before, after, container) {
+    const id = cellText(container).toLowerCase();
+    if (!id) return false;
+    const moved = (text) => {
+      const hay = moveStableText(text).toLowerCase();
+      let from = 0;
+      while (from < hay.length) {
+        const at = hay.indexOf(id, from);
+        if (at < 0) return false;
+        if (/^\s*moved/.test(hay.slice(at + id.length, at + id.length + 12))) return true;
+        from = at + id.length;
+      }
+      return false;
+    };
+    return /move successful/i.test(after) && moved(after) && !moved(before);
+  }
+
+  function moveDropAccepted(before, after, token, container) {
+    const problem = moveScreenProblem(after);
+    if (problem) return { ok: false, error: problem };
+    const bad = moveBadPhrase(before, after);
+    if (bad) return { ok: false, error: bad };
+    const shown = cellText(token) && moveTokenCount(after, token) > moveTokenCount(before, token);
+    if (shown || containerJustMoved(before, after, container)) return { ok: true, error: "" };
+    return { ok: false, error: "Page did not show " + cellText(token) };
+  }
+
   function moveIsScanPage(href, title) {
     if (/404|not found/i.test(cellText(title))) return false;
     try {
@@ -3001,7 +3028,7 @@
     };
   }
 
-  async function waitForMoveToken(beforeRaw, token) {
+  async function waitForMoveToken(beforeRaw, token, container) {
     const start = Date.now();
     let last = moveStableText(beforeRaw);
     let stableAt = 0;
@@ -3009,7 +3036,9 @@
     while (Date.now() - start < 8000) {
       const raw = moveScreenText();
       const sig = moveStableText(raw);
-      const verdict = moveScanAccepted(beforeRaw, raw, token);
+      const verdict = container
+        ? moveDropAccepted(beforeRaw, raw, token, container)
+        : moveScanAccepted(beforeRaw, raw, token);
       if (sig !== last) {
         last = sig;
         saw = true;
@@ -3023,7 +3052,10 @@
       await sleep(40);
     }
     const raw = moveScreenText();
-    return { ...moveScanAccepted(beforeRaw, raw, token), detail: clip(raw, 240) };
+    const verdict = container
+      ? moveDropAccepted(beforeRaw, raw, token, container)
+      : moveScanAccepted(beforeRaw, raw, token);
+    return { ...verdict, detail: clip(raw, 240) };
   }
 
   async function performDropzone(container, dropzone) {
@@ -3042,7 +3074,7 @@
     paintMoveBadge("1/1 scan dropzone " + dropzone);
     rememberDropzone({ container, dropzone, step: "dropzone" });
     await burstMoveScan(dropzone, dropzone);
-    const second = await waitForMoveToken(midRaw, dropzone);
+    const second = await waitForMoveToken(midRaw, dropzone, container);
     paintMoveBadge(second.ok ? "Dropzone accepted: " + dropzone : "Dropzone stopped: " + (second.error || "not accepted"));
     const detail = second.detail || first.detail || "";
     if (!second.ok) return { ok: false, error: second.error || "Page did not show " + dropzone, detail };
