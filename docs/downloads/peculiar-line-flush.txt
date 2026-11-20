@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.49
+// @version      2.9.50
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -51,7 +51,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.49";
+  const VERSION = "2.9.50";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2487,13 +2487,20 @@
   function ensureMoveTab() {
     GM_setValue(KEYS.dropzoneTried, { href: MOVE_URL, t: Date.now() });
     GM_setValue(KEYS.dropzoneNudge, Date.now());
-    if (moveFresh()) return;
-    if (Date.now() - moveTabOpenedAt < 15000) return;
+    GM_setValue("plf.dropzoneClaim", { n: 0, t: 0 });
+    rememberDropzone({ step: "opening", dropzone: MOVE_URL });
+    const heartbeat = Number(GM_getValue(KEYS.dropzoneHeartbeat, 0)) || 0;
+    const live = Date.now() - heartbeat < HEARTBEAT_STALE_MS;
+    if (live && Date.now() - moveTabOpenedAt < 4000) return;
     moveTabOpenedAt = Date.now();
     try {
-      GM_openInTab(MOVE_URL, { active: true, insert: true, setParent: true });
+      GM_openInTab(MOVE_URL, false);
     } catch {
-      /* The Move App tab could not be opened. */
+      try {
+        GM_openInTab(MOVE_URL, { active: true, insert: true, setParent: true });
+      } catch {
+        /* The Move App tab could not be opened. */
+      }
     }
   }
 
@@ -2883,6 +2890,13 @@
       noteMoveLanded();
       const text = moveScreenText();
       if (/scan was unsuccessful|not of appropriate type/i.test(text)) {
+        const reloaded = Number(GM_getValue("plf.dropzoneReload", 0)) || 0;
+        if (Date.now() - reloaded > 20000) {
+          GM_setValue("plf.dropzoneReload", Date.now());
+          paintMoveBadge("Refreshing the scan page");
+          location.assign(MOVE_URL);
+          return { switching: true, ok: false, error: "Refreshing the scan page" };
+        }
         paintMoveBadge("The page is showing a scan error. Leaving it on screen.");
         await sleep(2000);
         return { ok: false, error: "Page is showing a scan error", detail: clip(text, 240) };
@@ -2949,6 +2963,22 @@
   }
 
   let moveWorkerStarted = false;
+  let moveWorkerAt = 0;
+  let moveSawJob = false;
+  async function closeMoveTabWhenDone() {
+    const pack = GM_getValue(KEYS.dropzoneQueue, null);
+    const cursor = Number(GM_getValue(KEYS.dropzoneCursor, 0)) || 0;
+    const pending = (Array.isArray(pack?.jobs) ? pack.jobs : []).filter((job) => job && Number(job.n) > cursor);
+    if (pending.length) return;
+    if (!moveSawJob && Date.now() - moveWorkerAt < 8000) return;
+    if (closeMoveTabWhenDone.closing) return;
+    closeMoveTabWhenDone.closing = true;
+    paintMoveBadge("Done. Closing this tab.");
+    GM_setValue(KEYS.dropzoneHeartbeat, 0);
+    await sleep(400);
+    try { window.close(); } catch { /* The browser kept this tab open. */ }
+  }
+
   async function drainDropzones() {
     if (drainDropzones.working) return;
     drainDropzones.working = true;
@@ -2960,6 +2990,7 @@
           .filter((job) => job && Number(job.n) > cursor)
           .sort((a, b) => Number(a.n) - Number(b.n));
         if (!jobs.length) break;
+        moveSawJob = true;
         const job = jobs[0];
         const claim = GM_getValue("plf.dropzoneClaim", null);
         if (claim && Number(claim.n) === Number(job.n) && Date.now() - (Number(claim.t) || 0) < 25000 && (!claim.href || claim.href === location.href)) break;
@@ -2970,7 +3001,7 @@
         } catch (err) {
           result = { ok: false, error: String(err?.message || err) };
         }
-        if (result?.switching) break;
+        if (result?.switching) return;
         GM_setValue(KEYS.dropzoneCursor, Number(job.n));
         GM_setValue(KEYS.dropzoneStatus, {
           n: job.n,
@@ -2982,6 +3013,7 @@
           t: Date.now(),
         });
       }
+      await closeMoveTabWhenDone();
     } finally {
       drainDropzones.working = false;
     }
@@ -2990,6 +3022,7 @@
   function startMoveDropzoneWorker() {
     if (!moveWorkerStarted) {
       moveWorkerStarted = true;
+      moveWorkerAt = Date.now();
       const beat = () => {
         noteMoveLanded();
         GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
@@ -4753,7 +4786,7 @@
       if (accept && offer) {
         const dropped = enqueueBackgroundDropzone(offer.container, offer.dropzone);
         if (dropped) {
-          paintDropzoneStatus(moveFresh() ? `Queued ${dropped.container} → ${dropped.dropzone}` : `Opening Move App for ${dropped.container}`);
+          paintDropzoneStatus(`Opening Move App for ${dropped.container}`);
           ensureMoveTab();
         }
       }
