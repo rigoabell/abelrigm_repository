@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.45
+// @version      2.9.46
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -51,7 +51,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.45";
+  const VERSION = "2.9.46";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2412,14 +2412,50 @@
     return askingSource || /waiting for scan/i.test(screen);
   }
 
+  function moveStatusNoise(text) {
+    const name = cellText(text).toLowerCase();
+    return name.startsWith("dropzone waiting")
+      || name.startsWith("move app is open")
+      || name.startsWith("ready to scan")
+      || name.startsWith("opening ")
+      || name.startsWith("sending ")
+      || name.startsWith("container scan")
+      || name.startsWith("waiting for a container")
+      || name.startsWith("this page cannot")
+      || name.startsWith("the page is showing")
+      || name.startsWith("source accepted")
+      || name.startsWith("source stopped")
+      || name.startsWith("destination accepted")
+      || name.startsWith("destination stopped")
+      || name.startsWith("stopped.");
+  }
+
   function moveWorkflowScore(text) {
     const name = cellText(text).toLowerCase();
-    if (!name || /pallet/.test(name)) return -1;
+    if (!name || /pallet/.test(name) || moveStatusNoise(name)) return -1;
     let score = 0;
     if (/drop\s*zone/.test(name)) score += 5;
     if (/container/.test(name)) score += 3;
     if (/tote/.test(name)) score += 3;
     return score;
+  }
+
+  function moveChromeLabel(text) {
+    const name = cellText(text).toLowerCase();
+    if (!name || moveStatusNoise(name)) return true;
+    return /^(menu|sign out|reset session|continue|confirm|confirm move|select workflow|source)$/.test(name)
+      || /scan source|scan destination|scan a pallet|not of appropriate type|waiting for scan/.test(name);
+  }
+
+  function moveWorkflowPick(labels) {
+    const texts = (Array.isArray(labels) ? labels : []).map((item) => cellText(item)).filter(Boolean);
+    const ranked = texts
+      .map((text) => ({ text, score: moveWorkflowScore(text) }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score || a.text.localeCompare(b.text));
+    if (ranked.length) return ranked[0].text;
+    const neutral = texts.filter((text) => !moveChromeLabel(text) && moveWorkflowScore(text) === 0 && text.length <= 40);
+    return neutral.length === 1 ? neutral[0] : "";
   }
 
   function noteMoveLanded() {
@@ -2494,6 +2530,12 @@
       if (node.nodeType === 1) {
         const tag = node.tagName;
         if (tag === "SCRIPT" || tag === "STYLE" || tag === "NOSCRIPT") return;
+        if (node.id && String(node.id).startsWith("plf-")) return;
+        const view = node.ownerDocument?.defaultView;
+        if (view) {
+          const style = view.getComputedStyle(node);
+          if (style.display === "none" || style.visibility === "hidden") return;
+        }
         if (node.shadowRoot) walk(node.shadowRoot);
       }
       const kids = node.childNodes || [];
@@ -2659,6 +2701,25 @@
     for (const ch of [...Array.from(code), "Enter"]) fireMoveKey(target, ch);
   }
 
+  function moveOwnUi(el) {
+    return Boolean(el?.closest?.("[id^='plf-']") || (el?.id && String(el.id).startsWith("plf-")));
+  }
+
+  function movePress(el) {
+    if (!el) return;
+    const view = el.ownerDocument?.defaultView || pageWindow;
+    const opts = { bubbles: true, cancelable: true, view };
+    ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((type) => {
+      try {
+        const Ctor = type.startsWith("pointer") && view.PointerEvent ? view.PointerEvent : view.MouseEvent;
+        el.dispatchEvent(new Ctor(type, opts));
+      } catch {
+        /* This page does not accept that pointer event. */
+      }
+    });
+    try { el.click(); } catch { /* The control could not be clicked. */ }
+  }
+
   function moveClickButton(label) {
     const want = cellText(label).toLowerCase();
     if (!want) return false;
@@ -2666,12 +2727,12 @@
     moveEachRoot((root) => {
       if (clicked || !root.querySelectorAll) return;
       root.querySelectorAll("button, a, [role='button'], [role='link'], input[type='button'], input[type='submit'], div, span, li, label").forEach((el) => {
-        if (clicked || !moveVisible(el)) return;
-        const text = cellText(el.innerText || el.value || el.getAttribute?.("aria-label")).toLowerCase();
-        const buttonish = el.tagName === "BUTTON" || el.tagName === "A" || el.tagName === "INPUT" || el.getAttribute?.("role") === "button" || el.getAttribute?.("role") === "link";
-        if (text !== want && !(buttonish && text.startsWith(want + " "))) return;
+        if (clicked || !moveVisible(el) || moveOwnUi(el)) return;
+        const text = cellText(el.innerText || el.value || el.getAttribute?.("aria-label")).toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+        if (text !== want && !text.startsWith(want + " ")) return;
+        if (text.length > 40) return;
         const clickable = el.closest("button, a, [role='button'], [role='link']") || el;
-        clickable.click();
+        movePress(clickable);
         clicked = true;
       });
     });
@@ -2695,54 +2756,89 @@
     const seen = new Set();
     moveEachRoot((root) => {
       if (!root.querySelectorAll) return;
-      root.querySelectorAll("a, button, [role='button'], [role='link'], li, div, span, label").forEach((el) => {
-        if (!moveVisible(el)) return;
+      root.querySelectorAll("a, button, [role='button'], [role='link'], li, div, span, label, option").forEach((el) => {
+        if (moveOwnUi(el)) return;
+        const select = el.tagName === "OPTION" ? el.closest("select") : null;
+        if (select) {
+          if (!moveVisible(select)) return;
+        } else if (!moveVisible(el)) return;
         const text = cellText(el.innerText || el.textContent || el.getAttribute?.("aria-label")).replace(/\s+/g, " ");
-        if (!text || text.length > 80) return;
+        if (!text || text.length > 80 || moveStatusNoise(text)) return;
         const href = el.href || el.getAttribute?.("href") || "";
         const key = (text + "|" + href).toLowerCase();
         if (seen.has(key)) return;
         seen.add(key);
-        out.push({ text, href, el });
+        out.push({ text, href, el, select });
       });
     });
     return out;
   }
 
-  function rankMoveWorkflows(choices) {
-    return choices
-      .map((choice) => ({ ...choice, score: moveWorkflowScore(choice.text) }))
-      .filter((choice) => choice.score > 0)
-      .sort((a, b) => b.score - a.score);
+  function moveChoiceKey(choice) {
+    return (cellText(choice?.text) + "|" + cellText(choice?.href)).toLowerCase();
+  }
+
+  function moveActivateChoice(pick) {
+    if (!pick?.el) return;
+    if (pick.select) {
+      const view = pick.select.ownerDocument?.defaultView || pageWindow;
+      pick.select.value = pick.el.value;
+      pick.el.selected = true;
+      pick.select.dispatchEvent(new view.Event("input", { bubbles: true }));
+      pick.select.dispatchEvent(new view.Event("change", { bubbles: true }));
+      return;
+    }
+    const clickable = pick.el.closest?.("button, a, [role='button'], [role='link']") || pick.el;
+    movePress(clickable);
   }
 
   async function moveLeavePalletWorkflow() {
     const screen = moveScreenText();
     if (movePageReady(location.href, document.title, screen, document.readyState)) return null;
     const pallet = /scan source pallet|scan a pallet|scan destination pallet|not of appropriate type/i.test(screen);
+    const claim = GM_getValue("plf.dropzoneClaim", null);
+    const jobN = Number(claim?.n) || 0;
+    const prior = GM_getValue("plf.dropzoneWorkflow", null);
+    if (prior && Number(prior.n) === jobN && Date.now() - (Number(prior.t) || 0) < 60000) {
+      if (pallet) return { ok: false, error: "Workflow still wants a pallet", detail: cellText(prior.name) };
+      return null;
+    }
+    if (!pallet && !/select workflow/i.test(screen)) return null;
+    const namedChoice = (choices, allowNeutral) => {
+      const labels = choices.map((choice) => choice.text);
+      const name = allowNeutral
+        ? moveWorkflowPick(labels)
+        : labels
+          .map((text) => ({ text, score: moveWorkflowScore(text) }))
+          .filter((item) => item.score > 0)
+          .sort((a, b) => b.score - a.score || a.text.localeCompare(b.text))[0]?.text;
+      return name ? choices.find((choice) => cellText(choice.text) === name) : null;
+    };
     let seen = moveWorkflowChoices();
-    let ranked = rankMoveWorkflows(seen);
-    if (!pallet && !ranked.length && !/select workflow/i.test(screen)) return null;
-    if (!ranked.length) {
-      paintMoveBadge("This page cannot take a tote. Opening the workflow list.");
+    let pick = namedChoice(seen, false);
+    const before = new Set(seen.filter((choice) => !choice.select).map(moveChoiceKey));
+    if (!pick) {
+      paintMoveBadge("Opening the workflow list");
+      try { pageWindow.focus(); } catch { /* The browser kept this tab in the background. */ }
       moveClickButton("Select workflow");
+      for (let i = 0; i < 12 && !pick; i += 1) {
+        await sleep(300);
+        seen = moveWorkflowChoices().filter((choice) => choice.select || !before.has(moveChoiceKey(choice)));
+        pick = namedChoice(seen, true);
+      }
     }
-    for (let i = 0; i < 8 && !ranked.length; i += 1) {
-      await sleep(300);
-      seen = moveWorkflowChoices();
-      ranked = rankMoveWorkflows(seen);
-    }
-    if (!ranked.length) {
-      const labels = seen.map((choice) => choice.text).slice(0, 12).join(" | ");
+    if (!pick) {
+      const labels = seen.map((choice) => choice.text).filter((text) => !moveChromeLabel(text)).slice(0, 12).join(" | ");
+      const fallback = seen.map((choice) => choice.text).slice(0, 12).join(" | ");
       return {
         ok: false,
         error: "No container workflow in the list",
-        detail: clip(labels || screen, 240),
+        detail: clip(labels || fallback || screen, 240),
       };
     }
-    const pick = ranked[0];
     paintMoveBadge("Opening " + pick.text);
     rememberDropzone({ step: "workflow", workflow: pick.text });
+    GM_setValue("plf.dropzoneWorkflow", { n: jobN, name: pick.text, t: Date.now() });
     const href = cellText(pick.href);
     let sameJob = false;
     try {
@@ -2751,16 +2847,15 @@
       sameJob = false;
     }
     if (href && /jobId=\d+/i.test(href) && !sameJob) {
-      const claim = GM_getValue("plf.dropzoneClaim", null);
       GM_setValue("plf.dropzoneClaim", {
-        n: Number(claim?.n) || 0,
+        n: jobN,
         t: Date.now(),
         href: location.href,
       });
       location.assign(href);
       return { switching: true, ok: false, error: "Opening " + pick.text };
     }
-    pick.el.click();
+    moveActivateChoice(pick);
     await sleep(800);
     return { stayed: true };
   }
@@ -2887,7 +2982,7 @@
         noteMoveLanded();
         GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
         const text = moveScreenText();
-        paintMoveBadge(movePageReady(location.href, document.title, text, document.readyState) ? "Dropzone ready" : "Dropzone waiting for the scan screen");
+        paintMoveBadge(movePageReady(location.href, document.title, text, document.readyState) ? "Ready to scan a container" : "Move App is open");
       };
       beat();
       setInterval(beat, HEARTBEAT_MS);

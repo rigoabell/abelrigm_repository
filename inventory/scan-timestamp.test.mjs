@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveIsScanPage, movePageReady, moveWorkflowScore, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -192,7 +192,7 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.9\.45/);
+assert.match(src, /@version\s+2\.9\.46/);
 assert.match(src, /function moveBurstTarget/);
 assert.equal(api.backgroundDropzone(false, "dzA", "ts1"), null);
 assert.equal(api.backgroundDropzone(true, "", "ts1"), null);
@@ -236,6 +236,12 @@ assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app
 assert.equal(api.moveWorkflowScore("Move Between Pallets"), -1);
 assert.equal(api.moveWorkflowScore("Dropzone"), 5);
 assert.equal(api.moveWorkflowScore("Move Between Containers"), 3);
+assert.equal(api.moveWorkflowScore("Dropzone waiting for the scan screen"), -1);
+assert.equal(api.moveWorkflowPick(["Dropzone waiting for the scan screen", "Select workflow", "Menu"]), "");
+assert.equal(api.moveWorkflowPick(["Move Between Pallets", "Dropzone"]), "Dropzone");
+assert.equal(api.moveWorkflowPick(["Move Between Pallets", "Move Between Containers"]), "Move Between Containers");
+assert.equal(api.moveWorkflowPick(["Menu", "Sign out", "Only One Workflow"]), "Only One Workflow");
+assert.equal(api.moveWorkflowPick(["Alpha Move", "Beta Move"]), "");
 assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets", "Scan source pallet", "loading"), false);
 assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets", "Scan source pallet Scan was unsuccessful", "complete"), false);
 assert.equal(api.moveIsScanPage("https://aft-moveapp.na.aftx.amazonoperations.app/move-container", "HTTP Status 404 – Not Found"), false);
