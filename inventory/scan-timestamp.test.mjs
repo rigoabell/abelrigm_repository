@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, priorOuterLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, priorOuterLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveDropAccepted, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -193,9 +193,9 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.9\.60/);
+assert.match(src, /@version\s+2\.9\.61/);
 assert.match(src, /function blockFcMenuOpen/);
-assert.equal(src.includes("function moveDropAccepted"), false);
+assert.match(src, /function moveDropAccepted/);
 assert.match(src, /class="idcell"/);
 assert.equal(src.includes('id="dzAdd"'), false);
 assert.equal(api.priorOuterLabel("dz-P-CR-EOL", "rcCRetStations"), "rcCRetStations");
@@ -276,8 +276,11 @@ assert.equal(api.moveScanAccepted("ready", "Scanned tsTEK940449", "tsTEK940449")
 assert.equal(api.moveScanAccepted("already tsTEK940449", "already tsTEK940449 clock", "tsTEK940449").ok, false);
 assert.equal(api.moveScanAccepted("ready", "tsTEK940449 invalid container", "tsTEK940449").ok, false);
 assert.equal(api.moveScanAccepted("ready", "dz-P-CR-EOL The container scanned was not of appropriate type. Scan a pallet.", "dz-P-CR-EOL").ok, false);
-const moved = "anqsmith MenumScan container to movetsX04yzyw9v movedMove Successful: Scan another container";
-assert.equal(api.moveScanAccepted("Scan container to move tsX04yzyw9v", moved, "dz-P-CR-EOL").ok, false);
+const moved = "abelrigm MenumScan container to movetsAUD145501 movedMove Successful: Scan another container";
+assert.equal(api.moveScanAccepted("Scan container to move tsAUD145501", moved, "dz-P-CR-EOL").ok, false);
+assert.equal(api.moveDropAccepted("Scan container to move tsAUD145501", moved, "dz-P-CR-EOL", "tsAUD145501").ok, true);
+assert.equal(api.moveDropAccepted(moved, moved + " 2:22 PM", "dz-P-CR-EOL", "tsAUD145501").ok, false);
+assert.equal(api.moveDropAccepted("Scan container to move tsAUD145501", moved + " https://fcmenu-iad-regionalized.corp.amazon.com/", "dz-P-CR-EOL", "tsAUD145501").ok, false);
 assert.match(src, /aft-moveapp\.na\.aftx\.amazonoperations\.app/);
 assert.match(src, /id="dzAsk"/);
 assert.equal(api.fileDate("2026-11-07 22:00:00"), "2026-11-07");
