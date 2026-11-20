@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, dashboardHtml, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, priorOuterLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveDropAccepted, moveCheckDue, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -23,6 +23,7 @@ const sandbox = {
   Response,
   Uint8Array,
   DataView,
+  URL,
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
@@ -77,10 +78,11 @@ assert.equal(markedBack[0].age, "3d");
 
 const sheet = api.dashboardSheetRows([record]);
 const header = sheet.find((row) => row[0] === "Location" && row[1] === "Parent" && row[2] === "Container");
-assert.deepEqual([...header], ["Location", "Parent", "Container", "Age", "Status", "Units", "Scanned At"]);
+assert.deepEqual([...header], ["Location", "Parent", "Container", "Age", "Status", "Units", "Scanned At", "Dropped"]);
 const detail = sheet[sheet.length - 1];
 assert.equal(detail[2], "csX1234");
 assert.equal(detail[6], scannedAt);
+assert.equal(detail[7], "");
 
 const roundTrip = api.recordsFromBook({ sheets: [{ name: "Dashboard", rows: sheet }] });
 assert.equal(roundTrip.length, 1);
@@ -188,13 +190,134 @@ assert.deepEqual(
 const locationOnly = api.recordsFromBook({ sheets: book.sheets.filter((sheet) => sheet.name !== "Dashboard") });
 assert.equal(locationOnly.length, 3);
 
-const dash = api.dashboardHtml([eol, line], "abelrigm");
-assert.match(dash, /LOCATIONS/);
-assert.match(dash, /SCANS/);
-assert.match(dash, /csX1234/);
-assert.match(dash, /L3 Even/);
-assert.equal(dash.includes("BY PARENT"), false);
-assert.equal(dash.includes("<svg"), false);
+assert.match(src, /OUTER LOCATION/);
+assert.equal(src.includes('id="dashboard"'), false);
+assert.equal(src.includes("function dashboardHtml"), false);
+assert.match(src, /@version\s+2\.10\.2/);
+assert.match(src, /Container was not scanned/);
+assert.match(src, /function blockFcMenuOpen/);
+assert.match(src, /function moveDropAccepted/);
+assert.match(src, /class="idcell"/);
+assert.equal(src.includes('id="dzAdd"'), false);
+assert.equal(api.priorOuterLabel("dz-P-CR-EOL", "rcCRetStations"), "rcCRetStations");
+assert.equal(api.priorOuterLabel("rcCRetStations [RECEIVE_LANE]", ""), "rcCRetStations");
+assert.match(src, /#dz-batch-panel\{display:none !important;\}/);
+assert.match(src, /dz-batch-panel/);
+assert.match(src, /move-container\?jobId=200/);
+assert.equal(src.includes("jobId=400"), false);
+assert.match(src, /@include\s+\/\^https:\\\/\\\/fcmenu-\[a-z0-9-\]\+\\\.corp\\\.amazon\\\.com/);
+assert.match(src, /@match\s+https:\/\/fcmenu-iad-regionalized\.corp\.amazon\.com\/\*/);
+assert.match(src, /function moveBurstTarget/);
+assert.equal(api.backgroundDropzone(false, "dzA", "ts1"), null);
+assert.equal(api.backgroundDropzone(true, "", "ts1"), null);
+const zoneJob = api.backgroundDropzone(true, " dzA ", " ts1 ");
+assert.deepEqual({ container: zoneJob.container, dropzone: zoneJob.dropzone }, { container: "ts1", dropzone: "dzA" });
+assert.equal(api.stationsDropPrompt(false, "rcCRetStations", "ts1"), null);
+assert.equal(api.stationsDropPrompt(true, "rcCRetLane2", "ts1"), null);
+const stationOffer = api.stationsDropPrompt(true, "rcCRetStations [RECEIVE_LANE]", " ts1 ");
+assert.deepEqual(
+  { container: stationOffer.container, dropzone: stationOffer.dropzone },
+  { container: "ts1", dropzone: "dz-P-CR-EOL" }
+);
+assert.deepEqual([...api.normalizeSavedDropzones(null)], ["dz-P-CR-EOL"]);
+assert.deepEqual([...api.normalizeSavedDropzones([" dz-P-CR-EOL ", "dz-P-CR-EOL", "dz-other"])], ["dz-P-CR-EOL", "dz-other"]);
+const dropView = api.dropzoneDebugView({
+  ask: true,
+  saved: ["dz-P-CR-EOL"],
+  trace: { events: [{ t: "2026-11-20 11:21:39", container: "tsAUD184397", outer: "rcCRetStations", step: "asked" }] },
+  queue: { n: 1, jobs: [{ n: 1, container: "tsAUD184397", dropzone: "dz-P-CR-EOL" }] },
+  cursor: 1,
+  status: { container: "tsAUD184397", dropzone: "dz-P-CR-EOL", ok: false, error: "Page did not take the container", t: 5 },
+  heartbeat: 1000,
+  now: 20000,
+});
+assert.equal(dropView.ask, true);
+assert.deepEqual([...dropView.saved], ["dz-P-CR-EOL"]);
+assert.equal(dropView.events[0].step, "asked");
+assert.equal(dropView.pending.length, 0);
+assert.equal(dropView.status.ok, false);
+assert.equal(dropView.status.error, "Page did not take the container");
+assert.equal(dropView.moveOpen, false);
+assert.equal(api.moveIsScanPage("https://aft-moveapp.na.aftx.amazonoperations.app/", "HTTP Status 404 – Not Found"), false);
+assert.equal(api.moveIsScanPage("https://aft-moveapp.na.aftx.amazonoperations.app/move-container", "AFT Move Between Pallets"), false);
+assert.equal(api.moveIsScanPage("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets"), true);
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets", "Scan source pallet", "complete"), true);
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=200", "AFT Move Individual Container", "Scan container to move", "complete"), true);
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=200", "AFT Move Individual Container", "abelrigm MenumScan container to move", "interactive"), true);
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=12", "Move container", "Scan source container", "complete"), true);
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=12", "Move container", "Waiting for scan", "complete"), true);
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets", "Scan source pallet Waiting for scan", "complete"), true);
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=12", "Move container", "Scan destination container", "complete"), false);
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=12", "Move container", "Scan source container Scan destination container", "complete"), true);
+assert.equal(api.moveWorkflowScore("Move Between Pallets"), -1);
+assert.equal(api.moveWorkflowScore("Dropzone"), 5);
+assert.equal(api.moveWorkflowScore("Move Between Containers"), 3);
+assert.equal(api.moveWorkflowScore("Dropzone waiting for the scan screen"), -1);
+assert.equal(api.moveWorkflowPick(["Dropzone waiting for the scan screen", "Select workflow", "Menu"]), "");
+assert.equal(api.moveWorkflowPick(["Move Between Pallets", "Dropzone"]), "Dropzone");
+assert.equal(api.moveWorkflowPick(["Move Between Pallets", "Move Between Containers"]), "Move Between Containers");
+assert.equal(api.moveWorkflowPick(["Menu", "Sign out", "Only One Workflow"]), "Only One Workflow");
+assert.equal(api.moveWorkflowPick(["Alpha Move", "Beta Move"]), "");
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets", "Scan source pallet", "loading"), false);
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets", "Scan source pallet Scan was unsuccessful", "complete"), false);
+assert.equal(api.moveIsScanPage("https://aft-moveapp.na.aftx.amazonoperations.app/move-container", "HTTP Status 404 – Not Found"), false);
+const landing = api.dropzoneDebugView({
+  target: "https://aft-moveapp.na.aftx.amazonoperations.app/move-container",
+  tried: { href: "https://aft-moveapp.na.aftx.amazonoperations.app/move-container" },
+  landed: { href: "https://aft-moveapp.na.aftx.amazonoperations.app/", title: "HTTP Status 404 – Not Found" },
+});
+assert.equal(landing.tried, "https://aft-moveapp.na.aftx.amazonoperations.app/move-container");
+assert.equal(landing.landed, "https://aft-moveapp.na.aftx.amazonoperations.app/");
+assert.equal(landing.landedTitle, "HTTP Status 404 – Not Found");
+assert.match(src, /dropzone: dropzoneDebugView/);
+assert.deepEqual([...api.scanBurstKeys("ab1")], ["a", "b", "1", "Enter"]);
+assert.equal(api.moveBadPhrase("ready", "Invalid container"), "invalid");
+assert.equal(api.moveScanAccepted("ready", "clock 1:02 PM updated", "tsTEK940449").ok, false);
+assert.equal(api.moveScanAccepted("ready", "Scanned tsTEK940449", "tsTEK940449").ok, true);
+assert.equal(api.moveScanAccepted("already tsTEK940449", "already tsTEK940449 clock", "tsTEK940449").ok, false);
+assert.equal(api.moveScanAccepted("ready", "tsTEK940449 invalid container", "tsTEK940449").ok, false);
+assert.equal(api.moveScanAccepted("ready", "dz-P-CR-EOL The container scanned was not of appropriate type. Scan a pallet.", "dz-P-CR-EOL").ok, false);
+const moved = "abelrigm MenumScan container to movetsAUD145501 movedMove Successful: Scan another container";
+assert.equal(api.moveScanAccepted("Scan container to move tsAUD145501", moved, "dz-P-CR-EOL").ok, false);
+assert.equal(api.moveDropAccepted("Scan container to move tsAUD145501", moved, "dz-P-CR-EOL", "tsAUD145501").ok, true);
+assert.equal(api.moveDropAccepted(moved, moved + " 2:22 PM", "dz-P-CR-EOL", "tsAUD145501").ok, false);
+assert.equal(api.moveDropAccepted("Scan container to move tsAUD145501", moved + " https://fcmenu-iad-regionalized.corp.amazon.com/", "dz-P-CR-EOL", "tsAUD145501").ok, false);
+assert.equal(api.moveDropAccepted("Scan container to move", "milesele MenumContainertsX0mx1jvvmdz-P-CR-EOL", "dz-P-CR-EOL", "tsX0mx1jvvm").ok, false);
+assert.equal(api.moveCheckDue(0, 60 * 60 * 1000), true);
+assert.equal(api.moveCheckDue(1_000, 1_000 + 59 * 60 * 1000), false);
+assert.equal(api.moveCheckDue(1_000, 1_000 + 60 * 60 * 1000), true);
+assert.match(src, /There cannot be another tab open with the move tool/);
+assert.match(src, /id="dzCheckBtn"/);
+assert.match(src, /id="moveCheck"/);
+assert.match(src, /\.move-check \{[^}]*background: #ffe14a/);
+assert.match(src, /aft-moveapp\.na\.aftx\.amazonoperations\.app/);
+assert.match(src, /id="dzAsk"/);
+assert.equal(api.fileDate("2026-11-07 22:00:00"), "2026-11-07");
+assert.equal(api.fileDate("2026-11-08 00:01:00"), "2026-11-07");
+assert.equal(api.fileDate("2026-11-08 05:59:00"), "2026-11-07");
+assert.equal(api.fileDate("2026-11-08 06:00:00"), "2026-11-08");
+const nightScan = {
+  location: "EOL 1",
+  parent: "rcCRetStations",
+  container: "tsNight",
+  age: "1d",
+  status: "Good",
+  units: "1",
+  scannedAt: "2026-11-07 22:00:00",
+};
+const afterMidnight = { ...nightScan, container: "tsAfter", scannedAt: "2026-11-08 00:01:00" };
+const mergedNight = api.mergeShiftRecords(
+  [nightScan, afterMidnight],
+  [nightScan, afterMidnight],
+  "2026-11-08",
+  "Night",
+  "2026-11-07"
+);
+assert.deepEqual(
+  [...mergedNight.map((rec) => rec.container)],
+  ["tsNight", "tsAfter"]
+);
+assert.match(src, /\.x \{[^}]*background: #b42318/);
 
 const bulk = [];
 for (let i = 0; i < 3000; i++) {
@@ -332,5 +455,17 @@ const earlyContainers = [...nightBook.sheets.find((sheet) => sheet.name === "jki
 assert.deepEqual(nightContainers, ["tsNight"]);
 assert.deepEqual(earlyContainers, ["tsEarly"]);
 assert.equal(nightBook.sheets.some((sheet) => [...sheet.rows].some((row) => [...row].includes("tsA"))), false);
+
+const withOuter = api.parseDetailsText(
+  "tsREF922111 [TOTE]\nTotal units\n6\nOldest Units Age\n0d 23h 32m\nOuter Location\npaA100 [STORAGE] [PICK]\nParent Container\nrcCRetStations [RECEIVE_LANE]\n"
+);
+assert.equal(withOuter.outerLocation, "paA100");
+assert.equal(api.outerLocationLabel(withOuter), "paA100");
+const parentOnly = api.parseDetailsText(
+  "tsREF922111 [TOTE]\nTotal units\n6\nOldest Units Age\n0d 23h 32m\nParent Container\nrcCRetStations [RECEIVE_LANE]\n"
+);
+assert.equal(parentOnly.outerLocation, "rcCRetStations");
+assert.equal(parentOnly.parentContainer, "rcCRetStations");
+assert.match(src, /<div class="brand-by">developed by abelrigm<\/div>/);
 
 console.log("scan timestamp tests passed");
