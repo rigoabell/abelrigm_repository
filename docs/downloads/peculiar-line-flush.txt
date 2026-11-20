@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.57
+// @version      2.9.58
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -54,7 +54,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.57";
+  const VERSION = "2.9.58";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -3527,12 +3527,20 @@
         .history th:nth-child(4), .history td:nth-child(4) { width: 44px; }
         .bar, .scanrow, .status, .focusrow, .identity, .foot { position: relative; z-index: 1; flex: 0 0 auto; }
         .identity {
-          margin: 8px 10px 0; padding: 8px 10px;
+          display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+          margin: 8px 10px 0; padding: 0;
           font-size: 16px; font-weight: 800; line-height: 1.35;
-          overflow-wrap: anywhere;
           background: #ffffff; color: #111111;
           border: 2px solid #111111; border-radius: 8px;
+          overflow: hidden;
         }
+        .idcell {
+          min-width: 0; padding: 8px 10px;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+          border-right: 2px solid #111111;
+        }
+        .idcell:last-child { border-right: 0; }
+        .identity a.sku { color: inherit; font-weight: 800; text-decoration: underline; }
         .lineswrap, .histwrap { min-height: 0; overflow: auto; max-height: min(240px, calc((var(--plf-vh) - 230px) / var(--plf-boost, 1))); }
         .histhead { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
         .histhead span { font-size: 11px; letter-spacing: .12em; font-weight: 700; color: #111111; }
@@ -4168,21 +4176,17 @@
     }
 
     function showTicket(id, result) {
-      const container = cellText((result && result.containerId) || id);
-      const type = cellText(result?.containerType);
+      const container = stripBracketText((result && result.containerId) || id);
       const units = cellText(result?.totalUnits);
-      const parent = cellText(result?.parentContainer);
-      const parentType = cellText(result?.parentType);
-      const grand = cellText(result?.grandparent);
-      const bits = [
-        container ? container + (type ? ` [${type}]` : "") : "",
-        units ? `${units} units` : "",
-        parent ? `Parent ${parent}${parentType ? ` [${parentType}]` : ""}` : "",
-        grand ? `Grandparent ${grand}` : "",
-      ].filter(Boolean);
-      shadow.getElementById("identity").innerHTML = bits.length
-        ? bits.map((bit) => escapeHtml(bit)).join(" · ")
-        : `<span class="empty">No container yet</span>`;
+      const parent = stripBracketText(result?.parentContainer);
+      const cells = [
+        container ? skuLink(container) : `<span class="empty">—</span>`,
+        units ? escapeHtml(`${units} units`) : `<span class="empty">—</span>`,
+        parent ? escapeHtml(`Parent ${parent}`) : `<span class="empty">—</span>`,
+      ];
+      const identity = shadow.getElementById("identity");
+      identity.style.gridTemplateColumns = "repeat(3, minmax(0, 1fr))";
+      identity.innerHTML = cells.map((html) => `<div class="idcell">${html}</div>`).join("");
       shownOuterLocation = priorOuterLabel(outerLocationLabel(result), rememberedPrior(container));
       paintLocationBoard();
       paintAge(result);
