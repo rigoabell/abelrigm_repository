@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.55
+// @version      2.9.56
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -54,7 +54,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.55";
+  const VERSION = "2.9.56";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2760,7 +2760,7 @@
     if (!el) {
       el = document.createElement("div");
       el.id = "plf-move-badge";
-      el.style.cssText = "position:fixed;left:8px;bottom:8px;z-index:2147483647;background:#111111;color:#ffffff;font:700 14px Segoe UI,sans-serif;padding:8px 10px;border-radius:8px;max-width:420px;";
+      el.style.cssText = "display:none !important;";
       document.documentElement.appendChild(el);
     }
     el.textContent = text;
@@ -2774,7 +2774,7 @@
       if (!document.getElementById("dz-batch-style")) {
         const style = document.createElement("style");
         style.id = "dz-batch-style";
-        style.textContent = "#dz-batch-panel{position:fixed;top:16px;right:16px;width:400px;z-index:2147483646;color:#e8edf5;background:#12151c;border:1px solid #2c3340;border-radius:12px;box-shadow:0 16px 40px rgba(0,0,0,.45);font:13px/1.4 Segoe UI,sans-serif}#dz-batch-panel header{display:flex;align-items:center;gap:8px;padding:10px 12px;background:#1b212c;border-bottom:1px solid #2c3340;border-radius:12px 12px 0 0}#dz-batch-panel header b{font-size:14px}#dz-batch-panel .dz-ver{color:#93a0b4;font-size:11px}#dz-batch-panel .dz-body{display:flex;flex-direction:column;gap:8px;padding:12px}#dz-batch-panel label{color:#93a0b4;font-size:11px;font-weight:700}#dz-batch-panel input,#dz-batch-panel textarea{width:100%;padding:8px;color:#e8edf5;background:#0e1116;border:1px solid #334155;border-radius:8px;font:inherit}#dz-batch-panel textarea{min-height:72px;font-family:ui-monospace,Consolas,monospace}#dz-batch-panel .dz-status{min-height:2.6em}";
+        style.textContent = "#dz-batch-panel{display:none !important;}";
         document.documentElement.appendChild(style);
       }
       let panel = document.getElementById("dz-batch-panel");
@@ -2922,11 +2922,10 @@
       if (movePageReady(location.href, document.title, text, document.readyState)) {
         paintMoveBadge("Scan screen is ready");
         try { pageWindow.focus(); } catch { /* The browser kept this tab in the background. */ }
-        await sleep(300);
         return { ok: true, detail: clip(moveScreenText(), 240) };
       }
       paintMoveBadge("Waiting for the scan screen");
-      await sleep(200);
+      await sleep(80);
     }
     return {
       ok: false,
@@ -2948,10 +2947,10 @@
         last = sig;
         saw = true;
         stableAt = Date.now();
-      } else if (saw && stableAt && Date.now() - stableAt >= 250) {
+      } else if (saw && stableAt && Date.now() - stableAt >= 100) {
         return { ...verdict, detail: clip(raw, 240) };
       }
-      if (verdict.ok && saw && stableAt && Date.now() - stableAt >= 250) {
+      if (verdict.ok && saw && stableAt && Date.now() - stableAt >= 100) {
         return { ...verdict, detail: clip(raw, 240) };
       }
       await sleep(40);
@@ -2971,7 +2970,7 @@
     await burstMoveScan(container, container);
     const first = await waitForMoveToken(beforeRaw, container);
     paintMoveBadge(first.ok ? "Tote accepted: " + container : "Tote was sent: " + container);
-    await sleep(200);
+    await sleep(80);
     const midRaw = moveScreenText();
     paintMoveBadge("1/1 scan dropzone " + dropzone);
     rememberDropzone({ container, dropzone, step: "dropzone" });
