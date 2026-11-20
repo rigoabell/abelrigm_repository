@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, priorOuterLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveDropAccepted, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, priorOuterLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveDropAccepted, moveCheckDue, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -193,7 +193,7 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.10\.0/);
+assert.match(src, /@version\s+2\.10\.1/);
 assert.match(src, /Container was not scanned/);
 assert.match(src, /function blockFcMenuOpen/);
 assert.match(src, /function moveDropAccepted/);
@@ -282,6 +282,12 @@ assert.equal(api.moveScanAccepted("Scan container to move tsAUD145501", moved, "
 assert.equal(api.moveDropAccepted("Scan container to move tsAUD145501", moved, "dz-P-CR-EOL", "tsAUD145501").ok, true);
 assert.equal(api.moveDropAccepted(moved, moved + " 2:22 PM", "dz-P-CR-EOL", "tsAUD145501").ok, false);
 assert.equal(api.moveDropAccepted("Scan container to move tsAUD145501", moved + " https://fcmenu-iad-regionalized.corp.amazon.com/", "dz-P-CR-EOL", "tsAUD145501").ok, false);
+assert.equal(api.moveDropAccepted("Scan container to move", "milesele MenumContainertsX0mx1jvvmdz-P-CR-EOL", "dz-P-CR-EOL", "tsX0mx1jvvm").ok, false);
+assert.equal(api.moveCheckDue(0, 60 * 60 * 1000), true);
+assert.equal(api.moveCheckDue(1_000, 1_000 + 59 * 60 * 1000), false);
+assert.equal(api.moveCheckDue(1_000, 1_000 + 60 * 60 * 1000), true);
+assert.match(src, /There cannot be another tab open with the move tool/);
+assert.match(src, /id="dzCheckBtn"/);
 assert.match(src, /aft-moveapp\.na\.aftx\.amazonoperations\.app/);
 assert.match(src, /id="dzAsk"/);
 assert.equal(api.fileDate("2026-11-07 22:00:00"), "2026-11-07");
