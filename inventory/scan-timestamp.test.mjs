@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, priorOuterLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveDropAccepted, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, priorOuterLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -193,7 +193,9 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.9\.59/);
+assert.match(src, /@version\s+2\.9\.60/);
+assert.match(src, /function blockFcMenuOpen/);
+assert.equal(src.includes("function moveDropAccepted"), false);
 assert.match(src, /class="idcell"/);
 assert.equal(src.includes('id="dzAdd"'), false);
 assert.equal(api.priorOuterLabel("dz-P-CR-EOL", "rcCRetStations"), "rcCRetStations");
@@ -275,9 +277,6 @@ assert.equal(api.moveScanAccepted("already tsTEK940449", "already tsTEK940449 cl
 assert.equal(api.moveScanAccepted("ready", "tsTEK940449 invalid container", "tsTEK940449").ok, false);
 assert.equal(api.moveScanAccepted("ready", "dz-P-CR-EOL The container scanned was not of appropriate type. Scan a pallet.", "dz-P-CR-EOL").ok, false);
 const moved = "anqsmith MenumScan container to movetsX04yzyw9v movedMove Successful: Scan another container";
-assert.equal(api.moveDropAccepted("Scan container to move tsX04yzyw9v", moved, "dz-P-CR-EOL", "tsX04yzyw9v").ok, true);
-assert.equal(api.moveDropAccepted(moved, moved + " 1:05 PM", "dz-P-CR-EOL", "tsX04yzyw9v").ok, false);
-assert.equal(api.moveDropAccepted("Scan container to move tsX04yzyw9v", moved, "dz-P-CR-EOL", "tsOTHER").ok, false);
 assert.equal(api.moveScanAccepted("Scan container to move tsX04yzyw9v", moved, "dz-P-CR-EOL").ok, false);
 assert.match(src, /aft-moveapp\.na\.aftx\.amazonoperations\.app/);
 assert.match(src, /id="dzAsk"/);

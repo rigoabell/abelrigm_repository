@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.59
+// @version      2.9.60
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -54,7 +54,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.59";
+  const VERSION = "2.9.60";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2461,33 +2461,6 @@
     return { ok: true, error: "" };
   }
 
-  function containerJustMoved(before, after, container) {
-    const id = cellText(container).toLowerCase();
-    if (!id) return false;
-    const moved = (text) => {
-      const hay = moveStableText(text).toLowerCase();
-      let from = 0;
-      while (from < hay.length) {
-        const at = hay.indexOf(id, from);
-        if (at < 0) return false;
-        if (/^\s*moved/.test(hay.slice(at + id.length, at + id.length + 12))) return true;
-        from = at + id.length;
-      }
-      return false;
-    };
-    return /move successful/i.test(after) && moved(after) && !moved(before);
-  }
-
-  function moveDropAccepted(before, after, token, container) {
-    const problem = moveScreenProblem(after);
-    if (problem) return { ok: false, error: problem };
-    const bad = moveBadPhrase(before, after);
-    if (bad) return { ok: false, error: bad };
-    const shown = cellText(token) && moveTokenCount(after, token) > moveTokenCount(before, token);
-    if (shown || containerJustMoved(before, after, container)) return { ok: true, error: "" };
-    return { ok: false, error: "Page did not show " + cellText(token) };
-  }
-
   function moveIsScanPage(href, title) {
     if (/404|not found/i.test(cellText(title))) return false;
     try {
@@ -2779,19 +2752,65 @@
     el.dispatchEvent(new view.Event("change", { bubbles: true }));
   }
 
+  function fcMenuControl(node) {
+    const el = node instanceof Element ? node : node?.parentElement;
+    if (!el?.closest) return null;
+    const control = el.closest("a, button, [role='button'], [role='link']");
+    if (!control || control.closest?.("#dz-batch-panel, [id^='plf-']")) return null;
+    const href = String(control.href || control.getAttribute("href") || "");
+    const label = cellText(control.innerText || control.getAttribute("aria-label") || control.getAttribute("title")).toLowerCase();
+    if (/fcmenu/i.test(href) || label === "menu") return control;
+    return null;
+  }
+
+  function disarmFcMenuControls() {
+    moveEachRoot((root) => {
+      if (!root.querySelectorAll) return;
+      root.querySelectorAll("a, button, [role='button'], [role='link']").forEach((el) => {
+        if (!fcMenuControl(el)) return;
+        const href = el.getAttribute("href");
+        if (href) {
+          el.setAttribute("data-plf-href", href);
+          el.removeAttribute("href");
+        }
+        el.setAttribute("tabindex", "-1");
+      });
+    });
+  }
+
+  function blockFcMenuOpen() {
+    if (blockFcMenuOpen.armed) return;
+    blockFcMenuOpen.armed = true;
+    const stop = (event) => {
+      if (!fcMenuControl(event.target)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      rememberDropzone({ step: "menu-blocked" });
+    };
+    document.addEventListener("click", stop, true);
+    document.addEventListener("auxclick", stop, true);
+    document.addEventListener("keydown", stop, true);
+    document.addEventListener("keyup", stop, true);
+    const nativeOpen = pageWindow.open;
+    pageWindow.open = function(url, ...rest) {
+      if (/fcmenu/i.test(String(url || ""))) {
+        rememberDropzone({ step: "menu-blocked", dropzone: String(url || "") });
+        return null;
+      }
+      return nativeOpen.call(pageWindow, url, ...rest);
+    };
+  }
+
   function moveBurstTarget() {
     const body = document.body || document.documentElement;
+    disarmFcMenuControls();
     const active = moveDeepActive(document);
-    if (!active || active === body || active === document.documentElement) return body;
-    if (active.closest?.("#dz-batch-panel, [id^='plf-']")) return body;
-    const label = cellText(active.innerText || active.getAttribute?.("aria-label") || "").toLowerCase();
-    const tag = String(active.tagName || "").toLowerCase();
-    const menu = tag === "button" || tag === "a" || active.getAttribute?.("role") === "button" || /\bmenu\b/.test(label);
-    if (!menu) return active;
-    try {
-      if (active.blur) active.blur();
-    } catch {
-      /* The menu button can stay focused. The keys still go to the page. */
+    if (active && active !== body && active !== document.documentElement && !moveTextField(active)) {
+      try {
+        active.blur();
+      } catch {
+        /* The focused control can stay focused. The keys still go to the page. */
+      }
     }
     try {
       body.focus();
@@ -3028,7 +3047,7 @@
     };
   }
 
-  async function waitForMoveToken(beforeRaw, token, container) {
+  async function waitForMoveToken(beforeRaw, token) {
     const start = Date.now();
     let last = moveStableText(beforeRaw);
     let stableAt = 0;
@@ -3036,9 +3055,7 @@
     while (Date.now() - start < 8000) {
       const raw = moveScreenText();
       const sig = moveStableText(raw);
-      const verdict = container
-        ? moveDropAccepted(beforeRaw, raw, token, container)
-        : moveScanAccepted(beforeRaw, raw, token);
+      const verdict = moveScanAccepted(beforeRaw, raw, token);
       if (sig !== last) {
         last = sig;
         saw = true;
@@ -3052,10 +3069,7 @@
       await sleep(40);
     }
     const raw = moveScreenText();
-    const verdict = container
-      ? moveDropAccepted(beforeRaw, raw, token, container)
-      : moveScanAccepted(beforeRaw, raw, token);
-    return { ...verdict, detail: clip(raw, 240) };
+    return { ...moveScanAccepted(beforeRaw, raw, token), detail: clip(raw, 240) };
   }
 
   async function performDropzone(container, dropzone) {
@@ -3074,7 +3088,7 @@
     paintMoveBadge("1/1 scan dropzone " + dropzone);
     rememberDropzone({ container, dropzone, step: "dropzone" });
     await burstMoveScan(dropzone, dropzone);
-    const second = await waitForMoveToken(midRaw, dropzone, container);
+    const second = await waitForMoveToken(midRaw, dropzone);
     paintMoveBadge(second.ok ? "Dropzone accepted: " + dropzone : "Dropzone stopped: " + (second.error || "not accepted"));
     const detail = second.detail || first.detail || "";
     if (!second.ok) return { ok: false, error: second.error || "Page did not show " + dropzone, detail };
@@ -3142,7 +3156,9 @@
     if (!moveWorkerStarted) {
       moveWorkerStarted = true;
       moveWorkerAt = Date.now();
+      blockFcMenuOpen();
       const beat = () => {
+        disarmFcMenuControls();
         noteMoveLanded();
         GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
         const pack = GM_getValue(KEYS.dropzoneQueue, null);
