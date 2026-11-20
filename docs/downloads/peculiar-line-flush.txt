@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.36
+// @version      2.9.37
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
-// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. An optional background dropzone sends each scan to the Move App.
+// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
 // @author       abelrigm
 // @match        https://peculiar-inventory-na.aka.corp.amazon.com/*
 // @match        https://aft-aging-inventory.na.aftx.amazonoperations.app/*
@@ -36,7 +36,7 @@
     Documents / IOL Assignments / Line Flush Records
   Example: LineFlush_2026-08-28_abelrigm.xlsx
   A night that runs past midnight keeps that same file until 6:00 AM. At 6:00 AM the next file starts.
-  Optional background dropzone: turn Dropzone on, enter the dropzone code, and leave the Move App scan page open. Each scan is sent there as a container scan and then that dropzone, without waiting on the Line Flush lookup.
+  Ask to dropzone is off until it is turned on. The panel remembers that switch and the saved dropzones. When a tote's outer location is rcCRetStations, the panel asks before sending it to dz-P-CR-EOL on the open Move App scan page.
   The Dashboard sheet matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time. Each location that was scanned also has its own sheet. Status uses the oldest-units age: Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
   EOL scans (EOL 1–6, AR EOL, BIGs EOL) also update a shift workbook. Day is 6:00 AM–5:59 PM in LineFlush_EOL_YYYY-MM-DD_Day.xlsx. Night is 6:00 PM–5:59 AM in LineFlush_EOL_YYYY-MM-DD_Night.xlsx, named for the evening the shift starts. The Summary sheet reads left to right: the whole shift, the halves, the quarters, then the hour windows. Each window shows the EOL and dropzone mix.
 
@@ -51,7 +51,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.36";
+  const VERSION = "2.9.37";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -81,8 +81,8 @@
     locationIdle: "plf.locationIdle",
     panelSize: "plf.panelSize",
     panelOpen: "plf.panelOpen",
-    dropzoneOn: "plf.dropzoneOn",
-    dropzoneCode: "plf.dropzoneCode",
+    dropzoneAsk: "plf.dropzoneAsk",
+    dropzones: "plf.dropzones",
     dropzoneQueue: "plf.dropzoneQueue",
     dropzoneCursor: "plf.dropzoneCursor",
     dropzoneStatus: "plf.dropzoneStatus",
@@ -2246,11 +2246,46 @@
     return session;
   }
 
+  const STATIONS_OUTER = "rccretstations";
+  const STATIONS_DROPZONE = "dz-P-CR-EOL";
+
   function backgroundDropzone(enabled, dropzone, container) {
     const zone = cellText(dropzone);
     const id = cellText(container);
     if (!enabled || !zone || !id) return null;
     return { container: id, dropzone: zone };
+  }
+
+  function stationsDropPrompt(enabled, outerLocation, container) {
+    if (enabled !== true) return null;
+    const outer = stripBracketText(outerLocation).toLowerCase();
+    const id = cellText(container);
+    if (!id || outer !== STATIONS_OUTER) return null;
+    return { container: id, dropzone: STATIONS_DROPZONE };
+  }
+
+  function normalizeSavedDropzones(list) {
+    const source = Array.isArray(list) ? list : [STATIONS_DROPZONE];
+    const seen = new Set();
+    const out = [];
+    for (const item of source) {
+      const name = cellText(item).slice(0, 40);
+      const key = name.toLowerCase();
+      if (!name || seen.has(key)) continue;
+      seen.add(key);
+      out.push(name);
+    }
+    return out;
+  }
+
+  function loadSavedDropzones() {
+    return normalizeSavedDropzones(GM_getValue(KEYS.dropzones, null));
+  }
+
+  function saveSavedDropzones(list) {
+    const next = normalizeSavedDropzones(list);
+    GM_setValue(KEYS.dropzones, next);
+    return next;
   }
 
   function scanBurstKeys(text) {
@@ -2280,12 +2315,8 @@
     return Date.now() - t < HEARTBEAT_STALE_MS;
   }
 
-  function enqueueBackgroundDropzone(container) {
-    const job = backgroundDropzone(
-      GM_getValue(KEYS.dropzoneOn, false) === true,
-      GM_getValue(KEYS.dropzoneCode, ""),
-      container
-    );
+  function enqueueBackgroundDropzone(container, dropzone) {
+    const job = backgroundDropzone(true, dropzone, container);
     if (!job) return null;
     const pack = GM_getValue(KEYS.dropzoneQueue, { n: 0, jobs: [] }) || { n: 0, jobs: [] };
     const n = Number(pack.n || 0) + 1;
@@ -2789,7 +2820,7 @@
           border-radius: 8px; padding: 7px 10px; font-size: 22px; font-weight: 700;
           letter-spacing: .04em; outline: none;
         }
-        .dzrow {
+        .dzrow, .dzprompt {
           display: flex; align-items: center; gap: 8px;
           padding: 6px 10px; background: #ffffff;
           border-bottom: 2px solid #111111;
@@ -2798,18 +2829,35 @@
           display: flex; align-items: center; gap: 6px;
           font-size: 12px; font-weight: 800; white-space: nowrap;
         }
-        #dzCode {
-          flex: 1 1 180px; min-width: 0; height: 32px;
+        #dzAdd {
+          flex: 1 1 160px; min-width: 0; height: 32px;
           border: 1px solid #111111; border-radius: 8px;
           background: #ffffff; color: #111111;
           font-size: 14px; font-weight: 700; padding: 0 8px;
         }
+        #dzAddBtn, .dzprompt button { height: 32px; font-weight: 800; }
         #dzStatus {
           flex: 1 1 180px; min-width: 0;
           font-size: 12px; font-weight: 700;
           overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
-        #q::placeholder, #filter::placeholder, #dzCode::placeholder { color: #667085; }
+        .dzsaved {
+          display: flex; flex-wrap: wrap; gap: 6px;
+          padding: 6px 10px; background: #ffffff;
+          border-bottom: 2px solid #111111;
+        }
+        .dzchip {
+          display: inline-flex; align-items: center; gap: 4px;
+          border: 1px solid #111111; border-radius: 999px;
+          padding: 2px 8px; font-size: 12px; font-weight: 800;
+        }
+        .dzchip.used { background: #e7f7ec; }
+        .dzchip button { border: 0; background: transparent; padding: 0 0 0 4px; font-size: 14px; line-height: 1; }
+        .dzprompt { display: none; background: #fff8e8; }
+        .dzprompt.open { display: flex; }
+        #dzPromptText { flex: 1 1 auto; min-width: 0; font-size: 14px; font-weight: 800; }
+        #dzYes { background: #111111; color: #ffffff; border-color: #111111; }
+        #q::placeholder, #filter::placeholder, #dzAdd::placeholder { color: #667085; }
         #q:focus { border-color: #111111; box-shadow: 0 0 0 3px rgba(17,17,17,.12); }
         .focusrow {
           display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
@@ -3050,9 +3098,18 @@
             <input id="q" type="text" placeholder="Scan container" autocomplete="off" spellcheck="false" />
             </div>
           <div class="dzrow">
-            <label for="dzOn"><input id="dzOn" type="checkbox" /> Dropzone</label>
-            <input id="dzCode" type="text" placeholder="Dropzone code" autocomplete="off" spellcheck="false" />
+            <label for="dzAsk"><input id="dzAsk" type="checkbox" /> Ask to dropzone</label>
             <div id="dzStatus">Off</div>
+          </div>
+          <div class="dzrow">
+            <input id="dzAdd" type="text" placeholder="Add a dropzone" autocomplete="off" spellcheck="false" />
+            <button id="dzAddBtn" type="button">Save</button>
+          </div>
+          <div class="dzsaved" id="dzSaved"></div>
+          <div class="dzprompt" id="dzPrompt">
+            <div id="dzPromptText"></div>
+            <button id="dzYes" type="button">Yes</button>
+            <button id="dzNo" type="button">No</button>
           </div>
           <div class="status ready" id="note">Ready</div>
           <div class="focusrow">
@@ -3937,12 +3994,6 @@
 
     async function lookupOne(id, location) {
       selectedId = id;
-      const dropped = enqueueBackgroundDropzone(id);
-      if (dropped) {
-        const dzLine = shadow.getElementById("dzStatus");
-        if (dzLine) dzLine.textContent = `Queued ${dropped.container} → ${dropped.dropzone}`;
-        ensureMoveTab();
-      }
       showTicket(id, { containerId: id, inventory: [] });
       queueBanner(id);
       await new Promise((r) => requestAnimationFrame(() => r()));
@@ -3987,6 +4038,7 @@
         });
         persist();
         showTicket(id, result);
+        maybeAskDropzone(id, result);
         flashPanel();
         renderStats();
         renderHistory();
@@ -4119,36 +4171,108 @@
       input.value += ch;
     };
 
-    const dzOn = shadow.getElementById("dzOn");
-    const dzCode = shadow.getElementById("dzCode");
+    const dzAsk = shadow.getElementById("dzAsk");
+    const dzAdd = shadow.getElementById("dzAdd");
     const dzStatus = shadow.getElementById("dzStatus");
-    dzOn.checked = GM_getValue(KEYS.dropzoneOn, false) === true;
-    dzCode.value = cellText(GM_getValue(KEYS.dropzoneCode, ""));
+    const dzPrompt = shadow.getElementById("dzPrompt");
+    const dzPromptText = shadow.getElementById("dzPromptText");
+    const dropPromptQueue = [];
+    let dropPromptCurrent = null;
+    dzAsk.checked = GM_getValue(KEYS.dropzoneAsk, false) === true;
+    if (GM_getValue(KEYS.dropzones, null) == null) saveSavedDropzones([STATIONS_DROPZONE]);
+
     function paintDropzoneStatus(text) {
       if (dzStatus) dzStatus.textContent = text;
     }
-    function saveDropzoneChoice() {
-      GM_setValue(KEYS.dropzoneOn, dzOn.checked === true);
-      GM_setValue(KEYS.dropzoneCode, cellText(dzCode.value));
-      if (!dzOn.checked) paintDropzoneStatus("Off");
-      else if (!cellText(dzCode.value)) paintDropzoneStatus("Enter a dropzone");
-      else paintDropzoneStatus(`On · ${cellText(dzCode.value)}`);
+    function paintAskState() {
+      paintDropzoneStatus(dzAsk.checked ? `On · rcCRetStations asks for ${STATIONS_DROPZONE}` : "Off");
     }
-    saveDropzoneChoice();
-    dzOn.addEventListener("change", () => {
-      saveDropzoneChoice();
-      if (dzOn.checked && cellText(dzCode.value)) ensureMoveTab();
+    function renderSavedDropzones() {
+      const list = shadow.getElementById("dzSaved");
+      const names = loadSavedDropzones();
+      list.innerHTML = names.length
+        ? names
+            .map((name) => {
+              const used = name.toLowerCase() === STATIONS_DROPZONE.toLowerCase() ? " used" : "";
+              return `<span class="dzchip${used}">${escapeHtml(name)}<button type="button" data-dropzone="${escapeHtml(name)}" title="Remove ${escapeHtml(name)}">×</button></span>`;
+            })
+            .join("")
+        : `<span class="empty">No saved dropzones</span>`;
+    }
+    function hideDropPrompt() {
+      dropPromptCurrent = null;
+      dzPrompt.classList.remove("open");
+      dzPromptText.textContent = "";
+    }
+    function showDropPrompt() {
+      if (dropPromptCurrent || !dropPromptQueue.length) {
+        if (!dropPromptCurrent) hideDropPrompt();
+        return;
+      }
+      dropPromptCurrent = dropPromptQueue.shift();
+      const waiting = dropPromptQueue.length ? ` · ${dropPromptQueue.length} more` : "";
+      dzPromptText.textContent = `Dropzone ${dropPromptCurrent.container} to ${dropPromptCurrent.dropzone}?${waiting}`;
+      dzPrompt.classList.add("open");
+    }
+    function maybeAskDropzone(containerId, result) {
+      const offer = stationsDropPrompt(dzAsk.checked === true, outerLocationLabel(result), containerId);
+      if (!offer) return;
+      dropPromptQueue.push(offer);
+      showDropPrompt();
+    }
+    function finishDropPrompt(accept) {
+      const offer = dropPromptCurrent;
+      hideDropPrompt();
+      if (accept && offer) {
+        const dropped = enqueueBackgroundDropzone(offer.container, offer.dropzone);
+        if (dropped) {
+          paintDropzoneStatus(`Queued ${dropped.container} → ${dropped.dropzone}`);
+          ensureMoveTab();
+        }
+      }
+      showDropPrompt();
+    }
+    dzAsk.addEventListener("change", () => {
+      GM_setValue(KEYS.dropzoneAsk, dzAsk.checked === true);
+      if (!dzAsk.checked) {
+        dropPromptQueue.splice(0, dropPromptQueue.length);
+        hideDropPrompt();
+      }
+      paintAskState();
     });
-    dzCode.addEventListener("input", saveDropzoneChoice);
-    dzCode.addEventListener("change", saveDropzoneChoice);
+    shadow.getElementById("dzAddBtn").addEventListener("click", () => {
+      const name = cellText(dzAdd.value);
+      if (!name) return;
+      saveSavedDropzones([...loadSavedDropzones(), name]);
+      dzAdd.value = "";
+      renderSavedDropzones();
+      focusScanBox();
+    });
+    dzAdd.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      event.stopPropagation();
+      shadow.getElementById("dzAddBtn").click();
+    });
+    shadow.getElementById("dzSaved").addEventListener("click", (event) => {
+      const button = event.target instanceof Element ? event.target.closest("[data-dropzone]") : null;
+      const name = button?.getAttribute("data-dropzone") || "";
+      if (!name) return;
+      saveSavedDropzones(loadSavedDropzones().filter((item) => item.toLowerCase() !== name.toLowerCase()));
+      renderSavedDropzones();
+    });
+    shadow.getElementById("dzYes").addEventListener("click", () => finishDropPrompt(true));
+    shadow.getElementById("dzNo").addEventListener("click", () => finishDropPrompt(false));
     GM_addValueChangeListener(KEYS.dropzoneStatus, (_name, _old, res) => {
-      if (!res || !dzOn.checked) return;
+      if (!res) return;
       paintDropzoneStatus(
         res.ok
           ? `Sent ${res.container} → ${res.dropzone}`
           : `Not sent ${res.container}: ${res.error || "failed"}`
       );
     });
+    renderSavedDropzones();
+    paintAskState();
 
     renderStats();
     tick();
