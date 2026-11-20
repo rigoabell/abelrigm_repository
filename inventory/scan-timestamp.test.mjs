@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveIsScanPage, movePageReady, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveIsScanPage, movePageReady, moveWorkflowScore, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -192,7 +192,7 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.9\.44/);
+assert.match(src, /@version\s+2\.9\.45/);
 assert.match(src, /function moveBurstTarget/);
 assert.equal(api.backgroundDropzone(false, "dzA", "ts1"), null);
 assert.equal(api.backgroundDropzone(true, "", "ts1"), null);
@@ -227,7 +227,15 @@ assert.equal(dropView.moveOpen, false);
 assert.equal(api.moveIsScanPage("https://aft-moveapp.na.aftx.amazonoperations.app/", "HTTP Status 404 – Not Found"), false);
 assert.equal(api.moveIsScanPage("https://aft-moveapp.na.aftx.amazonoperations.app/move-container", "AFT Move Between Pallets"), false);
 assert.equal(api.moveIsScanPage("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets"), true);
-assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets", "Scan source pallet", "complete"), true);
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets", "Scan source pallet", "complete"), false);
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=12", "Move container", "Scan source container", "complete"), true);
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=12", "Move container", "Waiting for scan", "complete"), true);
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets", "Scan source pallet Waiting for scan", "complete"), false);
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=12", "Move container", "Scan destination container", "complete"), false);
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=12", "Move container", "Scan source container Scan destination container", "complete"), true);
+assert.equal(api.moveWorkflowScore("Move Between Pallets"), -1);
+assert.equal(api.moveWorkflowScore("Dropzone"), 5);
+assert.equal(api.moveWorkflowScore("Move Between Containers"), 3);
 assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets", "Scan source pallet", "loading"), false);
 assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets", "Scan source pallet Scan was unsuccessful", "complete"), false);
 assert.equal(api.moveIsScanPage("https://aft-moveapp.na.aftx.amazonoperations.app/move-container", "HTTP Status 404 – Not Found"), false);

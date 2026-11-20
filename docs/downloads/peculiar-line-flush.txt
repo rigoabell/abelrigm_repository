@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.44
+// @version      2.9.45
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -51,7 +51,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.44";
+  const VERSION = "2.9.45";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2396,7 +2396,7 @@
       const parsed = new URL(cellText(href));
       return /aft-moveapp/i.test(parsed.hostname)
         && /\/move-container(?:\/|$)/i.test(parsed.pathname)
-        && parsed.searchParams.get("jobId") === "400";
+        && Boolean(parsed.searchParams.get("jobId"));
     } catch {
       return false;
     }
@@ -2406,8 +2406,20 @@
     if (!moveIsScanPage(href, title)) return false;
     if (readyState && readyState !== "complete") return false;
     const screen = String(text || "");
-    if (/scan was unsuccessful/i.test(screen)) return false;
-    return /scan source pallet/i.test(screen);
+    if (/scan was unsuccessful|not of appropriate type|scan a pallet|scan source pallet|scan destination pallet/i.test(screen)) return false;
+    const askingSource = /scan source container|scan the container|scan source(?!\s+pallet)/i.test(screen);
+    if (/scan destination/i.test(screen) && !askingSource) return false;
+    return askingSource || /waiting for scan/i.test(screen);
+  }
+
+  function moveWorkflowScore(text) {
+    const name = cellText(text).toLowerCase();
+    if (!name || /pallet/.test(name)) return -1;
+    let score = 0;
+    if (/drop\s*zone/.test(name)) score += 5;
+    if (/container/.test(name)) score += 3;
+    if (/tote/.test(name)) score += 3;
+    return score;
   }
 
   function noteMoveLanded() {
@@ -2653,11 +2665,13 @@
     let clicked = false;
     moveEachRoot((root) => {
       if (clicked || !root.querySelectorAll) return;
-      root.querySelectorAll("button, a, [role='button'], input[type='button'], input[type='submit']").forEach((el) => {
+      root.querySelectorAll("button, a, [role='button'], [role='link'], input[type='button'], input[type='submit'], div, span, li, label").forEach((el) => {
         if (clicked || !moveVisible(el)) return;
         const text = cellText(el.innerText || el.value || el.getAttribute?.("aria-label")).toLowerCase();
-        if (text !== want && !text.startsWith(want + " ")) return;
-        el.click();
+        const buttonish = el.tagName === "BUTTON" || el.tagName === "A" || el.tagName === "INPUT" || el.getAttribute?.("role") === "button" || el.getAttribute?.("role") === "link";
+        if (text !== want && !(buttonish && text.startsWith(want + " "))) return;
+        const clickable = el.closest("button, a, [role='button'], [role='link']") || el;
+        clickable.click();
         clicked = true;
       });
     });
@@ -2676,6 +2690,81 @@
     el.textContent = text;
   }
 
+  function moveWorkflowChoices() {
+    const out = [];
+    const seen = new Set();
+    moveEachRoot((root) => {
+      if (!root.querySelectorAll) return;
+      root.querySelectorAll("a, button, [role='button'], [role='link'], li, div, span, label").forEach((el) => {
+        if (!moveVisible(el)) return;
+        const text = cellText(el.innerText || el.textContent || el.getAttribute?.("aria-label")).replace(/\s+/g, " ");
+        if (!text || text.length > 80) return;
+        const href = el.href || el.getAttribute?.("href") || "";
+        const key = (text + "|" + href).toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push({ text, href, el });
+      });
+    });
+    return out;
+  }
+
+  function rankMoveWorkflows(choices) {
+    return choices
+      .map((choice) => ({ ...choice, score: moveWorkflowScore(choice.text) }))
+      .filter((choice) => choice.score > 0)
+      .sort((a, b) => b.score - a.score);
+  }
+
+  async function moveLeavePalletWorkflow() {
+    const screen = moveScreenText();
+    if (movePageReady(location.href, document.title, screen, document.readyState)) return null;
+    const pallet = /scan source pallet|scan a pallet|scan destination pallet|not of appropriate type/i.test(screen);
+    let seen = moveWorkflowChoices();
+    let ranked = rankMoveWorkflows(seen);
+    if (!pallet && !ranked.length && !/select workflow/i.test(screen)) return null;
+    if (!ranked.length) {
+      paintMoveBadge("This page cannot take a tote. Opening the workflow list.");
+      moveClickButton("Select workflow");
+    }
+    for (let i = 0; i < 8 && !ranked.length; i += 1) {
+      await sleep(300);
+      seen = moveWorkflowChoices();
+      ranked = rankMoveWorkflows(seen);
+    }
+    if (!ranked.length) {
+      const labels = seen.map((choice) => choice.text).slice(0, 12).join(" | ");
+      return {
+        ok: false,
+        error: "No container workflow in the list",
+        detail: clip(labels || screen, 240),
+      };
+    }
+    const pick = ranked[0];
+    paintMoveBadge("Opening " + pick.text);
+    rememberDropzone({ step: "workflow", workflow: pick.text });
+    const href = cellText(pick.href);
+    let sameJob = false;
+    try {
+      sameJob = href && new URL(href, location.href).searchParams.get("jobId") === new URL(location.href).searchParams.get("jobId");
+    } catch {
+      sameJob = false;
+    }
+    if (href && /jobId=\d+/i.test(href) && !sameJob) {
+      const claim = GM_getValue("plf.dropzoneClaim", null);
+      GM_setValue("plf.dropzoneClaim", {
+        n: Number(claim?.n) || 0,
+        t: Date.now(),
+        href: location.href,
+      });
+      location.assign(href);
+      return { switching: true, ok: false, error: "Opening " + pick.text };
+    }
+    pick.el.click();
+    await sleep(800);
+    return { stayed: true };
+  }
+
   async function waitForMoveReady() {
     const start = Date.now();
     while (Date.now() - start < 20000) {
@@ -2687,12 +2776,12 @@
         return { ok: false, error: "Page is showing a scan error", detail: clip(text, 240) };
       }
       if (movePageReady(location.href, document.title, text, document.readyState)) {
-        paintMoveBadge("Scan source pallet is ready");
+        paintMoveBadge("Container scan is ready");
         try { pageWindow.focus(); } catch { /* The browser kept this tab in the background. */ }
         await sleep(300);
         return { ok: true, detail: clip(moveScreenText(), 240) };
       }
-      paintMoveBadge("Waiting for Scan source pallet");
+      paintMoveBadge("Waiting for a container scan");
       await sleep(200);
     }
     return {
@@ -2729,11 +2818,13 @@
 
   async function performDropzone(container, dropzone) {
     rememberDropzone({ container, dropzone, step: "waiting" });
+    const switched = await moveLeavePalletWorkflow();
+    if (switched?.switching || switched?.ok === false) return switched;
     const ready = await waitForMoveReady();
     if (!ready.ok) return ready;
     rememberDropzone({ container, dropzone, step: "scanning" });
     const beforeRaw = moveScreenText();
-    await burstMoveScan(container, "source pallet " + container);
+    await burstMoveScan(container, "source " + container);
     const first = await waitForMoveToken(beforeRaw, container);
     paintMoveBadge(first.ok ? "Source accepted: " + container : "Source stopped: " + (first.error || "not accepted"));
     if (!first.ok) return { ok: false, error: first.error || "Page did not show " + container, detail: first.detail || "" };
@@ -2764,7 +2855,7 @@
         if (!jobs.length) break;
         const job = jobs[0];
         const claim = GM_getValue("plf.dropzoneClaim", null);
-        if (claim && Number(claim.n) === Number(job.n) && Date.now() - (Number(claim.t) || 0) < 25000) break;
+        if (claim && Number(claim.n) === Number(job.n) && Date.now() - (Number(claim.t) || 0) < 25000 && (!claim.href || claim.href === location.href)) break;
         GM_setValue("plf.dropzoneClaim", { n: Number(job.n), t: Date.now() });
         let result = { ok: false, error: "Dropzone failed" };
         try {
@@ -2772,6 +2863,7 @@
         } catch (err) {
           result = { ok: false, error: String(err?.message || err) };
         }
+        if (result?.switching) break;
         GM_setValue(KEYS.dropzoneCursor, Number(job.n));
         GM_setValue(KEYS.dropzoneStatus, {
           n: job.n,
@@ -5130,11 +5222,16 @@
     const bootMove = () => {
       if (!document.documentElement) return;
       startMoveDropzoneWorker();
-      if (!moveIsScanPage(location.href, document.title || "pending")) {
-        if (!bootMove.sent) {
-          bootMove.sent = true;
-          location.assign(MOVE_URL);
-        }
+      let onMoveHost = false;
+      try {
+        onMoveHost = /aft-moveapp/i.test(new URL(location.href).hostname);
+      } catch {
+        onMoveHost = false;
+      }
+      if (onMoveHost && !/404|not found/i.test(document.title)) return;
+      if (!bootMove.sent) {
+        bootMove.sent = true;
+        location.assign(MOVE_URL);
       }
     };
     bootMove();
