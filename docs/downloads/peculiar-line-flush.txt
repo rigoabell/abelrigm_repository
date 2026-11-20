@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.39
+// @version      2.9.40
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -51,13 +51,13 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.39";
+  const VERSION = "2.9.40";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
   const OLD_SCRIPT_NAME = "Peculiar Inventory Scan Panel";
   const PECULIAR_URL = "https://aft-aging-inventory.na.aftx.amazonoperations.app/MEM3/overview";
-  const MOVE_URL = "https://aft-moveapp.na.aftx.amazonoperations.app/";
+  const MOVE_URL = "https://aft-moveapp.na.aftx.amazonoperations.app/move-container";
   const SP_SITE = "https://amazon-my.sharepoint.com/personal/abelrigm_amazon_com";
   const SOS_FOLDER =
     "/personal/abelrigm_amazon_com/Documents/IOL Assignments/Line Flush Records";
@@ -86,7 +86,9 @@
     dropzoneQueue: "plf.dropzoneQueue",
     dropzoneCursor: "plf.dropzoneCursor",
     dropzoneStatus: "plf.dropzoneStatus",
-    dropzoneHeartbeat: "plf.dropzoneHeartbeat",
+    dropzoneHeartbeat: "plf.dropzoneScanHeartbeat",
+    dropzoneTried: "plf.dropzoneTried",
+    dropzoneLanded: "plf.dropzoneLanded",
     dropzoneTrace: "plf.dropzoneTrace",
   };
   const IDLE_LOCATION_MS = 10 * 60 * 1000;
@@ -2315,6 +2317,9 @@
             t: Number(rawStatus.t) || 0,
           }
         : null,
+      tried: cellText(state?.tried?.href) || cellText(state?.target),
+      landed: cellText(state?.landed?.href),
+      landedTitle: cellText(state?.landed?.title),
       moveOpen: Boolean(heartbeat && now - heartbeat < HEARTBEAT_STALE_MS),
     };
   }
@@ -2373,8 +2378,37 @@
     return { ok: true, error: "" };
   }
 
+  function moveIsScanPage(href, title) {
+    if (/404|not found/i.test(cellText(title))) return false;
+    try {
+      const parsed = new URL(cellText(href));
+      return /aft-moveapp/i.test(parsed.hostname) && /\/move-container(?:\/|$)/i.test(parsed.pathname);
+    } catch {
+      return false;
+    }
+  }
+
+  function moveSamePath(href, target) {
+    try {
+      const path = (value) => new URL(value).pathname.replace(/\/+$/, "") || "/";
+      return path(href) === path(target);
+    } catch {
+      return false;
+    }
+  }
+
+  function noteMoveLanded() {
+    GM_setValue(KEYS.dropzoneLanded, {
+      href: location.href,
+      title: document.title || "",
+      t: Date.now(),
+    });
+  }
+
   function moveFresh() {
-    if (isMoveApp && isTop) return true;
+    if (isMoveApp && isTop && moveIsScanPage(location.href, document.title)) return true;
+    const landed = GM_getValue(KEYS.dropzoneLanded, null);
+    if (landed && !moveIsScanPage(landed.href, landed.title)) return false;
     const t = Number(GM_getValue(KEYS.dropzoneHeartbeat, 0)) || 0;
     return Date.now() - t < HEARTBEAT_STALE_MS;
   }
@@ -2391,7 +2425,10 @@
 
   let moveTabOpenedAt = 0;
   function ensureMoveTab() {
+    GM_setValue(KEYS.dropzoneTried, { href: MOVE_URL, t: Date.now() });
     if (moveFresh()) return;
+    const landed = GM_getValue(KEYS.dropzoneLanded, null);
+    if (landed && moveSamePath(landed.href, MOVE_URL) && Date.now() - (Number(landed.t) || 0) < HEARTBEAT_STALE_MS) return;
     if (Date.now() - moveTabOpenedAt < 15000) return;
     moveTabOpenedAt = Date.now();
     try {
@@ -2669,7 +2706,11 @@
   function startMoveDropzoneWorker() {
     if (!moveWorkerStarted) {
       moveWorkerStarted = true;
-      const beat = () => GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
+      const beat = () => {
+        noteMoveLanded();
+        if (!moveIsScanPage(location.href, document.title)) return;
+        GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
+      };
       beat();
       setInterval(beat, HEARTBEAT_MS);
       GM_addValueChangeListener(KEYS.dropzoneQueue, () => {
@@ -2827,6 +2868,9 @@
         cursor: GM_getValue(KEYS.dropzoneCursor, 0),
         status: GM_getValue(KEYS.dropzoneStatus, null),
         heartbeat: GM_getValue(KEYS.dropzoneHeartbeat, 0),
+        tried: GM_getValue(KEYS.dropzoneTried, null),
+        landed: GM_getValue(KEYS.dropzoneLanded, null),
+        target: MOVE_URL,
         now: Date.now(),
       }),
     };
@@ -4994,6 +5038,15 @@
   if (isMoveApp && isTop) {
     const bootMove = () => {
       if (!document.documentElement) return;
+      noteMoveLanded();
+      if (!moveSamePath(location.href, MOVE_URL)) {
+        if (!bootMove.sent) {
+          bootMove.sent = true;
+          location.assign(MOVE_URL);
+        }
+        return;
+      }
+      if (!moveIsScanPage(location.href, document.title)) return;
       startMoveDropzoneWorker();
     };
     bootMove();

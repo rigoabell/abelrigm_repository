@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveIsScanPage, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -23,6 +23,7 @@ const sandbox = {
   Response,
   Uint8Array,
   DataView,
+  URL,
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
@@ -191,7 +192,7 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.9\.39/);
+assert.match(src, /@version\s+2\.9\.40/);
 assert.equal(api.backgroundDropzone(false, "dzA", "ts1"), null);
 assert.equal(api.backgroundDropzone(true, "", "ts1"), null);
 const zoneJob = api.backgroundDropzone(true, " dzA ", " ts1 ");
@@ -222,6 +223,17 @@ assert.equal(dropView.pending.length, 0);
 assert.equal(dropView.status.ok, false);
 assert.equal(dropView.status.error, "Page did not take the container");
 assert.equal(dropView.moveOpen, false);
+assert.equal(api.moveIsScanPage("https://aft-moveapp.na.aftx.amazonoperations.app/", "HTTP Status 404 – Not Found"), false);
+assert.equal(api.moveIsScanPage("https://aft-moveapp.na.aftx.amazonoperations.app/move-container", "Move container"), true);
+assert.equal(api.moveIsScanPage("https://aft-moveapp.na.aftx.amazonoperations.app/move-container", "HTTP Status 404 – Not Found"), false);
+const landing = api.dropzoneDebugView({
+  target: "https://aft-moveapp.na.aftx.amazonoperations.app/move-container",
+  tried: { href: "https://aft-moveapp.na.aftx.amazonoperations.app/move-container" },
+  landed: { href: "https://aft-moveapp.na.aftx.amazonoperations.app/", title: "HTTP Status 404 – Not Found" },
+});
+assert.equal(landing.tried, "https://aft-moveapp.na.aftx.amazonoperations.app/move-container");
+assert.equal(landing.landed, "https://aft-moveapp.na.aftx.amazonoperations.app/");
+assert.equal(landing.landedTitle, "HTTP Status 404 – Not Found");
 assert.match(src, /dropzone: dropzoneDebugView/);
 assert.deepEqual([...api.scanBurstKeys("ab1")], ["a", "b", "1", "Enter"]);
 assert.equal(api.moveBadPhrase("ready", "Invalid container"), "invalid");
