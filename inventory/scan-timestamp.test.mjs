@@ -192,7 +192,7 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.9\.42/);
+assert.match(src, /@version\s+2\.9\.43/);
 assert.equal(api.backgroundDropzone(false, "dzA", "ts1"), null);
 assert.equal(api.backgroundDropzone(true, "", "ts1"), null);
 const zoneJob = api.backgroundDropzone(true, " dzA ", " ts1 ");
@@ -245,6 +245,7 @@ assert.equal(api.moveScanAccepted("ready", "clock 1:02 PM updated", "tsTEK940449
 assert.equal(api.moveScanAccepted("ready", "Scanned tsTEK940449", "tsTEK940449").ok, true);
 assert.equal(api.moveScanAccepted("already tsTEK940449", "already tsTEK940449 clock", "tsTEK940449").ok, false);
 assert.equal(api.moveScanAccepted("ready", "tsTEK940449 invalid container", "tsTEK940449").ok, false);
+assert.equal(api.moveScanAccepted("ready", "dz-P-CR-EOL The container scanned was not of appropriate type. Scan a pallet.", "dz-P-CR-EOL").ok, false);
 assert.match(src, /aft-moveapp\.na\.aftx\.amazonoperations\.app/);
 assert.match(src, /id="dzAsk"/);
 assert.equal(api.fileDate("2026-11-07 22:00:00"), "2026-11-07");
