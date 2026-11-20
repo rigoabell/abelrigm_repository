@@ -6,7 +6,7 @@ const src = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-panel.t
 const patched = src.replace(
     "applyTodayDateOnce();\n    init();\n    startSilentUpdates();\n})();",
     `globalThis.__mem3 = {
-        addLeaving, saveLeaving, loadLeaving, clearMarkedLeave, shiftId,
+        addLeaving, saveLeaving, loadLeaving, clearMarkedLeave, shiftId, currentLeaving,
         mergeLeaving, enableLeavingShare, publishLeaving, pullLeaving, whenLeavingShared,
         activityLine, leavingLine, leavingQuarterCounts, loginFromWelcome, restoreLatestMarks,
         addNote, clearNote, saveNotes, loadNotes, pullNotes, whenNotesShared, mergeNotes, openNotes, noteLine
@@ -186,6 +186,29 @@ const both = JSON.parse(gist.text);
 const names = both.shifts[a.shiftId(now)].map((item) => item.login).sort();
 assert.deepEqual(names, ["brndbo", "wyoungmy"]);
 assert.equal(both.shifts[a.shiftId(now)].find((item) => item.login === "brndbo").status, "cancelled");
+
+const staleDoc = JSON.parse(JSON.stringify(b.loadLeaving()));
+const thirdDoc = a.loadLeaving();
+a.addLeaving(thirdDoc, "thirdlog", 15 * 60, "Station 3-09", now);
+await finish(a.publishLeaving(thirdDoc));
+await finish(b.publishLeaving(staleDoc));
+const kept = JSON.parse(gist.text);
+const keptNames = kept.shifts[a.shiftId(now)].map((item) => item.login);
+assert.ok(keptNames.indexOf("thirdlog") !== -1);
+assert.ok(keptNames.indexOf("wyoungmy") !== -1);
+assert.equal(
+    a.currentLeaving({
+        shifts: {
+            "1999-01-01-nights": [{ id: "nightone-01:00 AM", login: "nightone", said: "01:00 AM", status: "said", markedAtMs: now.getTime() }]
+        }
+    }, now).some((row) => row.login === "nightone"),
+    true
+);
+assert.equal(a.currentLeaving({
+    shifts: {
+        "1999-01-01-days": [{ id: "oldone-01:00 AM", login: "oldone", said: "01:00 AM", status: "said", markedAtMs: now.getTime() - (13 * 60 * 60 * 1000) }]
+    }
+}, now).length, 0);
 
 const shiftKey = a.shiftId(now);
 const remarked = a.mergeLeaving(
