@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.61
+// @version      2.9.62
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -54,7 +54,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.61";
+  const VERSION = "2.9.62";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2587,12 +2587,12 @@
   function ensureMoveTab() {
     GM_setValue(KEYS.dropzoneTried, { href: MOVE_URL, t: Date.now() });
     GM_setValue(KEYS.dropzoneNudge, Date.now());
-    GM_setValue("plf.dropzoneClaim", { n: 0, t: 0 });
     rememberDropzone({ step: "opening", dropzone: MOVE_URL });
     const heartbeat = Number(GM_getValue(KEYS.dropzoneHeartbeat, 0)) || 0;
-    const live = Date.now() - heartbeat < HEARTBEAT_STALE_MS;
-    if (live && Date.now() - moveTabOpenedAt < 4000) return;
+    if (Date.now() - heartbeat < HEARTBEAT_STALE_MS) return;
+    if (Date.now() - moveTabOpenedAt < 4000) return;
     moveTabOpenedAt = Date.now();
+    GM_setValue("plf.dropzoneClaim", { n: 0, t: 0, tab: "" });
     try {
       GM_openInTab(MOVE_URL, { active: true, insert: true, setParent: true });
     } catch {
@@ -2852,6 +2852,7 @@
     const code = cellText(text);
     const name = label || code;
     paintMoveBadge("Sending " + name);
+    try { pageWindow.focus(); } catch { /* The browser kept this tab in the background. */ }
     const target = moveBurstTarget();
     if (!target) return;
     for (const ch of [...Array.from(code), "Enter"]) fireMoveKey(target, ch);
@@ -3115,9 +3116,13 @@
     const beforeRaw = moveScreenText();
     await burstMoveScan(container, container);
     const first = await waitForMoveToken(beforeRaw, container);
-    paintMoveBadge(first.ok ? "Tote accepted: " + container : "Tote was sent: " + container);
-    await sleep(80);
+    paintMoveBadge(first.ok ? "Tote accepted: " + container : "Container was not scanned");
+    if (!first.ok) return { ok: false, error: "Container was not scanned", detail: first.detail || "" };
+    await sleep(400);
     const midRaw = moveScreenText();
+    if (/move was unsuccessful|action failed/i.test(midRaw)) {
+      return { ok: false, error: "The move failed", detail: clip(midRaw, 240) };
+    }
     paintMoveBadge("1/1 scan dropzone " + dropzone);
     rememberDropzone({ container, dropzone, step: "dropzone" });
     await burstMoveScan(dropzone, dropzone);
@@ -3133,6 +3138,7 @@
   let moveWorkerStarted = false;
   let moveWorkerAt = 0;
   let moveSawJob = false;
+  const moveTabId = Math.random().toString(36).slice(2);
   async function closeMoveTabWhenDone() {
     const pack = GM_getValue(KEYS.dropzoneQueue, null);
     const cursor = Number(GM_getValue(KEYS.dropzoneCursor, 0)) || 0;
@@ -3161,8 +3167,11 @@
         moveSawJob = true;
         const job = jobs[0];
         const claim = GM_getValue("plf.dropzoneClaim", null);
-        if (claim && Number(claim.n) === Number(job.n) && Date.now() - (Number(claim.t) || 0) < 25000 && (!claim.href || claim.href === location.href)) break;
-        GM_setValue("plf.dropzoneClaim", { n: Number(job.n), t: Date.now() });
+        if (claim && claim.tab && claim.tab !== moveTabId && Number(claim.n) === Number(job.n) && Date.now() - (Number(claim.t) || 0) < 25000) return;
+        GM_setValue("plf.dropzoneClaim", { n: Number(job.n), t: Date.now(), tab: moveTabId, href: location.href });
+        await sleep(60);
+        const held = GM_getValue("plf.dropzoneClaim", null);
+        if (!held || held.tab !== moveTabId || Number(held.n) !== Number(job.n)) return;
         let result = { ok: false, error: "Dropzone failed" };
         try {
           result = await performDropzone(job.container, job.dropzone);
