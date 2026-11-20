@@ -1,0 +1,1282 @@
+// ==UserScript==
+// @name         RRDA PIL Deep Dive Logins (abelrigm)
+// @namespace    ultimate-tampermonkey
+// @version      0.1.0
+// @description  Copy Login-column aliases from the RRDA Possible Item List deep dive, and copy a debug dump when the table is hard to inspect.
+// @author       Cursor
+// @match        https://rrda.harmony.a2z.com/*
+// @grant        GM_setClipboard
+// @grant        GM_registerMenuCommand
+// @run-at       document-start
+// ==/UserScript==
+
+(function () {
+  "use strict";
+
+  const SCRIPT = {
+    version: "0.1.0",
+    installationKey: "__rrdaPilDeepDiveInstalled",
+  };
+
+  /* core:start */
+  const DENY = new Set([
+    "login",
+    "manager",
+    "region",
+    "site",
+    "week",
+    "engaged",
+    "pending",
+    "east",
+    "west",
+    "north",
+    "south",
+    "wtd",
+    "overview",
+    "coaching",
+    "session",
+    "recorded",
+    "following",
+    "total",
+    "units",
+    "usage",
+    "mem3",
+    "all",
+    "weeks",
+    "search",
+    "not",
+  ]);
+
+  function norm(value) {
+    return String(value ?? "")
+      .replace(/\u00a0/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function headerKey(value) {
+    return norm(value).toLowerCase().replace(/[^a-z0-9]+/g, "");
+  }
+
+  function isLoginHeader(value) {
+    const words = norm(value)
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean);
+    if (!words.length || words[0] !== "login") return false;
+    return words.slice(1).every((word) => /^(sort|asc|desc|ascending|descending|button)$/.test(word));
+  }
+
+  function isLogin(value) {
+    const text = norm(value);
+    if (!/^[a-z][a-z0-9]{2,15}$/i.test(text)) return false;
+    const lower = text.toLowerCase();
+    if (DENY.has(lower)) return false;
+    if (/^w\d{1,2}$/i.test(lower)) return false;
+    return true;
+  }
+
+  function clip(value, max) {
+    const text = String(value ?? "");
+    if (text.length <= max) return text;
+    return `${text.slice(0, max)}\n… (${text.length - max} more characters)`;
+  }
+
+  function readBody(headers, body) {
+    const column = headers.findIndex(isLoginHeader);
+    const seen = new Set();
+    const unique = [];
+    const rejected = [];
+    const rejectedSeen = new Set();
+    let rawCount = 0;
+    const sampleRows = [];
+
+    (body || []).forEach((row) => {
+      const cells = (row || []).map((cell) => norm(cell));
+      if (sampleRows.length < 8) {
+        sampleRows.push(cells.map((cell) => cell.slice(0, 80)));
+      }
+      const value = cells[column] || "";
+      if (!value) return;
+      if (!isLogin(value)) {
+        const key = value.slice(0, 80);
+        if (!rejectedSeen.has(key) && rejected.length < 8) {
+          rejectedSeen.add(key);
+          rejected.push(key);
+        }
+        return;
+      }
+      rawCount += 1;
+      const login = value.toLowerCase();
+      if (seen.has(login)) return;
+      seen.add(login);
+      unique.push(login);
+    });
+
+    return { column, unique, rawCount, rejected, sampleRows };
+  }
+
+  function scoreParsed(headers, uniqueCount) {
+    if (!headers.some(isLoginHeader)) return -1;
+    const keys = headers.map(headerKey);
+    let score = 10;
+    if (keys.includes("manager")) score += 5;
+    if (keys.includes("pilunits") || keys.includes("pilusage")) score += 5;
+    if (keys.includes("engaged")) score += 3;
+    if (keys.includes("week")) score += 2;
+    if (keys.includes("region") && keys.includes("site")) score += 2;
+    score += Math.min(uniqueCount, 30);
+    return score;
+  }
+
+  function parseMatrix(matrix) {
+    if (!matrix || !matrix.length) return null;
+    const limit = Math.min(matrix.length, 6);
+    let best = null;
+    for (let i = 0; i < limit; i += 1) {
+      const headers = (matrix[i] || []).map((cell) => norm(cell));
+      if (!headers.some(isLoginHeader)) continue;
+      const parsed = readBody(headers, matrix.slice(i + 1));
+      const score = scoreParsed(headers, parsed.unique.length);
+      if (!best || score > best.score) {
+        best = { score, headerRow: i, headers, ...parsed };
+      }
+    }
+    return best;
+  }
+
+  function chooseMatrix(matrices) {
+    const ranked = [];
+    (matrices || []).forEach((matrix) => {
+      const parsed = parseMatrix(matrix);
+      if (parsed) ranked.push(parsed);
+    });
+    ranked.sort((a, b) => b.score - a.score || b.unique.length - a.unique.length);
+    return { chosen: ranked[0] || null, others: ranked.slice(1, 7) };
+  }
+
+  function matrixFromHtmlTable(table) {
+    const matrix = [];
+    for (const row of table.rows || []) {
+      const cells = [...(row.cells || [])].map((cell) => norm(cell.textContent));
+      if (cells.some(Boolean)) matrix.push(cells);
+    }
+    return matrix;
+  }
+
+  function isHeaderRowElement(el) {
+    if (!el || !el.children) return false;
+    if (typeof el.closest === "function" && el.closest("table")) return false;
+    const count = el.childElementCount != null ? el.childElementCount : el.children.length;
+    if (count < 4 || count > 20) return false;
+    const labels = [...el.children].map((child) => norm(child.textContent));
+    if (labels.some((label) => label.length > 40)) return false;
+    if (!labels.some(isLoginHeader)) return false;
+    return labels.some((label) => {
+      const key = headerKey(label);
+      return (
+        key === "manager" ||
+        key === "pilunits" ||
+        key === "pilusage" ||
+        key === "engaged" ||
+        key === "week" ||
+        key === "region" ||
+        key === "site"
+      );
+    });
+  }
+
+  function matrixFromHeaderRow(headerEl) {
+    const headers = [...headerEl.children].map((child) => norm(child.textContent));
+    const colCount = headers.length;
+    const rows = [headers];
+    const parent = headerEl.parentElement;
+    if (!parent) return rows;
+    const siblings = [...parent.children];
+    const index = siblings.indexOf(headerEl);
+    const after = siblings.slice(index + 1);
+    const sameShape = after.filter((row) => {
+      return row.childElementCount >= colCount - 1 && row.childElementCount <= colCount + 2;
+    });
+    if (sameShape.length) {
+      sameShape.forEach((row) => {
+        rows.push([...row.children].slice(0, colCount).map((child) => norm(child.textContent)));
+      });
+      return rows;
+    }
+    for (const wrap of after.slice(0, 3)) {
+      const inner = [...wrap.children].filter((row) => row.childElementCount >= Math.min(4, colCount));
+      if (!inner.length) continue;
+      inner.forEach((row) => {
+        rows.push([...row.children].slice(0, colCount).map((child) => norm(child.textContent)));
+      });
+      return rows;
+    }
+    return rows;
+  }
+
+  function matrixFromLabels(labels) {
+    const cells = (labels || []).map((cell) => norm(cell));
+    let start = -1;
+    for (let i = 0; i < cells.length; i += 1) {
+      if (isLoginHeader(cells[i])) {
+        start = i;
+        break;
+      }
+    }
+    if (start < 0) return null;
+    let cols = 0;
+    for (let i = start; i < cells.length; i += 1) {
+      if (cols >= 4 && isLogin(cells[i])) break;
+      cols += 1;
+      if (cols > 16) return null;
+    }
+    if (cols < 4) return null;
+    const matrix = [];
+    for (let i = start; i < cells.length; i += cols) {
+      const row = cells.slice(i, i + cols);
+      if (row.length < cols) break;
+      matrix.push(row);
+    }
+    return matrix.length > 1 ? matrix : null;
+  }
+
+  function formatDebugReport(data) {
+    const report = data || {};
+    const page = report.page || {};
+    const chosen = report.chosen || null;
+    const lines = [
+      `=== RRDA PIL Deep Dive Logins Copy Debug v${report.version || "?"} ===`,
+      "Paste this whole dump back. It shows the page shape and the logins the script can see.",
+      "",
+      "PAGE",
+      `  URL: ${page.url || ""}`,
+      `  Title: ${page.title || ""}`,
+      `  In iframe: ${page.inIframe ? "yes" : "no"}`,
+      `  Top URL: ${page.topUrl || ""}`,
+      "",
+      "RIGHT CLICK",
+      "  The global Double Right Click Inspector does not run inside iframes.",
+      "  This script listens in every frame and uses the real element, including open shadow roots.",
+      `  Right clicks seen: ${report.rightClicks ?? 0}`,
+      `  Context menus seen: ${report.contextMenus ?? 0}`,
+    ];
+
+    if (report.lastClick) {
+      lines.push(`  Last target: ${report.lastClick.tag || ""} ${report.lastClick.text || ""}`.trimEnd());
+      lines.push(`  Last frame: ${report.lastClick.frame || ""}`);
+      lines.push(`  Last css: ${report.lastClick.css || ""}`);
+    } else {
+      lines.push("  Last target: none yet. Double-right-click a Login cell, then Copy Debug again.");
+    }
+
+    lines.push("", "LOGINS");
+    const logins = report.logins || [];
+    lines.push(`  Unique visible: ${logins.length}`);
+    lines.push(`  ${logins.join(", ") || "(none)"}`);
+    lines.push(`  Raw login cells: ${report.rawCount ?? 0}`);
+    lines.push(`  Rejected samples: ${(report.rejected || []).join(" | ") || "(none)"}`);
+
+    lines.push("", "CHOSEN TABLE");
+    if (!chosen) {
+      lines.push("  none");
+    } else {
+      lines.push(`  Kind: ${chosen.kind || "matrix"}`);
+      lines.push(`  Score: ${chosen.score}`);
+      lines.push(`  Login column: ${chosen.column}`);
+      lines.push(`  Headers: ${(chosen.headers || []).join(" | ")}`);
+      lines.push("  Sample rows:");
+      (chosen.sampleRows || []).forEach((row) => {
+        lines.push(`    ${(row || []).join(" | ")}`);
+      });
+    }
+
+    lines.push("", "OTHER TABLES");
+    const others = report.others || [];
+    if (!others.length) lines.push("  none");
+    others.forEach((item) => {
+      lines.push(`  score ${item.score} ${item.kind || "matrix"}: ${(item.headers || []).join(" | ")}`);
+    });
+
+    lines.push("", "TABS");
+    const tabs = report.tabs || [];
+    if (!tabs.length) lines.push("  none");
+    tabs.forEach((tab) => {
+      lines.push(
+        `  ${tab.label} <${tab.tag}> aria-selected=${tab.ariaSelected || ""} class=${tab.className || ""}`,
+      );
+    });
+
+    lines.push("", "LOGIN LABELS");
+    const labels = report.loginLabels || [];
+    if (!labels.length) lines.push("  none");
+    labels.forEach((label) => {
+      lines.push(`  <${label.tag}> .${label.className || ""} parent=${label.parent || ""}`);
+      lines.push(`    siblings: ${(label.siblings || []).join(" | ")}`);
+    });
+
+    lines.push("", "FRAMES");
+    const frames = report.frames || [];
+    if (!frames.length) lines.push("  none");
+    frames.forEach((frame) => {
+      lines.push(
+        `  readable=${frame.readable ? "yes" : "no"} ${frame.width || 0}x${frame.height || 0} id=${frame.id || ""} class=${frame.className || ""}`,
+      );
+      lines.push(`    src: ${frame.src || ""}`);
+      if (frame.childUrl) lines.push(`    child: ${frame.childUrl}`);
+    });
+
+    lines.push("", "SHADOW HOSTS");
+    const shadows = report.shadows || [];
+    if (!shadows.length) lines.push("  none");
+    shadows.forEach((host) => {
+      lines.push(
+        `  <${host.tag}> #${host.id || ""} .${host.className || ""} mode=${host.mode || ""} descendants=${host.descendants}`,
+      );
+    });
+
+    lines.push("", "SCROLL");
+    const scroll = report.scroll || {};
+    if (!scroll.found) {
+      lines.push("  No inner scroll container. Copy Logins uses the rows currently in the DOM.");
+    } else {
+      lines.push(`  ${scroll.label}`);
+      lines.push(`  scrollHeight=${scroll.scrollHeight} clientHeight=${scroll.clientHeight} scrollTop=${scroll.scrollTop}`);
+      lines.push("  Copy Logins scrolls this container, keeps every login it sees, then restores the position.");
+    }
+
+    lines.push("", "CLICK STATE BY FRAME");
+    const states = report.frameStates || [];
+    if (!states.length) lines.push("  none");
+    states.forEach((item) => {
+      const state = item.state || {};
+      lines.push(
+        `  depth ${item.depth} clicks=${state.rightClicks ?? 0} menus=${state.contextMenus ?? 0} ${item.href || ""}`,
+      );
+    });
+
+    lines.push("", "VIEW");
+    lines.push(clip(report.view || "(empty)", 2000));
+    if (chosen && chosen.headerHtml) {
+      lines.push("", "HEADER HTML");
+      lines.push(clip(chosen.headerHtml, 1200));
+    }
+    return lines.join("\n");
+  }
+  /* core:end */
+
+  function isTopWindow() {
+    try {
+      return window.top === window;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function classText(el) {
+    if (!el) return "";
+    if (typeof el.className === "string") return el.className;
+    if (el.className && typeof el.className.baseVal === "string") return el.className.baseVal;
+    return "";
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => {
+      window.setTimeout(resolve, ms);
+    });
+  }
+
+  async function copyText(text) {
+    try {
+      if (typeof GM_setClipboard === "function") {
+        GM_setClipboard(text, "text");
+        return true;
+      }
+    } catch (err) {
+      /* fall through */
+    }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (err) {
+      /* fall through */
+    }
+    try {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "true");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      const copied = document.execCommand("copy");
+      textarea.remove();
+      return copied;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function walkRoots(win, visit) {
+    const seen = new Set();
+
+    function walkNode(root) {
+      if (!root || seen.has(root)) return;
+      seen.add(root);
+      visit(root);
+      const nodes = root.querySelectorAll ? root.querySelectorAll("*") : [];
+      for (const el of nodes) {
+        if (el.shadowRoot) walkNode(el.shadowRoot);
+      }
+    }
+
+    function walkDoc(doc) {
+      if (!doc || seen.has(doc)) return;
+      walkNode(doc);
+      const frames = doc.querySelectorAll ? doc.querySelectorAll("iframe, frame") : [];
+      for (const frame of frames) {
+        try {
+          if (frame.contentDocument) walkDoc(frame.contentDocument);
+        } catch (err) {
+          /* cross-origin frame */
+        }
+      }
+    }
+
+    try {
+      walkDoc(win.document);
+    } catch (err) {
+      /* document not ready */
+    }
+  }
+
+  function matrixFromRoleGrid(grid) {
+    const rows = [];
+    const rowNodes = grid.querySelectorAll('[role="row"]');
+    for (const row of rowNodes) {
+      const owner = row.closest('[role="grid"], [role="table"]');
+      if (owner !== grid) continue;
+      const cells = [...row.querySelectorAll('[role="columnheader"], [role="gridcell"], [role="cell"], th, td')];
+      const direct = cells.filter((cell) => {
+        const rowOwner = cell.parentElement && cell.parentElement.closest('[role="row"]');
+        return rowOwner === row;
+      });
+      const used = direct.length ? direct : cells;
+      used.sort((a, b) => {
+        return Number(a.getAttribute("aria-colindex") || 0) - Number(b.getAttribute("aria-colindex") || 0);
+      });
+      const labels = used.map((cell) => norm(cell.textContent));
+      if (labels.some(Boolean)) rows.push(labels);
+    }
+    return rows;
+  }
+
+  function flatLabels(el) {
+    const count = el.childElementCount || 0;
+    if (count < 12 || count > 800) return null;
+    const labels = [];
+    for (const child of el.children) {
+      if (child.childElementCount > 12) return null;
+      labels.push(norm(child.textContent));
+    }
+    if (!labels.some(isLoginHeader)) return null;
+    return labels;
+  }
+
+  function collectItems(win) {
+    const items = [];
+    walkRoots(win, (root) => {
+      if (!root.querySelectorAll) return;
+      for (const table of root.querySelectorAll("table")) {
+        const matrix = matrixFromHtmlTable(table);
+        if (matrix.length) items.push({ kind: "table", matrix, el: table });
+      }
+      for (const grid of root.querySelectorAll('[role="grid"], [role="table"]')) {
+        if (grid.tagName === "TABLE") continue;
+        const matrix = matrixFromRoleGrid(grid);
+        if (matrix.length) items.push({ kind: "role", matrix, el: grid });
+      }
+      for (const el of root.querySelectorAll("div, tr")) {
+        if (el.closest && el.closest("#rrda-pil-panel")) continue;
+        if (!isHeaderRowElement(el)) continue;
+        const matrix = matrixFromHeaderRow(el);
+        if (matrix.length > 1) items.push({ kind: "div", matrix, el });
+      }
+      for (const el of root.querySelectorAll("div")) {
+        if (el.closest && el.closest("#rrda-pil-panel")) continue;
+        const labels = flatLabels(el);
+        if (!labels) continue;
+        const matrix = matrixFromLabels(labels);
+        if (matrix && matrix.length > 1) items.push({ kind: "flat", matrix, el });
+      }
+    });
+    return items;
+  }
+
+  function rankItems(items) {
+    const ranked = [];
+    items.forEach((item) => {
+      const parsed = parseMatrix(item.matrix);
+      if (!parsed) return;
+      ranked.push({
+        ...parsed,
+        kind: item.kind,
+        el: item.el,
+      });
+    });
+    ranked.sort((a, b) => b.score - a.score || b.unique.length - a.unique.length);
+    return ranked;
+  }
+
+  function scanWindow(win) {
+    return rankItems(collectItems(win));
+  }
+
+  function signature(parsed) {
+    return (parsed.headers || []).map(headerKey).join("|");
+  }
+
+  function findScroller(el) {
+    if (!el || !el.ownerDocument) return null;
+    const view = el.ownerDocument.defaultView || window;
+    let node = el.parentElement;
+    while (node && node !== el.ownerDocument.body && node !== el.ownerDocument.documentElement) {
+      let overflow = "";
+      try {
+        overflow = view.getComputedStyle(node).overflowY;
+      } catch (err) {
+        overflow = "";
+      }
+      if ((overflow === "auto" || overflow === "scroll") && node.scrollHeight > node.clientHeight + 24) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function scrollInfo(el) {
+    const scroller = el ? findScroller(el) : null;
+    if (!scroller) return { found: false };
+    return {
+      found: true,
+      label: `${scroller.tagName}.${classText(scroller).split(/\s+/).slice(0, 2).join(".")}`,
+      scrollHeight: scroller.scrollHeight,
+      clientHeight: scroller.clientHeight,
+      scrollTop: scroller.scrollTop,
+    };
+  }
+
+  function listFrames(doc) {
+    const frames = [];
+    const nodes = doc.querySelectorAll ? doc.querySelectorAll("iframe, frame") : [];
+    for (const frame of nodes) {
+      let readable = false;
+      let childUrl = "";
+      try {
+        readable = !!frame.contentDocument;
+        childUrl = frame.contentDocument ? frame.contentDocument.URL : "";
+      } catch (err) {
+        readable = false;
+      }
+      frames.push({
+        src: frame.getAttribute("src") || "",
+        id: frame.id || "",
+        className: classText(frame).slice(0, 80),
+        readable,
+        childUrl,
+        width: frame.clientWidth || 0,
+        height: frame.clientHeight || 0,
+      });
+      if (frames.length >= 20) break;
+    }
+    return frames;
+  }
+
+  function listShadows(doc) {
+    const hosts = [];
+    if (!doc.querySelectorAll) return hosts;
+    for (const el of doc.querySelectorAll("*")) {
+      if (!el.shadowRoot) continue;
+      let descendants = 0;
+      try {
+        descendants = el.shadowRoot.querySelectorAll("*").length;
+      } catch (err) {
+        descendants = 0;
+      }
+      hosts.push({
+        tag: el.tagName,
+        id: el.id || "",
+        className: classText(el).slice(0, 80),
+        mode: el.shadowRoot.mode || "",
+        descendants,
+      });
+      if (hosts.length >= 15) break;
+    }
+    return hosts;
+  }
+
+  function listTabs(win) {
+    const tabs = [];
+    walkRoots(win, (root) => {
+      if (!root.querySelectorAll || tabs.length >= 12) return;
+      for (const el of root.querySelectorAll("button, [role='tab'], a")) {
+        const label = norm(el.textContent || "");
+        if (label.length > 80) continue;
+        if (!/Deep Dive|Overview|Summaries|Regional|Site Level|AA Deep/i.test(label)) continue;
+        tabs.push({
+          label,
+          tag: el.tagName.toLowerCase(),
+          ariaSelected: el.getAttribute("aria-selected") || "",
+          className: classText(el).slice(0, 100),
+        });
+        if (tabs.length >= 12) return;
+      }
+    });
+    return tabs;
+  }
+
+  function listLoginLabels(win) {
+    const found = [];
+    walkRoots(win, (root) => {
+      if (!root.querySelectorAll || found.length >= 8) return;
+      for (const el of root.querySelectorAll("th, [role='columnheader'], div, span, p, button")) {
+        if (el.closest && el.closest("#rrda-pil-panel")) continue;
+        if (!isLoginHeader(el.textContent || "")) continue;
+        if (el.childElementCount > 4) continue;
+        let deeper = false;
+        for (const child of el.children) {
+          if (isLoginHeader(child.textContent || "")) deeper = true;
+        }
+        if (deeper) continue;
+        const parent = el.parentElement;
+        found.push({
+          tag: el.tagName.toLowerCase(),
+          className: classText(el).slice(0, 100),
+          parent: parent ? `${parent.tagName.toLowerCase()}.${classText(parent).split(/\s+/).slice(0, 2).join(".")}` : "",
+          siblings: parent
+            ? [...parent.children].slice(0, 12).map((child) => norm(child.textContent).slice(0, 24))
+            : [],
+        });
+        if (found.length >= 8) return;
+      }
+    });
+    return found;
+  }
+
+  function readFrameState(doc) {
+    try {
+      const raw = doc.documentElement && doc.documentElement.getAttribute("data-rrda-pil-state");
+      return raw ? JSON.parse(raw) : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function writeFrameState(state) {
+    try {
+      document.documentElement.setAttribute("data-rrda-pil-state", JSON.stringify(state));
+    } catch (err) {
+      /* document not ready */
+    }
+  }
+
+  function gatherFrameStates(win) {
+    const states = [];
+    function visit(frameWin, depth) {
+      let href = "";
+      let state = null;
+      try {
+        href = frameWin.location.href;
+        state = readFrameState(frameWin.document);
+      } catch (err) {
+        href = "(cross-origin)";
+      }
+      states.push({ depth, href, state });
+      let frames;
+      try {
+        frames = frameWin.frames;
+      } catch (err) {
+        return;
+      }
+      for (let i = 0; i < frames.length && states.length < 12; i += 1) {
+        try {
+          visit(frames[i], depth + 1);
+        } catch (err) {
+          states.push({ depth: depth + 1, href: "(cross-origin)", state: null });
+        }
+      }
+    }
+    visit(win, 0);
+    return states;
+  }
+
+  function findAaTab(win) {
+    let found = null;
+    walkRoots(win, (root) => {
+      if (found || !root.querySelectorAll) return;
+      for (const el of root.querySelectorAll("button, [role='tab'], a, span")) {
+        const label = norm(el.textContent || "");
+        if (!/^AA Deep Dive\b/i.test(label) || label.length > 80) continue;
+        found = el.closest("button, [role='tab'], a") || el;
+        return;
+      }
+    });
+    return found;
+  }
+
+  function buildDebugData(ranked) {
+    const chosen = ranked[0] || null;
+    const pageInIframe = !isTopWindow();
+    let topUrl = location.href;
+    try {
+      topUrl = window.top.location.href;
+    } catch (err) {
+      topUrl = "(cross-origin top)";
+    }
+    const state = readFrameState(document) || {};
+    return {
+      version: SCRIPT.version,
+      page: {
+        url: location.href,
+        title: document.title || "",
+        inIframe: pageInIframe,
+        topUrl,
+      },
+      rightClicks: state.rightClicks || 0,
+      contextMenus: state.contextMenus || 0,
+      lastClick: state.lastClick || null,
+      logins: chosen ? chosen.unique : [],
+      rawCount: chosen ? chosen.rawCount : 0,
+      rejected: chosen ? chosen.rejected : [],
+      chosen: chosen
+        ? {
+            kind: chosen.kind,
+            score: chosen.score,
+            column: chosen.column,
+            headers: chosen.headers,
+            sampleRows: chosen.sampleRows,
+            headerHtml: chosen.el ? chosen.el.outerHTML : "",
+          }
+        : null,
+      others: ranked.slice(1, 7).map((item) => ({
+        kind: item.kind,
+        score: item.score,
+        headers: item.headers,
+      })),
+      tabs: listTabs(window),
+      loginLabels: listLoginLabels(window),
+      frames: listFrames(document),
+      shadows: listShadows(document),
+      scroll: scrollInfo(chosen && chosen.el),
+      frameStates: isTopWindow() ? gatherFrameStates(window) : [],
+      view: (document.querySelector("main") || document.body || {}).innerText || "",
+    };
+  }
+
+  function unreadableLargeFrame() {
+    return listFrames(document).some((frame) => !frame.readable && frame.width > 300 && frame.height > 200);
+  }
+
+  async function scrollCollect(ranked) {
+    const chosen = ranked[0];
+    if (!chosen) return { logins: [], steps: 0 };
+    const sig = signature(chosen);
+    const seen = new Set(chosen.unique);
+    const logins = chosen.unique.slice();
+    const scroller = findScroller(chosen.el);
+    if (!scroller || scroller.scrollHeight <= scroller.clientHeight + 40) {
+      return { logins, steps: 0 };
+    }
+    const start = scroller.scrollTop;
+    let steps = 0;
+    let lastTop = -1;
+    let stuck = 0;
+    try {
+      for (; steps < 40; steps += 1) {
+        const next = scroller.scrollTop + Math.max(100, Math.floor(scroller.clientHeight * 0.85));
+        if (next <= scroller.scrollTop) break;
+        scroller.scrollTop = next;
+        await sleep(70);
+        const again = scanWindow(window);
+        const match = again.find((item) => signature(item) === sig) || again[0];
+        if (match) {
+          match.unique.forEach((login) => {
+            if (seen.has(login)) return;
+            seen.add(login);
+            logins.push(login);
+          });
+        }
+        if (scroller.scrollTop === lastTop) {
+          stuck += 1;
+          if (stuck >= 2) break;
+        } else {
+          stuck = 0;
+        }
+        lastTop = scroller.scrollTop;
+        if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 4) break;
+      }
+    } finally {
+      scroller.scrollTop = start;
+    }
+    return { logins, steps };
+  }
+
+  const clickState = {
+    rightClicks: 0,
+    contextMenus: 0,
+    lastClick: null,
+  };
+  let lastRight = { time: 0, element: null };
+
+  function escapeIdentifier(value) {
+    if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(value);
+    return String(value).replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char}`);
+  }
+
+  function isUniqueSelector(selector, doc) {
+    try {
+      return doc.querySelectorAll(selector).length === 1;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function buildSegment(element) {
+    if (element.id) return `#${escapeIdentifier(element.id)}`;
+    const tagName = element.tagName.toLowerCase();
+    const classes = classText(element)
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((name) => `.${escapeIdentifier(name)}`)
+      .join("");
+    const base = `${tagName}${classes}`;
+    const parent = element.parentElement;
+    if (!parent) return base || tagName;
+    const same = [...parent.children].filter((sibling) => sibling.tagName === element.tagName);
+    if (same.length <= 1) return base || tagName;
+    return `${base || tagName}:nth-of-type(${same.indexOf(element) + 1})`;
+  }
+
+  function buildAbsoluteCssSegment(element) {
+    const tagName = element.tagName.toLowerCase();
+    if (element.id) return `${tagName}#${escapeIdentifier(element.id)}`;
+    const parent = element.parentElement;
+    if (!parent) return tagName;
+    const same = [...parent.children].filter((sibling) => sibling.tagName === element.tagName);
+    if (same.length <= 1) return tagName;
+    return `${tagName}:nth-of-type(${same.indexOf(element) + 1})`;
+  }
+
+  function escapeXPathLiteral(value) {
+    if (!value.includes('"')) return `"${value}"`;
+    if (!value.includes("'")) return `'${value}'`;
+    return `concat(${value
+      .split('"')
+      .map((part) => `"${part}"`)
+      .join(`, '"', `)})`;
+  }
+
+  function getCssSelector(element) {
+    const doc = element.ownerDocument || document;
+    const segments = [];
+    let current = element;
+    while (current && current !== doc.documentElement) {
+      segments.unshift(buildSegment(current));
+      if (isUniqueSelector(segments.join(" > "), doc)) return segments.join(" > ");
+      current = current.parentElement;
+    }
+    segments.unshift("html");
+    return segments.join(" > ");
+  }
+
+  function getCssPath(element) {
+    const segments = [];
+    let current = element;
+    while (current) {
+      segments.unshift(buildAbsoluteCssSegment(current));
+      current = current.parentElement;
+    }
+    return segments.join(" > ");
+  }
+
+  function getXPath(element) {
+    if (element.id) return `//*[@id=${escapeXPathLiteral(element.id)}]`;
+    const segments = [];
+    let current = element;
+    while (current && current.nodeType === Node.ELEMENT_NODE) {
+      const tagName = current.tagName.toLowerCase();
+      const parent = current.parentElement;
+      if (!parent) {
+        segments.unshift(`/${tagName}[1]`);
+        break;
+      }
+      const same = [...parent.children].filter((sibling) => sibling.tagName === current.tagName);
+      segments.unshift(`/${tagName}[${same.indexOf(current) + 1}]`);
+      current = parent;
+    }
+    return segments.join("");
+  }
+
+  function eventElement(event) {
+    const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+    for (const node of path) {
+      if (node instanceof Element) return node;
+    }
+    if (event.target instanceof Element) return event.target;
+    if (event.target && event.target.parentElement) return event.target.parentElement;
+    return null;
+  }
+
+  function showRipple(clientX, clientY, color) {
+    const ripple = document.createElement("div");
+    ripple.setAttribute("aria-hidden", "true");
+    ripple.style.position = "fixed";
+    ripple.style.left = `${clientX}px`;
+    ripple.style.top = `${clientY}px`;
+    ripple.style.width = "18px";
+    ripple.style.height = "18px";
+    ripple.style.marginLeft = "-9px";
+    ripple.style.marginTop = "-9px";
+    ripple.style.borderRadius = "9999px";
+    ripple.style.border = `3px solid ${color}`;
+    ripple.style.background = color;
+    ripple.style.opacity = "0.85";
+    ripple.style.pointerEvents = "none";
+    ripple.style.zIndex = "2147483647";
+    ripple.style.transition = "transform 280ms ease-out, opacity 280ms ease-out";
+    ripple.style.transform = "scale(0.35)";
+    (document.body || document.documentElement).appendChild(ripple);
+    window.requestAnimationFrame(() => {
+      ripple.style.transform = "scale(4)";
+      ripple.style.opacity = "0";
+    });
+    window.setTimeout(() => ripple.remove(), 320);
+  }
+
+  function locatorPayload(target) {
+    const root = target.getRootNode && target.getRootNode();
+    const inShadow = typeof ShadowRoot !== "undefined" && root instanceof ShadowRoot;
+    let frameUrl = location.href;
+    return [
+      `Frame: ${frameUrl}`,
+      `In iframe: ${isTopWindow() ? "no" : "yes"}`,
+      `Shadow: ${inShadow ? "yes" : "no"}`,
+      "",
+      "Inner HTML:",
+      clip(target.innerHTML, 4000),
+      "",
+      "Outer HTML:",
+      clip(target.outerHTML, 4000),
+      "",
+      "CSS Selector:",
+      getCssSelector(target),
+      "",
+      "CSS Path:",
+      getCssPath(target),
+      "",
+      "XPath:",
+      getXPath(target),
+    ].join("\n");
+  }
+
+  function rememberClick(target, kind) {
+    clickState[kind] += 1;
+    clickState.lastClick = {
+      tag: target ? target.tagName.toLowerCase() : "",
+      text: target ? norm(target.textContent).slice(0, 80) : "",
+      css: target ? getCssSelector(target) : "",
+      frame: location.href,
+    };
+    writeFrameState(clickState);
+  }
+
+  function onPointerDown(event) {
+    if (event.button !== 2) return;
+    const target = eventElement(event);
+    if (!target || (target.closest && target.closest("#rrda-pil-panel"))) return;
+    rememberClick(target, "rightClicks");
+    const now = Date.now();
+    const isDouble = lastRight.element === target && now - lastRight.time <= 350;
+    lastRight = { time: now, element: target };
+    if (!isDouble) return;
+    void copyText(locatorPayload(target)).then((ok) => {
+      showRipple(event.clientX, event.clientY, ok ? "rgba(34, 197, 94, 0.95)" : "rgba(239, 68, 68, 0.95)");
+    });
+  }
+
+  function onContextMenu(event) {
+    const target = eventElement(event);
+    if (!target || (target.closest && target.closest("#rrda-pil-panel"))) return;
+    rememberClick(target, "contextMenus");
+  }
+
+  let textCheckAt = 0;
+  let textCheckResult = false;
+
+  function isPilPage() {
+    const loc = `${location.pathname}${location.hash}${location.search}`;
+    if (/possible-item-list/i.test(loc)) return true;
+    if (/PIL Usage|Possible Item List/i.test(document.title || "")) return true;
+    const now = Date.now();
+    if (now - textCheckAt < 5000) return textCheckResult;
+    textCheckAt = now;
+    const main = document.querySelector("main") || document.body;
+    const text = main ? main.innerText || "" : "";
+    textCheckResult = text.includes("PIL Usage") || text.includes("Possible Item List");
+    return textCheckResult;
+  }
+
+  let panel = null;
+  let statusEl = null;
+  let statusFreeze = 0;
+  let busy = false;
+
+  function setStatus(message, freezeMs) {
+    statusFreeze = Date.now() + (freezeMs || 0);
+    if (statusEl) statusEl.textContent = message;
+  }
+
+  function ensureStyle() {
+    if (document.getElementById("rrda-pil-style")) return;
+    const style = document.createElement("style");
+    style.id = "rrda-pil-style";
+    style.textContent = `
+      #rrda-pil-panel {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        z-index: 2147483646;
+        width: 232px;
+        padding: 10px 12px;
+        border-radius: 12px;
+        background: #0f172a;
+        color: #f8fafc;
+        border: 1px solid #f97316;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+        font: 12px/1.35 Inter, "Segoe UI", Arial, sans-serif;
+      }
+      #rrda-pil-panel strong {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 13px;
+      }
+      #rrda-pil-panel .rrda-pil-actions {
+        display: flex;
+        gap: 6px;
+      }
+      #rrda-pil-panel button {
+        flex: 1;
+        border: 0;
+        border-radius: 8px;
+        min-height: 30px;
+        background: #f97316;
+        color: #111827;
+        font: 700 12px/1.2 Inter, "Segoe UI", Arial, sans-serif;
+        cursor: pointer;
+      }
+      #rrda-pil-panel button.rrda-pil-debug {
+        background: #1e293b;
+        color: #f8fafc;
+      }
+      #rrda-pil-panel button[disabled] {
+        opacity: 0.65;
+        cursor: wait;
+      }
+      #rrda-pil-status {
+        margin: 8px 0 0;
+        color: #cbd5e1;
+      }
+    `;
+    document.documentElement.appendChild(style);
+  }
+
+  function visibleSummary(ranked) {
+    const chosen = ranked[0];
+    if (!chosen) {
+      if (unreadableLargeFrame()) return "A large frame is not readable. Copy Debug and paste it back.";
+      return "No Login column yet. Open AA Deep Dive, or Copy Debug.";
+    }
+    const noun = chosen.unique.length === 1 ? "login" : "logins";
+    return `${chosen.unique.length} unique ${noun} on screen (${chosen.rawCount} cells).`;
+  }
+
+  function refreshCount() {
+    if (!panel || busy || Date.now() < statusFreeze) return;
+    try {
+      statusEl.textContent = visibleSummary(scanWindow(window));
+    } catch (err) {
+      statusEl.textContent = "Scan failed. Copy Debug and paste it back.";
+    }
+  }
+
+  function ensurePanel() {
+    if (!isTopWindow() || !document.body) return;
+    if (!isPilPage()) {
+      if (panel) panel.remove();
+      panel = null;
+      statusEl = null;
+      return;
+    }
+    if (panel && panel.isConnected) return;
+    ensureStyle();
+    panel = document.createElement("section");
+    panel.id = "rrda-pil-panel";
+    const title = document.createElement("strong");
+    title.textContent = `PIL Logins v${SCRIPT.version}`;
+    const actions = document.createElement("div");
+    actions.className = "rrda-pil-actions";
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.textContent = "Copy Logins";
+    copyButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void copyLogins();
+    });
+    const debugButton = document.createElement("button");
+    debugButton.type = "button";
+    debugButton.className = "rrda-pil-debug";
+    debugButton.textContent = "Copy Debug";
+    debugButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void copyDebug();
+    });
+    statusEl = document.createElement("p");
+    statusEl.id = "rrda-pil-status";
+    statusEl.textContent = "Looking for the Login column…";
+    actions.appendChild(copyButton);
+    actions.appendChild(debugButton);
+    panel.appendChild(title);
+    panel.appendChild(actions);
+    panel.appendChild(statusEl);
+    document.body.appendChild(panel);
+    refreshCount();
+  }
+
+  function setBusy(next) {
+    busy = next;
+    if (!panel) return;
+    panel.querySelectorAll("button").forEach((button) => {
+      button.disabled = next;
+    });
+  }
+
+  async function copyDebug() {
+    setBusy(true);
+    try {
+      const report = formatDebugReport(buildDebugData(scanWindow(window)));
+      const ok = await copyText(report);
+      setStatus(ok ? "Debug copied. Paste it back." : "Could not copy debug.", 2500);
+    } catch (err) {
+      setStatus("Debug failed. Try the Tampermonkey menu.", 2500);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyLogins() {
+    setBusy(true);
+    try {
+      let ranked = scanWindow(window);
+      if (!ranked.length || !ranked[0].unique.length) {
+        const tab = findAaTab(window);
+        if (tab) {
+          setStatus("Opening AA Deep Dive…", 1500);
+          tab.click();
+          await sleep(900);
+          ranked = scanWindow(window);
+          if (!ranked.length || !ranked[0].unique.length) {
+            await sleep(1200);
+            ranked = scanWindow(window);
+          }
+        }
+      }
+      const collected = await scrollCollect(ranked);
+      if (!collected.logins.length) {
+        setStatus(
+          unreadableLargeFrame()
+            ? "No logins. A frame is blocked. Copy Debug and paste it back."
+            : "No logins in the Login column. Copy Debug and paste it back.",
+          4000,
+        );
+        return;
+      }
+      const ok = await copyText(collected.logins.join("\n"));
+      const scrolled = collected.steps > 0 ? " after scrolling" : "";
+      setStatus(ok ? `Copied ${collected.logins.length} logins${scrolled}.` : "Could not copy logins.", 3000);
+    } catch (err) {
+      setStatus("Copy failed. Copy Debug and paste it back.", 4000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function hookHistory() {
+    if (window.__rrdaPilHistoryHook) return;
+    window.__rrdaPilHistoryHook = true;
+    ["pushState", "replaceState"].forEach((name) => {
+      const original = history[name];
+      if (typeof original !== "function") return;
+      history[name] = function hookedHistory() {
+        const result = original.apply(this, arguments);
+        window.dispatchEvent(new Event("rrda-pil-route"));
+        return result;
+      };
+    });
+    window.addEventListener("popstate", ensurePanel);
+    window.addEventListener("rrda-pil-route", ensurePanel);
+  }
+
+  function install() {
+    if (window[SCRIPT.installationKey]) return;
+    window[SCRIPT.installationKey] = true;
+    writeFrameState(clickState);
+    window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("contextmenu", onContextMenu, true);
+    if (!isTopWindow()) return;
+    hookHistory();
+    if (typeof GM_registerMenuCommand === "function") {
+      GM_registerMenuCommand("PIL: Copy Logins", () => {
+        void copyLogins();
+      });
+      GM_registerMenuCommand("PIL: Copy Debug", () => {
+        void copyDebug();
+      });
+    }
+    const start = () => {
+      ensurePanel();
+      window.setInterval(() => {
+        ensurePanel();
+        refreshCount();
+      }, 2000);
+      const observer = new MutationObserver((records) => {
+        const outsidePanel = records.some((record) => {
+          const node = record.target;
+          const element = node && node.nodeType === 1 ? node : node && node.parentElement;
+          if (!element) return false;
+          if (element.id === "rrda-pil-panel") return false;
+          return !(element.closest && element.closest("#rrda-pil-panel"));
+        });
+        if (!outsidePanel) return;
+        ensurePanel();
+        window.clearTimeout(install._countTimer);
+        install._countTimer = window.setTimeout(refreshCount, 400);
+      });
+      const watch = () => {
+        if (!document.body) return;
+        observer.observe(document.body, { childList: true, subtree: true });
+      };
+      if (document.body) watch();
+      else document.addEventListener("DOMContentLoaded", watch, { once: true });
+    };
+    if (document.body) start();
+    else document.addEventListener("DOMContentLoaded", start, { once: true });
+  }
+
+  install();
+})();
