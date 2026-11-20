@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, priorOuterLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -78,10 +78,11 @@ assert.equal(markedBack[0].age, "3d");
 
 const sheet = api.dashboardSheetRows([record]);
 const header = sheet.find((row) => row[0] === "Location" && row[1] === "Parent" && row[2] === "Container");
-assert.deepEqual([...header], ["Location", "Parent", "Container", "Age", "Status", "Units", "Scanned At"]);
+assert.deepEqual([...header], ["Location", "Parent", "Container", "Age", "Status", "Units", "Scanned At", "Dropped"]);
 const detail = sheet[sheet.length - 1];
 assert.equal(detail[2], "csX1234");
 assert.equal(detail[6], scannedAt);
+assert.equal(detail[7], "");
 
 const roundTrip = api.recordsFromBook({ sheets: [{ name: "Dashboard", rows: sheet }] });
 assert.equal(roundTrip.length, 1);
@@ -192,7 +193,10 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.9\.56/);
+assert.match(src, /@version\s+2\.9\.57/);
+assert.equal(src.includes('id="dzAdd"'), false);
+assert.equal(api.priorOuterLabel("dz-P-CR-EOL", "rcCRetStations"), "rcCRetStations");
+assert.equal(api.priorOuterLabel("rcCRetStations [RECEIVE_LANE]", ""), "rcCRetStations");
 assert.match(src, /#dz-batch-panel\{display:none !important;\}/);
 assert.match(src, /dz-batch-panel/);
 assert.match(src, /move-container\?jobId=200/);

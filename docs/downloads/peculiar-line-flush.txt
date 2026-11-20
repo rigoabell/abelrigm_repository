@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.56
+// @version      2.9.57
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -54,7 +54,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.56";
+  const VERSION = "2.9.57";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -124,6 +124,7 @@
   const HEADERS = [
     "Container ID",
     "Scanned At",
+    "Dropped",
     "Scanner",
     "Container Type",
     "Total Units",
@@ -376,6 +377,8 @@
       status,
       units: ok ? cellText(result?.totalUnits) : "",
       scannedAt: cellText(scannedAt),
+      outer: cellText(result?.reportedOuter) || outerLocationLabel(result),
+      dropped: cellText(result?.dropped),
     };
   }
 
@@ -459,7 +462,7 @@
     ];
     for (const loc of summary.locations) rows.push(tallyCells(loc.name, loc));
     rows.push([]);
-    rows.push(["Location", "Parent", "Container", "Age", "Status", "Units", "Scanned At"]);
+    rows.push(["Location", "Parent", "Container", "Age", "Status", "Units", "Scanned At", "Dropped"]);
     for (const rec of records || []) {
       rows.push([
         rec.location,
@@ -469,6 +472,7 @@
         rec.status,
         rec.units,
         rec.scannedAt || "",
+        rec.dropped || "",
       ]);
     }
     return rows;
@@ -487,6 +491,7 @@
       const parentCol = col("Parent Container");
       const statusCol = col("Status");
       const timeCol = col("Scanned At");
+      const droppedCol = col("Dropped");
       for (const row of sheet.rows.slice(1)) {
         const container = cellText(row[idCol]);
         const rawStatus = cellText(row[statusCol]);
@@ -502,6 +507,7 @@
           status,
           units: rawStatus === "OK" ? cellText(row[unitCol]) : "",
           scannedAt: timeCol >= 0 ? cellText(row[timeCol]) : "",
+          dropped: droppedCol >= 0 ? cellText(row[droppedCol]) : "",
         });
       }
     }
@@ -514,6 +520,7 @@
     if (start < 0) return null;
     const header = rows[start];
     const scannedCol = header.findIndex((cell) => cellText(cell) === "Scanned At");
+    const droppedCol = header.findIndex((cell) => cellText(cell) === "Dropped");
     const records = [];
     for (const row of rows.slice(start + 1)) {
       const container = cellText(row[2]);
@@ -526,6 +533,8 @@
         status: cellText(row[4]) || "Error",
         units: cellText(row[5]),
         scannedAt: scannedCol >= 0 ? cellText(row[scannedCol]) : "",
+        outer: cellText(row[1]) || "",
+        dropped: droppedCol >= 0 ? cellText(row[droppedCol]) : "",
       });
     }
     return records;
@@ -1771,6 +1780,7 @@
       return [
         result.containerId || containerId,
         nowIso(),
+        i === 0 ? cellText(result.dropped) : "",
         alias,
         i === 0 ? result.containerType || "" : "",
         i === 0 ? result.totalUnits || "" : "",
@@ -1847,9 +1857,9 @@
   }
 
   function locationSheetRows(records) {
-    const rows = [["Location", "Parent", "Container", "Age", "Status", "Units", "Scanned At"]];
+    const rows = [["Location", "Parent", "Container", "Age", "Status", "Units", "Scanned At", "Dropped"]];
     for (const rec of records) {
-      rows.push([rec.location, rec.parent, rec.container, rec.age, rec.status, rec.units, rec.scannedAt || ""]);
+      rows.push([rec.location, rec.parent, rec.container, rec.age, rec.status, rec.units, rec.scannedAt || "", rec.dropped || ""]);
     }
     return rows;
   }
@@ -2262,6 +2272,63 @@
     const id = cellText(container);
     if (!enabled || !zone || !id) return null;
     return { container: id, dropzone: zone };
+  }
+
+  function priorOuterLabel(live, prior) {
+    const next = stripBracketText(live);
+    const old = stripBracketText(prior);
+    if (old && next.toLowerCase() === STATIONS_DROPZONE.toLowerCase()) return old;
+    return next;
+  }
+
+  function rememberPriorOuter(container, outer) {
+    const day = fileDate();
+    const pack = GM_getValue("plf.preDropOuter", null);
+    const map = pack && pack.day === day && pack.map && typeof pack.map === "object" ? { ...pack.map } : {};
+    const old = stripBracketText(outer);
+    if (!old) return;
+    map[cellText(container).toLowerCase()] = old;
+    GM_setValue("plf.preDropOuter", { day, map });
+  }
+
+  function rememberedPrior(container) {
+    const pack = GM_getValue("plf.preDropOuter", null);
+    if (!pack || pack.day !== fileDate() || !pack.map) return "";
+    return cellText(pack.map[cellText(container).toLowerCase()]);
+  }
+
+  function reportedParent(parent, prior) {
+    const full = cellText(parent) || "(no parent)";
+    const kept = priorOuterLabel(full, prior);
+    if (kept && kept.toLowerCase() !== stripBracketText(full).toLowerCase()) return kept;
+    return full;
+  }
+
+  async function markContainerDropped(containerId) {
+    const id = cellText(containerId).toLowerCase();
+    if (!id || !sosCache.alias) return;
+    await ensureSosCache(sosCache.alias);
+    const records = sosCache.records || [];
+    let index = -1;
+    for (let i = records.length - 1; i >= 0; i--) {
+      if (cellText(records[i].container).toLowerCase() === id) {
+        index = i;
+        break;
+      }
+    }
+    if (index < 0 || records[index].dropped === "Dropped") return;
+    const snapshot = records.map((rec) => ({ ...rec }));
+    const previous = sosCache.book;
+    const next = records.map((rec, i) => (i === index ? { ...rec, dropped: "Dropped" } : rec));
+    sosCache.records = next;
+    sosCache.book = dashboardBook(next);
+    try {
+      await writeSosFile(sosCache.name, await workbookBytes(sosCache.book));
+    } catch (err) {
+      sosCache.records = snapshot;
+      sosCache.book = previous;
+      throw err;
+    }
   }
 
   function stationsDropPrompt(enabled, outerLocation, container) {
@@ -3386,7 +3453,7 @@
           border-radius: 8px; padding: 7px 10px; font-size: 22px; font-weight: 700;
           letter-spacing: .04em; outline: none;
         }
-        .dzrow, .dzprompt {
+        .dzrow {
           display: flex; align-items: center; gap: 8px;
           padding: 6px 10px; background: #ffffff;
           border-bottom: 2px solid #111111;
@@ -3395,35 +3462,29 @@
           display: flex; align-items: center; gap: 6px;
           font-size: 12px; font-weight: 800; white-space: nowrap;
         }
-        #dzAdd {
-          flex: 1 1 160px; min-width: 0; height: 32px;
-          border: 1px solid #111111; border-radius: 8px;
-          background: #ffffff; color: #111111;
-          font-size: 14px; font-weight: 700; padding: 0 8px;
-        }
-        #dzAddBtn, .dzprompt button { height: 32px; font-weight: 800; }
         #dzStatus {
           flex: 1 1 180px; min-width: 0;
           font-size: 12px; font-weight: 700;
           overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
-        .dzsaved {
-          display: flex; flex-wrap: wrap; gap: 6px;
-          padding: 6px 10px; background: #ffffff;
-          border-bottom: 2px solid #111111;
+        .dzpop {
+          display: none; position: absolute; inset: 0; z-index: 6;
+          align-items: center; justify-content: center;
+          background: rgba(17, 17, 17, .35); pointer-events: auto;
         }
-        .dzchip {
-          display: inline-flex; align-items: center; gap: 4px;
-          border: 1px solid #111111; border-radius: 999px;
-          padding: 2px 8px; font-size: 12px; font-weight: 800;
+        .dzpop.open { display: flex; }
+        .dzpop-card {
+          width: min(520px, calc((var(--plf-vw) - 32px) / var(--plf-boost, 1)));
+          display: flex; flex-direction: column; gap: 12px;
+          padding: 16px; background: #ffffff; color: #111111;
+          border: 3px solid #111111; border-radius: 12px;
+          box-shadow: 0 18px 50px rgba(0,0,0,.35);
         }
-        .dzchip.used { background: #e7f7ec; }
-        .dzchip button { border: 0; background: transparent; padding: 0 0 0 4px; font-size: 14px; line-height: 1; }
-        .dzprompt { display: none; background: #fff8e8; }
-        .dzprompt.open { display: flex; }
-        #dzPromptText { flex: 1 1 auto; min-width: 0; font-size: 14px; font-weight: 800; }
+        #dzPromptText { font-size: 18px; font-weight: 800; line-height: 1.3; }
+        .dzpop-actions { display: flex; gap: 8px; }
+        .dzpop-actions button { height: 42px; flex: 1; font-size: 16px; font-weight: 800; }
         #dzYes { background: #111111; color: #ffffff; border-color: #111111; }
-        #q::placeholder, #filter::placeholder, #dzAdd::placeholder { color: #667085; }
+        #q::placeholder, #filter::placeholder { color: #667085; }
         #q:focus { border-color: #111111; box-shadow: 0 0 0 3px rgba(17,17,17,.12); }
         .focusrow {
           display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
@@ -3667,16 +3728,6 @@
             <label for="dzAsk"><input id="dzAsk" type="checkbox" /> Ask to dropzone</label>
             <div id="dzStatus">Off</div>
           </div>
-          <div class="dzrow">
-            <input id="dzAdd" type="text" placeholder="Add a dropzone" autocomplete="off" spellcheck="false" />
-            <button id="dzAddBtn" type="button">Save</button>
-          </div>
-          <div class="dzsaved" id="dzSaved"></div>
-          <div class="dzprompt" id="dzPrompt">
-            <div id="dzPromptText"></div>
-            <button id="dzYes" type="button">Yes</button>
-            <button id="dzNo" type="button">No</button>
-          </div>
           <div class="status ready" id="note">Ready</div>
           <div class="focusrow">
             <div class="ageboard" id="ageBoard">
@@ -3808,6 +3859,15 @@
           </div>
         </div>
       </div>
+      </div>
+      <div class="dzpop" id="dzPrompt">
+        <div class="dzpop-card">
+          <div id="dzPromptText"></div>
+          <div class="dzpop-actions" id="dzPopActions">
+            <button id="dzYes" type="button">Yes</button>
+            <button id="dzNo" type="button">No</button>
+          </div>
+        </div>
       </div>
       <div class="plf-fab-dock"><button class="fab" id="fab">Line Flush</button></div>`;
     document.documentElement.append(hostEl);
@@ -4123,7 +4183,7 @@
       shadow.getElementById("identity").innerHTML = bits.length
         ? bits.map((bit) => escapeHtml(bit)).join(" · ")
         : `<span class="empty">No container yet</span>`;
-      shownOuterLocation = outerLocationLabel(result);
+      shownOuterLocation = priorOuterLabel(outerLocationLabel(result), rememberedPrior(container));
       paintLocationBoard();
       paintAge(result);
       const lines = result?.inventory || [];
@@ -4592,7 +4652,12 @@
         delete stored.raw;
         selectedId = id;
         const scannedAt = nowIso();
+        const prior = rememberedPrior(id);
+        result.reportedOuter = priorOuterLabel(outerLocationLabel(result), prior);
+        result.reportedParent = reportedParent(result.parentContainer, prior);
         const record = scanRecord(id, result, location, scannedAt);
+        record.parent = result.reportedParent;
+        record.outer = result.reportedOuter;
         recent.unshift({
           t: scannedAt,
           id,
@@ -4739,14 +4804,14 @@
     };
 
     const dzAsk = shadow.getElementById("dzAsk");
-    const dzAdd = shadow.getElementById("dzAdd");
     const dzStatus = shadow.getElementById("dzStatus");
     const dzPrompt = shadow.getElementById("dzPrompt");
     const dzPromptText = shadow.getElementById("dzPromptText");
+    const dzPopActions = shadow.getElementById("dzPopActions");
     const dropPromptQueue = [];
     let dropPromptCurrent = null;
+    let dropWaitingClose = false;
     dzAsk.checked = GM_getValue(KEYS.dropzoneAsk, false) === true;
-    if (GM_getValue(KEYS.dropzones, null) == null) saveSavedDropzones([STATIONS_DROPZONE]);
 
     function paintDropzoneStatus(text) {
       if (dzStatus) dzStatus.textContent = text;
@@ -4754,37 +4819,28 @@
     function paintAskState() {
       paintDropzoneStatus(dzAsk.checked ? `On · rcCRetStations asks for ${STATIONS_DROPZONE}` : "Off");
     }
-    function renderSavedDropzones() {
-      const list = shadow.getElementById("dzSaved");
-      const names = loadSavedDropzones();
-      list.innerHTML = names.length
-        ? names
-            .map((name) => {
-              const used = name.toLowerCase() === STATIONS_DROPZONE.toLowerCase() ? " used" : "";
-              return `<span class="dzchip${used}">${escapeHtml(name)}<button type="button" data-dropzone="${escapeHtml(name)}" title="Remove ${escapeHtml(name)}">×</button></span>`;
-            })
-            .join("")
-        : `<span class="empty">No saved dropzones</span>`;
-    }
     function hideDropPrompt() {
       dropPromptCurrent = null;
+      dropWaitingClose = false;
       dzPrompt.classList.remove("open");
       dzPromptText.textContent = "";
+      if (dzPopActions) dzPopActions.style.display = "";
     }
     function showDropPrompt() {
-      if (dropPromptCurrent || !dropPromptQueue.length) {
-        if (!dropPromptCurrent) hideDropPrompt();
+      if (dropWaitingClose || dropPromptCurrent || !dropPromptQueue.length) {
+        if (!dropPromptCurrent && !dropWaitingClose) hideDropPrompt();
         return;
       }
       dropPromptCurrent = dropPromptQueue.shift();
       const waiting = dropPromptQueue.length ? ` · ${dropPromptQueue.length} more` : "";
       dzPromptText.textContent = `Dropzone ${dropPromptCurrent.container} to ${dropPromptCurrent.dropzone}?${waiting}`;
+      if (dzPopActions) dzPopActions.style.display = "";
       dzPrompt.classList.add("open");
     }
     function maybeAskDropzone(containerId, result) {
       const ask = dzAsk.checked === true;
-      const outer = outerLocationLabel(result);
-      const offer = stationsDropPrompt(ask, outer, containerId);
+      const outer = priorOuterLabel(outerLocationLabel(result), rememberedPrior(containerId));
+      const offer = stationsDropPrompt(ask, outerLocationLabel(result), containerId);
       rememberDropzone({
         container: cellText(containerId),
         outer,
@@ -4793,28 +4849,50 @@
         step: offer ? "asked" : ask ? "skipped" : "off",
       });
       if (!offer) return;
-      dropPromptQueue.push(offer);
+      dropPromptQueue.push({ ...offer, outer });
       showDropPrompt();
     }
     function finishDropPrompt(accept) {
       const offer = dropPromptCurrent;
-      hideDropPrompt();
+      if (!accept) {
+        if (offer) {
+          rememberDropzone({
+            container: offer.container,
+            outer: "rcCRetStations",
+            ask: true,
+            dropzone: offer.dropzone,
+            step: "no",
+          });
+        }
+        hideDropPrompt();
+        showDropPrompt();
+        return;
+      }
       if (offer) {
+        rememberPriorOuter(offer.container, offer.outer || "rcCRetStations");
         rememberDropzone({
           container: offer.container,
-          outer: "rcCRetStations",
+          outer: offer.outer || "rcCRetStations",
           ask: true,
           dropzone: offer.dropzone,
-          step: accept ? "yes" : "no",
+          step: "yes",
         });
-      }
-      if (accept && offer) {
         const dropped = enqueueBackgroundDropzone(offer.container, offer.dropzone);
         if (dropped) {
           paintDropzoneStatus(`Opening Move App for ${dropped.container}`);
           ensureMoveTab();
         }
       }
+      dropWaitingClose = true;
+      dzPromptText.textContent = offer
+        ? `Dropping ${offer.container} to ${offer.dropzone}`
+        : "Dropping";
+      if (dzPopActions) dzPopActions.style.display = "none";
+      dzPrompt.classList.add("open");
+    }
+    function dropTabClosed() {
+      if (!dropWaitingClose) return;
+      hideDropPrompt();
       showDropPrompt();
     }
     dzAsk.addEventListener("change", () => {
@@ -4825,29 +4903,11 @@
       }
       paintAskState();
     });
-    shadow.getElementById("dzAddBtn").addEventListener("click", () => {
-      const name = cellText(dzAdd.value);
-      if (!name) return;
-      saveSavedDropzones([...loadSavedDropzones(), name]);
-      dzAdd.value = "";
-      renderSavedDropzones();
-      focusScanBox();
-    });
-    dzAdd.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter") return;
-      event.preventDefault();
-      event.stopPropagation();
-      shadow.getElementById("dzAddBtn").click();
-    });
-    shadow.getElementById("dzSaved").addEventListener("click", (event) => {
-      const button = event.target instanceof Element ? event.target.closest("[data-dropzone]") : null;
-      const name = button?.getAttribute("data-dropzone") || "";
-      if (!name) return;
-      saveSavedDropzones(loadSavedDropzones().filter((item) => item.toLowerCase() !== name.toLowerCase()));
-      renderSavedDropzones();
-    });
     shadow.getElementById("dzYes").addEventListener("click", () => finishDropPrompt(true));
     shadow.getElementById("dzNo").addEventListener("click", () => finishDropPrompt(false));
+    GM_addValueChangeListener(KEYS.dropzoneHeartbeat, (_name, _old, value) => {
+      if (Number(value) === 0) dropTabClosed();
+    });
     GM_addValueChangeListener(KEYS.dropzoneStatus, (_name, _old, res) => {
       if (!res) return;
       rememberDropzone({
@@ -4862,8 +4922,12 @@
           ? `Sent ${res.container} → ${res.dropzone}`
           : `Not sent ${res.container}: ${res.error || "failed"}`
       );
+      if (!res.ok) return;
+      const id = cellText(res.container).toLowerCase();
+      const hit = recent.find((row) => cellText(row.id).toLowerCase() === id && row.record);
+      if (hit) hit.record = { ...hit.record, dropped: "Dropped" };
+      enqueueSave(() => markContainerDropped(res.container)).catch(() => {});
     });
-    renderSavedDropzones();
     paintAskState();
 
     renderStats();
