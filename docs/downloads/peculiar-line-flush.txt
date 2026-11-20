@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.37
+// @version      2.9.38
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -51,7 +51,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.37";
+  const VERSION = "2.9.38";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -87,6 +87,7 @@
     dropzoneCursor: "plf.dropzoneCursor",
     dropzoneStatus: "plf.dropzoneStatus",
     dropzoneHeartbeat: "plf.dropzoneHeartbeat",
+    dropzoneTrace: "plf.dropzoneTrace",
   };
   const IDLE_LOCATION_MS = 10 * 60 * 1000;
   const TOTAL_SHEET = "TOTAL";
@@ -2288,6 +2289,44 @@
     return next;
   }
 
+  function dropzoneDebugView(state) {
+    const saved = Array.isArray(state?.saved) ? state.saved.map((item) => cellText(item)).filter(Boolean) : [];
+    const events = Array.isArray(state?.trace?.events) ? state.trace.events.slice(-12) : [];
+    const jobs = Array.isArray(state?.queue?.jobs) ? state.queue.jobs : [];
+    const cursor = Number(state?.cursor) || 0;
+    const pending = jobs
+      .filter((job) => job && Number(job.n) > cursor)
+      .map((job) => ({ n: Number(job.n), container: cellText(job.container), dropzone: cellText(job.dropzone) }));
+    const rawStatus = state?.status && typeof state.status === "object" ? state.status : null;
+    const heartbeat = Number(state?.heartbeat) || 0;
+    const now = Number(state?.now) || 0;
+    return {
+      ask: state?.ask === true,
+      saved,
+      events,
+      pending,
+      status: rawStatus
+        ? {
+            container: cellText(rawStatus.container),
+            dropzone: cellText(rawStatus.dropzone),
+            ok: Boolean(rawStatus.ok),
+            error: cellText(rawStatus.error),
+            t: Number(rawStatus.t) || 0,
+          }
+        : null,
+      moveOpen: Boolean(heartbeat && now - heartbeat < HEARTBEAT_STALE_MS),
+    };
+  }
+
+  function rememberDropzone(event) {
+    const prev = GM_getValue(KEYS.dropzoneTrace, null);
+    const events = Array.isArray(prev?.events) ? prev.events : [];
+    const next = [...events, { t: nowIso(), ...event }].slice(-12);
+    const trace = { events: next };
+    GM_setValue(KEYS.dropzoneTrace, trace);
+    return trace;
+  }
+
   function scanBurstKeys(text) {
     return [...Array.from(cellText(text)), "Enter"];
   }
@@ -2655,6 +2694,16 @@
       },
       queued: scanQueueLen,
       recent: recent.slice(0, 8).map((r) => ({ t: r.t, id: r.id, age: r.age, sku: r.sku, status: r.status })),
+      dropzone: dropzoneDebugView({
+        ask: GM_getValue(KEYS.dropzoneAsk, false) === true,
+        saved: loadSavedDropzones(),
+        trace: GM_getValue(KEYS.dropzoneTrace, null),
+        queue: GM_getValue(KEYS.dropzoneQueue, null),
+        cursor: GM_getValue(KEYS.dropzoneCursor, 0),
+        status: GM_getValue(KEYS.dropzoneStatus, null),
+        heartbeat: GM_getValue(KEYS.dropzoneHeartbeat, 0),
+        now: Date.now(),
+      }),
     };
     const text = JSON.stringify(payload, null, 2);
     let copied = false;
@@ -4015,6 +4064,7 @@
           inventoryCount: (result.inventory || []).length,
           matched: idsMatch(result.containerId, id),
           lookupMs: result.lookupMs || 0,
+          outerLocation: outerLocationLabel(result),
           raw: clip(result.raw || "", 600),
         };
         const who = alias || (await currentAlias());
@@ -4215,7 +4265,16 @@
       dzPrompt.classList.add("open");
     }
     function maybeAskDropzone(containerId, result) {
-      const offer = stationsDropPrompt(dzAsk.checked === true, outerLocationLabel(result), containerId);
+      const ask = dzAsk.checked === true;
+      const outer = outerLocationLabel(result);
+      const offer = stationsDropPrompt(ask, outer, containerId);
+      rememberDropzone({
+        container: cellText(containerId),
+        outer,
+        ask,
+        dropzone: offer?.dropzone || "",
+        step: offer ? "asked" : ask ? "skipped" : "off",
+      });
       if (!offer) return;
       dropPromptQueue.push(offer);
       showDropPrompt();
@@ -4223,6 +4282,15 @@
     function finishDropPrompt(accept) {
       const offer = dropPromptCurrent;
       hideDropPrompt();
+      if (offer) {
+        rememberDropzone({
+          container: offer.container,
+          outer: "rcCRetStations",
+          ask: true,
+          dropzone: offer.dropzone,
+          step: accept ? "yes" : "no",
+        });
+      }
       if (accept && offer) {
         const dropped = enqueueBackgroundDropzone(offer.container, offer.dropzone);
         if (dropped) {
@@ -4265,6 +4333,12 @@
     shadow.getElementById("dzNo").addEventListener("click", () => finishDropPrompt(false));
     GM_addValueChangeListener(KEYS.dropzoneStatus, (_name, _old, res) => {
       if (!res) return;
+      rememberDropzone({
+        container: cellText(res.container),
+        dropzone: cellText(res.dropzone),
+        step: res.ok ? "sent" : "not sent",
+        error: cellText(res.error),
+      });
       paintDropzoneStatus(
         res.ok
           ? `Sent ${res.container} → ${res.dropzone}`

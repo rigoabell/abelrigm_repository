@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, stationsDropPrompt, normalizeSavedDropzones };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -191,7 +191,7 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.9\.37/);
+assert.match(src, /@version\s+2\.9\.38/);
 assert.equal(api.backgroundDropzone(false, "dzA", "ts1"), null);
 assert.equal(api.backgroundDropzone(true, "", "ts1"), null);
 const zoneJob = api.backgroundDropzone(true, " dzA ", " ts1 ");
@@ -205,6 +205,24 @@ assert.deepEqual(
 );
 assert.deepEqual([...api.normalizeSavedDropzones(null)], ["dz-P-CR-EOL"]);
 assert.deepEqual([...api.normalizeSavedDropzones([" dz-P-CR-EOL ", "dz-P-CR-EOL", "dz-other"])], ["dz-P-CR-EOL", "dz-other"]);
+const dropView = api.dropzoneDebugView({
+  ask: true,
+  saved: ["dz-P-CR-EOL"],
+  trace: { events: [{ t: "2026-11-20 11:21:39", container: "tsAUD184397", outer: "rcCRetStations", step: "asked" }] },
+  queue: { n: 1, jobs: [{ n: 1, container: "tsAUD184397", dropzone: "dz-P-CR-EOL" }] },
+  cursor: 1,
+  status: { container: "tsAUD184397", dropzone: "dz-P-CR-EOL", ok: false, error: "Page did not take the container", t: 5 },
+  heartbeat: 1000,
+  now: 20000,
+});
+assert.equal(dropView.ask, true);
+assert.deepEqual([...dropView.saved], ["dz-P-CR-EOL"]);
+assert.equal(dropView.events[0].step, "asked");
+assert.equal(dropView.pending.length, 0);
+assert.equal(dropView.status.ok, false);
+assert.equal(dropView.status.error, "Page did not take the container");
+assert.equal(dropView.moveOpen, false);
+assert.match(src, /dropzone: dropzoneDebugView/);
 assert.deepEqual([...api.scanBurstKeys("ab1")], ["a", "b", "1", "Enter"]);
 assert.equal(api.moveBadPhrase("ready", "Invalid container"), "invalid");
 assert.match(src, /aft-moveapp\.na\.aftx\.amazonoperations\.app/);
