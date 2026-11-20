@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.40
+// @version      2.9.41
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -51,13 +51,13 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.40";
+  const VERSION = "2.9.41";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
   const OLD_SCRIPT_NAME = "Peculiar Inventory Scan Panel";
   const PECULIAR_URL = "https://aft-aging-inventory.na.aftx.amazonoperations.app/MEM3/overview";
-  const MOVE_URL = "https://aft-moveapp.na.aftx.amazonoperations.app/move-container";
+  const MOVE_URL = "https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400";
   const SP_SITE = "https://amazon-my.sharepoint.com/personal/abelrigm_amazon_com";
   const SOS_FOLDER =
     "/personal/abelrigm_amazon_com/Documents/IOL Assignments/Line Flush Records";
@@ -2382,19 +2382,18 @@
     if (/404|not found/i.test(cellText(title))) return false;
     try {
       const parsed = new URL(cellText(href));
-      return /aft-moveapp/i.test(parsed.hostname) && /\/move-container(?:\/|$)/i.test(parsed.pathname);
+      return /aft-moveapp/i.test(parsed.hostname)
+        && /\/move-container(?:\/|$)/i.test(parsed.pathname)
+        && parsed.searchParams.get("jobId") === "400";
     } catch {
       return false;
     }
   }
 
-  function moveSamePath(href, target) {
-    try {
-      const path = (value) => new URL(value).pathname.replace(/\/+$/, "") || "/";
-      return path(href) === path(target);
-    } catch {
-      return false;
-    }
+  function movePageReady(href, title, text, readyState) {
+    if (!moveIsScanPage(href, title)) return false;
+    if (readyState && readyState !== "complete") return false;
+    return /scan source pallet/i.test(String(text || ""));
   }
 
   function noteMoveLanded() {
@@ -2428,7 +2427,7 @@
     GM_setValue(KEYS.dropzoneTried, { href: MOVE_URL, t: Date.now() });
     if (moveFresh()) return;
     const landed = GM_getValue(KEYS.dropzoneLanded, null);
-    if (landed && moveSamePath(landed.href, MOVE_URL) && Date.now() - (Number(landed.t) || 0) < HEARTBEAT_STALE_MS) return;
+    if (landed && moveIsScanPage(landed.href, landed.title) && Date.now() - (Number(landed.t) || 0) < HEARTBEAT_STALE_MS) return;
     if (Date.now() - moveTabOpenedAt < 15000) return;
     moveTabOpenedAt = Date.now();
     try {
@@ -2618,16 +2617,33 @@
     } catch {
       /* The scan target cannot take focus. The keys still go to it. */
     }
-    const before = field ? String(field.value || field.textContent || "") : "";
     for (const ch of scanBurstKeys(text)) {
       fireMoveKey(target, ch);
       await sleep(8);
     }
     if (!field) return;
     const after = String(field.value || field.textContent || "");
-    if (after.toLowerCase().includes(cellText(text).toLowerCase()) || after !== before) return;
+    if (after.toLowerCase().includes(cellText(text).toLowerCase())) return;
     moveSetField(field, text);
     fireMoveKey(field, "Enter");
+  }
+
+  async function waitForMoveReady() {
+    const start = Date.now();
+    while (Date.now() - start < 15000) {
+      noteMoveLanded();
+      const text = moveScreenText();
+      if (movePageReady(location.href, document.title, text, document.readyState)) {
+        await sleep(300);
+        return { ok: true, detail: clip(moveScreenText(), 240) };
+      }
+      await sleep(200);
+    }
+    return {
+      ok: false,
+      error: "Move page was not ready",
+      detail: clip(location.href + " " + moveScreenText(), 240),
+    };
   }
 
   async function waitForMoveToken(beforeRaw, token) {
@@ -2656,6 +2672,8 @@
   }
 
   async function performDropzone(container, dropzone) {
+    const ready = await waitForMoveReady();
+    if (!ready.ok) return ready;
     const beforeRaw = moveScreenText();
     await burstMoveScan(container);
     const first = await waitForMoveToken(beforeRaw, container);
@@ -5039,14 +5057,13 @@
     const bootMove = () => {
       if (!document.documentElement) return;
       noteMoveLanded();
-      if (!moveSamePath(location.href, MOVE_URL)) {
+      if (!moveIsScanPage(location.href, document.title || "pending")) {
         if (!bootMove.sent) {
           bootMove.sent = true;
           location.assign(MOVE_URL);
         }
         return;
       }
-      if (!moveIsScanPage(location.href, document.title)) return;
       startMoveDropzoneWorker();
     };
     bootMove();
