@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.10.11
+// @version      1.11.13
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.10.11';
+    const SCRIPT_VERSION = '1.11.13';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -2231,6 +2231,35 @@
         ];
     }
 
+    function customerReturnsCopy(lines) {
+        if (!lines || lines.length < 3) return '';
+        return 'Customer returns ' + lines[1] + ' | ' + lines[2];
+    }
+
+    function armStationCopy(block) {
+        if (!block || block.getAttribute('data-mem3-copy') === '1') return;
+        block.setAttribute('data-mem3-copy', '1');
+        block.style.cursor = 'pointer';
+        if (!block.title) block.title = 'Click to copy';
+        block.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            const text = block.getAttribute('data-copy') || '';
+            if (!text) return;
+            copyText(text).then(function () {
+                block.title = 'Copied';
+                setTimeout(function () {
+                    if (block.title === 'Copied') block.title = 'Click to copy';
+                }, 1200);
+            }).catch(function () {
+                block.title = 'Copy failed';
+                setTimeout(function () {
+                    if (block.title === 'Copy failed') block.title = 'Click to copy';
+                }, 1500);
+            });
+        });
+    }
+
     function findStationNode(root) {
         let best = null;
         function visit(el) {
@@ -2357,6 +2386,7 @@
         const lines = customerReturnsLines(textSkipping(source, 'mem3-cr-station'));
         if (!lines) return;
         const sig = lines.join('\n');
+        const copyValue = customerReturnsCopy(lines);
         let block = source.nextElementSibling;
         if (!block || String(block.className || '').indexOf('mem3-cr-station') === -1) {
             const parent = source.parentElement || cell;
@@ -2372,7 +2402,11 @@
         const hiddenOk = source !== cell && source.getAttribute && source.getAttribute('data-mem3-cr-hidden') === '1';
         const flatOk = source === cell && cell.getAttribute && cell.getAttribute('data-mem3-cr-flat') === '1';
         pinAssignmentColumn(cell);
-        if (block && block.getAttribute('data-sig') === sig && (hiddenOk || flatOk)) return;
+        if (block && block.getAttribute('data-sig') === sig && (hiddenOk || flatOk)) {
+            block.setAttribute('data-copy', copyValue);
+            armStationCopy(block);
+            return;
+        }
         if (!block) {
             block = document.createElement('div');
             block.className = 'mem3-cr-station';
@@ -2385,10 +2419,12 @@
         }
         block.className = 'mem3-cr-station';
         block.setAttribute('data-sig', sig);
+        block.setAttribute('data-copy', copyValue);
         block.style.cssText = 'display:flex; flex-direction:column; align-items:flex-start; gap:1px; ' +
-            'line-height:1.3;';
+            'line-height:1.3; cursor:pointer;';
         copyStationFont(source, block);
         fillStationBlock(block, lines);
+        armStationCopy(block);
         if (source !== cell) hideStationSource(source);
         else {
             const kids = cell.children || [];
@@ -3319,7 +3355,10 @@
         }
         if (mode === 'inner') {
             const via = reactClick(btn, 'inner');
-            return via || 'pointer';
+            if (via) return via;
+            pageClick(btn);
+            try { btn.click(); } catch (e) { /* ignore */ }
+            return 'native';
         }
         const via = reactClick(btn, 'all');
         if (via) return via;
@@ -4100,15 +4139,20 @@
         if (record) record.clickedUnassign = true;
         const via = clickUnassignButton(target, 'inner');
         if (record) record.clickMethod = via || 'fiber';
-        const watched = await watchUnassign(login, station);
-        const buttonGone = !target.isConnected || (function () {
+        const buttonGone = await waitFor(function () {
+            if (!target.isConnected) return true;
             const rect = target.getBoundingClientRect();
-            return rect.width < 1 || rect.height < 1;
-        })();
-        if (record) record.buttonGone = buttonGone;
-        if (!watched.gone) await closeAllAssociateMenus();
-        noteUnassignWatch(record, watched);
-        return watched.gone;
+            return (rect.width < 1 || rect.height < 1) ? true : null;
+        }, 2500);
+        if (record) record.buttonGone = !!buttonGone;
+        if (!buttonGone) await closeAllAssociateMenus();
+        if (record) {
+            record.landed = !!buttonGone;
+            record.leftBoard = station ? !rowStillOnBoard(login, station) : countLoginOnBoard(login) < before;
+            record.afterCount = countLoginOnBoard(login);
+        }
+        // A manual Unassign leaves the person on the board. The click landed when the menu closed.
+        return !!buttonGone;
     }
 
     async function unassignCount(button, limit) {
@@ -4165,9 +4209,7 @@
                     detail: person.station || 'Opening menu',
                     stats: 'Copied Name, Login, Station for reassign'
                 });
-                let stayedOff = false;
-                let watchedOnce = false;
-                while (rowStillOnBoard(login, person.station) && person.tries < 4 && !RUN_STOP) {
+                while (!person.landed && person.tries < 2 && !RUN_STOP) {
                     person.tries++;
                     await closeAllAssociateMenus();
                     const anchor = findAnchorForPerson(login, person.station);
@@ -4177,21 +4219,11 @@
                     person.name = fresh.name || person.name;
                     person.empId = fresh.empId || person.empId;
                     await sleep(80);
-                    watchedOnce = true;
-                    const ok = await unassignAnchor(anchor, person);
-                    if (ok) {
-                        stayedOff = true;
-                        break;
-                    }
+                    person.landed = await unassignAnchor(anchor, person);
+                    if (person.landed) break;
                     await sleep(300);
                 }
-                if (!stayedOff && !watchedOnce) {
-                    const watched = await watchUnassign(login, person.station);
-                    stayedOff = watched.gone;
-                    person.samples = watched.samples;
-                }
-                person.leftBoard = stayedOff;
-                if (person.leftBoard) left++;
+                if (person.landed) left++;
                 await sleep(400);
             }
             batch.done = left;
@@ -4237,10 +4269,8 @@
         unassigning = true;
         RUN_STOP = false;
         const original = button.textContent;
-        const MAX_TRIES = 6;
-        const MAX_PASSES = 8;
         const people = snapshotBoardPeople();
-        const batch = { mode: 'unassign-all', limit: people.length, people: people, passes: 0, leftover: [] };
+        const batch = { mode: 'unassign-all', limit: people.length, people: people, passes: 1, missed: [] };
         let left = 0;
         try {
             await closeAllAssociateMenus();
@@ -4267,87 +4297,60 @@
                 });
                 return;
             }
-            for (let pass = 1; pass <= MAX_PASSES && !RUN_STOP; pass++) {
-                batch.passes = pass;
-                const remaining = snapshotBoardPeople();
-                if (!remaining.length) break;
-                let progress = 0;
-                for (let i = 0; i < remaining.length; i++) {
-                    if (RUN_STOP) {
-                        batch.stopped = true;
-                        break;
-                    }
-                    const person = upsertPerson(people, remaining[i]);
-                    person.tries = 0;
-                    person.clickedUnassign = false;
-                    button.textContent = 'Unassigning ' + (left + 1) + '/' + people.length;
-                    paintRunPanel({
-                        title: 'Unassigning associates',
-                        done: left,
-                        total: Math.max(people.length, left + remaining.length - i),
-                        current: (person.name ? person.name + '  ' : '') + person.login,
-                        detail: 'Pass ' + pass + ' · ' + (person.station || 'Opening menu'),
-                        stats: 'Copied reassign list · left ' + left + ' · still ' + (remaining.length - i)
-                    });
-                    let stayedOff = false;
-                    let watchedOnce = false;
-                    while (rowStillOnBoard(person.login, person.station) && person.tries < MAX_TRIES && !RUN_STOP) {
-                        person.tries++;
-                        await closeAllAssociateMenus();
-                        const anchor = findAnchorForPerson(person.login, person.station);
-                        if (!anchor) break;
-                        const fresh = boardPersonFromAnchor(anchor);
-                        person.station = fresh.station || person.station;
-                        person.name = fresh.name || person.name;
-                        person.empId = fresh.empId || person.empId;
-                        try { anchor.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e1) { /* ignore */ }
-                        await sleep(80);
-                        watchedOnce = true;
-                        const ok = await unassignAnchor(anchor, person);
-                        if (ok) {
-                            stayedOff = true;
-                            break;
-                        }
-                        await sleep(300);
-                    }
-                    if (!stayedOff && !watchedOnce) {
-                        const watched = await watchUnassign(person.login, person.station);
-                        stayedOff = watched.gone;
-                        person.samples = watched.samples;
-                    }
-                    person.leftBoard = stayedOff;
-                    if (person.leftBoard) {
-                        left++;
-                        progress++;
-                    }
-                    await sleep(250);
+            const missed = [];
+            for (let i = 0; i < people.length; i++) {
+                if (RUN_STOP) {
+                    batch.stopped = true;
+                    break;
                 }
-                if (!progress) break;
-            }
-            const leftover = snapshotBoardPeople();
-            batch.leftover = leftover;
-            for (let i = 0; i < leftover.length; i++) {
-                leftover[i].leftBoard = false;
-                upsertPerson(people, leftover[i]);
+                const person = people[i];
+                person.tries = 0;
+                person.clickedUnassign = false;
+                button.textContent = 'Unassigning ' + (i + 1) + '/' + people.length;
+                paintRunPanel({
+                    title: 'Unassigning associates',
+                    done: left,
+                    total: people.length,
+                    current: (person.name ? person.name + '  ' : '') + person.login,
+                    detail: person.station || 'Opening menu',
+                    stats: 'Copied reassign list · clicked ' + left
+                });
+                while (!person.landed && person.tries < 2 && !RUN_STOP) {
+                    person.tries++;
+                    await closeAllAssociateMenus();
+                    const anchor = findAnchorForPerson(person.login, person.station);
+                    if (!anchor) break;
+                    const fresh = boardPersonFromAnchor(anchor);
+                    person.station = fresh.station || person.station;
+                    person.name = fresh.name || person.name;
+                    person.empId = fresh.empId || person.empId;
+                    try { anchor.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e1) { /* ignore */ }
+                    await sleep(80);
+                    person.landed = await unassignAnchor(anchor, person);
+                    if (person.landed) break;
+                    await sleep(300);
+                }
+                if (person.landed) left++;
+                else missed.push(person);
+                await sleep(250);
             }
             batch.done = left;
-            batch.still = leftover.length;
-            batch.failed = leftover.length;
+            batch.missed = missed;
+            batch.failed = missed.length;
             batch.reassign = formatReassignList(people);
             pushUnassignLog(batch);
             try { await copyText(batch.reassign); } catch (e2) { /* ignore */ }
-            button.textContent = leftover.length ? ('Unassigned ' + left + ' · left ' + leftover.length) : ('Unassigned ' + left);
+            button.textContent = missed.length ? ('Unassigned ' + left + ' · missed ' + missed.length) : ('Unassigned ' + left);
             paintRunPanel({
-                title: batch.stopped ? 'Unassign stopped' : (leftover.length ? 'Unassign finished — leftovers' : 'Unassign finished'),
+                title: batch.stopped ? 'Unassign stopped' : (missed.length ? 'Unassign finished — missed' : 'Unassign finished'),
                 done: left,
                 total: people.length,
-                detail: leftover.length
-                    ? ('Still assigned:\n' + formatReassignList(leftover))
+                detail: missed.length
+                    ? ('Unassign did not land:\n' + formatReassignList(missed))
                     : batch.reassign,
-                stats: leftover.length
-                    ? ('Copied leftovers · Unassigned ' + left + ' · still assigned ' + leftover.length)
-                    : ('Copied reassign list · Unassigned ' + left),
-                barColor: leftover.length ? '#d29922' : '#2ea043',
+                stats: 'They stay on the board, same as unassigning by hand. Clicked ' + left +
+                    (missed.length ? (' · missed ' + missed.length) : ''),
+                barColor: missed.length ? '#d29922' : '#2ea043',
                 finished: true
             });
         } catch (e) {
@@ -9037,7 +9040,7 @@
                 let error = '';
                 for (let tryN = 1; tryN <= 4; tryN++) {
                     if (leavingStop) break;
-                    if (record && record.leftBoard) break;
+                    if (record && (record.landed || record.leftBoard)) break;
                     await closeAllAssociateMenus();
                     const again = anchorOnMarkedStation(row.login, row.station);
                     if (!again) {
@@ -9069,7 +9072,7 @@
                     };
                     if (error) attempt.error = error;
                     step.attempts.push(attempt);
-                    if (record.leftBoard) break;
+                    if (record.landed || record.leftBoard) break;
                     await sleep(300);
                 }
                 const click = slimEarlyClick(record, error);
@@ -9082,7 +9085,8 @@
                 step.tooltipButtons = click.tooltipButtons;
                 step.tries = step.attempts.length;
                 if (error) step.error = error;
-                const gone = !!step.leftBoard;
+                const gone = !!(record && (record.landed || record.leftBoard));
+                step.leftBoard = gone;
                 if (leavingStop && !gone) {
                     left.push(row.login);
                     for (let j = i + 1; j < rows.length; j++) left.push(rows[j].login);
@@ -10225,11 +10229,19 @@
         info.appendChild(loginLine);
         const station = looksLikeLogin(who) ? stationForLogin(who) : '';
         const stationLines = leavingStationLines(station);
+        const stationCopy = customerReturnsCopy(stationLines);
+        const stationHost = stationCopy ? document.createElement('div') : info;
+        if (stationCopy) {
+            stationHost.setAttribute('data-copy', stationCopy);
+            stationHost.style.cursor = 'pointer';
+            armStationCopy(stationHost);
+            info.appendChild(stationHost);
+        }
         for (let i = 0; i < stationLines.length; i++) {
             const line = document.createElement('div');
             line.textContent = stationLines[i];
             line.style.cssText = 'font-size:12px; line-height:1.35; color:#ffffff;';
-            info.appendChild(line);
+            stationHost.appendChild(line);
         }
         head.appendChild(info);
         const timeRow = document.createElement('div');
