@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, fileDate, mergeShiftRecords };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -191,7 +191,15 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.9\.35/);
+assert.match(src, /@version\s+2\.9\.36/);
+assert.equal(api.backgroundDropzone(false, "dzA", "ts1"), null);
+assert.equal(api.backgroundDropzone(true, "", "ts1"), null);
+const zoneJob = api.backgroundDropzone(true, " dzA ", " ts1 ");
+assert.deepEqual({ container: zoneJob.container, dropzone: zoneJob.dropzone }, { container: "ts1", dropzone: "dzA" });
+assert.deepEqual([...api.scanBurstKeys("ab1")], ["a", "b", "1", "Enter"]);
+assert.equal(api.moveBadPhrase("ready", "Invalid container"), "invalid");
+assert.match(src, /aft-moveapp\.na\.aftx\.amazonoperations\.app/);
+assert.match(src, /id="dzOn"/);
 assert.equal(api.fileDate("2026-11-07 22:00:00"), "2026-11-07");
 assert.equal(api.fileDate("2026-11-08 00:01:00"), "2026-11-07");
 assert.equal(api.fileDate("2026-11-08 05:59:00"), "2026-11-07");

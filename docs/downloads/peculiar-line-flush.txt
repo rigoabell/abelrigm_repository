@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.35
+// @version      2.9.36
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
-// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
+// @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. An optional background dropzone sends each scan to the Move App.
 // @author       abelrigm
 // @match        https://peculiar-inventory-na.aka.corp.amazon.com/*
 // @match        https://aft-aging-inventory.na.aftx.amazonoperations.app/*
@@ -12,6 +12,9 @@
 // @match        https://*.cloudfront.net/idp-selection*
 // @match        https://*.federated-auth.aft.a2z.com/*
 // @match        https://qifcr.na.aftx.amazonoperations.app/*
+// @match        https://aft-moveapp.na.aftx.amazonoperations.app/*
+// @match        https://aft-moveapp.eu.aftx.amazonoperations.app/*
+// @match        https://aft-moveapp.fe.aftx.amazonoperations.app/*
 // @connect      amazon-my.sharepoint.com
 // @connect      raw.githubusercontent.com
 // @run-at       document-start
@@ -33,6 +36,7 @@
     Documents / IOL Assignments / Line Flush Records
   Example: LineFlush_2026-08-28_abelrigm.xlsx
   A night that runs past midnight keeps that same file until 6:00 AM. At 6:00 AM the next file starts.
+  Optional background dropzone: turn Dropzone on, enter the dropzone code, and leave the Move App scan page open. Each scan is sent there as a container scan and then that dropzone, without waiting on the Line Flush lookup.
   The Dashboard sheet matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time. Each location that was scanned also has its own sheet. Status uses the oldest-units age: Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
   EOL scans (EOL 1–6, AR EOL, BIGs EOL) also update a shift workbook. Day is 6:00 AM–5:59 PM in LineFlush_EOL_YYYY-MM-DD_Day.xlsx. Night is 6:00 PM–5:59 AM in LineFlush_EOL_YYYY-MM-DD_Night.xlsx, named for the evening the shift starts. The Summary sheet reads left to right: the whole shift, the halves, the quarters, then the hour windows. Each window shows the EOL and dropzone mix.
 
@@ -47,12 +51,13 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.35";
+  const VERSION = "2.9.36";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
   const OLD_SCRIPT_NAME = "Peculiar Inventory Scan Panel";
   const PECULIAR_URL = "https://aft-aging-inventory.na.aftx.amazonoperations.app/MEM3/overview";
+  const MOVE_URL = "https://aft-moveapp.na.aftx.amazonoperations.app/";
   const SP_SITE = "https://amazon-my.sharepoint.com/personal/abelrigm_amazon_com";
   const SOS_FOLDER =
     "/personal/abelrigm_amazon_com/Documents/IOL Assignments/Line Flush Records";
@@ -76,6 +81,12 @@
     locationIdle: "plf.locationIdle",
     panelSize: "plf.panelSize",
     panelOpen: "plf.panelOpen",
+    dropzoneOn: "plf.dropzoneOn",
+    dropzoneCode: "plf.dropzoneCode",
+    dropzoneQueue: "plf.dropzoneQueue",
+    dropzoneCursor: "plf.dropzoneCursor",
+    dropzoneStatus: "plf.dropzoneStatus",
+    dropzoneHeartbeat: "plf.dropzoneHeartbeat",
   };
   const IDLE_LOCATION_MS = 10 * 60 * 1000;
   const TOTAL_SHEET = "TOTAL";
@@ -124,6 +135,7 @@
 
   const host = location.hostname;
   const isPeculiar = /peculiar-inventory|aft-aging-inventory/i.test(host);
+  const isMoveApp = /aft-moveapp/i.test(host);
   const isLoginChooser = /idp-selection|federated-auth\.aft\.a2z\.com|qifcr\.na\.aftx\.amazonoperations\.app/i.test(location.href);
   const pageWindow = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
   let isTop = true;
@@ -2234,6 +2246,244 @@
     return session;
   }
 
+  function backgroundDropzone(enabled, dropzone, container) {
+    const zone = cellText(dropzone);
+    const id = cellText(container);
+    if (!enabled || !zone || !id) return null;
+    return { container: id, dropzone: zone };
+  }
+
+  function scanBurstKeys(text) {
+    return [...Array.from(cellText(text)), "Enter"];
+  }
+
+  function moveStableText(text) {
+    return String(text || "")
+      .replace(/\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?/gi, "#")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function moveBadPhrase(before, after) {
+    const re = /\b(invalid|not found|unknown barcode|unknown|error|failed|cannot|can't|does not|doesn't|unrecognized|no such|try again)\b/gi;
+    const phrases = (text) => new Set((String(text).match(re) || []).map((item) => item.toLowerCase()));
+    const prev = phrases(before);
+    for (const phrase of phrases(after)) {
+      if (!prev.has(phrase)) return phrase;
+    }
+    return "";
+  }
+
+  function moveFresh() {
+    if (isMoveApp && isTop) return true;
+    const t = Number(GM_getValue(KEYS.dropzoneHeartbeat, 0)) || 0;
+    return Date.now() - t < HEARTBEAT_STALE_MS;
+  }
+
+  function enqueueBackgroundDropzone(container) {
+    const job = backgroundDropzone(
+      GM_getValue(KEYS.dropzoneOn, false) === true,
+      GM_getValue(KEYS.dropzoneCode, ""),
+      container
+    );
+    if (!job) return null;
+    const pack = GM_getValue(KEYS.dropzoneQueue, { n: 0, jobs: [] }) || { n: 0, jobs: [] };
+    const n = Number(pack.n || 0) + 1;
+    const jobs = [...(Array.isArray(pack.jobs) ? pack.jobs : []), { n, container: job.container, dropzone: job.dropzone, t: Date.now() }];
+    GM_setValue(KEYS.dropzoneQueue, { n, jobs: jobs.slice(-30) });
+    return job;
+  }
+
+  let moveTabOpenedAt = 0;
+  function ensureMoveTab() {
+    if (moveFresh()) return;
+    if (Date.now() - moveTabOpenedAt < 15000) return;
+    moveTabOpenedAt = Date.now();
+    try {
+      GM_openInTab(MOVE_URL, false);
+    } catch {
+      /* The Move App tab could not be opened. */
+    }
+  }
+
+  function movePageText() {
+    let out = "";
+    const take = (doc) => {
+      try {
+        if (doc?.body?.innerText) out += " " + doc.body.innerText;
+      } catch {
+        /* This frame is not readable. */
+      }
+    };
+    take(document);
+    document.querySelectorAll("iframe, frame").forEach((frame) => {
+      try {
+        take(frame.contentDocument);
+      } catch {
+        /* A cross-origin frame stays on its own page. */
+      }
+    });
+    return out.replace(/\s+/g, " ").trim().slice(0, 50000);
+  }
+
+  function moveFocusTarget() {
+    const el = document.activeElement;
+    if (el && el !== document.body && el !== document.documentElement) return el;
+    return document.body || document.documentElement;
+  }
+
+  function moveKeyCode(ch) {
+    if (ch === "Enter") return 13;
+    if (/^[a-zA-Z]$/.test(ch)) return ch.toUpperCase().charCodeAt(0);
+    return ch.charCodeAt(0);
+  }
+
+  function moveKeyName(ch) {
+    if (/^[a-zA-Z]$/.test(ch)) return "Key" + ch.toUpperCase();
+    if (/^[0-9]$/.test(ch)) return "Digit" + ch;
+    if (ch === "-") return "Minus";
+    if (ch === "_") return "Minus";
+    if (ch === ".") return "Period";
+    return "";
+  }
+
+  function fireMoveKey(target, ch) {
+    const view = target.ownerDocument?.defaultView || pageWindow;
+    const keyCode = moveKeyCode(ch);
+    const init = {
+      key: ch,
+      code: ch === "Enter" ? "Enter" : moveKeyName(ch),
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      keyCode,
+      which: ch === "Enter" ? keyCode : ch.charCodeAt(0),
+      charCode: ch === "Enter" ? 0 : ch.charCodeAt(0),
+    };
+    let event;
+    try {
+      event = new view.KeyboardEvent("keydown", init);
+    } catch {
+      event = new KeyboardEvent("keydown", init);
+    }
+    try {
+      Object.defineProperty(event, "keyCode", { configurable: true, get: () => keyCode });
+      Object.defineProperty(event, "which", { configurable: true, get: () => init.which });
+    } catch {
+      /* The browser locked the event fields. */
+    }
+    target.dispatchEvent(event);
+    ["keypress", "keyup"].forEach((type) => {
+      let follow;
+      try {
+        follow = new view.KeyboardEvent(type, init);
+      } catch {
+        follow = new KeyboardEvent(type, init);
+      }
+      target.dispatchEvent(follow);
+    });
+  }
+
+  async function burstMoveScan(text) {
+    const target = moveFocusTarget();
+    if (!target) return;
+    try {
+      target.focus();
+    } catch {
+      /* The scan target cannot take focus. The keys still go to it. */
+    }
+    for (const ch of scanBurstKeys(text)) {
+      fireMoveKey(target, ch);
+      await sleep(8);
+    }
+  }
+
+  async function waitForMoveChange(beforeRaw, beforeSig) {
+    const start = Date.now();
+    let saw = false;
+    let last = beforeSig;
+    let stableAt = 0;
+    while (Date.now() - start < 8000) {
+      const raw = movePageText();
+      const sig = moveStableText(raw);
+      if (sig !== last) {
+        last = sig;
+        if (sig !== beforeSig) {
+          saw = true;
+          stableAt = Date.now();
+        }
+      } else if (saw && stableAt && Date.now() - stableAt >= 250) {
+        return { changed: true, bad: moveBadPhrase(beforeRaw, raw) };
+      }
+      await sleep(40);
+    }
+    return { changed: saw, bad: moveBadPhrase(beforeRaw, movePageText()) };
+  }
+
+  async function performDropzone(container, dropzone) {
+    const beforeRaw = movePageText();
+    const beforeSig = moveStableText(beforeRaw);
+    await burstMoveScan(container);
+    const first = await waitForMoveChange(beforeRaw, beforeSig);
+    if (!first.changed) return { ok: false, error: "Page did not take the container" };
+    if (first.bad) return { ok: false, error: first.bad };
+    await sleep(200);
+    const midRaw = movePageText();
+    const midSig = moveStableText(midRaw);
+    await burstMoveScan(dropzone);
+    const second = await waitForMoveChange(midRaw, midSig);
+    if (!second.changed) return { ok: false, error: "Page did not take the dropzone" };
+    if (second.bad) return { ok: false, error: second.bad };
+    return { ok: true, error: "" };
+  }
+
+  let moveWorkerStarted = false;
+  async function drainDropzones() {
+    if (drainDropzones.working) return;
+    drainDropzones.working = true;
+    try {
+      for (;;) {
+        const pack = GM_getValue(KEYS.dropzoneQueue, null);
+        const cursor = Number(GM_getValue(KEYS.dropzoneCursor, 0)) || 0;
+        const jobs = (Array.isArray(pack?.jobs) ? pack.jobs : [])
+          .filter((job) => job && Number(job.n) > cursor)
+          .sort((a, b) => Number(a.n) - Number(b.n));
+        if (!jobs.length) break;
+        const job = jobs[0];
+        let result = { ok: false, error: "Dropzone failed" };
+        try {
+          result = await performDropzone(job.container, job.dropzone);
+        } catch (err) {
+          result = { ok: false, error: String(err?.message || err) };
+        }
+        GM_setValue(KEYS.dropzoneCursor, Number(job.n));
+        GM_setValue(KEYS.dropzoneStatus, {
+          n: job.n,
+          container: job.container,
+          dropzone: job.dropzone,
+          ok: Boolean(result.ok),
+          error: result.error || "",
+          t: Date.now(),
+        });
+      }
+    } finally {
+      drainDropzones.working = false;
+    }
+  }
+
+  function startMoveDropzoneWorker() {
+    if (!moveWorkerStarted) {
+      moveWorkerStarted = true;
+      const beat = () => GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
+      beat();
+      setInterval(beat, HEARTBEAT_MS);
+      GM_addValueChangeListener(KEYS.dropzoneQueue, () => {
+        drainDropzones();
+      });
+    }
+    drainDropzones();
+  }
+
   function startPeculiarWorker() {
     GM_setValue(KEYS.heartbeat, Date.now());
     setInterval(() => GM_setValue(KEYS.heartbeat, Date.now()), HEARTBEAT_MS);
@@ -2539,7 +2789,27 @@
           border-radius: 8px; padding: 7px 10px; font-size: 22px; font-weight: 700;
           letter-spacing: .04em; outline: none;
         }
-        #q::placeholder, #filter::placeholder { color: #667085; }
+        .dzrow {
+          display: flex; align-items: center; gap: 8px;
+          padding: 6px 10px; background: #ffffff;
+          border-bottom: 2px solid #111111;
+        }
+        .dzrow label {
+          display: flex; align-items: center; gap: 6px;
+          font-size: 12px; font-weight: 800; white-space: nowrap;
+        }
+        #dzCode {
+          flex: 1 1 180px; min-width: 0; height: 32px;
+          border: 1px solid #111111; border-radius: 8px;
+          background: #ffffff; color: #111111;
+          font-size: 14px; font-weight: 700; padding: 0 8px;
+        }
+        #dzStatus {
+          flex: 1 1 180px; min-width: 0;
+          font-size: 12px; font-weight: 700;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        #q::placeholder, #filter::placeholder, #dzCode::placeholder { color: #667085; }
         #q:focus { border-color: #111111; box-shadow: 0 0 0 3px rgba(17,17,17,.12); }
         .focusrow {
           display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
@@ -2779,6 +3049,11 @@
             <button id="delLoc" type="button" disabled title="Remove this custom location">Delete</button>
             <input id="q" type="text" placeholder="Scan container" autocomplete="off" spellcheck="false" />
             </div>
+          <div class="dzrow">
+            <label for="dzOn"><input id="dzOn" type="checkbox" /> Dropzone</label>
+            <input id="dzCode" type="text" placeholder="Dropzone code" autocomplete="off" spellcheck="false" />
+            <div id="dzStatus">Off</div>
+          </div>
           <div class="status ready" id="note">Ready</div>
           <div class="focusrow">
             <div class="ageboard" id="ageBoard">
@@ -3662,6 +3937,12 @@
 
     async function lookupOne(id, location) {
       selectedId = id;
+      const dropped = enqueueBackgroundDropzone(id);
+      if (dropped) {
+        const dzLine = shadow.getElementById("dzStatus");
+        if (dzLine) dzLine.textContent = `Queued ${dropped.container} → ${dropped.dropzone}`;
+        ensureMoveTab();
+      }
       showTicket(id, { containerId: id, inventory: [] });
       queueBanner(id);
       await new Promise((r) => requestAnimationFrame(() => r()));
@@ -3837,6 +4118,37 @@
       input.focus({ preventScroll: true });
       input.value += ch;
     };
+
+    const dzOn = shadow.getElementById("dzOn");
+    const dzCode = shadow.getElementById("dzCode");
+    const dzStatus = shadow.getElementById("dzStatus");
+    dzOn.checked = GM_getValue(KEYS.dropzoneOn, false) === true;
+    dzCode.value = cellText(GM_getValue(KEYS.dropzoneCode, ""));
+    function paintDropzoneStatus(text) {
+      if (dzStatus) dzStatus.textContent = text;
+    }
+    function saveDropzoneChoice() {
+      GM_setValue(KEYS.dropzoneOn, dzOn.checked === true);
+      GM_setValue(KEYS.dropzoneCode, cellText(dzCode.value));
+      if (!dzOn.checked) paintDropzoneStatus("Off");
+      else if (!cellText(dzCode.value)) paintDropzoneStatus("Enter a dropzone");
+      else paintDropzoneStatus(`On · ${cellText(dzCode.value)}`);
+    }
+    saveDropzoneChoice();
+    dzOn.addEventListener("change", () => {
+      saveDropzoneChoice();
+      if (dzOn.checked && cellText(dzCode.value)) ensureMoveTab();
+    });
+    dzCode.addEventListener("input", saveDropzoneChoice);
+    dzCode.addEventListener("change", saveDropzoneChoice);
+    GM_addValueChangeListener(KEYS.dropzoneStatus, (_name, _old, res) => {
+      if (!res || !dzOn.checked) return;
+      paintDropzoneStatus(
+        res.ok
+          ? `Sent ${res.container} → ${res.dropzone}`
+          : `Not sent ${res.container}: ${res.error || "failed"}`
+      );
+    });
 
     renderStats();
     tick();
@@ -4353,5 +4665,14 @@
     tryBoot();
     [400, 1200, 3000, 6000].forEach((ms) => setTimeout(tryBoot, ms));
     setInterval(tryBoot, 2000);
+  }
+
+  if (isMoveApp && isTop) {
+    const bootMove = () => {
+      if (!document.documentElement) return;
+      startMoveDropzoneWorker();
+    };
+    bootMove();
+    [400, 1200, 3000].forEach((ms) => setTimeout(bootMove, ms));
   }
 })();
