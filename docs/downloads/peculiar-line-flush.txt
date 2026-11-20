@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.43
+// @version      2.9.44
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -51,7 +51,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.43";
+  const VERSION = "2.9.44";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2621,37 +2621,30 @@
     el.dispatchEvent(new view.Event("change", { bubbles: true }));
   }
 
+  function moveBurstTarget() {
+    const body = document.body || document.documentElement;
+    const active = document.activeElement;
+    try {
+      if (active && active !== body && active.blur) active.blur();
+    } catch {
+      /* Focus can stay where it is. The keys still go to the page. */
+    }
+    try {
+      body.focus();
+    } catch {
+      /* The page body cannot take focus. The keys still go to it. */
+    }
+    return body;
+  }
+
   async function burstMoveScan(text, label) {
     const code = cellText(text);
     const name = label || code;
-    paintMoveBadge("Next: " + name);
-    await sleep(2000);
-    const target = moveScanTarget();
+    paintMoveBadge("Sending " + name);
+    await sleep(800);
+    const target = moveBurstTarget();
     if (!target) return;
-    const field = moveTextField(target) ? target : null;
-    try {
-      target.focus();
-    } catch {
-      /* The scan target cannot take focus. The keys still go to it. */
-    }
-    paintMoveBadge("Typing " + name);
-    for (const ch of Array.from(code)) {
-      paintMoveBadge("Typing " + name + " · " + ch);
-      fireMoveKey(target, ch);
-      await sleep(180);
-    }
-    await sleep(800);
-    if (field) {
-      const after = String(field.value || field.textContent || "");
-      if (!after.toLowerCase().includes(code.toLowerCase())) {
-        paintMoveBadge("Field missed " + code + ". Putting the full code in.");
-        await sleep(1200);
-        moveSetField(field, code);
-      }
-    }
-    paintMoveBadge("Pressing Enter for " + code);
-    await sleep(800);
-    fireMoveKey(field || target, "Enter");
+    for (const ch of [...Array.from(code), "Enter"]) fireMoveKey(target, ch);
   }
 
   function moveClickButton(label) {
@@ -2722,10 +2715,10 @@
         last = sig;
         saw = true;
         stableAt = Date.now();
-      } else if (saw && stableAt && Date.now() - stableAt >= 1000) {
+      } else if (saw && stableAt && Date.now() - stableAt >= 250) {
         return { ...verdict, detail: clip(raw, 240) };
       }
-      if (verdict.ok && saw && stableAt && Date.now() - stableAt >= 1000) {
+      if (verdict.ok && saw && stableAt && Date.now() - stableAt >= 250) {
         return { ...verdict, detail: clip(raw, 240) };
       }
       await sleep(40);
@@ -2743,18 +2736,16 @@
     await burstMoveScan(container, "source pallet " + container);
     const first = await waitForMoveToken(beforeRaw, container);
     paintMoveBadge(first.ok ? "Source accepted: " + container : "Source stopped: " + (first.error || "not accepted"));
-    await sleep(3000);
     if (!first.ok) return { ok: false, error: first.error || "Page did not show " + container, detail: first.detail || "" };
+    await sleep(200);
     const midRaw = moveScreenText();
     if (!/scan destination/i.test(midRaw)) {
       paintMoveBadge("Stopped. The page did not ask for a destination.");
-      await sleep(3000);
       return { ok: false, error: "Page did not ask for a destination", detail: clip(midRaw, 240) };
     }
     await burstMoveScan(dropzone, "destination " + dropzone);
     const second = await waitForMoveToken(midRaw, dropzone);
     paintMoveBadge(second.ok ? "Destination accepted: " + dropzone : "Destination stopped: " + (second.error || "not accepted"));
-    await sleep(3000);
     if (!second.ok) return { ok: false, error: second.error || "Page did not show " + dropzone, detail: second.detail || "" };
     return { ok: true, error: "", detail: second.detail || "" };
   }
