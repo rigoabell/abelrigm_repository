@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.53
+// @version      2.9.54
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -54,7 +54,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.53";
+  const VERSION = "2.9.54";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2408,11 +2408,12 @@
 
   function movePageReady(href, title, text, readyState) {
     if (!moveIsScanPage(href, title)) return false;
-    if (readyState && readyState !== "complete") return false;
     const screen = String(text || "");
     if (/scan was unsuccessful|not of appropriate type|scan a pallet/i.test(screen)) return false;
-    if (/scan destination/i.test(screen) && !/scan source/i.test(screen)) return false;
-    return /scan source|waiting for scan/i.test(screen);
+    if (/scan destination/i.test(screen) && !/scan source|scan container/i.test(screen)) return false;
+    if (!/scan source|scan container|waiting for scan/i.test(screen)) return false;
+    if (readyState && readyState !== "complete" && readyState !== "interactive") return false;
+    return true;
   }
 
   function moveStatusNoise(text) {
@@ -2687,10 +2688,15 @@
   function moveBurstTarget() {
     const body = document.body || document.documentElement;
     const active = moveDeepActive(document);
+    if (!active || active === body || active === document.documentElement) return body;
+    const label = cellText(active.innerText || active.getAttribute?.("aria-label") || "").toLowerCase();
+    const tag = String(active.tagName || "").toLowerCase();
+    const menu = tag === "button" || tag === "a" || active.getAttribute?.("role") === "button" || /\bmenu\b/.test(label);
+    if (!menu) return active;
     try {
-      if (active && active !== body && active.blur) active.blur();
+      if (active.blur) active.blur();
     } catch {
-      /* The focused control can stay. The keys still go to the page. */
+      /* The menu button can stay focused. The keys still go to the page. */
     }
     try {
       body.focus();

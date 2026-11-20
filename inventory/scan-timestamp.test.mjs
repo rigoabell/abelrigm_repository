@@ -192,7 +192,7 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.9\.53/);
+assert.match(src, /@version\s+2\.9\.54/);
 assert.match(src, /move-container\?jobId=200/);
 assert.equal(src.includes("jobId=400"), false);
 assert.match(src, /@include\s+\/\^https:\\\/\\\/fcmenu-\[a-z0-9-\]\+\\\.corp\\\.amazon\\\.com/);
@@ -232,6 +232,8 @@ assert.equal(api.moveIsScanPage("https://aft-moveapp.na.aftx.amazonoperations.ap
 assert.equal(api.moveIsScanPage("https://aft-moveapp.na.aftx.amazonoperations.app/move-container", "AFT Move Between Pallets"), false);
 assert.equal(api.moveIsScanPage("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets"), true);
 assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets", "Scan source pallet", "complete"), true);
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=200", "AFT Move Individual Container", "Scan container to move", "complete"), true);
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=200", "AFT Move Individual Container", "abelrigm MenumScan container to move", "interactive"), true);
 assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=12", "Move container", "Scan source container", "complete"), true);
 assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=12", "Move container", "Waiting for scan", "complete"), true);
 assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets", "Scan source pallet Waiting for scan", "complete"), true);
