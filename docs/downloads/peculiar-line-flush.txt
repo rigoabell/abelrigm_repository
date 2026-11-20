@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.64
+// @version      2.9.65
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -54,7 +54,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.64";
+  const VERSION = "2.9.65";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -3618,7 +3618,7 @@
         .history th:nth-child(4), .history td:nth-child(4) { width: 44px; }
         .bar, .scanrow, .status, .focusrow, .identity, .foot { position: relative; z-index: 1; flex: 0 0 auto; }
         .identity {
-          display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+          display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
           margin: 8px 10px 12px; padding: 0;
           font-size: 16px; font-weight: 800; line-height: 1.35;
           background: #ffffff; color: #111111;
@@ -4269,14 +4269,12 @@
     function showTicket(id, result) {
       const container = stripBracketText((result && result.containerId) || id);
       const units = cellText(result?.totalUnits);
-      const parent = stripBracketText(result?.parentContainer);
       const cells = [
         container ? skuLink(container) : `<span class="empty">—</span>`,
         units ? escapeHtml(`${units} units`) : `<span class="empty">—</span>`,
-        parent ? escapeHtml(`Parent ${parent}`) : `<span class="empty">—</span>`,
       ];
       const identity = shadow.getElementById("identity");
-      identity.style.gridTemplateColumns = "repeat(3, minmax(0, 1fr))";
+      identity.style.gridTemplateColumns = "repeat(2, minmax(0, 1fr))";
       identity.innerHTML = cells.map((html) => `<div class="idcell">${html}</div>`).join("");
       shownOuterLocation = priorOuterLabel(outerLocationLabel(result), rememberedPrior(container));
       paintLocationBoard();
