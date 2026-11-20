@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.38
+// @version      2.9.39
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -51,7 +51,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.38";
+  const VERSION = "2.9.39";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2311,6 +2311,7 @@
             dropzone: cellText(rawStatus.dropzone),
             ok: Boolean(rawStatus.ok),
             error: cellText(rawStatus.error),
+            detail: cellText(rawStatus.detail),
             t: Number(rawStatus.t) || 0,
           }
         : null,
@@ -2348,6 +2349,30 @@
     return "";
   }
 
+  function moveTokenCount(text, token) {
+    const needle = cellText(token).toLowerCase();
+    if (!needle) return 0;
+    const hay = moveStableText(text).toLowerCase();
+    let count = 0;
+    let from = 0;
+    while (from < hay.length) {
+      const at = hay.indexOf(needle, from);
+      if (at < 0) break;
+      count += 1;
+      from = at + needle.length;
+    }
+    return count;
+  }
+
+  function moveScanAccepted(before, after, token) {
+    const bad = moveBadPhrase(before, after);
+    if (bad) return { ok: false, error: bad };
+    if (!cellText(token) || moveTokenCount(after, token) <= moveTokenCount(before, token)) {
+      return { ok: false, error: "Page did not show " + cellText(token) };
+    }
+    return { ok: true, error: "" };
+  }
+
   function moveFresh() {
     if (isMoveApp && isTop) return true;
     const t = Number(GM_getValue(KEYS.dropzoneHeartbeat, 0)) || 0;
@@ -2376,19 +2401,47 @@
     }
   }
 
-  function movePageText() {
-    let out = "";
-    const take = (doc) => {
-      try {
-        if (doc?.body?.innerText) out += " " + doc.body.innerText;
-      } catch {
-        /* This frame is not readable. */
-      }
+  function moveEachRoot(visit) {
+    const seen = new Set();
+    const walk = (root) => {
+      if (!root || seen.has(root) || !root.querySelectorAll) return;
+      seen.add(root);
+      visit(root);
+      root.querySelectorAll("*").forEach((el) => {
+        if (el.shadowRoot) walk(el.shadowRoot);
+      });
+      root.querySelectorAll("iframe, frame").forEach((frame) => {
+        try {
+          if (frame.contentDocument) walk(frame.contentDocument);
+        } catch {
+          /* A cross-origin frame stays on its own page. */
+        }
+      });
     };
-    take(document);
+    walk(document);
+  }
+
+  function moveScreenText() {
+    let out = "";
+    const walk = (node) => {
+      if (!node || out.length > 50000) return;
+      if (node.nodeType === 3) {
+        out += node.nodeValue;
+        return;
+      }
+      if (node.nodeType !== 1 && node.nodeType !== 11) return;
+      if (node.nodeType === 1) {
+        const tag = node.tagName;
+        if (tag === "SCRIPT" || tag === "STYLE" || tag === "NOSCRIPT") return;
+        if (node.shadowRoot) walk(node.shadowRoot);
+      }
+      const kids = node.childNodes || [];
+      for (let i = 0; i < kids.length; i += 1) walk(kids[i]);
+    };
+    if (document.body) walk(document.body);
     document.querySelectorAll("iframe, frame").forEach((frame) => {
       try {
-        take(frame.contentDocument);
+        if (frame.contentDocument?.body) walk(frame.contentDocument.body);
       } catch {
         /* A cross-origin frame stays on its own page. */
       }
@@ -2396,10 +2449,60 @@
     return out.replace(/\s+/g, " ").trim().slice(0, 50000);
   }
 
-  function moveFocusTarget() {
-    const el = document.activeElement;
-    if (el && el !== document.body && el !== document.documentElement) return el;
-    return document.body || document.documentElement;
+  function moveDeepActive(doc) {
+    let el = doc?.activeElement || null;
+    const guard = new Set();
+    while (el?.shadowRoot?.activeElement && !guard.has(el)) {
+      guard.add(el);
+      el = el.shadowRoot.activeElement;
+    }
+    return el;
+  }
+
+  function moveVisible(el) {
+    if (!el || el.nodeType !== 1 || !el.getBoundingClientRect) return false;
+    const view = el.ownerDocument?.defaultView;
+    if (!view) return false;
+    const style = view.getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function moveTextField(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.isContentEditable) return true;
+    const tag = el.tagName;
+    if (tag === "TEXTAREA") return true;
+    if (tag !== "INPUT") return false;
+    const type = String(el.type || "text").toLowerCase();
+    return type === "text" || type === "search" || type === "tel" || type === "number" || type === "";
+  }
+
+  function moveInputScore(el, active) {
+    let score = 0;
+    const blob = [el.placeholder, el.getAttribute?.("aria-label"), el.name, el.id, el.getAttribute?.("data-testid")].join(" ");
+    if (/scan|barcode|container|drop|location|tote|lpn|bin/i.test(blob)) score += 8;
+    if (el === active) score += 12;
+    return score;
+  }
+
+  function moveScanInput() {
+    const active = moveDeepActive(document);
+    const found = [];
+    moveEachRoot((root) => {
+      root.querySelectorAll("input, textarea, [contenteditable='true']").forEach((el) => {
+        if (moveTextField(el) && moveVisible(el) && !el.disabled && !el.readOnly) found.push(el);
+      });
+    });
+    found.sort((a, b) => moveInputScore(b, active) - moveInputScore(a, active));
+    return found[0] || null;
+  }
+
+  function moveScanTarget() {
+    const active = moveDeepActive(document);
+    if (moveTextField(active) && moveVisible(active)) return active;
+    return moveScanInput() || active || document.body || document.documentElement;
   }
 
   function moveKeyCode(ch) {
@@ -2411,8 +2514,7 @@
   function moveKeyName(ch) {
     if (/^[a-zA-Z]$/.test(ch)) return "Key" + ch.toUpperCase();
     if (/^[0-9]$/.test(ch)) return "Digit" + ch;
-    if (ch === "-") return "Minus";
-    if (ch === "_") return "Minus";
+    if (ch === "-" || ch === "_") return "Minus";
     if (ch === ".") return "Period";
     return "";
   }
@@ -2420,91 +2522,113 @@
   function fireMoveKey(target, ch) {
     const view = target.ownerDocument?.defaultView || pageWindow;
     const keyCode = moveKeyCode(ch);
-    const init = {
-      key: ch,
-      code: ch === "Enter" ? "Enter" : moveKeyName(ch),
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      keyCode,
-      which: ch === "Enter" ? keyCode : ch.charCodeAt(0),
-      charCode: ch === "Enter" ? 0 : ch.charCodeAt(0),
-    };
-    let event;
-    try {
-      event = new view.KeyboardEvent("keydown", init);
-    } catch {
-      event = new KeyboardEvent("keydown", init);
-    }
-    try {
-      Object.defineProperty(event, "keyCode", { configurable: true, get: () => keyCode });
-      Object.defineProperty(event, "which", { configurable: true, get: () => init.which });
-    } catch {
-      /* The browser locked the event fields. */
-    }
-    target.dispatchEvent(event);
-    ["keypress", "keyup"].forEach((type) => {
-      let follow;
+    ["keydown", "keypress", "keyup"].forEach((type) => {
+      const keypress = type === "keypress";
+      const init = {
+        key: ch,
+        code: ch === "Enter" ? "Enter" : moveKeyName(ch),
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        keyCode,
+        which: keypress && ch !== "Enter" ? ch.charCodeAt(0) : keyCode,
+        charCode: keypress ? ch.charCodeAt(0) : 0,
+      };
+      let event;
       try {
-        follow = new view.KeyboardEvent(type, init);
+        event = new view.KeyboardEvent(type, init);
       } catch {
-        follow = new KeyboardEvent(type, init);
+        event = new KeyboardEvent(type, init);
       }
-      target.dispatchEvent(follow);
+      try {
+        Object.defineProperty(event, "keyCode", { configurable: true, get: () => keyCode });
+        Object.defineProperty(event, "which", { configurable: true, get: () => init.which });
+        Object.defineProperty(event, "charCode", { configurable: true, get: () => init.charCode });
+      } catch {
+        /* The browser locked the event fields. */
+      }
+      target.dispatchEvent(event);
     });
   }
 
+  function moveSetField(el, value) {
+    const view = el.ownerDocument?.defaultView || pageWindow;
+    const text = cellText(value);
+    try {
+      el.focus();
+    } catch {
+      /* The scan field cannot take focus. The value is still set. */
+    }
+    if (el.isContentEditable) {
+      el.textContent = text;
+      el.dispatchEvent(new view.InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
+      return;
+    }
+    const proto = el.tagName === "TEXTAREA" ? view.HTMLTextAreaElement.prototype : view.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+    if (setter) setter.call(el, text);
+    else el.value = text;
+    el.dispatchEvent(new view.InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
+    el.dispatchEvent(new view.Event("change", { bubbles: true }));
+  }
+
   async function burstMoveScan(text) {
-    const target = moveFocusTarget();
+    const target = moveScanTarget();
     if (!target) return;
+    const field = moveTextField(target) ? target : null;
     try {
       target.focus();
     } catch {
       /* The scan target cannot take focus. The keys still go to it. */
     }
+    const before = field ? String(field.value || field.textContent || "") : "";
     for (const ch of scanBurstKeys(text)) {
       fireMoveKey(target, ch);
       await sleep(8);
     }
+    if (!field) return;
+    const after = String(field.value || field.textContent || "");
+    if (after.toLowerCase().includes(cellText(text).toLowerCase()) || after !== before) return;
+    moveSetField(field, text);
+    fireMoveKey(field, "Enter");
   }
 
-  async function waitForMoveChange(beforeRaw, beforeSig) {
+  async function waitForMoveToken(beforeRaw, token) {
     const start = Date.now();
-    let saw = false;
-    let last = beforeSig;
+    let last = moveStableText(beforeRaw);
     let stableAt = 0;
+    let saw = false;
     while (Date.now() - start < 8000) {
-      const raw = movePageText();
+      const raw = moveScreenText();
       const sig = moveStableText(raw);
+      const verdict = moveScanAccepted(beforeRaw, raw, token);
       if (sig !== last) {
         last = sig;
-        if (sig !== beforeSig) {
-          saw = true;
-          stableAt = Date.now();
-        }
+        saw = true;
+        stableAt = Date.now();
       } else if (saw && stableAt && Date.now() - stableAt >= 250) {
-        return { changed: true, bad: moveBadPhrase(beforeRaw, raw) };
+        return { ...verdict, detail: clip(raw, 240) };
+      }
+      if (verdict.ok && saw && stableAt && Date.now() - stableAt >= 250) {
+        return { ...verdict, detail: clip(raw, 240) };
       }
       await sleep(40);
     }
-    return { changed: saw, bad: moveBadPhrase(beforeRaw, movePageText()) };
+    const raw = moveScreenText();
+    return { ...moveScanAccepted(beforeRaw, raw, token), detail: clip(raw, 240) };
   }
 
   async function performDropzone(container, dropzone) {
-    const beforeRaw = movePageText();
-    const beforeSig = moveStableText(beforeRaw);
+    const beforeRaw = moveScreenText();
     await burstMoveScan(container);
-    const first = await waitForMoveChange(beforeRaw, beforeSig);
-    if (!first.changed) return { ok: false, error: "Page did not take the container" };
-    if (first.bad) return { ok: false, error: first.bad };
+    const first = await waitForMoveToken(beforeRaw, container);
+    if (!first.ok) return { ok: false, error: first.error || "Page did not show " + container, detail: first.detail || "" };
     await sleep(200);
-    const midRaw = movePageText();
-    const midSig = moveStableText(midRaw);
+    const midRaw = moveScreenText();
     await burstMoveScan(dropzone);
-    const second = await waitForMoveChange(midRaw, midSig);
-    if (!second.changed) return { ok: false, error: "Page did not take the dropzone" };
-    if (second.bad) return { ok: false, error: second.bad };
-    return { ok: true, error: "" };
+    const second = await waitForMoveToken(midRaw, dropzone);
+    if (!second.ok) return { ok: false, error: second.error || "Page did not show " + dropzone, detail: second.detail || "" };
+    return { ok: true, error: "", detail: second.detail || "" };
   }
 
   let moveWorkerStarted = false;
@@ -2533,6 +2657,7 @@
           dropzone: job.dropzone,
           ok: Boolean(result.ok),
           error: result.error || "",
+          detail: clip(result.detail || "", 240),
           t: Date.now(),
         });
       }
@@ -4338,6 +4463,7 @@
         dropzone: cellText(res.dropzone),
         step: res.ok ? "sent" : "not sent",
         error: cellText(res.error),
+        detail: cellText(res.detail),
       });
       paintDropzoneStatus(
         res.ok
