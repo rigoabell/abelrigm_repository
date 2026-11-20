@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.47
+// @version      2.9.48
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -51,7 +51,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.47";
+  const VERSION = "2.9.48";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2917,19 +2917,20 @@
     rememberDropzone({ container, dropzone, step: "waiting" });
     const ready = await waitForMoveReady();
     if (!ready.ok) return ready;
-    rememberDropzone({ container, dropzone, step: "scanning" });
+    rememberDropzone({ container, dropzone, step: "tote" });
     const beforeRaw = moveScreenText();
-    await burstMoveScan(container, "source " + container);
+    await burstMoveScan(container, container);
     const first = await waitForMoveToken(beforeRaw, container);
-    paintMoveBadge(first.ok ? "Source accepted: " + container : "Source stopped: " + (first.error || "not accepted"));
-    if (!first.ok) return { ok: false, error: first.error || "Page did not show " + container, detail: first.detail || "" };
+    paintMoveBadge(first.ok ? "Tote accepted: " + container : "Tote was sent: " + container);
     await sleep(200);
     const midRaw = moveScreenText();
-    await burstMoveScan(dropzone, "destination " + dropzone);
+    rememberDropzone({ container, dropzone, step: "dropzone" });
+    await burstMoveScan(dropzone, dropzone);
     const second = await waitForMoveToken(midRaw, dropzone);
-    paintMoveBadge(second.ok ? "Destination accepted: " + dropzone : "Destination stopped: " + (second.error || "not accepted"));
-    if (!second.ok) return { ok: false, error: second.error || "Page did not show " + dropzone, detail: second.detail || "" };
-    return { ok: true, error: "", detail: second.detail || "" };
+    paintMoveBadge(second.ok ? "Dropzone accepted: " + dropzone : "Dropzone stopped: " + (second.error || "not accepted"));
+    const detail = second.detail || first.detail || "";
+    if (!second.ok) return { ok: false, error: second.error || "Page did not show " + dropzone, detail };
+    return { ok: true, error: "", detail };
   }
 
   let moveWorkerStarted = false;

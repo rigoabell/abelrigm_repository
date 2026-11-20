@@ -192,7 +192,7 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.9\.47/);
+assert.match(src, /@version\s+2\.9\.48/);
 assert.match(src, /function moveBurstTarget/);
 assert.equal(api.backgroundDropzone(false, "dzA", "ts1"), null);
 assert.equal(api.backgroundDropzone(true, "", "ts1"), null);
