@@ -193,7 +193,7 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.9\.63/);
+assert.match(src, /@version\s+2\.9\.64/);
 assert.match(src, /Container was not scanned/);
 assert.match(src, /function blockFcMenuOpen/);
 assert.match(src, /function moveDropAccepted/);
