@@ -192,7 +192,7 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.9\.41/);
+assert.match(src, /@version\s+2\.9\.42/);
 assert.equal(api.backgroundDropzone(false, "dzA", "ts1"), null);
 assert.equal(api.backgroundDropzone(true, "", "ts1"), null);
 const zoneJob = api.backgroundDropzone(true, " dzA ", " ts1 ");
@@ -228,6 +228,7 @@ assert.equal(api.moveIsScanPage("https://aft-moveapp.na.aftx.amazonoperations.ap
 assert.equal(api.moveIsScanPage("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets"), true);
 assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets", "Scan source pallet", "complete"), true);
 assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets", "Scan source pallet", "loading"), false);
+assert.equal(api.movePageReady("https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400", "AFT Move Between Pallets", "Scan source pallet Scan was unsuccessful", "complete"), false);
 assert.equal(api.moveIsScanPage("https://aft-moveapp.na.aftx.amazonoperations.app/move-container", "HTTP Status 404 – Not Found"), false);
 const landing = api.dropzoneDebugView({
   target: "https://aft-moveapp.na.aftx.amazonoperations.app/move-container",

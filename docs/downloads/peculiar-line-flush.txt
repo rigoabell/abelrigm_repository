@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.41
+// @version      2.9.42
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -51,7 +51,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.41";
+  const VERSION = "2.9.42";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -89,6 +89,7 @@
     dropzoneHeartbeat: "plf.dropzoneScanHeartbeat",
     dropzoneTried: "plf.dropzoneTried",
     dropzoneLanded: "plf.dropzoneLanded",
+    dropzoneNudge: "plf.dropzoneNudge",
     dropzoneTrace: "plf.dropzoneTrace",
   };
   const IDLE_LOCATION_MS = 10 * 60 * 1000;
@@ -2320,6 +2321,8 @@
       tried: cellText(state?.tried?.href) || cellText(state?.target),
       landed: cellText(state?.landed?.href),
       landedTitle: cellText(state?.landed?.title),
+      landedAgeMs: state?.landed?.t ? Math.max(0, now - (Number(state.landed.t) || 0)) : null,
+      heartbeatAgeMs: heartbeat ? Math.max(0, now - heartbeat) : null,
       moveOpen: Boolean(heartbeat && now - heartbeat < HEARTBEAT_STALE_MS),
     };
   }
@@ -2393,7 +2396,9 @@
   function movePageReady(href, title, text, readyState) {
     if (!moveIsScanPage(href, title)) return false;
     if (readyState && readyState !== "complete") return false;
-    return /scan source pallet/i.test(String(text || ""));
+    const screen = String(text || "");
+    if (/scan was unsuccessful/i.test(screen)) return false;
+    return /scan source pallet/i.test(screen);
   }
 
   function noteMoveLanded() {
@@ -2425,13 +2430,12 @@
   let moveTabOpenedAt = 0;
   function ensureMoveTab() {
     GM_setValue(KEYS.dropzoneTried, { href: MOVE_URL, t: Date.now() });
+    GM_setValue(KEYS.dropzoneNudge, Date.now());
     if (moveFresh()) return;
-    const landed = GM_getValue(KEYS.dropzoneLanded, null);
-    if (landed && moveIsScanPage(landed.href, landed.title) && Date.now() - (Number(landed.t) || 0) < HEARTBEAT_STALE_MS) return;
     if (Date.now() - moveTabOpenedAt < 15000) return;
     moveTabOpenedAt = Date.now();
     try {
-      GM_openInTab(MOVE_URL, false);
+      GM_openInTab(MOVE_URL, { active: true, insert: true, setParent: true });
     } catch {
       /* The Move App tab could not be opened. */
     }
@@ -2628,15 +2632,53 @@
     fireMoveKey(field, "Enter");
   }
 
+  function moveClickButton(label) {
+    const want = cellText(label).toLowerCase();
+    if (!want) return false;
+    let clicked = false;
+    moveEachRoot((root) => {
+      if (clicked || !root.querySelectorAll) return;
+      root.querySelectorAll("button, a, [role='button'], input[type='button'], input[type='submit']").forEach((el) => {
+        if (clicked || !moveVisible(el)) return;
+        const text = cellText(el.innerText || el.value || el.getAttribute?.("aria-label")).toLowerCase();
+        if (text !== want && !text.startsWith(want + " ")) return;
+        el.click();
+        clicked = true;
+      });
+    });
+    return clicked;
+  }
+
+  function paintMoveBadge(text) {
+    if (!isMoveApp || !document.documentElement) return;
+    let el = document.getElementById("plf-move-badge");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "plf-move-badge";
+      el.style.cssText = "position:fixed;left:8px;bottom:8px;z-index:2147483647;background:#111111;color:#ffffff;font:700 14px Segoe UI,sans-serif;padding:8px 10px;border-radius:8px;max-width:420px;";
+      document.documentElement.appendChild(el);
+    }
+    el.textContent = text;
+  }
+
   async function waitForMoveReady() {
     const start = Date.now();
-    while (Date.now() - start < 15000) {
+    while (Date.now() - start < 20000) {
       noteMoveLanded();
       const text = moveScreenText();
+      if (/scan was unsuccessful/i.test(text)) {
+        paintMoveBadge("Clearing the last unsuccessful scan");
+        moveClickButton("Continue");
+        await sleep(400);
+        continue;
+      }
       if (movePageReady(location.href, document.title, text, document.readyState)) {
+        paintMoveBadge("Scan source pallet is ready");
+        try { pageWindow.focus(); } catch { /* The browser kept this tab in the background. */ }
         await sleep(300);
         return { ok: true, detail: clip(moveScreenText(), 240) };
       }
+      paintMoveBadge("Waiting for Scan source pallet");
       await sleep(200);
     }
     return {
@@ -2672,8 +2714,11 @@
   }
 
   async function performDropzone(container, dropzone) {
+    rememberDropzone({ container, dropzone, step: "waiting" });
     const ready = await waitForMoveReady();
     if (!ready.ok) return ready;
+    rememberDropzone({ container, dropzone, step: "scanning" });
+    paintMoveBadge("Scanning " + container);
     const beforeRaw = moveScreenText();
     await burstMoveScan(container);
     const first = await waitForMoveToken(beforeRaw, container);
@@ -2699,6 +2744,9 @@
           .sort((a, b) => Number(a.n) - Number(b.n));
         if (!jobs.length) break;
         const job = jobs[0];
+        const claim = GM_getValue("plf.dropzoneClaim", null);
+        if (claim && Number(claim.n) === Number(job.n) && Date.now() - (Number(claim.t) || 0) < 25000) break;
+        GM_setValue("plf.dropzoneClaim", { n: Number(job.n), t: Date.now() });
         let result = { ok: false, error: "Dropzone failed" };
         try {
           result = await performDropzone(job.container, job.dropzone);
@@ -2726,12 +2774,18 @@
       moveWorkerStarted = true;
       const beat = () => {
         noteMoveLanded();
-        if (!moveIsScanPage(location.href, document.title)) return;
         GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
+        const text = moveScreenText();
+        paintMoveBadge(movePageReady(location.href, document.title, text, document.readyState) ? "Dropzone ready" : "Dropzone waiting for the scan screen");
       };
       beat();
       setInterval(beat, HEARTBEAT_MS);
+      setInterval(() => drainDropzones(), 1000);
       GM_addValueChangeListener(KEYS.dropzoneQueue, () => {
+        drainDropzones();
+      });
+      GM_addValueChangeListener(KEYS.dropzoneNudge, () => {
+        try { pageWindow.focus(); } catch { /* The browser kept this tab in the background. */ }
         drainDropzones();
       });
     }
@@ -4481,7 +4535,7 @@
       if (accept && offer) {
         const dropped = enqueueBackgroundDropzone(offer.container, offer.dropzone);
         if (dropped) {
-          paintDropzoneStatus(`Queued ${dropped.container} → ${dropped.dropzone}`);
+          paintDropzoneStatus(moveFresh() ? `Queued ${dropped.container} → ${dropped.dropzone}` : `Opening Move App for ${dropped.container}`);
           ensureMoveTab();
         }
       }
@@ -5056,15 +5110,13 @@
   if (isMoveApp && isTop) {
     const bootMove = () => {
       if (!document.documentElement) return;
-      noteMoveLanded();
+      startMoveDropzoneWorker();
       if (!moveIsScanPage(location.href, document.title || "pending")) {
         if (!bootMove.sent) {
           bootMove.sent = true;
           location.assign(MOVE_URL);
         }
-        return;
       }
-      startMoveDropzoneWorker();
     };
     bootMove();
     [400, 1200, 3000].forEach((ms) => setTimeout(bootMove, ms));
