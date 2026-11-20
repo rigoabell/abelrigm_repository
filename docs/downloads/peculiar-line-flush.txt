@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.54
+// @version      2.9.55
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -54,7 +54,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.54";
+  const VERSION = "2.9.55";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2689,6 +2689,7 @@
     const body = document.body || document.documentElement;
     const active = moveDeepActive(document);
     if (!active || active === body || active === document.documentElement) return body;
+    if (active.closest?.("#dz-batch-panel, [id^='plf-']")) return body;
     const label = cellText(active.innerText || active.getAttribute?.("aria-label") || "").toLowerCase();
     const tag = String(active.tagName || "").toLowerCase();
     const menu = tag === "button" || tag === "a" || active.getAttribute?.("role") === "button" || /\bmenu\b/.test(label);
@@ -2763,6 +2764,33 @@
       document.documentElement.appendChild(el);
     }
     el.textContent = text;
+    const status = document.getElementById("dz-status");
+    if (status) status.textContent = text;
+  }
+
+  function mountMoveBatchPanel(container, dropzone) {
+    const paint = () => {
+      if (!document.documentElement) return;
+      if (!document.getElementById("dz-batch-style")) {
+        const style = document.createElement("style");
+        style.id = "dz-batch-style";
+        style.textContent = "#dz-batch-panel{position:fixed;top:16px;right:16px;width:400px;z-index:2147483646;color:#e8edf5;background:#12151c;border:1px solid #2c3340;border-radius:12px;box-shadow:0 16px 40px rgba(0,0,0,.45);font:13px/1.4 Segoe UI,sans-serif}#dz-batch-panel header{display:flex;align-items:center;gap:8px;padding:10px 12px;background:#1b212c;border-bottom:1px solid #2c3340;border-radius:12px 12px 0 0}#dz-batch-panel header b{font-size:14px}#dz-batch-panel .dz-ver{color:#93a0b4;font-size:11px}#dz-batch-panel .dz-body{display:flex;flex-direction:column;gap:8px;padding:12px}#dz-batch-panel label{color:#93a0b4;font-size:11px;font-weight:700}#dz-batch-panel input,#dz-batch-panel textarea{width:100%;padding:8px;color:#e8edf5;background:#0e1116;border:1px solid #334155;border-radius:8px;font:inherit}#dz-batch-panel textarea{min-height:72px;font-family:ui-monospace,Consolas,monospace}#dz-batch-panel .dz-status{min-height:2.6em}";
+        document.documentElement.appendChild(style);
+      }
+      let panel = document.getElementById("dz-batch-panel");
+      if (!panel) {
+        panel = document.createElement("div");
+        panel.id = "dz-batch-panel";
+        panel.innerHTML = "<header><b>Dropzone Batch</b><span class=\"dz-ver\">running</span></header><div class=\"dz-body\"><label>Dropzone</label><input id=\"dz-dropzone\" type=\"text\" readonly><label>Containers</label><textarea id=\"dz-containers\" readonly></textarea><div class=\"dz-status\" id=\"dz-status\">Starting the scan.</div></div>";
+        (document.body || document.documentElement).appendChild(panel);
+      }
+      const dz = document.getElementById("dz-dropzone");
+      const box = document.getElementById("dz-containers");
+      if (dz && dropzone) dz.value = dropzone;
+      if (box && container) box.value = container;
+    };
+    paint();
+    if (!document.body) document.addEventListener("DOMContentLoaded", paint, { once: true });
   }
 
   function moveWorkflowChoices() {
@@ -2933,9 +2961,11 @@
   }
 
   async function performDropzone(container, dropzone) {
+    mountMoveBatchPanel(container, dropzone);
     rememberDropzone({ container, dropzone, step: "waiting" });
     const ready = await waitForMoveReady();
     if (!ready.ok) return ready;
+    paintMoveBadge("1/1 scan container " + container);
     rememberDropzone({ container, dropzone, step: "tote" });
     const beforeRaw = moveScreenText();
     await burstMoveScan(container, container);
@@ -2943,6 +2973,7 @@
     paintMoveBadge(first.ok ? "Tote accepted: " + container : "Tote was sent: " + container);
     await sleep(200);
     const midRaw = moveScreenText();
+    paintMoveBadge("1/1 scan dropzone " + dropzone);
     rememberDropzone({ container, dropzone, step: "dropzone" });
     await burstMoveScan(dropzone, dropzone);
     const second = await waitForMoveToken(midRaw, dropzone);
@@ -3016,6 +3047,11 @@
       const beat = () => {
         noteMoveLanded();
         GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
+        const pack = GM_getValue(KEYS.dropzoneQueue, null);
+        const cursor = Number(GM_getValue(KEYS.dropzoneCursor, 0)) || 0;
+        const job = (Array.isArray(pack?.jobs) ? pack.jobs : []).find((item) => item && Number(item.n) > cursor);
+        if (job) mountMoveBatchPanel(job.container, job.dropzone);
+        if (drainDropzones.working) return;
         const text = moveScreenText();
         paintMoveBadge(movePageReady(location.href, document.title, text, document.readyState) ? "Ready to scan a container" : "Move App is open");
       };
