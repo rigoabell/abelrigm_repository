@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.11\.12/);
+assert.match(src, /@version\s+1\.11\.13/);
 assert.match(src, /if \(shown >= 19\) return '#2ea043'/);
 assert.match(src, /if \(shown >= 16\) return '#d29922'/);
 assert.match(src, /data-mem3-enter-notes/);
@@ -160,9 +160,9 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.11.12");
-assert.match(entry.detail, /stayed off the board for the last 3 seconds/);
-assert.match(entry.detail, /button's own handler/);
+assert.equal(entry.version, "1.11.13");
+assert.match(entry.detail, /stays on the board the same as unassigning by hand/);
+assert.match(entry.detail, /Customer returns 1st Half: Station 1-04 \| 2nd Half: Station 1-76/);
 assert.match(entry.detail, /no longer at the station they were marked from/);
 assert.match(entry.detail, /red below 16/);
 assert.match(entry.detail, /View Notes/);
@@ -312,7 +312,7 @@ const patched = src.replace(
         },
         setDown(value) { FCLM_DOWN = value; },
         showUpdate(remote) { showUpdatePrompt(remote); },
-        shiftId, parseLeaveTime, addLeaving, dueLeaving, noteBack, markTakenOff, cleanStationText, customerReturnsLines,
+        shiftId, parseLeaveTime, addLeaving, dueLeaving, noteBack, markTakenOff, cleanStationText, customerReturnsLines, customerReturnsCopy,
         blendMediumLarge, overallRate, bodyColumn, sizePair, excludedFromBigsIdle, placeBesideLogin, extremeRanks, uphHighlight, uphColor,
         stationDisabled(row) { return stationIsDisabled(row); },
         stop() {
@@ -874,6 +874,10 @@ try {
         JSON.stringify(["Customer Returns", "1st Half: Station 4-20", "2nd Half: Station 4-22"])
     );
     assert.equal(api.customerReturnsLines("CRET BIGS Processor Station 8-24"), null);
+    assert.equal(
+        api.customerReturnsCopy(api.customerReturnsLines("Customer Returns 1st Half: Station 1-04 | 2nd Half: Station 1-76")),
+        "Customer returns 1st Half: Station 1-04 | 2nd Half: Station 1-76"
+    );
     const openStation = stationTable([
         ["Customer Returns 1st Half: Station 3-06 | 2nd Half: Station 3-70", ""]
     ]).querySelector("tbody tr");

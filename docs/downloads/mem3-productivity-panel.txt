@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.11.12
+// @version      1.11.13
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.11.12';
+    const SCRIPT_VERSION = '1.11.13';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -2231,6 +2231,35 @@
         ];
     }
 
+    function customerReturnsCopy(lines) {
+        if (!lines || lines.length < 3) return '';
+        return 'Customer returns ' + lines[1] + ' | ' + lines[2];
+    }
+
+    function armStationCopy(block) {
+        if (!block || block.getAttribute('data-mem3-copy') === '1') return;
+        block.setAttribute('data-mem3-copy', '1');
+        block.style.cursor = 'pointer';
+        if (!block.title) block.title = 'Click to copy';
+        block.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            const text = block.getAttribute('data-copy') || '';
+            if (!text) return;
+            copyText(text).then(function () {
+                block.title = 'Copied';
+                setTimeout(function () {
+                    if (block.title === 'Copied') block.title = 'Click to copy';
+                }, 1200);
+            }).catch(function () {
+                block.title = 'Copy failed';
+                setTimeout(function () {
+                    if (block.title === 'Copy failed') block.title = 'Click to copy';
+                }, 1500);
+            });
+        });
+    }
+
     function findStationNode(root) {
         let best = null;
         function visit(el) {
@@ -2357,6 +2386,7 @@
         const lines = customerReturnsLines(textSkipping(source, 'mem3-cr-station'));
         if (!lines) return;
         const sig = lines.join('\n');
+        const copyValue = customerReturnsCopy(lines);
         let block = source.nextElementSibling;
         if (!block || String(block.className || '').indexOf('mem3-cr-station') === -1) {
             const parent = source.parentElement || cell;
@@ -2372,7 +2402,11 @@
         const hiddenOk = source !== cell && source.getAttribute && source.getAttribute('data-mem3-cr-hidden') === '1';
         const flatOk = source === cell && cell.getAttribute && cell.getAttribute('data-mem3-cr-flat') === '1';
         pinAssignmentColumn(cell);
-        if (block && block.getAttribute('data-sig') === sig && (hiddenOk || flatOk)) return;
+        if (block && block.getAttribute('data-sig') === sig && (hiddenOk || flatOk)) {
+            block.setAttribute('data-copy', copyValue);
+            armStationCopy(block);
+            return;
+        }
         if (!block) {
             block = document.createElement('div');
             block.className = 'mem3-cr-station';
@@ -2385,10 +2419,12 @@
         }
         block.className = 'mem3-cr-station';
         block.setAttribute('data-sig', sig);
+        block.setAttribute('data-copy', copyValue);
         block.style.cssText = 'display:flex; flex-direction:column; align-items:flex-start; gap:1px; ' +
-            'line-height:1.3;';
+            'line-height:1.3; cursor:pointer;';
         copyStationFont(source, block);
         fillStationBlock(block, lines);
+        armStationCopy(block);
         if (source !== cell) hideStationSource(source);
         else {
             const kids = cell.children || [];
@@ -10193,11 +10229,19 @@
         info.appendChild(loginLine);
         const station = looksLikeLogin(who) ? stationForLogin(who) : '';
         const stationLines = leavingStationLines(station);
+        const stationCopy = customerReturnsCopy(stationLines);
+        const stationHost = stationCopy ? document.createElement('div') : info;
+        if (stationCopy) {
+            stationHost.setAttribute('data-copy', stationCopy);
+            stationHost.style.cursor = 'pointer';
+            armStationCopy(stationHost);
+            info.appendChild(stationHost);
+        }
         for (let i = 0; i < stationLines.length; i++) {
             const line = document.createElement('div');
             line.textContent = stationLines[i];
             line.style.cssText = 'font-size:12px; line-height:1.35; color:#ffffff;';
-            info.appendChild(line);
+            stationHost.appendChild(line);
         }
         head.appendChild(info);
         const timeRow = document.createElement('div');
