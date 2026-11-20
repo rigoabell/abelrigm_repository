@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.48
+// @version      2.9.49
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -51,7 +51,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.48";
+  const VERSION = "2.9.49";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2609,11 +2609,13 @@
 
   function moveKeyCode(ch) {
     if (ch === "Enter") return 13;
+    if (ch === "Escape") return 27;
     if (/^[a-zA-Z]$/.test(ch)) return ch.toUpperCase().charCodeAt(0);
     return ch.charCodeAt(0);
   }
 
   function moveKeyName(ch) {
+    if (ch === "Escape") return "Escape";
     if (/^[a-zA-Z]$/.test(ch)) return "Key" + ch.toUpperCase();
     if (/^[0-9]$/.test(ch)) return "Digit" + ch;
     if (ch === "-" || ch === "_") return "Minus";
@@ -2624,7 +2626,8 @@
   function fireMoveKey(target, ch) {
     const view = target.ownerDocument?.defaultView || pageWindow;
     const keyCode = moveKeyCode(ch);
-    ["keydown", "keypress", "keyup"].forEach((type) => {
+    const types = ch === "Escape" ? ["keydown", "keyup"] : ["keydown", "keypress", "keyup"];
+    types.forEach((type) => {
       const keypress = type === "keypress";
       const init = {
         key: ch,
@@ -2674,24 +2677,31 @@
     el.dispatchEvent(new view.Event("change", { bubbles: true }));
   }
 
-  function moveBurstTarget() {
-    const docs = [];
+  function moveMenuOpen() {
+    let open = false;
     moveEachRoot((root) => {
-      const doc = root.nodeType === 9 ? root : root.ownerDocument;
-      if (doc && docs.indexOf(doc) === -1) docs.push(doc);
+      if (open || !root.querySelectorAll) return;
+      root.querySelectorAll("fc-menu, [role='menu'], [class*='fc-menu'], [class*='fcmenu'], [id*='fcmenu']").forEach((el) => {
+        if (moveVisible(el)) open = true;
+      });
     });
-    if (docs.indexOf(document) === -1) docs.unshift(document);
-    let fallback = document.body || document.documentElement;
-    for (const doc of docs) {
-      const el = moveDeepActive(doc);
-      if (!el || moveOwnUi(el)) continue;
-      if (el === doc.body || el === doc.documentElement) {
-        fallback = el;
-        continue;
-      }
-      return el;
+    return open;
+  }
+
+  function moveBurstTarget() {
+    const body = document.body || document.documentElement;
+    const active = moveDeepActive(document);
+    try {
+      if (active && active !== body && active.blur) active.blur();
+    } catch {
+      /* The focused control can stay. The keys still go to the page. */
     }
-    return fallback;
+    try {
+      body.focus();
+    } catch {
+      /* The page body cannot take focus. The keys still go to it. */
+    }
+    return body;
   }
 
   async function burstMoveScan(text, label) {
@@ -2700,6 +2710,11 @@
     paintMoveBadge("Sending " + name);
     const target = moveBurstTarget();
     if (!target) return;
+    if (moveMenuOpen()) {
+      paintMoveBadge("Closing the menu");
+      fireMoveKey(target, "Escape");
+      await sleep(200);
+    }
     for (const ch of [...Array.from(code), "Enter"]) fireMoveKey(target, ch);
   }
 
@@ -5314,13 +5329,14 @@
     const bootMove = () => {
       if (!document.documentElement) return;
       startMoveDropzoneWorker();
-      let onMoveHost = false;
+      let onScan = false;
       try {
-        onMoveHost = /aft-moveapp/i.test(new URL(location.href).hostname);
+        const parsed = new URL(location.href);
+        onScan = /aft-moveapp/i.test(parsed.hostname) && /\/move-container(?:\/|$)/i.test(parsed.pathname);
       } catch {
-        onMoveHost = false;
+        onScan = false;
       }
-      if (onMoveHost && !/404|not found/i.test(document.title)) return;
+      if (onScan && !/404|not found/i.test(document.title)) return;
       if (!bootMove.sent) {
         bootMove.sent = true;
         location.assign(MOVE_URL);
