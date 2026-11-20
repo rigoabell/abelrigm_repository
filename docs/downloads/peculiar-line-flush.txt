@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.52
+// @version      2.9.53
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -54,13 +54,13 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.52";
+  const VERSION = "2.9.53";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
   const OLD_SCRIPT_NAME = "Peculiar Inventory Scan Panel";
   const PECULIAR_URL = "https://aft-aging-inventory.na.aftx.amazonoperations.app/MEM3/overview";
-  const MOVE_URL = "https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=400";
+  const MOVE_URL = "https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=200";
   const SP_SITE = "https://amazon-my.sharepoint.com/personal/abelrigm_amazon_com";
   const SOS_FOLDER =
     "/personal/abelrigm_amazon_com/Documents/IOL Assignments/Line Flush Records";
@@ -5349,7 +5349,9 @@
       let onScan = false;
       try {
         const parsed = new URL(location.href);
-        onScan = /aft-moveapp/i.test(parsed.hostname) && /\/move-container(?:\/|$)/i.test(parsed.pathname);
+        onScan = /aft-moveapp/i.test(parsed.hostname)
+          && /\/move-container(?:\/|$)/i.test(parsed.pathname)
+          && parsed.searchParams.get("jobId") === "200";
       } catch {
         onScan = false;
       }
