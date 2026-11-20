@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.9.46
+// @version      2.9.47
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -51,7 +51,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.9.46";
+  const VERSION = "2.9.47";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2406,10 +2406,9 @@
     if (!moveIsScanPage(href, title)) return false;
     if (readyState && readyState !== "complete") return false;
     const screen = String(text || "");
-    if (/scan was unsuccessful|not of appropriate type|scan a pallet|scan source pallet|scan destination pallet/i.test(screen)) return false;
-    const askingSource = /scan source container|scan the container|scan source(?!\s+pallet)/i.test(screen);
-    if (/scan destination/i.test(screen) && !askingSource) return false;
-    return askingSource || /waiting for scan/i.test(screen);
+    if (/scan was unsuccessful|not of appropriate type|scan a pallet/i.test(screen)) return false;
+    if (/scan destination/i.test(screen) && !/scan source/i.test(screen)) return false;
+    return /scan source|waiting for scan/i.test(screen);
   }
 
   function moveStatusNoise(text) {
@@ -2676,26 +2675,29 @@
   }
 
   function moveBurstTarget() {
-    const body = document.body || document.documentElement;
-    const active = document.activeElement;
-    try {
-      if (active && active !== body && active.blur) active.blur();
-    } catch {
-      /* Focus can stay where it is. The keys still go to the page. */
+    const docs = [];
+    moveEachRoot((root) => {
+      const doc = root.nodeType === 9 ? root : root.ownerDocument;
+      if (doc && docs.indexOf(doc) === -1) docs.push(doc);
+    });
+    if (docs.indexOf(document) === -1) docs.unshift(document);
+    let fallback = document.body || document.documentElement;
+    for (const doc of docs) {
+      const el = moveDeepActive(doc);
+      if (!el || moveOwnUi(el)) continue;
+      if (el === doc.body || el === doc.documentElement) {
+        fallback = el;
+        continue;
+      }
+      return el;
     }
-    try {
-      body.focus();
-    } catch {
-      /* The page body cannot take focus. The keys still go to it. */
-    }
-    return body;
+    return fallback;
   }
 
   async function burstMoveScan(text, label) {
     const code = cellText(text);
     const name = label || code;
     paintMoveBadge("Sending " + name);
-    await sleep(800);
     const target = moveBurstTarget();
     if (!target) return;
     for (const ch of [...Array.from(code), "Enter"]) fireMoveKey(target, ch);
@@ -2871,12 +2873,12 @@
         return { ok: false, error: "Page is showing a scan error", detail: clip(text, 240) };
       }
       if (movePageReady(location.href, document.title, text, document.readyState)) {
-        paintMoveBadge("Container scan is ready");
+        paintMoveBadge("Scan screen is ready");
         try { pageWindow.focus(); } catch { /* The browser kept this tab in the background. */ }
         await sleep(300);
         return { ok: true, detail: clip(moveScreenText(), 240) };
       }
-      paintMoveBadge("Waiting for a container scan");
+      paintMoveBadge("Waiting for the scan screen");
       await sleep(200);
     }
     return {
@@ -2913,8 +2915,6 @@
 
   async function performDropzone(container, dropzone) {
     rememberDropzone({ container, dropzone, step: "waiting" });
-    const switched = await moveLeavePalletWorkflow();
-    if (switched?.switching || switched?.ok === false) return switched;
     const ready = await waitForMoveReady();
     if (!ready.ok) return ready;
     rememberDropzone({ container, dropzone, step: "scanning" });
@@ -2925,10 +2925,6 @@
     if (!first.ok) return { ok: false, error: first.error || "Page did not show " + container, detail: first.detail || "" };
     await sleep(200);
     const midRaw = moveScreenText();
-    if (!/scan destination/i.test(midRaw)) {
-      paintMoveBadge("Stopped. The page did not ask for a destination.");
-      return { ok: false, error: "Page did not ask for a destination", detail: clip(midRaw, 240) };
-    }
     await burstMoveScan(dropzone, "destination " + dropzone);
     const second = await waitForMoveToken(midRaw, dropzone);
     paintMoveBadge(second.ok ? "Destination accepted: " + dropzone : "Destination stopped: " + (second.error || "not accepted"));
