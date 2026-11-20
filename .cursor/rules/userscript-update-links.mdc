@@ -1,0 +1,18 @@
+---
+description: When a Tampermonkey userscript is updated, give the new script link and the links where existing installs must be pasted.
+globs: docs/downloads/**/*.{txt,user.js}
+alwaysApply: false
+---
+
+When a userscript version changes, end the reply with both of these. Do this every time, including when the files are already on main.
+
+1. New script link. The raw URL of the `.user.js` that Tampermonkey installs, on `main` once that file is there:
+   `https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/<file>.user.js`
+   If it is not on `main` yet, give the branch raw URL that returns the file now, and say when the `main` link starts working.
+
+2. Paste-in links. These are the places copies already installed still check. Name the page to open and the file to replace:
+   - Productivity Panel: https://gist.github.com/rigoabell/60993861e496361e9d79fd5465de2973 — replace `MEM3-Productivity-Panel.user.js`
+   - Peculiar Line Flush: https://github.com/rigoabell/peculiar-line-flush — replace `peculiar-line-flush.user.js` on `main`
+   - Any other script: use the `@updateURL` that the previously published copy checks, even if this repository's copy now points somewhere else.
+
+People on an older install do not see a new version until the file at their old update link is replaced. Say that when those paste-in links were not updated.
