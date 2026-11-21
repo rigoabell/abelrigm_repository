@@ -148,13 +148,13 @@ function auditPage() {
 test("catalog entry matches the script", () => {
   assert.equal(src, pasted);
   assert.equal(src.includes("innerHTML"), false);
-  assert.match(src, /@version\s+1\.6\.0/);
+  assert.match(src, /@version\s+1\.7\.0/);
   assert.match(src, /@match\s+https:\/\/ont-base\.corp\.amazon\.com\/\*/);
   assert.match(src, /ont-piles-audit-workspace\.user\.js/);
 
   const entry = catalog.find((item) => item.id === "ont-piles-audit-workspace");
   assert.ok(entry);
-  assert.equal(entry.version, "1.6.0");
+  assert.equal(entry.version, "1.7.0");
   assert.equal(entry.category, "ONT Base");
   assert.equal(entry.file, "downloads/ont-piles-audit-workspace.txt");
   assert.equal(entry.downloadName, "ONT Base Piles Audit Workspace (abelrigm).txt");
@@ -165,7 +165,7 @@ test("catalog entry matches the script", () => {
   assert.match(entry.detail, /pallet 20/);
   assert.match(entry.detail, /tote 5/);
   assert.equal(fs.existsSync(new URL("docs/" + entry.file, root)), true);
-  assert.equal(piles.VERSION, "1.6.0");
+  assert.equal(piles.VERSION, "1.7.0");
 
   const projects = catalog.length + 1;
   assert.match(index, new RegExp(projects + "</span><span class=\"qn-label\">Portfolio projects"));
@@ -216,6 +216,11 @@ test("workspace sits between the header cell and the two pile cards", () => {
   assert.equal(bodyRows.length, 4);
   assert.equal(bodyRows[0].children.length, 9);
   assert.equal(bodyRows[0].children[0].textContent, "Problem Solve");
+  assert.equal(bodyRows[0].children[3].children.length, 0);
+  assert.equal(bodyRows[1].children[3].children.length, 0);
+  assert.equal(bodyRows[2].children[3].children.length, 1);
+  assert.equal(flat.includes("Shuttles count on Add Ins only."), false);
+  assert.equal(flat.includes("These stay out of the total."), false);
   assert.equal(bodyRows[3].children[0].textContent, "Total");
   assert.equal(bodyRows[3].children.length, 9);
   assert.equal(surface.attrs["data-work-surface"], "1");
