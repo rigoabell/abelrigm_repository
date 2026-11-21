@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.8
+// @version      1.12.9
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.8';
+    const SCRIPT_VERSION = '1.12.9';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -10966,15 +10966,16 @@
     }
 
     function extendedListPhoto(login, empId) {
-        const photoPx = 42;
         const ringPx = 4;
         const wrap = document.createElement('div');
-        wrap.style.cssText = 'flex:0 0 auto; padding:' + ringPx + 'px; line-height:0;';
+        wrap.style.cssText = 'flex:0 0 auto; align-self:stretch; display:flex; align-items:stretch; ' +
+            'box-sizing:border-box; padding:' + ringPx + 'px 0; line-height:0;';
         const photo = document.createElement('div');
         photo.setAttribute('data-mem3-extended-photo', '1');
         const url = photoForLogin(login) || (empId ? photoForEmp(empId) : '');
-        photo.style.cssText = 'position:relative; width:' + photoPx + 'px; height:' + photoPx + 'px; ' +
-            'border-radius:50%; background:#21262d center/cover no-repeat;';
+        photo.style.cssText = 'position:relative; align-self:stretch; aspect-ratio:1; width:auto; height:auto; ' +
+            'min-width:42px; min-height:42px; box-sizing:border-box; border-radius:50%; ' +
+            'background:#21262d center/cover no-repeat;';
         if (url) photo.style.backgroundImage = 'url("' + String(url).replace(/"/g, '') + '")';
         const person = empId ? personForEmp(empId) : null;
         const ident = IDENTITY.byLogin[String(login || '').trim().toLowerCase()] || null;
@@ -11096,7 +11097,7 @@
         for (let i = 0; i < rows.length; i++) {
             const copy = rows[i];
             const line = document.createElement('div');
-            line.style.cssText = 'display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-top:1px solid #30363d;';
+            line.style.cssText = 'display:flex; gap:8px; align-items:stretch; padding:6px 0; border-top:1px solid #30363d;';
             const empId = breakRowEmpId(copy);
             line.appendChild(extendedListPhoto(copy.login || '', empId));
             const label = document.createElement('div');
@@ -11119,7 +11120,7 @@
                 const view = document.createElement('button');
                 view.type = 'button';
                 view.textContent = 'Engagement';
-                view.style.cssText = 'flex:0 0 auto; padding:4px 8px; border-radius:6px; border:1px solid #8b949e; ' +
+                view.style.cssText = 'flex:0 0 auto; align-self:center; padding:4px 8px; border-radius:6px; border:1px solid #8b949e; ' +
                     'background:#0d1117; color:#fff; font:800 11px Segoe UI,system-ui,sans-serif; cursor:pointer;';
                 view.addEventListener('click', function (event) {
                     event.preventDefault();

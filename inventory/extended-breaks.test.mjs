@@ -133,6 +133,7 @@ assert.equal(src.includes("min idle"), false);
 assert.match(src, /function pendingBreakIds/);
 assert.match(src, /function queueMissingBreaks/);
 assert.match(src, /data-mem3-extended-photo/);
+assert.match(src, /align-self:stretch; aspect-ratio:1/);
 assert.match(src, /Open FCLM details/);
 assert.match(src, /fclmEmpUrl\(empId, 'all'\)/);
 assert.match(src, /data-break-minutes/);
