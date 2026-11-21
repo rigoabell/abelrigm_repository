@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.10.2
+// @version      2.10.3
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -54,7 +54,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.10.2";
+  const VERSION = "2.10.3";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -154,6 +154,54 @@
     isTop = pageWindow.top === pageWindow.self;
   } catch {
     isTop = false;
+  }
+  function patchMoveKeyListeners(win) {
+    let proto;
+    try {
+      proto = win.EventTarget && win.EventTarget.prototype;
+    } catch {
+      return;
+    }
+    if (!proto || proto.__plfMovePatched || typeof proto.addEventListener !== "function") return;
+    const wrapMap = new WeakMap();
+    const origAdd = proto.addEventListener;
+    const origRemove = proto.removeEventListener;
+    const keyEvents = new Set(["keydown", "keypress", "keyup"]);
+    try {
+      proto.addEventListener = function(type, listener, options) {
+        if (!listener || !keyEvents.has(type)) return origAdd.call(this, type, listener, options);
+        let wrapped = wrapMap.get(listener);
+        if (!wrapped) {
+          wrapped = function(event) {
+            try {
+              const target = event && event.target;
+              if (target && typeof target.closest === "function" && target.closest("#dz-batch-panel, [id^='plf-']")) return;
+            } catch {
+              /* Deliver the event. */
+            }
+            if (typeof listener === "function") return listener.apply(this, arguments);
+            if (listener && typeof listener.handleEvent === "function") return listener.handleEvent(event);
+          };
+          try {
+            wrapMap.set(listener, wrapped);
+          } catch {
+            return origAdd.call(this, type, listener, options);
+          }
+        }
+        return origAdd.call(this, type, wrapped, options);
+      };
+      proto.removeEventListener = function(type, listener, options) {
+        const wrapped = listener ? wrapMap.get(listener) : null;
+        return origRemove.call(this, type, wrapped || listener, options);
+      };
+      proto.__plfMovePatched = true;
+    } catch {
+      /* The page locked its event prototype. The scan still runs. */
+    }
+  }
+  if (isMoveApp && isTop) {
+    patchMoveKeyListeners(window);
+    try { patchMoveKeyListeners(pageWindow); } catch { /* This frame has no page window. */ }
   }
   let onScanKey = null;
   let restoreScanFocus = null;
@@ -2487,14 +2535,55 @@
     return clock - stamp >= MOVE_CHECK_MS;
   }
 
-  function moveDropAccepted(before, after, _token, container) {
+  function moveBatchBadPhrase(before, after) {
+    const needles = [
+      "invalid",
+      "not found",
+      "unknown barcode",
+      "unsuccessful",
+      "not be moved",
+      "can not",
+      "cannot",
+      "can't",
+      "does not",
+      "doesn't",
+      "unrecognized",
+      "no such",
+      "already scanned",
+      "try a different",
+      "try again",
+      "failed",
+      "error",
+      "unknown",
+    ];
+    const prev = String(before || "").toLowerCase();
+    const next = String(after || "").toLowerCase();
+    for (const phrase of needles) {
+      if (next.includes(phrase) && !prev.includes(phrase)) return phrase;
+    }
+    return "";
+  }
+
+  function moveBatchContainerAccepted(before, after) {
+    const problem = moveScreenProblem(after);
+    if (problem) return { ok: false, error: problem };
+    const bad = moveBatchBadPhrase(before, after);
+    if (bad) return { ok: false, error: bad };
+    if (moveStableText(after) === moveStableText(before)) return { ok: false, error: "Page did not change" };
+    return { ok: true, error: "" };
+  }
+
+  function moveDropAccepted(before, after, _token, _container) {
     if (/fcmenu/i.test(String(after || ""))) return { ok: false, error: "FC Menu opened" };
     const problem = moveScreenProblem(after);
     if (problem) return { ok: false, error: problem };
-    const bad = moveBadPhrase(before, after);
+    const bad = moveBatchBadPhrase(before, after);
     if (bad) return { ok: false, error: bad };
-    if (containerJustMoved(before, after, container)) return { ok: true, error: "" };
-    return { ok: false, error: "Page did not show the container moved" };
+    if (moveStableText(after) === moveStableText(before)) return { ok: false, error: "Page did not change" };
+    if (!/move successful/i.test(after) || /move successful/i.test(before)) {
+      return { ok: false, error: "Page did not say Move Successful" };
+    }
+    return { ok: true, error: "" };
   }
 
   function moveIsScanPage(href, title) {
@@ -2844,23 +2933,24 @@
     };
   }
 
-  function moveBurstTarget() {
-    const body = document.body || document.documentElement;
-    disarmFcMenuControls();
-    const active = moveDeepActive(document);
-    if (active && active !== body && active !== document.documentElement && !moveTextField(active)) {
-      try {
-        active.blur();
-      } catch {
-        /* The focused control can stay focused. The keys still go to the page. */
+  function movePageFocus() {
+    const docs = [];
+    moveEachRoot((root) => {
+      const doc = root.nodeType === 9 ? root : root.ownerDocument;
+      if (doc && !docs.includes(doc)) docs.push(doc);
+    });
+    if (!docs.includes(document)) docs.unshift(document);
+    let fallback = document.body || document.documentElement;
+    for (const doc of docs) {
+      const el = moveDeepActive(doc);
+      if (!el || moveOwnUi(el)) continue;
+      if (el === doc.body || el === doc.documentElement) {
+        fallback = el;
+        continue;
       }
+      return el;
     }
-    try {
-      body.focus();
-    } catch {
-      /* The page body cannot take focus. The keys still go to it. */
-    }
-    return body;
+    return fallback;
   }
 
   async function burstMoveScan(text, label) {
@@ -2868,7 +2958,10 @@
     const name = label || code;
     paintMoveBadge("Sending " + name);
     try { pageWindow.focus(); } catch { /* The browser kept this tab in the background. */ }
-    const target = moveBurstTarget();
+    disarmFcMenuControls();
+    const active = document.activeElement;
+    if (moveOwnUi(active) && typeof active.blur === "function") active.blur();
+    const target = movePageFocus();
     if (!target) return;
     for (const ch of [...Array.from(code), "Enter"]) fireMoveKey(target, ch);
   }
@@ -3101,15 +3194,15 @@
       const sig = moveStableText(raw);
       const verdict = container
         ? moveDropAccepted(beforeRaw, raw, token, container)
-        : moveScanAccepted(beforeRaw, raw, token);
+        : moveBatchContainerAccepted(beforeRaw, raw);
       if (sig !== last) {
         last = sig;
         saw = true;
         stableAt = Date.now();
-      } else if (saw && stableAt && Date.now() - stableAt >= 100) {
+      } else if (saw && stableAt && Date.now() - stableAt >= 250) {
         return { ...verdict, detail: clip(raw, 240) };
       }
-      if (verdict.ok && saw && stableAt && Date.now() - stableAt >= 100) {
+      if (verdict.ok && saw && stableAt && Date.now() - stableAt >= 250) {
         return { ...verdict, detail: clip(raw, 240) };
       }
       await sleep(40);
@@ -3117,8 +3210,22 @@
     const raw = moveScreenText();
     const verdict = container
       ? moveDropAccepted(beforeRaw, raw, token, container)
-      : moveScanAccepted(beforeRaw, raw, token);
+      : moveBatchContainerAccepted(beforeRaw, raw);
     return { ...verdict, detail: clip(raw, 240) };
+  }
+
+  async function dismissMoveRejection() {
+    const before = moveStableText(moveScreenText());
+    if (!moveClickButton("Continue")) {
+      const target = movePageFocus();
+      if (target) fireMoveKey(target, "c");
+    }
+    const start = Date.now();
+    while (Date.now() - start < 2000) {
+      if (moveStableText(moveScreenText()) !== before) return true;
+      await sleep(80);
+    }
+    return false;
   }
 
   async function performDropzone(container, dropzone) {
@@ -3132,10 +3239,14 @@
     await burstMoveScan(container, container);
     const first = await waitForMoveToken(beforeRaw, container);
     paintMoveBadge(first.ok ? "Tote accepted: " + container : "Container was not scanned");
-    if (!first.ok) return { ok: false, error: "Container was not scanned", detail: first.detail || "" };
-    await sleep(400);
+    if (!first.ok) {
+      if (first.error !== "Page did not change") await dismissMoveRejection();
+      return { ok: false, error: first.error || "Container was not scanned", detail: first.detail || "" };
+    }
+    await sleep(200);
     const midRaw = moveScreenText();
     if (/move was unsuccessful|action failed/i.test(midRaw)) {
+      await dismissMoveRejection();
       return { ok: false, error: "The move failed", detail: clip(midRaw, 240) };
     }
     paintMoveBadge("1/1 scan dropzone " + dropzone);
@@ -3146,7 +3257,10 @@
     const detail = second.detail || first.detail || "";
     if (/fcmenu/i.test(location.href)) return { ok: false, error: "FC Menu opened", detail };
     if (!moveIsScanPage(location.href, document.title)) return { ok: false, error: "Left the scan page", detail };
-    if (!second.ok) return { ok: false, error: second.error || "Page did not show " + dropzone, detail };
+    if (!second.ok) {
+      if (second.error !== "Page did not change") await dismissMoveRejection();
+      return { ok: false, error: second.error || "Page did not say Move Successful", detail };
+    }
     return { ok: true, error: "", detail };
   }
 

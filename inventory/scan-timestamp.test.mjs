@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, priorOuterLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveDropAccepted, moveCheckDue, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, priorOuterLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveDropAccepted, moveBatchContainerAccepted, moveCheckDue, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -193,7 +193,7 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.10\.2/);
+assert.match(src, /@version\s+2\.10\.3/);
 assert.match(src, /Container was not scanned/);
 assert.match(src, /function blockFcMenuOpen/);
 assert.match(src, /function moveDropAccepted/);
@@ -207,7 +207,7 @@ assert.match(src, /move-container\?jobId=200/);
 assert.equal(src.includes("jobId=400"), false);
 assert.match(src, /@include\s+\/\^https:\\\/\\\/fcmenu-\[a-z0-9-\]\+\\\.corp\\\.amazon\\\.com/);
 assert.match(src, /@match\s+https:\/\/fcmenu-iad-regionalized\.corp\.amazon\.com\/\*/);
-assert.match(src, /function moveBurstTarget/);
+assert.match(src, /function movePageFocus/);
 assert.equal(api.backgroundDropzone(false, "dzA", "ts1"), null);
 assert.equal(api.backgroundDropzone(true, "", "ts1"), null);
 const zoneJob = api.backgroundDropzone(true, " dzA ", " ts1 ");
@@ -283,6 +283,10 @@ assert.equal(api.moveDropAccepted("Scan container to move tsAUD145501", moved, "
 assert.equal(api.moveDropAccepted(moved, moved + " 2:22 PM", "dz-P-CR-EOL", "tsAUD145501").ok, false);
 assert.equal(api.moveDropAccepted("Scan container to move tsAUD145501", moved + " https://fcmenu-iad-regionalized.corp.amazon.com/", "dz-P-CR-EOL", "tsAUD145501").ok, false);
 assert.equal(api.moveDropAccepted("Scan container to move", "milesele MenumContainertsX0mx1jvvmdz-P-CR-EOL", "dz-P-CR-EOL", "tsX0mx1jvvm").ok, false);
+assert.equal(api.moveDropAccepted("Scan container to move", "Move Successful: Scan another container", "dz-P-CR-EOL", "tsX0mx1jvvm").ok, true);
+assert.equal(api.moveBatchContainerAccepted("Scan container to move", "Scan container to move tsX0mx1jvvm").ok, true);
+assert.equal(api.moveBatchContainerAccepted("Scan container to move", "Scan container to move").ok, false);
+assert.equal(api.moveBatchContainerAccepted("ready", "ready invalid container").ok, false);
 assert.equal(api.moveCheckDue(0, 60 * 60 * 1000), true);
 assert.equal(api.moveCheckDue(1_000, 1_000 + 59 * 60 * 1000), false);
 assert.equal(api.moveCheckDue(1_000, 1_000 + 60 * 60 * 1000), true);
