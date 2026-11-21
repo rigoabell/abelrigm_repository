@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dropzone Batch (abelrigm)
 // @namespace    https://github.com/rigoabell/abelrigm_repository
-// @version      0.2.4
+// @version      0.2.5
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/dropzone-batch.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/dropzone-batch.user.js
 // @description  Paste containers and one dropzone. Sends each container, then that dropzone, as a scan-gun burst.
@@ -21,7 +21,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.2.4';
+  const VERSION = '0.2.5';
   const PANEL_ID = 'dz-batch-panel';
   const SCAN_STRATEGY = 'focus';
   const SCAN_SUFFIX = 'Enter';
@@ -1107,6 +1107,20 @@
     updateCount();
   }
 
+  function clearContainers() {
+    const box = document.getElementById('dz-containers');
+    if (!box) return;
+    if (running) {
+      generation += 1;
+      running = false;
+      setRunning(false);
+    }
+    box.value = '';
+    persistForm();
+    updateCount();
+    setStatus('Container list cleared.');
+  }
+
   function resetDone() {
     doneIds.clear();
     skippedIds.length = 0;
@@ -1314,6 +1328,7 @@
             <span class="dz-real" id="dz-real">No gun scan yet</span>
           </div>
           <div class="dz-foot">
+            <button type="button" class="dz-linkish" id="dz-clear">Clear list</button>
             <button type="button" class="dz-linkish" id="dz-remove">Remove finished</button>
             <button type="button" class="dz-linkish" id="dz-reset">Reset done</button>
           </div>
@@ -1332,6 +1347,7 @@
     document.getElementById('dz-stop').addEventListener('click', () => stopBatch());
     document.getElementById('dz-skip').addEventListener('click', () => requestSkip());
     document.getElementById('dz-debug').addEventListener('click', (event) => copyDebug(event.currentTarget));
+    document.getElementById('dz-clear').addEventListener('click', clearContainers);
     document.getElementById('dz-remove').addEventListener('click', removeFinished);
     document.getElementById('dz-reset').addEventListener('click', resetDone);
     document.getElementById('dz-min').addEventListener('click', () => {

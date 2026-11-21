@@ -9,7 +9,7 @@ const catalog = JSON.parse(fs.readFileSync(new URL("docs/data/tampermonkey.json"
 
 assert.equal(src, pasted);
 assert.match(src, /@name\s+Dropzone Batch \(abelrigm\)/);
-assert.match(src, /@version\s+0\.2\.4/);
+assert.match(src, /@version\s+0\.2\.5/);
 assert.match(src, /@updateURL\s+https:\/\/raw\.githubusercontent\.com\/rigoabell\/abelrigm_repository\/main\/docs\/downloads\/dropzone-batch\.user\.js/);
 assert.match(src, /@downloadURL\s+https:\/\/raw\.githubusercontent\.com\/rigoabell\/abelrigm_repository\/main\/docs\/downloads\/dropzone-batch\.user\.js/);
 assert.match(src, /top:\s*50vh/);
@@ -22,12 +22,15 @@ assert.match(src, /@match\s+https:\/\/aft-moveapp\.na\.aftx\.amazonoperations\.a
 assert.match(src, /Copy debug/);
 assert.match(src, /id="dz-debug"/);
 assert.match(src, /id="dz-skip"/);
+assert.match(src, /id="dz-clear"/);
+assert.match(src, /Clear list/);
+assert.match(src, /Container list cleared\./);
 
 const entry = catalog.find((item) => item.id === "dropzone-batch");
 assert.ok(entry);
 assert.equal(entry.name, "Dropzone Batch (abelrigm)");
 assert.equal(entry.category, "AFT");
-assert.equal(entry.version, "0.2.4");
+assert.equal(entry.version, "0.2.5");
 assert.equal(entry.file, "downloads/dropzone-batch.txt");
 assert.equal(entry.downloadName, "Dropzone Batch (abelrigm).txt");
 assert.match(entry.summary, /dropzone/);
