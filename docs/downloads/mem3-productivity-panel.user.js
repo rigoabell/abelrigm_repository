@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.15
+// @version      1.12.16
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.15';
+    const SCRIPT_VERSION = '1.12.16';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -3934,11 +3934,13 @@
     function moveCursorTip(x, y) {
         const tip = cursorTipEl();
         tip.style.display = 'block';
-        let left = x + 12;
-        let top = y + 18;
         const rect = tip.getBoundingClientRect();
-        if (left + rect.width > window.innerWidth - 4) left = Math.max(4, x - rect.width - 12);
-        if (top + rect.height > window.innerHeight - 4) top = Math.max(4, y - rect.height - 12);
+        const gap = 12;
+        let left = x - rect.width / 2;
+        let top = y - rect.height - gap;
+        if (left < 4) left = 4;
+        if (left + rect.width > window.innerWidth - 4) left = Math.max(4, window.innerWidth - rect.width - 4);
+        if (top < 4) top = y + gap;
         tip.style.left = Math.round(left) + 'px';
         tip.style.top = Math.round(top) + 'px';
     }

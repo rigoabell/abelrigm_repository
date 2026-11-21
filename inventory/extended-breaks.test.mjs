@@ -151,6 +151,8 @@ assert.match(src, /BREAK_RUNNING && !idleGoing/);
 assert.match(src, /Took Extended Break/);
 assert.match(src, /Currently Idle/);
 assert.match(src, /id = 'mem3-cursor-tip'/);
+assert.match(src, /let left = x - rect\.width \/ 2;/);
+assert.match(src, /let top = y - rect\.height - gap;/);
 assert.match(src, /data-mem3-name-tip/);
 assert.match(src, /poly\.style\.pointerEvents = 'fill'/);
 assert.match(src, /pointer-events:none;/);
