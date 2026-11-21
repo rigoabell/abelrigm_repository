@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dropzone Batch (abelrigm)
 // @namespace    https://github.com/rigoabell/abelrigm_repository
-// @version      0.2.0
+// @version      0.2.1
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/dropzone-batch.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/dropzone-batch.user.js
 // @description  Paste containers and one dropzone. Sends each container, then that dropzone, as a scan-gun burst.
@@ -21,7 +21,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.2.0';
+  const VERSION = '0.2.1';
   const PANEL_ID = 'dz-batch-panel';
   const SCAN_STRATEGY = 'focus';
   const SCAN_SUFFIX = 'Enter';
@@ -156,13 +156,34 @@
   }
 
   function newBadPhrase(before, after) {
-    const re = /\b(invalid|not found|unknown barcode|unknown|error|failed|cannot|can't|does not|doesn't|unrecognized|no such|try again)\b/gi;
-    const phrases = (text) => new Set((String(text).match(re) || []).map((item) => item.toLowerCase()));
-    const prev = phrases(before);
-    for (const phrase of phrases(after)) {
-      if (!prev.has(phrase)) return phrase;
+    const needles = [
+      'invalid',
+      'not found',
+      'unknown barcode',
+      'unsuccessful',
+      'not be moved',
+      'can not',
+      'cannot',
+      "can't",
+      'does not',
+      "doesn't",
+      'unrecognized',
+      'no such',
+      'try again',
+      'failed',
+      'error',
+      'unknown',
+    ];
+    const prev = String(before || '').toLowerCase();
+    const next = String(after || '').toLowerCase();
+    for (const phrase of needles) {
+      if (next.includes(phrase) && !prev.includes(phrase)) return phrase;
     }
     return '';
+  }
+
+  function dropzoneAccepted(text) {
+    return String(text || '').toLowerCase().includes('move successful');
   }
 
   function loadStore() {
@@ -527,6 +548,7 @@
       changed: sawChange,
       bad: newBadPhrase(beforeRaw, afterRaw),
       excerpt: clip(afterRaw, 400),
+      accepted: dropzoneAccepted(afterRaw),
       stopped: generationStopped(),
     };
   }
@@ -655,12 +677,18 @@
           setStatus('Stopped on ' + container + '. The page did not take the dropzone. Copy debug.');
           break;
         }
-        if (dropScan.bad) {
+        if (dropScan.bad || !dropScan.accepted) {
           pushResult({
             container: container,
             status: 'error',
-            detail: 'Dropzone scan showed “' + dropScan.bad + '”.',
+            detail: dropScan.bad
+              ? 'Dropzone scan showed “' + dropScan.bad + '”.'
+              : 'Page changed, but it did not say Move Successful.',
           });
+          if (!dropScan.bad) {
+            setStatus('Stopped on ' + container + '. The move was not accepted. Copy debug.');
+            break;
+          }
           continue;
         }
         rememberDone(container);
