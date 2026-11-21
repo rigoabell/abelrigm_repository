@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.3
+// @version      1.12.4
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.3';
+    const SCRIPT_VERSION = '1.12.4';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -1902,6 +1902,104 @@
         if (changed) saveEngage(doc);
     }
 
+    // A finished extended-break pass stays on this computer. A refresh paints
+    // those results and does not walk the Time Details rows again.
+    const BREAK_CHECKED_KEY = 'mem3-extended-checked-v1';
+    let BREAK_CHECKED = null;
+    let BREAK_RUNNING = false;
+    let BREAK_FORCE = false;
+
+    function readBreakChecked() {
+        if (BREAK_CHECKED) return BREAK_CHECKED;
+        let raw = '';
+        try {
+            if (typeof GM_getValue === 'function') raw = GM_getValue(BREAK_CHECKED_KEY, '') || '';
+        } catch (e) { raw = ''; }
+        if (!raw) {
+            try { raw = localStorage.getItem(BREAK_CHECKED_KEY) || ''; } catch (e2) { raw = ''; }
+        }
+        let doc = null;
+        try { doc = raw ? JSON.parse(raw) : null; } catch (e3) { doc = null; }
+        if (!doc || typeof doc !== 'object') doc = { shiftId: '', ids: {}, finished: false };
+        if (!doc.ids || typeof doc.ids !== 'object') doc.ids = {};
+        BREAK_CHECKED = doc;
+        return BREAK_CHECKED;
+    }
+
+    function writeBreakChecked() {
+        const text = JSON.stringify(readBreakChecked());
+        try {
+            if (typeof GM_setValue === 'function') GM_setValue(BREAK_CHECKED_KEY, text);
+        } catch (e) { /* the page copy below still records it */ }
+        try { localStorage.setItem(BREAK_CHECKED_KEY, text); } catch (e2) { /* storage can be blocked */ }
+    }
+
+    function checkedForShift(now) {
+        const doc = readBreakChecked();
+        const shift = shiftId(now || new Date());
+        if (doc.shiftId !== shift) {
+            doc.shiftId = shift;
+            doc.ids = {};
+            doc.finished = false;
+            writeBreakChecked();
+        }
+        return doc;
+    }
+
+    function extendedChecked(empId, now) {
+        if (!empId) return false;
+        return !!checkedForShift(now).ids[empId];
+    }
+
+    function breakCalcFinished(now) {
+        return !!checkedForShift(now).finished;
+    }
+
+    function clearBreakChecked(now) {
+        const doc = readBreakChecked();
+        doc.shiftId = shiftId(now || new Date());
+        doc.ids = {};
+        doc.finished = false;
+        writeBreakChecked();
+    }
+
+    function reloadBreakChecked() {
+        BREAK_CHECKED = null;
+        readBreakChecked();
+    }
+
+    function noteExtendedChecked(empId, now) {
+        if (!empId) return;
+        const doc = checkedForShift(now);
+        doc.ids[empId] = 1;
+        writeBreakChecked();
+    }
+
+    function markBreakCalcFinished(now) {
+        const doc = checkedForShift(now);
+        doc.finished = true;
+        writeBreakChecked();
+    }
+
+    function clearUnengagedFlags(now) {
+        const shift = shiftId(now || new Date());
+        const doc = loadEngage();
+        const keep = [];
+        let changed = false;
+        const flags = doc.flags || [];
+        for (let i = 0; i < flags.length; i++) {
+            const row = flags[i];
+            if (row && row.shiftId === shift && !row.engagedAtMs) {
+                changed = true;
+                continue;
+            }
+            keep.push(row);
+        }
+        if (!changed) return;
+        doc.flags = keep;
+        saveEngage(doc);
+    }
+
     function engageExtended(empId, login, by, text, now) {
         const when = now || new Date();
         const actor = String(by || '').trim().toLowerCase();
@@ -2547,7 +2645,6 @@
         record.gaveUp = !incomingGood;
         record.refreshing = false;
         LAST_TIME[empId] = record;
-        try { rememberExtendedBreak(empId, record); } catch (e) { /* the time row still paints */ }
         recordTimeIssue(empId, record);
         if (!DEBUG.timeSample) {
             DEBUG.timeSample = {
@@ -2709,7 +2806,7 @@
     }
 
     async function loadBoardTimes() {
-        if (TIME_LOADING) return;
+        if (TIME_LOADING || BREAK_RUNNING) return;
         const gen = ++timeGeneration;
         const ids = [];
         const queued = Object.create(null);
@@ -2778,14 +2875,91 @@
             }
         } finally {
             TIME_LOADING = false;
+        }
+        try {
+            if (gen === timeGeneration) {
+                const forceBreaks = BREAK_FORCE;
+                BREAK_FORCE = false;
+                await runExtendedBreaks(forceBreaks);
+            }
+        } finally {
             if (!pagesHeld()) pumpRefresh();
         }
+    }
+
+    function extendedCalcProgress() {
+        const ids = cycleEmpIds();
+        const doc = checkedForShift(new Date());
+        let done = 0;
+        for (let i = 0; i < ids.length; i++) {
+            if (doc.ids[ids[i]]) done++;
+        }
+        return { done: done, total: ids.length };
+    }
+
+    // Idle percent owns the Time Details pages. Extended breaks start only
+    // after that pass is finished, and a saved pass is not run again.
+    async function runExtendedBreaks(force) {
+        if (BREAK_RUNNING) {
+            if (force) BREAK_FORCE = true;
+            return;
+        }
+        const when = new Date();
+        if (!force && breakCalcFinished(when)) return;
+        const ids = cycleEmpIds();
+        if (!ids.length) return;
+        BREAK_RUNNING = true;
+        paintProgress();
+        try {
+            if (force) {
+                clearBreakChecked(when);
+                clearUnengagedFlags(when);
+            }
+            const doc = checkedForShift(when);
+            for (let i = 0; i < ids.length; i++) {
+                const empId = ids[i];
+                if (!force && doc.ids[empId]) continue;
+                const record = LAST_TIME[empId];
+                if (record && record.segments) rememberExtendedBreak(empId, record, when);
+                doc.ids[empId] = 1;
+                if (i % 10 === 9) {
+                    writeBreakChecked();
+                    paintProgress();
+                    try { scheduleLivePaint(); } catch (e) { /* the bar already moved */ }
+                    await sleep(20);
+                }
+            }
+            doc.finished = true;
+            writeBreakChecked();
+        } finally {
+            BREAK_RUNNING = false;
+            paintProgress();
+            try { render(); } catch (e2) { /* the next paint still has the flags */ }
+            if (BREAK_FORCE) {
+                BREAK_FORCE = false;
+                await runExtendedBreaks(true);
+            }
+        }
+    }
+
+    function requestExtendedRecalc() {
+        const when = new Date();
+        BREAK_FORCE = true;
+        clearBreakChecked(when);
+        clearUnengagedFlags(when);
+        if (BREAK_RUNNING || TIME_LOADING || refreshBusy) return;
+        const progress = timeProgress();
+        if (progress.total > 0 && progress.done >= progress.total) {
+            runExtendedBreaks(true);
+            return;
+        }
+        refreshData();
     }
 
     // Between the 5-minute recalcs, a person who just showed up gets an idle
     // page. Their rate comes from the rollup already downloaded.
     function queueMissingTimes() {
-        if (unassigning || refreshBusy || TIME_LOADING || FCLM_DOWN || !LAST_ROLLUP_AT) return;
+        if (unassigning || refreshBusy || TIME_LOADING || BREAK_RUNNING || FCLM_DOWN || !LAST_ROLLUP_AT) return;
         const pool = cycleEmpIds();
         for (let i = 0; i < pool.length; i++) {
             if (!needsTimeThisCycle(pool[i])) continue;
@@ -3360,9 +3534,24 @@
         const label = el.querySelector('[data-label]');
         const fill = el.querySelector('[data-fill]');
         const pct = p.total ? Math.min(100, Math.round((p.done / p.total) * 100)) : 0;
-        if (label) label.textContent = p.total ? ('IDLE percent ' + p.done + ' / ' + p.total) : 'IDLE percent';
+        const idleGoing = p.total > 0 && p.done < p.total;
+        if (label) label.textContent = p.total ? ('Calculating Idle Time Percent ' + p.done + ' / ' + p.total) : 'Calculating Idle Time Percent';
         if (fill) fill.style.width = pct + '%';
-        el.style.display = (p.total > 0 && p.done < p.total) ? 'block' : 'none';
+        el.style.display = idleGoing ? 'block' : 'none';
+        const breaks = document.getElementById('mem3-break-progress');
+        if (breaks) {
+            const b = extendedCalcProgress();
+            const breakLabel = breaks.querySelector('[data-label]');
+            const breakFill = breaks.querySelector('[data-fill]');
+            const breakPct = b.total ? Math.min(100, Math.round((b.done / b.total) * 100)) : 0;
+            if (breakLabel) {
+                breakLabel.textContent = b.total
+                    ? ('Calculating Extended Breaks ' + b.done + ' / ' + b.total)
+                    : 'Calculating Extended Breaks';
+            }
+            if (breakFill) breakFill.style.width = breakPct + '%';
+            breaks.style.display = (BREAK_RUNNING && !idleGoing && b.total > 0) ? 'block' : 'none';
+        }
         paintIssueIcon();
     }
 
@@ -5861,11 +6050,11 @@
 
     function ensureSummaryActions() {
         let actions = document.getElementById('mem3-summary-actions');
-        if (actions && actions.getAttribute('data-mem3-probe') !== 'actions-v1945') actions.remove();
-        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'actions-v1945') return actions;
+        if (actions && actions.getAttribute('data-mem3-probe') !== 'actions-v1946') actions.remove();
+        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'actions-v1946') return actions;
         actions = document.createElement('div');
         actions.id = 'mem3-summary-actions';
-        actions.setAttribute('data-mem3-probe', 'actions-v1945');
+        actions.setAttribute('data-mem3-probe', 'actions-v1946');
         actions.style.cssText = 'display:grid; grid-template-columns:188px 188px; gap:6px; ' +
             'align-self:flex-start; margin-left:auto;';
         const copyBtn = panelChipButton('Copy debug', function () {
@@ -5881,6 +6070,7 @@
         actions.appendChild(makeEarlyUnassignButton());
         actions.appendChild(makeViewNotesButton());
         actions.appendChild(makeExtendedBreaksButton());
+        actions.appendChild(makeRecalcBreaksButton());
         actions.appendChild(copyBtn);
         return actions;
     }
@@ -6332,7 +6522,7 @@
     }
 
     function summaryStructureSig(data) {
-        return 'v50|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
+        return 'v51|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
             (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
             (data.floorOpen || []).join(';') + '|' +
             (data.floorDisabled || []).join(';') + '|' +
@@ -6649,10 +6839,17 @@
         const progress = document.createElement('div');
         progress.id = 'mem3-idle-progress';
         progress.style.cssText = 'flex:1 0 100%; margin-top:8px; display:none;';
-        progress.innerHTML = '<div data-label style="font-size:11px; color:#8b949e; font-weight:600; margin-bottom:4px;">IDLE</div>' +
+        progress.innerHTML = '<div data-label style="font-size:11px; color:#8b949e; font-weight:600; margin-bottom:4px;">Calculating Idle Time Percent</div>' +
             '<div style="height:6px; background:#0d1117; border-radius:99px; overflow:hidden;">' +
             '<div data-fill style="height:100%; width:0; background:#58a6ff;"></div></div>';
         node.appendChild(progress);
+        const breakProgress = document.createElement('div');
+        breakProgress.id = 'mem3-break-progress';
+        breakProgress.style.cssText = 'flex:1 0 100%; margin-top:8px; display:none;';
+        breakProgress.innerHTML = '<div data-label style="font-size:11px; color:#8b949e; font-weight:600; margin-bottom:4px;">Calculating Extended Breaks</div>' +
+            '<div style="height:6px; background:#0d1117; border-radius:99px; overflow:hidden;">' +
+            '<div data-fill style="height:100%; width:0; background:#d29922;"></div></div>';
+        node.appendChild(breakProgress);
         paintProgress();
         node.setAttribute('data-sig', sig);
     }
@@ -7711,7 +7908,7 @@
     }
 
     function pagesHeld() {
-        return TIME_LOADING || Object.keys(TIME_IN_FLIGHT).length > 0;
+        return TIME_LOADING || BREAK_RUNNING || Object.keys(TIME_IN_FLIGHT).length > 0;
     }
 
     function pumpRefresh() {
@@ -10887,6 +11084,10 @@
 
     function makeExtendedBreaksButton() {
         return panelChipButton('Extended Breaks', function () { openExtendedList('All', null); });
+    }
+
+    function makeRecalcBreaksButton() {
+        return panelChipButton('Recalculate Extended Breaks', requestExtendedRecalc);
     }
 
     function makeViewNotesButton() {

@@ -8,7 +8,9 @@ const patched = src.replace(
     `globalThis.__mem3 = {
         breakWindows, idleInWindow, isExtendedIdle, extendedHits, engagedColor,
         readFunctionSegment, rememberExtendedBreak, engageExtended,
-        extendedBreakStats, extendedBreakOpen, breakWhich, shiftId
+        extendedBreakStats, extendedBreakOpen, breakWhich, shiftId,
+        extendedChecked, breakCalcFinished, clearBreakChecked, reloadBreakChecked,
+        noteExtendedChecked, markBreakCalcFinished
     };
 })();`
 );
@@ -115,6 +117,21 @@ assert.equal(both.count, 1);
 assert.equal(both.rows[0].windows.length, 2);
 assert.equal(api.breakWhich(both.rows[0]), "1st and 2nd break");
 assert.equal(api.breakWhich(after.rows[0]), "1st break");
+
+api.noteExtendedChecked("99", when);
+api.markBreakCalcFinished(when);
+api.reloadBreakChecked();
+assert.equal(api.extendedChecked("99", when), true);
+assert.equal(api.breakCalcFinished(when), true);
+api.clearBreakChecked(when);
+api.reloadBreakChecked();
+assert.equal(api.breakCalcFinished(when), false);
+assert.equal(api.extendedChecked("99", when), false);
+assert.equal(src.includes("try { rememberExtendedBreak(empId, record)"), false);
+assert.match(src, /Calculating Idle Time Percent/);
+assert.match(src, /Calculating Extended Breaks/);
+assert.match(src, /Recalculate Extended Breaks/);
+assert.match(src, /background:#d29922;/);
 
 const daysScale = { shiftName: "days", originMin: 6 * 60, pxPerMin: 1 };
 const nightScale = { shiftName: "nights", originMin: 18 * 60, pxPerMin: 1 };
