@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.0
+// @version      1.12.1
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.0';
+    const SCRIPT_VERSION = '1.12.1';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -1701,6 +1701,50 @@
         return row;
     }
 
+    function extendedPersonKey(row) {
+        if (row && row.empId) return 'id:' + row.empId;
+        if (row && row.login) return 'login:' + row.login;
+        return 'row:' + ((row && row.id) || '');
+    }
+
+    function collapseExtendedRows(rows) {
+        const by = Object.create(null);
+        const order = [];
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            if (!row) continue;
+            const key = extendedPersonKey(row);
+            const prev = by[key];
+            if (!prev) {
+                by[key] = JSON.parse(JSON.stringify(row));
+                order.push(key);
+                continue;
+            }
+            const windows = Object.create(null);
+            const lists = [prev.windows || [], row.windows || []];
+            for (let n = 0; n < lists.length; n++) {
+                for (let w = 0; w < lists[n].length; w++) {
+                    const item = lists[n][w];
+                    if (!item || !item.id) continue;
+                    const had = windows[item.id];
+                    if (!had || (item.idleMin || 0) > (had.idleMin || 0)) windows[item.id] = item;
+                }
+            }
+            const ids = Object.keys(windows);
+            prev.windows = [];
+            for (let w = 0; w < ids.length; w++) prev.windows.push(windows[ids[w]]);
+            if (row.engagedAtMs && !prev.engagedAtMs) {
+                prev.engagedBy = row.engagedBy;
+                prev.engagedAt = row.engagedAt;
+                prev.engagedAtMs = row.engagedAtMs;
+                prev.detail = row.detail;
+            }
+        }
+        const out = [];
+        for (let i = 0; i < order.length; i++) out.push(by[order[i]]);
+        return out;
+    }
+
     function extendedRows(empIds, now) {
         const when = now || new Date();
         const shift = shiftId(when);
@@ -1711,17 +1755,14 @@
             for (let i = 0; i < flags.length; i++) {
                 if (flags[i] && flags[i].shiftId === shift) all.push(flags[i]);
             }
-            return all;
+            return collapseExtendedRows(all);
         }
         const out = [];
-        const seen = Object.create(null);
         for (let i = 0; i < empIds.length; i++) {
             const row = flagFor(empIds[i], '', when);
-            if (!row || seen[row.id]) continue;
-            seen[row.id] = true;
-            out.push(row);
+            if (row) out.push(row);
         }
-        return out;
+        return collapseExtendedRows(out);
     }
 
     function extendedBreakStats(empIds, now) {
@@ -3424,10 +3465,7 @@
         const idleNow = showsIdleNow(time, empId);
         const sig = yieldSig(time, empId);
         if (extended) {
-            const labels = (extended.windows || []).map(function (item) {
-                return (item.label || '') + ' ' + formatBreakMinutes(item.idleMin) + ' min idle';
-            }).join('. ');
-            top.appendChild(yieldTriangle('#f85149', 'Extended break. ' + labels, false));
+            top.appendChild(yieldTriangle('#f85149', 'Extended break: ' + breakWhich(extended) + '. ' + breakLines(extended).join('. '), false));
             if (idleNow) {
                 bottom.appendChild(yieldTriangle('#d29922', idleNowTitle(time, empId) || 'Idle now', true));
             }
@@ -5554,7 +5592,11 @@
         const breakLabel = document.createElement('span');
         breakLabel.textContent = 'EXTENDED BREAKS';
         breakLabel.style.cssText = 'font-size:10px; font-weight:600; color:#8b949e;';
+        const breakBar = document.createElement('span');
+        breakBar.textContent = '|';
+        breakBar.style.cssText = 'font-size:' + size + 'px; font-weight:700; color:#ffffff;';
         breakGroup.appendChild(breakCount);
+        breakGroup.appendChild(breakBar);
         breakGroup.appendChild(breakPct);
         breakGroup.appendChild(breakLabel);
         valueRow.appendChild(breakGroup);
@@ -6041,7 +6083,7 @@
     }
 
     function summaryStructureSig(data) {
-        return 'v48|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
+        return 'v49|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
             (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
             (data.floorOpen || []).join(';') + '|' +
             (data.floorDisabled || []).join(';') + '|' +
@@ -6562,6 +6604,7 @@
         headline.appendChild(unitsHead);
         headline.appendChild(idleHead);
         box.appendChild(headline);
+        paintPopupBreak(box, empId, person && person.login);
         box.dataset.empId = empId || '';
         box.dataset.login = person && person.login ? person.login : '';
         ensurePopupClock(box, person, empId);
@@ -6670,6 +6713,7 @@
                         existing.insertBefore(notesBtn, leaveBtn.nextSibling);
                     } else existing.appendChild(notesBtn);
                 }
+                paintPopupBreak(existing, existing.dataset.empId || '', existing.dataset.login || '');
                 syncPopupEngage(existing, popupPerson, existing.dataset.empId || '');
                 paintPopupLeaving(existing, popupPerson);
                 placeNameLeaving(host, popupPerson);
@@ -10311,15 +10355,67 @@
         }).catch(function () { /* the next pass tries again */ });
     }
 
+    function breakName(id) {
+        if (id === 'first') return '1st break';
+        if (id === 'second') return '2nd break';
+        return 'Break';
+    }
+
     function breakLines(row) {
         const windows = (row && row.windows) || [];
         const lines = [];
-        for (let i = 0; i < windows.length; i++) {
-            const item = windows[i];
-            lines.push((item.label || 'Window') + ': ' + formatBreakMinutes(item.idleMin) +
+        const used = Object.create(null);
+        function push(item) {
+            if (!item || !item.id || used[item.id]) return;
+            used[item.id] = true;
+            lines.push(breakName(item.id) + ': ' + formatBreakMinutes(item.idleMin) +
                 ' min idle, ' + windowIdlePct(item.idleMin).toFixed(1) + '%');
         }
+        for (let i = 0; i < windows.length; i++) {
+            if (windows[i] && windows[i].id === 'first') push(windows[i]);
+        }
+        for (let i = 0; i < windows.length; i++) {
+            if (windows[i] && windows[i].id === 'second') push(windows[i]);
+        }
+        for (let i = 0; i < windows.length; i++) push(windows[i]);
         return lines;
+    }
+
+    function breakWhich(row) {
+        const windows = (row && row.windows) || [];
+        let first = false;
+        let second = false;
+        for (let i = 0; i < windows.length; i++) {
+            if (!windows[i]) continue;
+            if (windows[i].id === 'first') first = true;
+            else if (windows[i].id === 'second') second = true;
+        }
+        if (first && second) return '1st and 2nd break';
+        if (first) return '1st break';
+        if (second) return '2nd break';
+        return 'Extended break';
+    }
+
+    function paintPopupBreak(box, empId, login) {
+        if (!box) return;
+        const row = flagFor(empId, login, new Date());
+        let note = box.querySelector('[data-mem3-extended-note]');
+        if (!row) {
+            if (note) note.remove();
+            return;
+        }
+        const lines = breakLines(row);
+        const text = 'Extended break: ' + breakWhich(row) + (row.engagedAtMs ? ' \u00b7 engaged' : '') +
+            (lines.length ? '\n' + lines.join('\n') : '');
+        if (!note) {
+            note = document.createElement('div');
+            note.setAttribute('data-mem3-extended-note', '');
+            note.style.cssText = 'margin-top:6px; font-size:12px; font-weight:700; white-space:pre-wrap; color:#ffffff;';
+            const head = box.querySelector('.mem3-popup-head');
+            if (head && head.nextSibling) box.insertBefore(note, head.nextSibling);
+            else box.appendChild(note);
+        }
+        if (note.textContent !== text) note.textContent = text;
     }
 
     function openEngagementDetail(row) {
@@ -10337,6 +10433,9 @@
             ? (personLabel(row.engagedBy) + ' engaged at ' + (row.engagedAt || ''))
             : 'Not engaged.';
         who.style.cssText = 'font-size:13px; font-weight:700; margin-bottom:8px;';
+        const which = document.createElement('div');
+        which.textContent = breakWhich(row) + (breakLines(row).length ? '\n' + breakLines(row).join('\n') : '');
+        which.style.cssText = 'font-size:12px; font-weight:650; white-space:pre-wrap; margin-bottom:8px;';
         const detail = document.createElement('div');
         detail.textContent = (row && row.detail) || '';
         detail.style.cssText = 'font-size:13px; white-space:pre-wrap;';
@@ -10352,6 +10451,7 @@
         });
         card.appendChild(title);
         card.appendChild(who);
+        card.appendChild(which);
         card.appendChild(detail);
         card.appendChild(close);
         document.body.appendChild(card);
@@ -10411,7 +10511,8 @@
             }
             const label = document.createElement('div');
             const bits = breakLines(copy);
-            label.textContent = (copy.login || 'associate') + (copy.engagedAtMs ? ' \u00b7 engaged' : ' \u00b7 not engaged') +
+            label.textContent = (copy.login || 'associate') + ' \u00b7 ' + breakWhich(copy) +
+                (copy.engagedAtMs ? ' \u00b7 engaged' : ' \u00b7 not engaged') +
                 (bits.length ? '\n' + bits.join('\n') : '');
             label.style.cssText = 'font-size:12px; font-weight:650; white-space:pre-wrap;';
             line.appendChild(label);
