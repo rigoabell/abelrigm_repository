@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.10.3
+// @version      2.10.4
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -54,7 +54,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.10.3";
+  const VERSION = "2.10.4";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -3720,9 +3720,10 @@
         #dzCheckBtn {
           height: 42px; font-size: 16px; font-weight: 800;
           display: flex; align-items: center; justify-content: center;
-          background: #111111; color: #ffffff; border: 2px solid #111111;
+          background: #ffe14a; color: #111111; border: 2px solid #111111;
           border-radius: 8px; text-decoration: none;
         }
+        #dzCheckBtn:hover { background: #ffd000; color: #111111; }
         .dzpop-actions { display: flex; gap: 8px; }
         .dzpop-actions button { height: 42px; flex: 1; font-size: 16px; font-weight: 800; }
         #dzYes { background: #111111; color: #ffffff; border-color: #111111; }
@@ -5066,6 +5067,8 @@
     let dropPhase = "";
     let dropSawTab = false;
     let dropCheckTimer = 0;
+    let dropFailTimer = 0;
+    let dropFailedId = "";
     dzAsk.checked = GM_getValue(KEYS.dropzoneAsk, false) === true;
 
     function paintDropzoneStatus(text) {
@@ -5085,17 +5088,11 @@
     }
     function showMoveCheck() {
       if (!dzCheck || !dzCheckText) return;
-      const due = moveCheckDue(GM_getValue(KEYS.moveCheckAt, 0), Date.now());
-      const open = moveTabOpen();
       dzCheck.classList.add("show");
-      if (dzCheckBtn) dzCheckBtn.style.display = due ? "" : "none";
-      if (due && open) {
-        dzCheckText.textContent = "Open Move App. There cannot be another tab open with the move tool. Close that tab, then click Check.";
-      } else if (due) {
-        dzCheckText.textContent = "Open Move App. There cannot be another tab open with the move tool.";
-      } else {
-        dzCheckText.textContent = "There cannot be another tab open with the move tool. Close it. The drop starts after it closes.";
-      }
+      if (dzCheckBtn) dzCheckBtn.style.display = "";
+      dzCheckText.textContent = moveTabOpen()
+        ? "Open Move App. There cannot be another tab open with the move tool. Close that tab, then click Check."
+        : "Open Move App. There cannot be another tab open with the move tool.";
     }
     function beginDropScan() {
       if (dropPhase === "dropping" || !dropHold) return;
@@ -5109,7 +5106,6 @@
       }
       const offer = dropHold;
       dropPhase = "dropping";
-      hideMoveCheck();
       GM_setValue("plf.moveCheckHold", 0);
       const dropped = enqueueBackgroundDropzone(offer.container, offer.dropzone);
       if (dropped) {
@@ -5123,7 +5119,9 @@
       dropHold = null;
       dropPhase = "";
       dropSawTab = false;
+      dropFailedId = "";
       clearTimeout(dropCheckTimer);
+      clearTimeout(dropFailTimer);
       dzPrompt.classList.remove("open");
       dzPromptText.textContent = "";
       hideMoveCheck();
@@ -5190,11 +5188,23 @@
         dropPhase = "wait-check";
         dropSawTab = false;
         clearTimeout(dropCheckTimer);
+        clearTimeout(dropFailTimer);
         dropCheckTimer = setTimeout(() => {
-          if (dropPhase === "dropping" || dropPhase === "") return;
+          if (!dropWaitingClose || dropPhase === "failed" || dropPhase === "") return;
           showMoveCheck();
-          beginDropScan();
         }, 3000);
+        dropFailTimer = setTimeout(() => {
+          if (!dropWaitingClose || dropPhase === "failed" || dropPhase === "" || !dzPrompt.classList.contains("open")) return;
+          const container = cellText(dropHold?.container);
+          const dropzone = cellText(dropHold?.dropzone);
+          const reason = "The drop did not finish";
+          dropPhase = "failed";
+          dropFailedId = container.toLowerCase();
+          dzPromptText.textContent = container ? `Not sent ${container}. ${reason}.` : reason;
+          paintDropzoneStatus(container ? `Not sent ${container}: ${reason}` : reason);
+          rememberDropzone({ container, dropzone, step: "not sent", error: reason });
+          hideMoveCheck();
+        }, 10000);
         beginDropScan();
       }
       dropWaitingClose = true;
@@ -5260,6 +5270,7 @@
     });
     GM_addValueChangeListener(KEYS.dropzoneStatus, (_name, _old, res) => {
       if (!res) return;
+      if (dropFailedId && cellText(res.container).toLowerCase() === dropFailedId) return;
       rememberDropzone({
         container: cellText(res.container),
         dropzone: cellText(res.dropzone),
