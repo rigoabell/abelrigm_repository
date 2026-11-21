@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.6
+// @version      1.12.7
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.6';
+    const SCRIPT_VERSION = '1.12.7';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -10880,7 +10880,7 @@
         function push(item) {
             if (!item || !item.id || used[item.id]) return;
             used[item.id] = true;
-            lines.push(breakName(item.id) + ': ' + formatBreakMinutes(item.idleMin) + ' min idle');
+            lines.push(breakName(item.id) + ': ' + formatBreakMinutes(item.idleMin) + ' min');
         }
         for (let i = 0; i < windows.length; i++) {
             if (windows[i] && windows[i].id === 'first') push(windows[i]);
@@ -10919,7 +10919,7 @@
             name.style.color = '#ffffff';
             const mins = document.createElement('span');
             mins.setAttribute('data-break-minutes', item.id);
-            mins.textContent = formatBreakMinutes(item.idleMin) + ' min idle';
+            mins.textContent = formatBreakMinutes(item.idleMin) + ' min';
             mins.style.cssText = 'color:#f85149; font-weight:800;';
             line.appendChild(name);
             line.appendChild(mins);
@@ -11084,19 +11084,22 @@
         for (let i = 0; i < rows.length; i++) {
             const copy = rows[i];
             const line = document.createElement('div');
-            line.style.cssText = 'display:flex; gap:8px; align-items:center; padding:6px 0; border-top:1px solid #30363d;';
+            line.style.cssText = 'display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-top:1px solid #30363d;';
             const empId = breakRowEmpId(copy);
             line.appendChild(extendedListPhoto(copy.login || '', empId));
             const label = document.createElement('div');
             label.style.cssText = 'flex:1 1 auto; min-width:0; font-size:12px; font-weight:650;';
-            const headBits = [copy.login || 'associate'];
+            const who = document.createElement('div');
+            who.textContent = copy.login || 'associate';
+            who.style.fontWeight = '800';
+            label.appendChild(who);
             const station = breakRowStation(copy);
-            if (station) headBits.push(station);
-            headBits.push(breakWhich(copy));
-            headBits.push(copy.engagedAtMs ? 'engaged' : 'not engaged');
-            const head = document.createElement('div');
-            head.textContent = headBits.join(' \u00b7 ');
-            label.appendChild(head);
+            const subBits = [];
+            if (station) subBits.push(station);
+            subBits.push(copy.engagedAtMs ? 'engaged' : 'not engaged');
+            const sub = document.createElement('div');
+            sub.textContent = subBits.join(' \u00b7 ');
+            label.appendChild(sub);
             appendBreakMinuteLines(label, copy);
             line.appendChild(label);
             if (copy.engagedAtMs) {

@@ -129,7 +129,7 @@ assert.equal(api.breakCalcFinished(when), false);
 assert.equal(api.extendedChecked("99", when), false);
 assert.equal(src.includes("try { rememberExtendedBreak(empId, record)"), false);
 assert.equal(src.includes("if (!force && breakCalcFinished(when)) return"), false);
-assert.equal(src.includes("min idle, "), false);
+assert.equal(src.includes("min idle"), false);
 assert.match(src, /function pendingBreakIds/);
 assert.match(src, /function queueMissingBreaks/);
 assert.match(src, /data-mem3-extended-photo/);
