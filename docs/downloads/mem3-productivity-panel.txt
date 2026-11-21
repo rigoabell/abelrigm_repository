@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.12
+// @version      1.12.13
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.12';
+    const SCRIPT_VERSION = '1.12.13';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -1136,7 +1136,7 @@
         link.rel = 'noopener';
         link.textContent = 'Open FCLM details';
         link.setAttribute('data-mem3-shift-details', '1');
-        link.style.cssText = 'display:inline-block; margin-top:2px; font-size:12px; font-weight:700; color:#58a6ff; text-decoration:underline;';
+        link.style.cssText = 'display:inline-block; margin-top:6px; font-size:12px; color:#58a6ff; text-decoration:underline;';
         link.addEventListener('click', function (e) { e.stopPropagation(); });
         return link;
     }
@@ -6440,24 +6440,20 @@
         return mark;
     }
 
-    function personCard(empId) {
-        const person = personForEmp(empId);
-        const time = LAST_TIME[empId];
-        const stats = statsFor(empId);
-        const card = document.createElement('div');
-        card.style.cssText = 'display:flex; align-items:center; gap:8px; background:#0d1117; ' +
-            'border:1px solid #30363d; border-radius:8px; padding:8px;';
+    function rosterPhoto(empId, login) {
         const photoPx = CLOCK_PHOTO_PX * 3;
         const ringPx = CLOCK_RING_PX * 3;
-        const photoWrap = document.createElement('div');
-        photoWrap.style.cssText = 'flex:0 0 auto; padding:' + ringPx + 'px; line-height:0;';
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'flex:0 0 auto; padding:' + ringPx + 'px; line-height:0;';
         const photo = document.createElement('div');
         photo.setAttribute('data-mem3-photo', '1');
-        const photoUrl = photoForEmp(empId);
+        const url = (empId && photoForEmp(empId)) || photoForLogin(login);
         photo.style.cssText = 'position:relative; width:' + photoPx + 'px; height:' + photoPx + 'px; ' +
             'border-radius:50%; background:#21262d center/cover no-repeat;';
-        if (photoUrl) photo.style.backgroundImage = 'url("' + String(photoUrl).replace(/"/g, '') + '")';
-        const clock = clockLabel(person.clockStatus);
+        if (url) photo.style.backgroundImage = 'url("' + String(url).replace(/"/g, '') + '")';
+        const person = empId ? personForEmp(empId) : null;
+        const ident = IDENTITY.byLogin[String(login || '').trim().toLowerCase()] || null;
+        const clock = clockLabel((person && person.clockStatus) || clockFor(ident, empId));
         if (clock) {
             photo.title = clock.text;
             const ring = document.createElement('span');
@@ -6467,7 +6463,18 @@
                 'box-shadow:0 0 0 ' + ringPx + 'px ' + clock.color + ';';
             photo.appendChild(ring);
         }
-        photoWrap.appendChild(photo);
+        wrap.appendChild(photo);
+        return wrap;
+    }
+
+    function personCard(empId) {
+        const person = personForEmp(empId);
+        const time = LAST_TIME[empId];
+        const stats = statsFor(empId);
+        const card = document.createElement('div');
+        card.style.cssText = 'display:flex; align-items:center; gap:8px; background:#0d1117; ' +
+            'border:1px solid #30363d; border-radius:8px; padding:8px;';
+        card.appendChild(rosterPhoto(empId, person.login));
         const info = document.createElement('div');
         info.style.cssText = 'flex:1 1 auto; min-width:0;';
         const name = document.createElement('div');
@@ -6501,7 +6508,6 @@
             info.appendChild(quiet);
         }
         info.appendChild(timeDetailsLink(empId));
-        card.appendChild(photoWrap);
         card.appendChild(info);
         return card;
     }
@@ -10976,50 +10982,48 @@
         return stationLabel(personForEmp(empId).station);
     }
 
-    function extendedListPhoto(login, empId) {
-        const ringPx = 4;
-        const wrap = document.createElement('div');
-        wrap.style.cssText = 'flex:0 0 auto; align-self:center; display:flex; align-items:center; line-height:0;';
-        const photo = document.createElement('div');
-        photo.setAttribute('data-mem3-extended-photo', '1');
-        const url = photoForLogin(login) || (empId ? photoForEmp(empId) : '');
-        const person = empId ? personForEmp(empId) : null;
-        const ident = IDENTITY.byLogin[String(login || '').trim().toLowerCase()] || null;
-        const clock = clockLabel((person && person.clockStatus) || clockFor(ident, empId));
-        const ring = clock ? clock.color : '#8b949e';
-        photo.title = clock ? clock.text : '';
-        photo.style.cssText = 'width:42px; height:42px; flex:0 0 auto; box-sizing:border-box; border-radius:50%; ' +
-            'border:' + ringPx + 'px solid ' + ring + '; background-clip:padding-box; ' +
-            'background-color:#21262d; background-position:center; background-size:cover; background-repeat:no-repeat;';
-        if (url) photo.style.backgroundImage = 'url("' + String(url).replace(/"/g, '') + '")';
-        wrap.appendChild(photo);
-        return wrap;
-    }
-
-    function shortBreakRowHeight(label) {
-        const h = Math.round(label.getBoundingClientRect().height);
-        const lines = label.querySelectorAll('[data-break-minutes]');
-        if (lines.length < 2 || !lines[1].parentElement) return h;
-        const extra = Math.round(lines[1].parentElement.getBoundingClientRect().height);
-        return h - (lines.length - 1) * extra;
-    }
-
-    function fitExtendedListPhotos(list) {
-        if (!list) return;
-        const photos = list.querySelectorAll('[data-mem3-extended-photo]');
-        let size = 0;
-        for (let i = 0; i < photos.length; i++) {
-            const line = photos[i].parentElement && photos[i].parentElement.parentElement;
-            const label = line && line.querySelector('[data-mem3-extended-copy]');
-            if (!label) continue;
-            const h = shortBreakRowHeight(label);
-            if (h >= 42 && (!size || h < size)) size = h;
+    function extendedBreakCard(row) {
+        const login = (row && row.login) || '';
+        const empId = breakRowEmpId(row);
+        const card = document.createElement('div');
+        card.style.cssText = 'display:flex; align-items:center; gap:8px; background:#0d1117; ' +
+            'border:1px solid #30363d; border-radius:8px; padding:8px;';
+        card.appendChild(rosterPhoto(empId, login));
+        const info = document.createElement('div');
+        info.style.cssText = 'flex:1 1 auto; min-width:0;';
+        const who = document.createElement('div');
+        who.textContent = login || 'associate';
+        who.style.cssText = 'font-size:14px; font-weight:800; margin-bottom:4px;';
+        info.appendChild(who);
+        const station = breakRowStation(row);
+        const sub = document.createElement('div');
+        const subBits = [];
+        if (station) subBits.push(station);
+        subBits.push(row && row.engagedAtMs ? 'engaged' : 'not engaged');
+        sub.textContent = subBits.join(' \u00b7 ');
+        sub.style.cssText = 'font-size:12px; font-weight:650; line-height:1.35;';
+        info.appendChild(sub);
+        const minutes = document.createElement('div');
+        minutes.style.cssText = 'font-size:12px; font-weight:650; line-height:1.35;';
+        appendBreakMinuteLines(minutes, row);
+        info.appendChild(minutes);
+        if (empId) info.appendChild(shiftDetailsLink(empId));
+        if (row && row.engagedAtMs) {
+            const view = document.createElement('button');
+            view.type = 'button';
+            view.textContent = 'Engagement';
+            view.style.cssText = 'display:inline-block; margin-top:6px; padding:4px 8px; border-radius:6px; ' +
+                'border:1px solid #8b949e; background:#0d1117; color:#fff; cursor:pointer; ' +
+                'font:800 11px Segoe UI,system-ui,sans-serif;';
+            view.addEventListener('click', function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+                openEngagementDetail(row);
+            });
+            info.appendChild(view);
         }
-        if (!size) return;
-        for (let i = 0; i < photos.length; i++) {
-            photos[i].style.width = size + 'px';
-            photos[i].style.height = size + 'px';
-        }
+        card.appendChild(info);
+        return card;
     }
 
     function paintPopupBreak(box, empId, login) {
@@ -11093,80 +11097,54 @@
     function openExtendedList(scopeLabel, empIds) {
         closeLeavingOverlay('mem3-extended-list');
         const rows = empIds ? extendedRows(empIds, new Date()) : extendedRows(null, new Date());
+        installPulseStyles();
+        const overlay = document.createElement('div');
+        overlay.id = 'mem3-extended-list';
+        overlay.style.cssText = 'position:fixed; inset:0; z-index:2147483646; background:rgba(0,0,0,0.55); ' +
+            'display:flex; align-items:flex-start; justify-content:center; padding:32px 16px; ' +
+            'font-family:Segoe UI,system-ui,sans-serif; color:#ffffff;';
+        overlay.addEventListener('click', function (e) {
+            if (e.target === overlay) overlay.remove();
+        });
         const card = document.createElement('div');
-        card.id = 'mem3-extended-list';
-        card.style.cssText = 'position:fixed; left:50%; top:50%; transform:translate(-50%, -50%); z-index:2147483647; ' +
-            'width:min(640px, calc(100vw - 24px)); max-height:calc(100vh - 24px); overflow:hidden; padding:12px; ' +
-            'display:flex; flex-direction:column; border-radius:10px; background:#161b22; color:#fff; border:1px solid #30363d; ' +
-            'box-shadow:0 8px 24px rgba(0,0,0,.45); font-family:Segoe UI,system-ui,sans-serif;';
-        const header = document.createElement('div');
-        header.style.cssText = 'display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px;';
-        const title = document.createElement('div');
-        title.textContent = (scopeLabel || 'Extended Breaks') + ' \u00b7 Extended Breaks';
-        title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif;';
+        card.style.cssText = 'width:min(720px, 100%); max-height:calc(100vh - 64px); overflow:auto; ' +
+            'background:#161b22; border:1px solid #30363d; border-radius:12px; padding:18px 18px 8px;';
+        const top = document.createElement('div');
+        top.style.cssText = 'display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:8px;';
+        const headingWrap = document.createElement('div');
+        const heading = document.createElement('div');
+        heading.textContent = (scopeLabel || 'Extended Breaks') + ' \u00b7 Extended Breaks';
+        heading.style.cssText = 'font-size:18px; font-weight:800;';
+        const sub = document.createElement('div');
+        sub.textContent = rows.length + (rows.length === 1 ? ' associate' : ' associates');
+        sub.style.cssText = 'font-size:13px; font-weight:500; color:#c9d1d9; margin-top:4px;';
+        headingWrap.appendChild(heading);
+        headingWrap.appendChild(sub);
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex; gap:8px; flex:0 0 auto;';
         const close = document.createElement('button');
         close.type = 'button';
         close.textContent = 'Close';
-        close.style.cssText = 'padding:7px 10px; border-radius:6px; border:1px solid #8b949e; background:#0d1117; ' +
-            'color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
-        close.addEventListener('click', function (event) {
-            event.preventDefault();
-            event.stopPropagation();
-            closeLeavingOverlay('mem3-extended-list');
-        });
-        header.appendChild(title);
-        header.appendChild(close);
-        const list = document.createElement('div');
-        list.style.cssText = 'overflow:auto; min-height:0; flex:1 1 auto;';
+        close.style.cssText = 'padding:6px 12px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
+            'background:#0d1117; border:1px solid #8b949e; font:800 12px Segoe UI,system-ui,sans-serif;';
+        close.addEventListener('click', function () { overlay.remove(); });
+        actions.appendChild(close);
+        top.appendChild(headingWrap);
+        top.appendChild(actions);
+        card.appendChild(top);
         if (!rows.length) {
             const empty = document.createElement('div');
             empty.textContent = 'Nobody has an extended break.';
-            empty.style.cssText = 'color:#8b949e; font-size:12px;';
-            list.appendChild(empty);
+            empty.style.cssText = 'font-size:13px; font-weight:650; margin-bottom:12px;';
+            card.appendChild(empty);
+        } else {
+            const list = document.createElement('div');
+            list.style.cssText = 'display:flex; flex-direction:column; gap:8px; margin-bottom:12px;';
+            for (let i = 0; i < rows.length; i++) list.appendChild(extendedBreakCard(rows[i]));
+            card.appendChild(list);
         }
-        for (let i = 0; i < rows.length; i++) {
-            const copy = rows[i];
-            const line = document.createElement('div');
-            line.style.cssText = 'display:flex; gap:10px; align-items:center; padding:6px 0; border-top:1px solid #30363d;';
-            const empId = breakRowEmpId(copy);
-            line.appendChild(extendedListPhoto(copy.login || '', empId));
-            const label = document.createElement('div');
-            label.setAttribute('data-mem3-extended-copy', '1');
-            label.style.cssText = 'flex:1 1 auto; min-width:0; font-size:12px; font-weight:650;';
-            const who = document.createElement('div');
-            who.textContent = copy.login || 'associate';
-            who.style.fontWeight = '800';
-            label.appendChild(who);
-            const station = breakRowStation(copy);
-            const subBits = [];
-            if (station) subBits.push(station);
-            subBits.push(copy.engagedAtMs ? 'engaged' : 'not engaged');
-            const sub = document.createElement('div');
-            sub.textContent = subBits.join(' \u00b7 ');
-            label.appendChild(sub);
-            appendBreakMinuteLines(label, copy);
-            if (empId) label.appendChild(shiftDetailsLink(empId));
-            line.appendChild(label);
-            if (copy.engagedAtMs) {
-                const view = document.createElement('button');
-                view.type = 'button';
-                view.textContent = 'Engagement';
-                view.style.cssText = 'flex:0 0 auto; align-self:center; padding:4px 8px; border-radius:6px; border:1px solid #8b949e; ' +
-                    'background:#0d1117; color:#fff; font:800 11px Segoe UI,system-ui,sans-serif; cursor:pointer;';
-                view.addEventListener('click', function (event) {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    openEngagementDetail(copy);
-                });
-                line.appendChild(view);
-            }
-            list.appendChild(line);
-        }
-        card.appendChild(header);
-        card.appendChild(list);
-        document.body.appendChild(card);
-        fitExtendedListPhotos(list);
-        requestAnimationFrame(function () { fitExtendedListPhotos(list); });
+        overlay.appendChild(card);
+        document.body.appendChild(overlay);
     }
 
     function openEngagePanel(login, empId) {

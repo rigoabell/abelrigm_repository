@@ -132,11 +132,10 @@ assert.equal(src.includes("if (!force && breakCalcFinished(when)) return"), fals
 assert.equal(src.includes("min idle"), false);
 assert.match(src, /function pendingBreakIds/);
 assert.match(src, /function queueMissingBreaks/);
-assert.match(src, /data-mem3-extended-photo/);
-assert.match(src, /border:' \+ ringPx \+ 'px solid ' \+ ring/);
-assert.match(src, /function fitExtendedListPhotos/);
+assert.match(src, /box-shadow:0 0 0 ' \+ ringPx \+ 'px ' \+ clock\.color/);
+assert.match(src, /function extendedBreakCard/);
+assert.match(src, /function rosterPhoto/);
 assert.match(src, /labelAbove: true/);
-assert.match(src, /if \(h >= 42 && \(!size \|\| h < size\)\) size = h/);
 assert.match(src, /Open FCLM details/);
 assert.match(src, /fclmEmpUrl\(empId, 'all'\)/);
 assert.match(src, /data-break-minutes/);
