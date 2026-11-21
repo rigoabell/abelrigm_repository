@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ONT Base Piles Audit Workspace (abelrigm)
 // @namespace    https://github.com/rigoabell/abelrigm_repository
-// @version      1.3.0
+// @version      1.5.0
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/ont-piles-audit-workspace.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/ont-piles-audit-workspace.user.js
 // @description  Count BIGS and sortable piles on the audit page and show the EOS total.
@@ -27,7 +27,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.3.0';
+  const VERSION = '1.5.0';
   const HOST = 'ont-base.corp.amazon.com';
   const CELL_ID = 'ont-piles-workspace-col';
   const CARD_ID = 'ont-piles-workspace';
@@ -104,12 +104,17 @@
     '#' + EOS_ID + ' h3 { font-size: 15px; font-weight: 700; margin: 18px 0 8px; }',
     '#' + EOS_ID + ' .ont-piles-note { color: #66707c; margin: 8px 2px 0; }',
     '#' + EOS_ID + ' .ont-piles-frame {',
-    '  border: 1px solid #e1e5ea; border-radius: 12px; overflow: hidden;',
+    '  border: 1px solid #e1e5ea; border-radius: 12px; max-width: 100%; overflow: auto; width: max-content;',
     '}',
-    '#' + EOS_ID + ' table { border-collapse: collapse; margin: 0; width: 100%; }',
+    '#' + EOS_ID + ' table { border-collapse: collapse; margin: 0; table-layout: fixed; }',
+    '#' + EOS_ID + ' .ont-piles-bigs { width: calc(71ch + 300px); min-width: calc(71ch + 300px); }',
+    '#' + EOS_ID + ' .ont-piles-other { width: calc(43ch + 172px); min-width: calc(43ch + 172px); }',
+    '#' + EOS_ID + ' .ont-piles-w-work { width: calc(13ch + 36px); min-width: calc(13ch + 36px); }',
+    '#' + EOS_ID + ' .ont-piles-w-count { width: calc(8ch + 36px); min-width: calc(8ch + 36px); }',
+    '#' + EOS_ID + ' .ont-piles-w-units { width: calc(6ch + 28px); min-width: calc(6ch + 28px); }',
     '#' + EOS_ID + ' th, #' + EOS_ID + ' td {',
     '  background: #fff; border: 0; border-bottom: 1px solid #e6eaee; border-right: 1px solid #e6eaee;',
-    '  font-weight: 400; padding: 8px 10px; text-align: center; vertical-align: middle;',
+    '  font-weight: 400; padding: 7px 10px; text-align: center; vertical-align: middle; white-space: nowrap;',
     '}',
     '#' + EOS_ID + ' tr > :last-child { border-right: 0; }',
     '#' + EOS_ID + ' tbody tr:last-child > * { border-bottom: 0; }',
@@ -123,25 +128,28 @@
     '#' + EOS_ID + ' .ont-piles-col { display: block; }',
     '#' + EOS_ID + ' .ont-piles-rate { color: #8b95a1; display: block; font-size: 11px; font-weight: 600; }',
     '#' + EOS_ID + ' tbody td:first-child, #' + EOS_ID + ' .ont-piles-head th:first-child {',
-    '  background: #fbfcfd; font-weight: 600; text-align: left; white-space: nowrap; width: 8.5rem;',
+    '  background: #fbfcfd; font-weight: 600; text-align: left; white-space: nowrap;',
     '}',
     '#' + EOS_ID + ' .ont-piles-other tr:last-child > * { border-bottom: 0; }',
     '#' + EOS_ID + ' .ont-piles-bigs { margin: 0; }',
-    '#' + EOS_ID + ' .ont-piles-split { box-shadow: inset 2px 0 0 #d7dde6; }',
+    '#' + EOS_ID + ' .ont-piles-split { border-left-color: #c5ced8; }',
     '#' + EOS_ID + ' input {',
-    '  -moz-appearance: textfield; appearance: textfield; background: #f4f6f8;',
-    '  border: 1px solid transparent; border-radius: 6px; box-sizing: border-box;',
-    '  font: inherit; font-variant-numeric: tabular-nums; padding: 6px 4px; text-align: center; width: 100%;',
+    '  background: #f4f6f8; border: 1px solid transparent; border-radius: 6px;',
+    '  font: inherit; font-variant-numeric: tabular-nums; height: 2rem; margin: 0;',
+    '  padding: 0 2px; text-align: center; width: 100%;',
     '}',
-    '#' + EOS_ID + ' input::-webkit-outer-spin-button, #' + EOS_ID + ' input::-webkit-inner-spin-button {',
-    '  -webkit-appearance: none; margin: 0;',
+    '#' + EOS_ID + ' input[type="number"]::-webkit-inner-spin-button,',
+    '#' + EOS_ID + ' input[type="number"]::-webkit-outer-spin-button {',
+    '  -webkit-appearance: inner-spin-button; cursor: pointer; height: 1.6em; margin: 0; opacity: 1;',
     '}',
     '#' + EOS_ID + ' input::placeholder { color: #b7c0ca; }',
     '#' + EOS_ID + ' input:hover { background: #eef1f5; }',
     '#' + EOS_ID + ' input:focus {',
     '  background: #fff; border-color: #2f6fed; outline: 2px solid rgba(47, 111, 237, 0.18); outline-offset: 0;',
     '}',
-    '#' + EOS_ID + ' .ont-piles-out { display: block; font-variant-numeric: tabular-nums; font-weight: 700; text-align: right; }',
+    '#' + EOS_ID + ' .ont-piles-out {',
+    '  display: block; font-variant-numeric: tabular-nums; font-weight: 700; line-height: 2rem; text-align: center;',
+    '}',
     '#' + EOS_ID + ' .ont-piles-eos { background: #f3f6fb; }',
     '#' + EOS_ID + ' .ont-piles-total td { background: #f6f8fb; font-weight: 700; }',
     '#' + EOS_ID + ' .ont-piles-total .ont-piles-eos { background: #e7eef9; }'
@@ -299,6 +307,9 @@
     root.id = EOS_ID;
 
     const sheet = el(doc, 'table', 'ont-piles-bigs');
+    sheet.appendChild(columnGroup(doc, [
+      'work', 'count', 'count', 'count', 'units', 'count', 'count', 'units', 'units'
+    ]));
     const head = el(doc, 'thead', '');
     const groups = el(doc, 'tr', 'ont-piles-group');
     groups.appendChild(el(doc, 'th', ''));
@@ -371,6 +382,7 @@
     root.appendChild(el(doc, 'h3', '', 'Other BIGS'));
     root.appendChild(el(doc, 'p', 'ont-piles-note', 'These stay out of the total.'));
     const other = el(doc, 'table', 'ont-piles-other');
+    other.appendChild(columnGroup(doc, ['work', 'count', 'count', 'count', 'units']));
     const otherHead = el(doc, 'tr', 'ont-piles-head');
     ['Work', 'Pallets × 20', 'Cages × 15', 'Shuttles × 100', 'Units'].forEach(function (label) {
       otherHead.appendChild(columnHead(doc, label, ''));
@@ -393,6 +405,14 @@
     otherFrame.appendChild(other);
     root.appendChild(otherFrame);
     return root;
+  }
+
+  function columnGroup(doc, kinds) {
+    const group = el(doc, 'colgroup', '');
+    kinds.forEach(function (kind) {
+      group.appendChild(el(doc, 'col', 'ont-piles-w-' + kind));
+    });
+    return group;
   }
 
   function columnHead(doc, label, className) {
