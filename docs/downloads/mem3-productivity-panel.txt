@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.5
+// @version      1.12.6
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.5';
+    const SCRIPT_VERSION = '1.12.6';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -2897,39 +2897,80 @@
         return { done: done, total: ids.length };
     }
 
+    function breakTimeReady(empId) {
+        const record = LAST_TIME[empId];
+        if (!record) return false;
+        if (record.segments) return true;
+        return !!(record.hasTime || record.noData || record.gaveUp || record.error);
+    }
+
+    // Someone already calculated stays saved. A new associate, or one whose
+    // time arrived after the last pass, is the only person this walks.
+    function pendingBreakIds(now) {
+        const ids = cycleEmpIds();
+        const doc = checkedForShift(now || new Date());
+        const out = [];
+        for (let i = 0; i < ids.length; i++) {
+            const empId = ids[i];
+            if (!empId || doc.ids[empId] || !breakTimeReady(empId)) continue;
+            out.push(empId);
+        }
+        return out;
+    }
+
+    function allBreaksChecked(now) {
+        const ids = cycleEmpIds();
+        if (!ids.length) return false;
+        const doc = checkedForShift(now || new Date());
+        for (let i = 0; i < ids.length; i++) {
+            if (!doc.ids[ids[i]]) return false;
+        }
+        return true;
+    }
+
     // Idle percent owns the Time Details pages. Extended breaks start only
-    // after that pass is finished, and a saved pass is not run again.
+    // after that pass, and only for associates who are not already saved.
     async function runExtendedBreaks(force) {
         if (BREAK_RUNNING) {
             if (force) BREAK_FORCE = true;
             return;
         }
+        if (TIME_LOADING) {
+            if (force) BREAK_FORCE = true;
+            return;
+        }
         const when = new Date();
-        if (!force && breakCalcFinished(when)) return;
-        const ids = cycleEmpIds();
-        if (!ids.length) return;
+        if (force) {
+            clearBreakChecked(when);
+            clearUnengagedFlags(when);
+        }
+        const ids = pendingBreakIds(when);
+        if (!ids.length) {
+            const doc = checkedForShift(when);
+            const finished = allBreaksChecked(when);
+            if (doc.finished !== finished) {
+                doc.finished = finished;
+                writeBreakChecked();
+            }
+            return;
+        }
         BREAK_RUNNING = true;
         paintProgress();
+        await sleep(250);
         try {
-            if (force) {
-                clearBreakChecked(when);
-                clearUnengagedFlags(when);
-            }
             const doc = checkedForShift(when);
             for (let i = 0; i < ids.length; i++) {
                 const empId = ids[i];
-                if (!force && doc.ids[empId]) continue;
                 const record = LAST_TIME[empId];
                 if (record && record.segments) rememberExtendedBreak(empId, record, when);
                 doc.ids[empId] = 1;
-                if (i % 10 === 9) {
+                paintProgress();
+                if (i % 8 === 7) {
                     writeBreakChecked();
-                    paintProgress();
-                    try { scheduleLivePaint(); } catch (e) { /* the bar already moved */ }
-                    await sleep(20);
+                    await sleep(40);
                 }
             }
-            doc.finished = true;
+            doc.finished = allBreaksChecked(when);
             writeBreakChecked();
         } finally {
             BREAK_RUNNING = false;
@@ -2966,6 +3007,12 @@
             loadBoardTimes();
             return;
         }
+    }
+
+    function queueMissingBreaks() {
+        if (unassigning || refreshBusy || TIME_LOADING || BREAK_RUNNING || FCLM_DOWN || !LAST_ROLLUP_AT) return;
+        if (!pendingBreakIds(new Date()).length) return;
+        runExtendedBreaks(false);
     }
 
     function clearTimeCache() {
@@ -3529,15 +3576,16 @@
 
     function paintProgress() {
         const el = document.getElementById('mem3-idle-progress');
-        if (!el) return;
         const p = timeProgress();
-        const label = el.querySelector('[data-label]');
-        const fill = el.querySelector('[data-fill]');
-        const pct = p.total ? Math.min(100, Math.round((p.done / p.total) * 100)) : 0;
-        const idleGoing = p.total > 0 && p.done < p.total;
-        if (label) label.textContent = p.total ? ('Calculating Idle Time Percent ' + p.done + ' / ' + p.total) : 'Calculating Idle Time Percent';
-        if (fill) fill.style.width = pct + '%';
-        el.style.display = idleGoing ? 'block' : 'none';
+        const idleGoing = !!TIME_LOADING;
+        if (el) {
+            const label = el.querySelector('[data-label]');
+            const fill = el.querySelector('[data-fill]');
+            const pct = p.total ? Math.min(100, Math.round((p.done / p.total) * 100)) : 0;
+            if (label) label.textContent = p.total ? ('Calculating Idle Time Percent ' + p.done + ' / ' + p.total) : 'Calculating Idle Time Percent';
+            if (fill) fill.style.width = pct + '%';
+            el.style.display = (idleGoing && p.total > 0) ? 'block' : 'none';
+        }
         const breaks = document.getElementById('mem3-break-progress');
         if (breaks) {
             const b = extendedCalcProgress();
@@ -5950,7 +5998,7 @@
 
         const valueRow = document.createElement('div');
         valueRow.style.cssText = 'display:flex; flex-direction:column; align-items:flex-start; gap:2px; line-height:1.05;';
-        const size = opts.lead ? 32 : 22;
+        const size = 22;
         const idlePct = opts.idlePct;
         const ic = idleColor(idlePct);
         const scopeIds = opts.empIds || [];
@@ -5976,7 +6024,8 @@
         }
         function addMetric(value, unit, color, rank, px, spec) {
             const group = document.createElement('span');
-            group.style.cssText = 'display:inline-flex; flex-wrap:wrap; align-items:baseline; gap:2px 4px; max-width:100%;';
+            group.style.cssText = 'display:inline-flex; align-items:baseline; gap:4px; max-width:100%;' +
+                (opts.lead ? ' flex-wrap:nowrap; white-space:nowrap;' : ' flex-wrap:wrap;');
             const key = spec && spec.key ? spec.key : '';
             if (key) group.setAttribute('data-rank-for', key);
             if (rank === 'best') group.className = 'mem3-pulse-best';
@@ -6041,8 +6090,8 @@
         breakGroup.appendChild(breakNums);
         breakGroup.appendChild(breakLabel);
         valueRow.appendChild(breakGroup);
-        addMetric(formatUnits(opts.units || 0), 'units', '#8b949e', '', opts.lead ? 16 : 13, { key: 'units' });
-        addMetric(formatDuration(opts.idleMin || 0), 'hrs idle', '#8b949e', '', opts.lead ? 16 : 13, { key: 'idleHours' });
+        addMetric(formatUnits(opts.units || 0), 'units', '#8b949e', '', 13, { key: 'units' });
+        addMetric(formatDuration(opts.idleMin || 0), 'hrs idle', '#8b949e', '', 13, { key: 'idleHours' });
 
         cell.appendChild(titleRow);
         cell.appendChild(valueRow);
@@ -6525,7 +6574,7 @@
     }
 
     function summaryStructureSig(data) {
-        return 'v52|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
+        return 'v53|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
             (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
             (data.floorOpen || []).join(';') + '|' +
             (data.floorDisabled || []).join(';') + '|' +
@@ -6647,8 +6696,8 @@
         if (actions.parentElement) actions.remove();
 
         node.style.cssText = 'display:flex; flex-direction:column; align-items:stretch; gap:8px; ' +
-            'flex:1 0 100%; width:100%; min-width:0; box-sizing:border-box; margin:8px 0 6px; padding:8px 10px; overflow-x:auto; ' +
-            'background:#161b22; border:1px solid #30363d; border-radius:10px; ' +
+            'flex:0 0 auto; width:100%; height:auto; min-width:0; box-sizing:border-box; margin:8px 0 6px; padding:8px 10px; ' +
+            'overflow:visible; background:#161b22; border:1px solid #30363d; border-radius:10px; ' +
             'font-family:Segoe UI,system-ui,sans-serif; color:#ffffff;';
 
         while (node.firstChild) node.removeChild(node.firstChild);
@@ -6772,9 +6821,25 @@
             node.appendChild(miss);
         }
 
+        const progress = document.createElement('div');
+        progress.id = 'mem3-idle-progress';
+        progress.style.cssText = 'width:100%; margin:0; display:none;';
+        progress.innerHTML = '<div data-label style="font-size:11px; color:#8b949e; font-weight:600; margin-bottom:4px;">Calculating Idle Time Percent</div>' +
+            '<div style="height:6px; background:#0d1117; border-radius:99px; overflow:hidden;">' +
+            '<div data-fill style="height:100%; width:0; background:#58a6ff;"></div></div>';
+        node.appendChild(progress);
+        const breakProgress = document.createElement('div');
+        breakProgress.id = 'mem3-break-progress';
+        breakProgress.style.cssText = 'width:100%; margin:0; display:none;';
+        breakProgress.innerHTML = '<div data-label style="font-size:11px; color:#8b949e; font-weight:600; margin-bottom:4px;">Calculating Extended Breaks</div>' +
+            '<div style="height:6px; background:#0d1117; border-radius:99px; overflow:hidden;">' +
+            '<div data-fill style="height:100%; width:0; background:#d29922;"></div></div>';
+        node.appendChild(breakProgress);
+
         const metrics = document.createElement('div');
-        metrics.style.cssText = 'display:grid; grid-template-columns:minmax(0,1.15fr) repeat(8,minmax(0,1fr)); ' +
-            'grid-template-rows:auto auto; column-gap:0; row-gap:6px; width:100%; min-width:0; align-items:stretch;';
+        metrics.style.cssText = 'display:grid; grid-template-columns:minmax(168px,1.15fr) repeat(8,minmax(0,1fr)); ' +
+            'grid-template-rows:auto auto; column-gap:0; row-gap:6px; width:100%; min-width:0; ' +
+            'overflow-x:auto; overflow-y:hidden; align-items:start;';
 
         const totalIds = lineIdsOf(data);
         const totalCell = makeSummaryCell({
@@ -6797,8 +6862,8 @@
         });
         totalCell.style.gridColumn = '1';
         totalCell.style.gridRow = '1 / span 2';
-        totalCell.style.alignSelf = 'stretch';
-        totalCell.style.height = '100%';
+        totalCell.style.alignSelf = 'start';
+        totalCell.style.height = 'auto';
         metrics.appendChild(totalCell);
 
         for (let i = 0; i < data.lines.length; i++) {
@@ -6838,21 +6903,6 @@
         node.appendChild(metrics);
         header.appendChild(actions);
         paintEarlyLog();
-
-        const progress = document.createElement('div');
-        progress.id = 'mem3-idle-progress';
-        progress.style.cssText = 'flex:1 0 100%; margin-top:8px; display:none;';
-        progress.innerHTML = '<div data-label style="font-size:11px; color:#8b949e; font-weight:600; margin-bottom:4px;">Calculating Idle Time Percent</div>' +
-            '<div style="height:6px; background:#0d1117; border-radius:99px; overflow:hidden;">' +
-            '<div data-fill style="height:100%; width:0; background:#58a6ff;"></div></div>';
-        node.appendChild(progress);
-        const breakProgress = document.createElement('div');
-        breakProgress.id = 'mem3-break-progress';
-        breakProgress.style.cssText = 'flex:1 0 100%; margin-top:8px; display:none;';
-        breakProgress.innerHTML = '<div data-label style="font-size:11px; color:#8b949e; font-weight:600; margin-bottom:4px;">Calculating Extended Breaks</div>' +
-            '<div style="height:6px; background:#0d1117; border-radius:99px; overflow:hidden;">' +
-            '<div data-fill style="height:100%; width:0; background:#d29922;"></div></div>';
-        node.appendChild(breakProgress);
         paintProgress();
         node.setAttribute('data-sig', sig);
     }
@@ -7464,6 +7514,7 @@
             scheduleLinePairs();
             if (CLOCK.loadedAt) paintAllClockRings();
             queueMissingTimes();
+            queueMissingBreaks();
             placeGroupUnassignButtons();
         }
     }
@@ -10829,8 +10880,7 @@
         function push(item) {
             if (!item || !item.id || used[item.id]) return;
             used[item.id] = true;
-            lines.push(breakName(item.id) + ': ' + formatBreakMinutes(item.idleMin) +
-                ' min idle, ' + windowIdlePct(item.idleMin).toFixed(1) + '%');
+            lines.push(breakName(item.id) + ': ' + formatBreakMinutes(item.idleMin) + ' min idle');
         }
         for (let i = 0; i < windows.length; i++) {
             if (windows[i] && windows[i].id === 'first') push(windows[i]);
@@ -10857,6 +10907,78 @@
         return 'Extended break';
     }
 
+    function appendBreakMinuteLines(parent, row) {
+        const windows = (row && row.windows) || [];
+        const used = Object.create(null);
+        function push(item) {
+            if (!item || !item.id || used[item.id]) return;
+            used[item.id] = true;
+            const line = document.createElement('div');
+            const name = document.createElement('span');
+            name.textContent = breakName(item.id) + ': ';
+            name.style.color = '#ffffff';
+            const mins = document.createElement('span');
+            mins.setAttribute('data-break-minutes', item.id);
+            mins.textContent = formatBreakMinutes(item.idleMin) + ' min idle';
+            mins.style.cssText = 'color:#f85149; font-weight:800;';
+            line.appendChild(name);
+            line.appendChild(mins);
+            parent.appendChild(line);
+        }
+        for (let i = 0; i < windows.length; i++) {
+            if (windows[i] && windows[i].id === 'first') push(windows[i]);
+        }
+        for (let i = 0; i < windows.length; i++) {
+            if (windows[i] && windows[i].id === 'second') push(windows[i]);
+        }
+        for (let i = 0; i < windows.length; i++) push(windows[i]);
+    }
+
+    function breakRowEmpId(row) {
+        if (row && row.empId) return row.empId;
+        const login = String((row && row.login) || '').trim().toLowerCase();
+        if (!login) return '';
+        const ids = Object.keys(BOARD_PEOPLE);
+        for (let i = 0; i < ids.length; i++) {
+            const person = BOARD_PEOPLE[ids[i]];
+            if (person && String(person.login || '').toLowerCase() === login) return ids[i];
+        }
+        const ident = IDENTITY.byLogin[login];
+        return ident ? (resolveEmpId(ident) || '') : '';
+    }
+
+    function breakRowStation(row) {
+        const empId = breakRowEmpId(row);
+        if (!empId) return '';
+        return stationLabel(personForEmp(empId).station);
+    }
+
+    function extendedListPhoto(login, empId) {
+        const photoPx = 42;
+        const ringPx = 4;
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'flex:0 0 auto; padding:' + ringPx + 'px; line-height:0;';
+        const photo = document.createElement('div');
+        photo.setAttribute('data-mem3-extended-photo', '1');
+        const url = photoForLogin(login) || (empId ? photoForEmp(empId) : '');
+        photo.style.cssText = 'position:relative; width:' + photoPx + 'px; height:' + photoPx + 'px; ' +
+            'border-radius:50%; background:#21262d center/cover no-repeat;';
+        if (url) photo.style.backgroundImage = 'url("' + String(url).replace(/"/g, '') + '")';
+        const person = empId ? personForEmp(empId) : null;
+        const ident = IDENTITY.byLogin[String(login || '').trim().toLowerCase()] || null;
+        const clock = clockLabel((person && person.clockStatus) || clockFor(ident, empId));
+        if (clock) {
+            photo.title = clock.text;
+            const ring = document.createElement('span');
+            ring.className = 'mem3-popup-clock-ring';
+            ring.style.cssText = 'position:absolute; inset:0; width:100%; height:100%; box-sizing:border-box; ' +
+                'border-radius:50%; pointer-events:none; box-shadow:0 0 0 ' + ringPx + 'px ' + clock.color + ';';
+            photo.appendChild(ring);
+        }
+        wrap.appendChild(photo);
+        return wrap;
+    }
+
     function paintPopupBreak(box, empId, login) {
         if (!box) return;
         const row = flagFor(empId, login, new Date());
@@ -10865,18 +10987,22 @@
             if (note) note.remove();
             return;
         }
-        const lines = breakLines(row);
-        const text = 'Extended break: ' + breakWhich(row) + (row.engagedAtMs ? ' \u00b7 engaged' : '') +
-            (lines.length ? '\n' + lines.join('\n') : '');
+        const sig = breakWhich(row) + '|' + breakLines(row).join('|') + '|' + (row.engagedAtMs ? '1' : '0');
         if (!note) {
             note = document.createElement('div');
             note.setAttribute('data-mem3-extended-note', '');
-            note.style.cssText = 'margin-top:6px; font-size:12px; font-weight:700; white-space:pre-wrap; color:#ffffff;';
+            note.style.cssText = 'margin-top:6px; font-size:12px; font-weight:700; color:#ffffff;';
             const head = box.querySelector('.mem3-popup-head');
             if (head && head.nextSibling) box.insertBefore(note, head.nextSibling);
             else box.appendChild(note);
         }
-        if (note.textContent !== text) note.textContent = text;
+        if (note.getAttribute('data-sig') === sig) return;
+        note.setAttribute('data-sig', sig);
+        note.textContent = '';
+        const title = document.createElement('div');
+        title.textContent = 'Extended break: ' + breakWhich(row) + (row.engagedAtMs ? ' \u00b7 engaged' : '');
+        note.appendChild(title);
+        appendBreakMinuteLines(note, row);
     }
 
     function openEngagementDetail(row) {
@@ -10895,8 +11021,11 @@
             : 'Not engaged.';
         who.style.cssText = 'font-size:13px; font-weight:700; margin-bottom:8px;';
         const which = document.createElement('div');
-        which.textContent = breakWhich(row) + (breakLines(row).length ? '\n' + breakLines(row).join('\n') : '');
-        which.style.cssText = 'font-size:12px; font-weight:650; white-space:pre-wrap; margin-bottom:8px;';
+        which.style.cssText = 'font-size:12px; font-weight:650; margin-bottom:8px;';
+        const whichTitle = document.createElement('div');
+        whichTitle.textContent = breakWhich(row);
+        which.appendChild(whichTitle);
+        appendBreakMinuteLines(which, row);
         const detail = document.createElement('div');
         detail.textContent = (row && row.detail) || '';
         detail.style.cssText = 'font-size:13px; white-space:pre-wrap;';
@@ -10924,7 +11053,7 @@
         const card = document.createElement('div');
         card.id = 'mem3-extended-list';
         card.style.cssText = 'position:fixed; left:50%; top:50%; transform:translate(-50%, -50%); z-index:2147483647; ' +
-            'width:min(560px, calc(100vw - 24px)); max-height:min(70vh, 560px); overflow:hidden; padding:12px; ' +
+            'width:min(640px, calc(100vw - 24px)); max-height:calc(100vh - 24px); overflow:hidden; padding:12px; ' +
             'display:flex; flex-direction:column; border-radius:10px; background:#161b22; color:#fff; border:1px solid #30363d; ' +
             'box-shadow:0 8px 24px rgba(0,0,0,.45); font-family:Segoe UI,system-ui,sans-serif;';
         const header = document.createElement('div');
@@ -10953,10 +11082,23 @@
             list.appendChild(empty);
         }
         for (let i = 0; i < rows.length; i++) {
-            const row = rows[i];
+            const copy = rows[i];
             const line = document.createElement('div');
-            line.style.cssText = 'display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-top:1px solid #30363d;';
-            const copy = row;
+            line.style.cssText = 'display:flex; gap:8px; align-items:center; padding:6px 0; border-top:1px solid #30363d;';
+            const empId = breakRowEmpId(copy);
+            line.appendChild(extendedListPhoto(copy.login || '', empId));
+            const label = document.createElement('div');
+            label.style.cssText = 'flex:1 1 auto; min-width:0; font-size:12px; font-weight:650;';
+            const headBits = [copy.login || 'associate'];
+            const station = breakRowStation(copy);
+            if (station) headBits.push(station);
+            headBits.push(breakWhich(copy));
+            headBits.push(copy.engagedAtMs ? 'engaged' : 'not engaged');
+            const head = document.createElement('div');
+            head.textContent = headBits.join(' \u00b7 ');
+            label.appendChild(head);
+            appendBreakMinuteLines(label, copy);
+            line.appendChild(label);
             if (copy.engagedAtMs) {
                 const view = document.createElement('button');
                 view.type = 'button';
@@ -10970,13 +11112,6 @@
                 });
                 line.appendChild(view);
             }
-            const label = document.createElement('div');
-            const bits = breakLines(copy);
-            label.textContent = (copy.login || 'associate') + ' \u00b7 ' + breakWhich(copy) +
-                (copy.engagedAtMs ? ' \u00b7 engaged' : ' \u00b7 not engaged') +
-                (bits.length ? '\n' + bits.join('\n') : '');
-            label.style.cssText = 'font-size:12px; font-weight:650; white-space:pre-wrap;';
-            line.appendChild(label);
             list.appendChild(line);
         }
         card.appendChild(header);

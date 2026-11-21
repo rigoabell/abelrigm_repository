@@ -128,10 +128,18 @@ api.reloadBreakChecked();
 assert.equal(api.breakCalcFinished(when), false);
 assert.equal(api.extendedChecked("99", when), false);
 assert.equal(src.includes("try { rememberExtendedBreak(empId, record)"), false);
+assert.equal(src.includes("if (!force && breakCalcFinished(when)) return"), false);
+assert.equal(src.includes("min idle, "), false);
+assert.match(src, /function pendingBreakIds/);
+assert.match(src, /function queueMissingBreaks/);
+assert.match(src, /data-mem3-extended-photo/);
+assert.match(src, /data-break-minutes/);
+assert.match(src, /color:#f85149; font-weight:800;/);
 assert.match(src, /Calculating Idle Time Percent/);
 assert.match(src, /Calculating Extended Breaks/);
 assert.match(src, /Recalculate Extended Breaks/);
 assert.match(src, /background:#d29922;/);
+assert.match(src, /BREAK_RUNNING && !idleGoing/);
 
 const daysScale = { shiftName: "days", originMin: 6 * 60, pxPerMin: 1 };
 const nightScale = { shiftName: "nights", originMin: 18 * 60, pxPerMin: 1 };
