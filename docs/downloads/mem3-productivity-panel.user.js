@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.16
+// @version      1.12.17
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.16';
+    const SCRIPT_VERSION = '1.12.17';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -2324,13 +2324,17 @@
 
     const CLOCK_PHOTO_PX = 32;
     const CLOCK_RING_PX = 6;
+    const ROW_PHOTO_PX = 38;
+    const ROW_RING_PX = 7;
 
     function restoreAvatar(el) {
         if (!el || !el.style) return;
         el.style.outline = '';
         el.style.outlineOffset = '';
-        el.style.minWidth = CLOCK_PHOTO_PX + 'px';
-        el.style.minHeight = CLOCK_PHOTO_PX + 'px';
+        el.style.width = ROW_PHOTO_PX + 'px';
+        el.style.height = ROW_PHOTO_PX + 'px';
+        el.style.minWidth = ROW_PHOTO_PX + 'px';
+        el.style.minHeight = ROW_PHOTO_PX + 'px';
         el.style.flexShrink = '0';
         el.style.borderRadius = '50%';
         el.style.backgroundSize = 'cover';
@@ -2375,7 +2379,7 @@
         ring.className = 'mem3-clock-ring';
         ring.style.cssText = 'position:absolute; inset:0; width:100%; height:100%; box-sizing:border-box; ' +
             'border-radius:50%; pointer-events:none; border:0; background:transparent; z-index:5; ' +
-            'box-shadow:0 0 0 ' + CLOCK_RING_PX + 'px ' + label.color;
+            'box-shadow:0 0 0 ' + ROW_RING_PX + 'px ' + label.color;
         avatar.appendChild(ring);
     }
 
@@ -3491,8 +3495,7 @@
             '@keyframes mem3YieldPulse { 0%, 100% { transform: scale(1); opacity: 1; }' +
             ' 50% { transform: scale(1.22); opacity: 0.55; } }' +
             '.mem3-yield-mark { display:inline-flex; transform-origin:center; }' +
-            '.mem3-idle-now { animation: mem3YieldPulse 1.05s ease-in-out infinite; }' +
-            '.mem3-extended-break { animation: none; }' +
+            '.mem3-idle-now, .mem3-extended-break { animation: mem3YieldPulse 1.05s ease-in-out infinite; }' +
             '@keyframes mem3EngagePulse { 0%, 100% { background:#f85149; color:#ffffff; }' +
             ' 50% { background:#ffa198; color:#3d0c0c; } }' +
             '.mem3-engage-pulse { animation: mem3EngagePulse 1.05s ease-in-out infinite; }' +
@@ -4026,8 +4029,8 @@
         mark.style.pointerEvents = 'none';
         const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
         svg.setAttribute('viewBox', '0 0 24 22');
-        svg.setAttribute('width', '20');
-        svg.setAttribute('height', '18');
+        svg.setAttribute('width', '24');
+        svg.setAttribute('height', '22');
         svg.setAttribute('aria-hidden', 'true');
         svg.style.pointerEvents = 'none';
         const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
@@ -4060,7 +4063,7 @@
     function yieldSlot() {
         const slot = document.createElement('span');
         slot.style.cssText = 'display:inline-flex; align-items:center; justify-content:center; ' +
-            'width:22px; height:20px; flex:0 0 auto; pointer-events:none;';
+            'width:26px; height:24px; flex:0 0 auto; pointer-events:none;';
         return slot;
     }
 

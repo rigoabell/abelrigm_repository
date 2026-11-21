@@ -155,6 +155,9 @@ assert.match(src, /let left = x - rect\.width \/ 2;/);
 assert.match(src, /let top = y - rect\.height - gap;/);
 assert.match(src, /data-mem3-name-tip/);
 assert.match(src, /poly\.style\.pointerEvents = 'fill'/);
+assert.match(src, /const ROW_PHOTO_PX = 38;/);
+assert.match(src, /svg\.setAttribute\('width', '24'\)/);
+assert.match(src, /\.mem3-idle-now, \.mem3-extended-break \{ animation: mem3YieldPulse/);
 assert.match(src, /pointer-events:none;/);
 
 const daysScale = { shiftName: "days", originMin: 6 * 60, pxPerMin: 1 };
