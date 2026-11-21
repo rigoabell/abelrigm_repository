@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.11
+// @version      1.12.12
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.11';
+    const SCRIPT_VERSION = '1.12.12';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -6035,39 +6035,50 @@
             return btn;
         }
         function addMetric(value, unit, color, rank, px, spec) {
+            const above = !!(spec && spec.labelAbove);
             const group = document.createElement('span');
-            group.style.cssText = 'display:inline-flex; align-items:baseline; gap:4px; max-width:100%;' +
-                (opts.lead ? ' flex-wrap:nowrap; white-space:nowrap;' : ' flex-wrap:wrap;');
+            group.style.cssText = above
+                ? 'display:flex; flex-direction:column; align-items:flex-start; gap:0; max-width:100%;'
+                : 'display:inline-flex; align-items:baseline; gap:4px; max-width:100%;' +
+                    (opts.lead ? ' flex-wrap:nowrap; white-space:nowrap;' : ' flex-wrap:wrap;');
             const key = spec && spec.key ? spec.key : '';
-            if (key) group.setAttribute('data-rank-for', key);
-            if (rank === 'best') group.className = 'mem3-pulse-best';
-            else if (rank === 'worst') group.className = 'mem3-pulse-worst';
-            if (spec && spec.onView) group.appendChild(viewButton(spec.viewTitle || 'View', spec.onView));
+            const nums = document.createElement('span');
+            nums.style.cssText = 'display:inline-flex; align-items:center; gap:4px;';
+            if (key) (above ? nums : group).setAttribute('data-rank-for', key);
+            const rankHost = above ? nums : group;
+            if (rank === 'best') rankHost.className = 'mem3-pulse-best';
+            else if (rank === 'worst') rankHost.className = 'mem3-pulse-worst';
+            if (spec && spec.onView) nums.appendChild(viewButton(spec.viewTitle || 'View', spec.onView));
             const num = document.createElement('span');
             num.textContent = value;
             if (key) num.setAttribute('data-metric', key);
             num.style.cssText = 'font-size:' + (px || size) + 'px; font-weight:700; color:' + color +
                 '; font-variant-numeric:tabular-nums;';
+            nums.appendChild(num);
             const label = document.createElement('span');
             label.textContent = unit;
-            label.style.cssText = 'font-size:10px; font-weight:600; color:#8b949e;';
-            group.appendChild(num);
-            group.appendChild(label);
+            label.style.cssText = 'font-size:10px; font-weight:600; color:#8b949e; line-height:1.1;';
+            if (above) group.appendChild(label);
+            group.appendChild(nums);
+            if (!above) group.appendChild(label);
             valueRow.appendChild(group);
         }
         const scopeLabel = opts.scopeLabel || 'Total';
         addMetric(opts.value, 'UPH', opts.uph > 0 ? c : '#c9d1d9', opts.uphRank || '', size, {
             key: 'uph',
+            labelAbove: true,
             viewTitle: 'View UPH, lowest first',
             onView: function () { openRosterPopup(scopeLabel, scopeIds, 'uph'); }
         });
         addMetric(idleLabel(idlePct), 'IDLE', ic, opts.idleRank || '', size, {
             key: 'idle',
+            labelAbove: true,
             viewTitle: 'View idle percent, highest first',
             onView: function () { openRosterPopup(scopeLabel, idleScope, 'idle'); }
         });
         addMetric(String(idleCount), 'ASSOCIATES IDLE', idleCount > 0 ? '#f85149' : '#c9d1d9', '', size, {
             key: 'idleCount',
+            labelAbove: true,
             viewTitle: 'View associates idle for 11 minutes',
             onView: function () { openRosterPopup(scopeLabel, idleScope, 'idleNow'); }
         });
@@ -6099,8 +6110,8 @@
         breakNums.appendChild(breakCount);
         breakNums.appendChild(breakBar);
         breakNums.appendChild(breakPct);
-        breakGroup.appendChild(breakNums);
         breakGroup.appendChild(breakLabel);
+        breakGroup.appendChild(breakNums);
         valueRow.appendChild(breakGroup);
         addMetric(formatUnits(opts.units || 0), 'units', '#8b949e', '', 13, { key: 'units' });
         addMetric(formatDuration(opts.idleMin || 0), 'hrs idle', '#8b949e', '', 13, { key: 'idleHours' });
@@ -6586,7 +6597,7 @@
     }
 
     function summaryStructureSig(data) {
-        return 'v53|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
+        return 'v54|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
             (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
             (data.floorOpen || []).join(';') + '|' +
             (data.floorDisabled || []).join(';') + '|' +
@@ -10985,6 +10996,14 @@
         return wrap;
     }
 
+    function shortBreakRowHeight(label) {
+        const h = Math.round(label.getBoundingClientRect().height);
+        const lines = label.querySelectorAll('[data-break-minutes]');
+        if (lines.length < 2 || !lines[1].parentElement) return h;
+        const extra = Math.round(lines[1].parentElement.getBoundingClientRect().height);
+        return h - (lines.length - 1) * extra;
+    }
+
     function fitExtendedListPhotos(list) {
         if (!list) return;
         const photos = list.querySelectorAll('[data-mem3-extended-photo]');
@@ -10993,7 +11012,7 @@
             const line = photos[i].parentElement && photos[i].parentElement.parentElement;
             const label = line && line.querySelector('[data-mem3-extended-copy]');
             if (!label) continue;
-            const h = Math.round(label.getBoundingClientRect().height);
+            const h = shortBreakRowHeight(label);
             if (h >= 42 && (!size || h < size)) size = h;
         }
         if (!size) return;
