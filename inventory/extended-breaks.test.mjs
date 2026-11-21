@@ -135,6 +135,7 @@ assert.match(src, /function queueMissingBreaks/);
 assert.match(src, /data-mem3-extended-photo/);
 assert.match(src, /border:' \+ ringPx \+ 'px solid ' \+ ring/);
 assert.match(src, /function fitExtendedListPhotos/);
+assert.match(src, /if \(h >= 42 && \(!size \|\| h < size\)\) size = h/);
 assert.match(src, /Open FCLM details/);
 assert.match(src, /fclmEmpUrl\(empId, 'all'\)/);
 assert.match(src, /data-break-minutes/);

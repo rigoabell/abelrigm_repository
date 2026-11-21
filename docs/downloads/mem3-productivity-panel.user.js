@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.10
+// @version      1.12.11
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.10';
+    const SCRIPT_VERSION = '1.12.11';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -10988,15 +10988,18 @@
     function fitExtendedListPhotos(list) {
         if (!list) return;
         const photos = list.querySelectorAll('[data-mem3-extended-photo]');
+        let size = 0;
         for (let i = 0; i < photos.length; i++) {
-            const photo = photos[i];
-            const line = photo.parentElement && photo.parentElement.parentElement;
+            const line = photos[i].parentElement && photos[i].parentElement.parentElement;
             const label = line && line.querySelector('[data-mem3-extended-copy]');
             if (!label) continue;
             const h = Math.round(label.getBoundingClientRect().height);
-            if (!(h >= 42)) continue;
-            photo.style.width = h + 'px';
-            photo.style.height = h + 'px';
+            if (h >= 42 && (!size || h < size)) size = h;
+        }
+        if (!size) return;
+        for (let i = 0; i < photos.length; i++) {
+            photos[i].style.width = size + 'px';
+            photos[i].style.height = size + 'px';
         }
     }
 
