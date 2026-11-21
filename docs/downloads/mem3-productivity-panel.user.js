@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.4
+// @version      1.12.5
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.4';
+    const SCRIPT_VERSION = '1.12.5';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -5928,12 +5928,12 @@
         cell.style.cssText = opts.lead
             ? 'display:flex; flex-direction:column; justify-content:center; gap:2px; ' +
               (opts.stacked
-                  ? 'width:100%; box-sizing:border-box; min-width:200px; margin:0; '
-                  : 'flex:1.15 1 0; min-width:200px; margin:0 10px 0 0; ') +
+                  ? 'width:100%; box-sizing:border-box; min-width:0; margin:0; '
+                  : 'flex:1.15 1 0; min-width:0; margin:0 10px 0 0; ') +
               'padding:6px 10px; background:#0d1117; border:1px solid #8b949e; ' +
               'border-left:5px solid #8b949e; border-radius:8px;'
             : 'display:flex; flex-direction:column; justify-content:center; gap:1px; ' +
-              'flex:1 1 0; min-width:172px; padding:2px 8px; border-left:3px solid #30363d;';
+              'flex:1 1 0; min-width:0; padding:2px 4px; border-left:3px solid #30363d;';
 
         const kicker = document.createElement('div');
         kicker.textContent = opts.kicker;
@@ -5976,7 +5976,7 @@
         }
         function addMetric(value, unit, color, rank, px, spec) {
             const group = document.createElement('span');
-            group.style.cssText = 'display:inline-flex; align-items:center; gap:4px;';
+            group.style.cssText = 'display:inline-flex; flex-wrap:wrap; align-items:baseline; gap:2px 4px; max-width:100%;';
             const key = spec && spec.key ? spec.key : '';
             if (key) group.setAttribute('data-rank-for', key);
             if (rank === 'best') group.className = 'mem3-pulse-best';
@@ -6013,8 +6013,10 @@
         const breakStats = extendedBreakStats(scopeIds);
         const breakColor = engagedColor(breakStats.pct);
         const breakGroup = document.createElement('span');
-        breakGroup.style.cssText = 'display:inline-flex; align-items:center; gap:6px; white-space:nowrap;';
-        breakGroup.appendChild(viewButton('View extended breaks', function () {
+        breakGroup.style.cssText = 'display:flex; flex-direction:column; align-items:flex-start; gap:1px; max-width:100%;';
+        const breakNums = document.createElement('span');
+        breakNums.style.cssText = 'display:inline-flex; align-items:center; gap:6px;';
+        breakNums.appendChild(viewButton('View extended breaks', function () {
             openExtendedList(scopeLabel, scopeIds);
         }));
         const breakCount = document.createElement('span');
@@ -6029,13 +6031,14 @@
             '; font-variant-numeric:tabular-nums;';
         const breakLabel = document.createElement('span');
         breakLabel.textContent = 'EXTENDED BREAKS';
-        breakLabel.style.cssText = 'font-size:10px; font-weight:600; color:#8b949e;';
+        breakLabel.style.cssText = 'font-size:10px; font-weight:600; color:#8b949e; line-height:1.1;';
         const breakBar = document.createElement('span');
         breakBar.textContent = '|';
         breakBar.style.cssText = 'font-size:' + size + 'px; font-weight:700; color:#ffffff;';
-        breakGroup.appendChild(breakCount);
-        breakGroup.appendChild(breakBar);
-        breakGroup.appendChild(breakPct);
+        breakNums.appendChild(breakCount);
+        breakNums.appendChild(breakBar);
+        breakNums.appendChild(breakPct);
+        breakGroup.appendChild(breakNums);
         breakGroup.appendChild(breakLabel);
         valueRow.appendChild(breakGroup);
         addMetric(formatUnits(opts.units || 0), 'units', '#8b949e', '', opts.lead ? 16 : 13, { key: 'units' });
@@ -6522,7 +6525,7 @@
     }
 
     function summaryStructureSig(data) {
-        return 'v51|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
+        return 'v52|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
             (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
             (data.floorOpen || []).join(';') + '|' +
             (data.floorDisabled || []).join(';') + '|' +
@@ -6644,7 +6647,7 @@
         if (actions.parentElement) actions.remove();
 
         node.style.cssText = 'display:flex; flex-direction:column; align-items:stretch; gap:8px; ' +
-            'flex:1 0 100%; width:100%; box-sizing:border-box; margin:8px 0 6px; padding:8px 10px; overflow-x:auto; ' +
+            'flex:1 0 100%; width:100%; min-width:0; box-sizing:border-box; margin:8px 0 6px; padding:8px 10px; overflow-x:auto; ' +
             'background:#161b22; border:1px solid #30363d; border-radius:10px; ' +
             'font-family:Segoe UI,system-ui,sans-serif; color:#ffffff;';
 
@@ -6770,8 +6773,8 @@
         }
 
         const metrics = document.createElement('div');
-        metrics.style.cssText = 'display:grid; grid-template-columns:minmax(200px,1.15fr) repeat(8,minmax(172px,1fr)); ' +
-            'grid-template-rows:auto auto; column-gap:0; row-gap:6px; width:max(100%, 1760px); align-items:stretch;';
+        metrics.style.cssText = 'display:grid; grid-template-columns:minmax(0,1.15fr) repeat(8,minmax(0,1fr)); ' +
+            'grid-template-rows:auto auto; column-gap:0; row-gap:6px; width:100%; min-width:0; align-items:stretch;';
 
         const totalIds = lineIdsOf(data);
         const totalCell = makeSummaryCell({
