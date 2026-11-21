@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.7
+// @version      1.12.8
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.7';
+    const SCRIPT_VERSION = '1.12.8';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -501,9 +501,9 @@
         return h + ':' + (min < 10 ? '0' + min : String(min));
     }
 
-    function getShiftWindow() {
+    function getShiftWindow(windowId) {
         const now = new Date();
-        const bounds = windowBounds(ACTIVE_WINDOW, now);
+        const bounds = windowBounds(windowId || ACTIVE_WINDOW, now);
         const start = bounds.start;
         const end = bounds.end;
         const pad = function (n) { return String(n).padStart(2, '0'); };
@@ -517,8 +517,8 @@
         };
     }
 
-    function getShiftWindowForLink() {
-        const w = getShiftWindow();
+    function getShiftWindowForLink(windowId) {
+        const w = getShiftWindow(windowId);
         const tzMin = -new Date().getTimezoneOffset();
         const sign = tzMin >= 0 ? '+' : '-';
         const absMin = Math.abs(tzMin);
@@ -1110,8 +1110,8 @@
         };
     }
 
-    function fclmEmpUrl(empId) {
-        const w = getShiftWindowForLink();
+    function fclmEmpUrl(empId, windowId) {
+        const w = getShiftWindowForLink(windowId);
         return 'https://fclm-portal.amazon.com/employee/timeDetails?employeeId=' + empId +
             '&warehouseId=' + WAREHOUSE +
             '&startTime=' + encodeURIComponent(w.startLink) +
@@ -1125,6 +1125,18 @@
         link.rel = 'noopener';
         link.textContent = 'Open FCLM Time Details';
         link.style.cssText = 'display:inline-block; margin-top:6px; font-size:12px; color:#58a6ff; text-decoration:underline;';
+        link.addEventListener('click', function (e) { e.stopPropagation(); });
+        return link;
+    }
+
+    function shiftDetailsLink(empId) {
+        const link = document.createElement('a');
+        link.href = fclmEmpUrl(empId, 'all');
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.textContent = 'Open FCLM details';
+        link.setAttribute('data-mem3-shift-details', '1');
+        link.style.cssText = 'display:inline-block; margin-top:2px; font-size:12px; font-weight:700; color:#58a6ff; text-decoration:underline;';
         link.addEventListener('click', function (e) { e.stopPropagation(); });
         return link;
     }
@@ -11101,6 +11113,7 @@
             sub.textContent = subBits.join(' \u00b7 ');
             label.appendChild(sub);
             appendBreakMinuteLines(label, copy);
+            if (empId) label.appendChild(shiftDetailsLink(empId));
             line.appendChild(label);
             if (copy.engagedAtMs) {
                 const view = document.createElement('button');

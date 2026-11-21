@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.12\.7/);
+assert.match(src, /@version\s+1\.12\.8/);
 assert.match(src, /if \(shown >= 19\) return '#2ea043'/);
 assert.match(src, /if \(shown >= 16\) return '#d29922'/);
 assert.match(src, /data-mem3-enter-notes/);
@@ -165,7 +165,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.12.7");
+assert.equal(entry.version, "1.12.8");
 assert.match(entry.detail, /stays on the board the same as unassigning by hand/);
 assert.match(entry.detail, /Customer returns 1st Half: Station 1-04 \| 2nd Half: Station 1-76/);
 assert.match(entry.detail, /no longer at the station they were marked from/);
