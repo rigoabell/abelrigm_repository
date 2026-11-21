@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.1
+// @version      1.12.3
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.1';
+    const SCRIPT_VERSION = '1.12.3';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -1224,6 +1224,8 @@
         const fns = doc.querySelectorAll('tr.function-seg');
         let lastFunction = null;
         const segments = [];
+        const scale = chartScale(doc, new Date());
+        let rowSample = '';
         for (let i = 0; i < fns.length; i++) {
             const cls = (fns[i].getAttribute('class') || '').toLowerCase();
             const title = ((fns[i].querySelector('td') || {}).textContent || '').trim();
@@ -1233,7 +1235,8 @@
             else if (bucket === 'indirect') idleMin += minutes;
             else if (bucket === 'direct') activeMin += minutes;
             lastFunction = { title: title.slice(0, 120), bucket: bucket, minutes: minutes };
-            segments.push(readFunctionSegment(fns[i], bucket, minutes, title));
+            if (!rowSample && (bucket === 'indirect' || bucket === 'tot')) rowSample = sampleFunctionRow(fns[i]);
+            segments.push(readFunctionSegment(fns[i], bucket, minutes, title, scale));
         }
         const titleEl = doc.querySelector('title');
         return {
@@ -1255,6 +1258,7 @@
             noData: clocks.length === 0 && /time details/i.test(titleEl ? titleEl.textContent || '' : ''),
             lastFunction: lastFunction,
             segments: segments,
+            rowSample: rowSample,
             currentlyIdle: showsIdleNow({ lastFunction: lastFunction })
         };
     }
@@ -1280,20 +1284,20 @@
     let engageChain = Promise.resolve();
 
     function parseClockMin(text) {
-        const match = /(\d{1,2}):(\d{2})(?::\d{2})?\s*([AP]M)/i.exec(String(text || ''));
+        const match = /(\d{1,2}):(\d{2})(?::\d{2})?\s*([ap])\.?\s*m\.?/i.exec(String(text || ''));
         if (!match) return null;
         let hour = parseInt(match[1], 10);
         const minute = parseInt(match[2], 10);
         if (hour < 1 || hour > 12 || minute > 59) return null;
         const ap = match[3].toUpperCase();
-        if (ap === 'PM' && hour < 12) hour += 12;
-        if (ap === 'AM' && hour === 12) hour = 0;
+        if (ap === 'P' && hour < 12) hour += 12;
+        if (ap === 'A' && hour === 12) hour = 0;
         return hour * 60 + minute;
     }
 
     function parseClockRange(text) {
         const found = [];
-        const re = /(\d{1,2}:\d{2}(?::\d{2})?\s*[AP]M)/gi;
+        const re = /(\d{1,2}:\d{2}(?::\d{2})?\s*[ap]\.?\s*m\.?)/gi;
         const raw = String(text || '');
         let match;
         while ((match = re.exec(raw))) {
@@ -1308,12 +1312,233 @@
         return { startMin: start, endMin: end };
     }
 
-    function readFunctionSegment(row, bucket, minutes, title) {
+    // FCLM often prints 08:50-09:15 or 2:20-2:45 with no AM/PM. On days,
+    // 6:00–11:59 stay in the morning and 1:00–5:59 are the afternoon. On
+    // nights, 6:00–11:59 are the evening and 1:00–5:59 are after midnight.
+    function clockFromParts(hour, minute, shiftName) {
+        if (hour > 23 || minute > 59 || hour < 0 || minute < 0) return null;
+        if (hour >= 13) return hour * 60 + minute;
+        if (hour === 0) return minute;
+        if (hour === 12) return (shiftName === 'nights' ? 0 : 12) * 60 + minute;
+        if (shiftName === 'nights') {
+            if (hour >= 6) return (hour + 12) * 60 + minute;
+            return hour * 60 + minute;
+        }
+        if (hour >= 6) return hour * 60 + minute;
+        return (hour + 12) * 60 + minute;
+    }
+
+    function parseIsoRange(text) {
+        const found = [];
+        const re = /\d{4}-\d{2}-\d{2}[T ](\d{2}):(\d{2})/g;
+        let match;
+        while ((match = re.exec(String(text || '')))) {
+            const hour = parseInt(match[1], 10);
+            const minute = parseInt(match[2], 10);
+            if (hour > 23 || minute > 59) continue;
+            found.push(hour * 60 + minute);
+            if (found.length === 2) break;
+        }
+        if (found.length < 2) return null;
+        let end = found[1];
+        if (end <= found[0]) end += 1440;
+        return { startMin: found[0], endMin: end };
+    }
+
+    function parseLooseRange(text, shiftName) {
+        const found = [];
+        const re = /\b(\d{1,2}):(\d{2})(?::\d{2})?\b/g;
+        let match;
+        while ((match = re.exec(String(text || '')))) {
+            const hour = parseInt(match[1], 10);
+            const minute = parseInt(match[2], 10);
+            if (hour > 23 || minute > 59) continue;
+            found.push(clockFromParts(hour, minute, shiftName));
+            if (found.length === 4) break;
+        }
+        for (let i = 0; i < found.length - 1; i++) {
+            const start = found[i];
+            let end = found[i + 1];
+            if (start == null || end == null) continue;
+            if (end <= start) end += 1440;
+            const span = end - start;
+            if (span >= 1 && span <= 360) return { startMin: start, endMin: end };
+        }
+        return null;
+    }
+
+    function rangeFromText(text, shiftName, minutes) {
+        return parseClockRange(text) || parseIsoRange(text) || parseLooseRange(text, shiftName) || singleClockRange(text, shiftName, minutes);
+    }
+
+    function singleClockRange(text, shiftName, minutes) {
+        if (!(minutes > 0)) return null;
+        const am = parseClockMin(text);
+        if (am != null && !parseClockRange(text)) return { startMin: am, endMin: am + minutes };
+        const found = [];
+        const re = /\b(\d{1,2}):(\d{2})\b/g;
+        let match;
+        while ((match = re.exec(String(text || '')))) {
+            found.push({ hour: parseInt(match[1], 10), minute: parseInt(match[2], 10) });
+            if (found.length > 1) return null;
+        }
+        if (found.length !== 1 || found[0].hour === 0) return null;
+        const start = clockFromParts(found[0].hour, found[0].minute, shiftName);
+        if (start == null) return null;
+        return { startMin: start, endMin: start + minutes };
+    }
+
+    function chartOriginMin(shiftName) {
+        return shiftName === 'nights' ? 18 * 60 : 6 * 60;
+    }
+
+    function defaultBreakScale(date) {
+        const shiftName = breakShiftName(date || new Date());
+        return { shiftName: shiftName, originMin: chartOriginMin(shiftName), pxPerMin: 1 };
+    }
+
+    function pxProp(style, name) {
+        const re = new RegExp('(?:^|;)\\s*' + name.replace('-', '\\-') + '\\s*:\\s*([\\d.]+)px', 'i');
+        const match = re.exec(String(style || ''));
+        return match ? parseFloat(match[1]) : null;
+    }
+
+    function rangeFromStyle(style, minutes, scale) {
+        if (!style) return null;
+        const leftPct = /(?:^|;)\s*left\s*:\s*([\d.]+)%/i.exec(style);
+        const widthPct = /(?:^|;)\s*width\s*:\s*([\d.]+)%/i.exec(style);
+        if (leftPct && widthPct) {
+            const span = 12 * 60;
+            const width = parseFloat(widthPct[1]);
+            if (width >= 1 && width < 80) {
+                const start = scale.originMin + (parseFloat(leftPct[1]) / 100) * span;
+                const dur = (width / 100) * span;
+                return { startMin: start, endMin: start + dur };
+            }
+        }
+        if (!(minutes > 0)) return null;
+        const margin = pxProp(style, 'margin-left');
+        const leftPx = margin != null ? margin : pxProp(style, 'left');
+        const widthPx = pxProp(style, 'width');
+        if (leftPx == null || !(widthPx > 0) || widthPx >= 600) return null;
+        const pxPerMin = widthPx / minutes;
+        const expected = scale.pxPerMin || 1;
+        if (pxPerMin < expected * 0.8 || pxPerMin > expected * 1.25) return null;
+        const start = scale.originMin + leftPx / pxPerMin;
+        return { startMin: start, endMin: start + minutes };
+    }
+
+    function rangeFromImages(row, minutes, scale) {
+        if (!row || !row.querySelectorAll || !(minutes > 0)) return null;
+        const imgs = row.querySelectorAll('img');
+        if (!imgs || !imgs.length) return null;
+        let offset = 0;
+        const expected = scale.pxPerMin || 1;
+        for (let i = 0; i < imgs.length; i++) {
+            const width = parseFloat(imgs[i].getAttribute('width') || '');
+            if (!(width > 0)) continue;
+            const ratio = width / minutes;
+            const height = parseFloat(imgs[i].getAttribute('height') || '');
+            if (ratio >= expected * 0.8 && ratio <= expected * 1.25 && (height === 0 || height > 2 || imgs[i].getAttribute('title'))) {
+                const start = scale.originMin + offset / ratio;
+                return { startMin: start, endMin: start + minutes };
+            }
+            if (height > 0 && height <= 2 && width < 400) offset += width;
+        }
+        return null;
+    }
+
+    function parseHourTick(text, shiftName) {
+        const match = /^(\d{1,2})(?::00)?\s*([ap])?\.?\s*m?\.?$/i.exec(String(text || '').trim());
+        if (!match) return null;
+        const hour = parseInt(match[1], 10);
+        const minute = 0;
+        if (match[2]) {
+            const ap = match[2].toUpperCase();
+            if (hour < 1 || hour > 12) return null;
+            let h = hour;
+            if (ap === 'P' && h < 12) h += 12;
+            if (ap === 'A' && h === 12) h = 0;
+            return h * 60 + minute;
+        }
+        return clockFromParts(hour, minute, shiftName);
+    }
+
+    function chartScale(doc, date) {
+        const scale = defaultBreakScale(date);
+        if (!doc || !doc.querySelectorAll) return scale;
+        const nodes = doc.querySelectorAll('td, div, span, th');
+        const marks = [];
+        for (let i = 0; i < nodes.length && marks.length < 24; i++) {
+            const text = String(nodes[i].textContent || '').replace(/\s+/g, ' ').trim();
+            if (!text || text.length > 8) continue;
+            const min = parseHourTick(text, scale.shiftName);
+            if (min == null) continue;
+            const style = nodes[i].getAttribute && nodes[i].getAttribute('style');
+            const left = style ? pxProp(style, 'left') : null;
+            const margin = style ? pxProp(style, 'margin-left') : null;
+            const px = margin != null ? margin : left;
+            if (px == null) continue;
+            marks.push({ min: min, px: px });
+        }
+        if (marks.length < 2) return scale;
+        marks.sort(function (a, b) { return a.px - b.px; });
+        for (let i = 1; i < marks.length; i++) {
+            const dPx = marks[i].px - marks[0].px;
+            let dMin = marks[i].min - marks[0].min;
+            if (dMin <= 0) dMin += 1440;
+            if (dPx < 1) continue;
+            const pxPerMin = dPx / dMin;
+            if (pxPerMin < 0.5 || pxPerMin > 4) continue;
+            return {
+                shiftName: scale.shiftName,
+                originMin: marks[0].min - marks[0].px / pxPerMin,
+                pxPerMin: pxPerMin
+            };
+        }
+        return scale;
+    }
+
+    function sampleFunctionRow(row) {
+        const bits = [];
+        const cls = row && row.getAttribute && row.getAttribute('class');
+        if (cls) bits.push('class=' + cls);
+        const nodes = row && row.querySelectorAll ? row.querySelectorAll('*') : [];
+        for (let i = 0; i < nodes.length && bits.length < 8; i++) {
+            const el = nodes[i];
+            if (!el || !el.getAttribute) continue;
+            const tag = el.tagName || 'el';
+            const title = el.getAttribute('title');
+            const style = el.getAttribute('style');
+            const width = el.getAttribute('width');
+            if (title) bits.push(tag + ' title=' + String(title).slice(0, 140));
+            if (style) bits.push(tag + ' style=' + String(style).slice(0, 160));
+            if (width) bits.push(tag + ' width=' + width);
+        }
+        const text = String((row && row.textContent) || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+        if (text) bits.push('text=' + text);
+        return bits.join(' | ').slice(0, 500);
+    }
+
+    function pushClockBlob(el, blobs) {
+        if (!el || !el.getAttribute) return;
+        const names = ['title', 'data-original-title', 'data-tooltip', 'aria-label', 'data-time', 'data-start', 'data-end'];
+        for (let i = 0; i < names.length; i++) {
+            const value = el.getAttribute(names[i]);
+            if (value) blobs.push(value);
+        }
+        const start = el.getAttribute('data-start');
+        const end = el.getAttribute('data-end');
+        if (start && end) blobs.push(start + ' - ' + end);
+    }
+
+    function readFunctionSegment(row, bucket, minutes, title, scale) {
+        const used = scale && scale.shiftName ? scale : defaultBreakScale(new Date());
         const blobs = [];
-        if (row && row.getAttribute && row.getAttribute('title')) blobs.push(row.getAttribute('title'));
+        pushClockBlob(row, blobs);
         if (row && row.querySelectorAll) {
             const titled = row.querySelectorAll('[title]');
-            for (let i = 0; i < titled.length; i++) blobs.push(titled[i].getAttribute('title') || '');
+            for (let i = 0; i < titled.length; i++) pushClockBlob(titled[i], blobs);
             const cells = row.querySelectorAll('td');
             for (let i = 0; i < cells.length; i++) {
                 const cls = String(cells[i].className || '');
@@ -1322,20 +1547,15 @@
             }
         }
         let range = null;
-        for (let i = 0; i < blobs.length; i++) {
-            range = parseClockRange(blobs[i]);
-            if (range) break;
-        }
+        for (let i = 0; i < blobs.length && !range; i++) range = rangeFromText(blobs[i], used.shiftName, minutes);
+        if (!range && row && row.getAttribute) range = rangeFromStyle(row.getAttribute('style') || '', minutes, used);
         if (!range && row && row.querySelectorAll) {
-            const cells = row.querySelectorAll('td');
-            for (let i = 0; i < cells.length && !range; i++) {
-                const cls = String(cells[i].className || '');
-                if (cls.indexOf('rightAlign') !== -1) continue;
-                const start = parseClockMin(cells[i].textContent || '');
-                if (start == null || !(minutes > 0)) continue;
-                range = { startMin: start, endMin: start + minutes };
+            const styled = row.querySelectorAll('[style]');
+            for (let i = 0; i < styled.length && !range; i++) {
+                range = rangeFromStyle(styled[i].getAttribute('style') || '', minutes, used);
             }
         }
+        if (!range) range = rangeFromImages(row, minutes, used);
         return {
             bucket: bucket,
             minutes: minutes,
@@ -1356,7 +1576,12 @@
 
     function overlapMinutes(start, end, w0, w1) {
         if (start == null || end == null) return 0;
-        return Math.max(0, Math.min(end, w1) - Math.max(start, w0));
+        let best = 0;
+        for (let shift = -1440; shift <= 1440; shift += 1440) {
+            const hit = Math.min(end + shift, w1) - Math.max(start + shift, w0);
+            if (hit > best) best = hit;
+        }
+        return best;
     }
 
     function idleInWindow(segments, window) {
@@ -3352,6 +3577,29 @@
         };
     }
 
+    function breakDebug() {
+        let withClock = 0;
+        let sample = null;
+        for (let i = 0; i < BOARD_IDS.length; i++) {
+            const id = BOARD_IDS[i];
+            const time = LAST_TIME[id];
+            if (!time) continue;
+            if (!sample && time.rowSample) sample = { empId: id, row: time.rowSample };
+            const segs = time.segments || [];
+            for (let s = 0; s < segs.length; s++) {
+                if (segs[s] && segs[s].startMin != null) { withClock++; break; }
+            }
+        }
+        let count = 0;
+        let pct = 100;
+        try {
+            const stats = extendedBreakStats(BOARD_IDS);
+            count = stats.count;
+            pct = stats.pct;
+        } catch (e) { /* the floor copy still returns the rest */ }
+        return { count: count, engagedPct: pct, withClock: withClock, rowSample: sample };
+    }
+
     function collectSummaryDebug() {
         const progress = timeProgress();
         let withTime = 0;
@@ -3392,6 +3640,7 @@
             },
             rollup: { functions: DEBUG.rollupFunctions },
             matching: { perLine: DEBUG.perLine, sampleMatched: DEBUG.sampleMatched },
+            breaks: breakDebug(),
             logs: DEBUG.logs,
             unassign: {
                 anchors: associateAnchors().length,
@@ -5490,12 +5739,12 @@
         cell.style.cssText = opts.lead
             ? 'display:flex; flex-direction:column; justify-content:center; gap:2px; ' +
               (opts.stacked
-                  ? 'width:100%; box-sizing:border-box; min-width:0; margin:0; '
-                  : 'flex:1.15 1 0; min-width:0; margin:0 10px 0 0; ') +
+                  ? 'width:100%; box-sizing:border-box; min-width:200px; margin:0; '
+                  : 'flex:1.15 1 0; min-width:200px; margin:0 10px 0 0; ') +
               'padding:6px 10px; background:#0d1117; border:1px solid #8b949e; ' +
               'border-left:5px solid #8b949e; border-radius:8px;'
             : 'display:flex; flex-direction:column; justify-content:center; gap:1px; ' +
-              'flex:1 1 0; min-width:0; padding:2px 8px; border-left:3px solid #30363d;';
+              'flex:1 1 0; min-width:172px; padding:2px 8px; border-left:3px solid #30363d;';
 
         const kicker = document.createElement('div');
         kicker.textContent = opts.kicker;
@@ -5575,7 +5824,7 @@
         const breakStats = extendedBreakStats(scopeIds);
         const breakColor = engagedColor(breakStats.pct);
         const breakGroup = document.createElement('span');
-        breakGroup.style.cssText = 'display:inline-flex; align-items:center; gap:4px;';
+        breakGroup.style.cssText = 'display:inline-flex; align-items:center; gap:6px; white-space:nowrap;';
         breakGroup.appendChild(viewButton('View extended breaks', function () {
             openExtendedList(scopeLabel, scopeIds);
         }));
@@ -6083,7 +6332,7 @@
     }
 
     function summaryStructureSig(data) {
-        return 'v49|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
+        return 'v50|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
             (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
             (data.floorOpen || []).join(';') + '|' +
             (data.floorDisabled || []).join(';') + '|' +
@@ -6205,7 +6454,7 @@
         if (actions.parentElement) actions.remove();
 
         node.style.cssText = 'display:flex; flex-direction:column; align-items:stretch; gap:8px; ' +
-            'flex:1 0 100%; width:100%; box-sizing:border-box; margin:8px 0 6px; padding:8px 10px; ' +
+            'flex:1 0 100%; width:100%; box-sizing:border-box; margin:8px 0 6px; padding:8px 10px; overflow-x:auto; ' +
             'background:#161b22; border:1px solid #30363d; border-radius:10px; ' +
             'font-family:Segoe UI,system-ui,sans-serif; color:#ffffff;';
 
@@ -6331,8 +6580,8 @@
         }
 
         const metrics = document.createElement('div');
-        metrics.style.cssText = 'display:grid; grid-template-columns:minmax(0,1.15fr) repeat(8,minmax(0,1fr)); ' +
-            'grid-template-rows:auto auto; column-gap:0; row-gap:6px; width:100%; align-items:stretch;';
+        metrics.style.cssText = 'display:grid; grid-template-columns:minmax(200px,1.15fr) repeat(8,minmax(172px,1fr)); ' +
+            'grid-template-rows:auto auto; column-gap:0; row-gap:6px; width:max(100%, 1760px); align-items:stretch;';
 
         const totalIds = lineIdsOf(data);
         const totalCell = makeSummaryCell({
@@ -7630,7 +7879,19 @@
             pageTitle: record.pageTitle || '',
             fetchedAt: record.fetchedAt || 0,
             lastFunction: record.lastFunction || null,
-            currentlyIdle: showsIdleNow(record, empId)
+            currentlyIdle: showsIdleNow(record, empId),
+            rowSample: record.rowSample || '',
+            segments: (record.segments || []).filter(function (seg) {
+                return seg && (seg.bucket === 'indirect' || seg.bucket === 'tot');
+            }).slice(0, 10).map(function (seg) {
+                return {
+                    bucket: seg.bucket,
+                    minutes: seg.minutes,
+                    startMin: seg.startMin,
+                    endMin: seg.endMin,
+                    title: seg.title || ''
+                };
+            })
         };
     }
 

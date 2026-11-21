@@ -115,3 +115,106 @@ assert.equal(both.count, 1);
 assert.equal(both.rows[0].windows.length, 2);
 assert.equal(api.breakWhich(both.rows[0]), "1st and 2nd break");
 assert.equal(api.breakWhich(after.rows[0]), "1st break");
+
+const daysScale = { shiftName: "days", originMin: 6 * 60, pxPerMin: 1 };
+const nightScale = { shiftName: "nights", originMin: 18 * 60, pxPerMin: 1 };
+
+function clockRow(text) {
+    return {
+        getAttribute(name) { return name === "title" ? text : ""; },
+        querySelectorAll(sel) {
+            if (sel === "[title]") return [{ getAttribute() { return text; } }];
+            if (sel === "td") return [{ className: "", textContent: text }, { className: "rightAlign", textContent: "0:25" }];
+            return [];
+        }
+    };
+}
+
+const dayText = api.readFunctionSegment(clockRow("08:50 - 09:15"), "indirect", 25, "Break", daysScale);
+assert.equal(dayText.startMin, 8 * 60 + 50);
+assert.equal(dayText.endMin, 9 * 60 + 15);
+assert.equal(api.extendedHits([dayText], noon)[0].id, "first");
+
+const afternoon = api.readFunctionSegment(clockRow("2:20 - 2:45"), "indirect", 25, "Break", daysScale);
+assert.equal(afternoon.startMin, 14 * 60 + 20);
+assert.equal(afternoon.endMin, 14 * 60 + 45);
+assert.equal(api.extendedHits([afternoon], noon)[0].id, "second");
+
+const nightText = api.readFunctionSegment(clockRow("08:50 - 09:15"), "indirect", 25, "Break", nightScale);
+assert.equal(nightText.startMin, 20 * 60 + 50);
+assert.equal(nightText.endMin, 21 * 60 + 15);
+assert.equal(api.extendedHits([nightText], night)[0].id, "first");
+
+const nightMorning = api.readFunctionSegment(clockRow("2:20 - 2:40"), "indirect", 20, "Break", nightScale);
+assert.equal(nightMorning.startMin, 2 * 60 + 20);
+assert.equal(api.idleInWindow([nightMorning], nights[1]), 20);
+
+const iso = api.readFunctionSegment(clockRow("2026-11-21T14:20:00 - 2026-11-21T14:45:00"), "indirect", 25, "Break", daysScale);
+assert.equal(iso.startMin, 14 * 60 + 20);
+assert.equal(iso.endMin, 14 * 60 + 45);
+
+const dotted = api.readFunctionSegment(clockRow("8:50 a.m. - 9:15 a.m."), "indirect", 25, "Break", daysScale);
+assert.equal(dotted.startMin, 8 * 60 + 50);
+assert.equal(dotted.endMin, 9 * 60 + 15);
+
+function barRow(style) {
+    return {
+        getAttribute() { return ""; },
+        querySelectorAll(sel) {
+            if (sel === "[style]") return [{ getAttribute(name) { return name === "style" ? style : ""; } }];
+            if (sel === "td") return [{ className: "", textContent: "Break" }, { className: "rightAlign", textContent: "0:25" }];
+            return [];
+        }
+    };
+}
+
+const morningBar = api.readFunctionSegment(barRow("margin-left:170px;width:25px"), "indirect", 25, "Break", daysScale);
+assert.equal(morningBar.startMin, 6 * 60 + 170);
+assert.equal(morningBar.endMin, 6 * 60 + 195);
+assert.equal(api.extendedHits([morningBar], noon)[0].id, "first");
+
+const shortBar = api.readFunctionSegment(barRow("margin-left:180px;width:15px"), "indirect", 15, "Break", daysScale);
+assert.equal(api.extendedHits([shortBar], noon).length, 0);
+
+const pctBar = api.readFunctionSegment(barRow("left:23.611111%;width:3.472222%"), "indirect", 25, "Break", daysScale);
+assert.ok(Math.abs(pctBar.startMin - (8 * 60 + 50)) < 0.2);
+assert.ok(Math.abs((pctBar.endMin - pctBar.startMin) - 25) < 0.2);
+
+const nightBar = api.readFunctionSegment(barRow("margin-left:500px;width:20px"), "indirect", 20, "Break", nightScale);
+assert.equal(nightBar.startMin, 18 * 60 + 500);
+assert.equal(api.idleInWindow([nightBar], nights[1]), 20);
+
+function imageRow() {
+    const imgs = [
+        { getAttribute(name) { return name === "width" ? "170" : name === "height" ? "1" : ""; } },
+        { getAttribute(name) { return name === "width" ? "25" : name === "height" ? "10" : name === "title" ? "Break" : ""; } }
+    ];
+    return {
+        getAttribute() { return ""; },
+        querySelectorAll(sel) {
+            if (sel === "img") return imgs;
+            if (sel === "td") return [{ className: "", textContent: "Break" }];
+            return [];
+        }
+    };
+}
+const imageBar = api.readFunctionSegment(imageRow(), "indirect", 25, "Break", daysScale);
+assert.equal(imageBar.startMin, 6 * 60 + 170);
+assert.equal(api.extendedHits([imageBar], noon)[0].id, "first");
+
+function trackRow() {
+    return {
+        getAttribute() { return ""; },
+        querySelectorAll(sel) {
+            if (sel === "[style]") return [
+                { getAttribute(name) { return name === "style" ? "left:0%;width:100%" : ""; } },
+                { getAttribute(name) { return name === "style" ? "margin-left:170px;width:25px" : ""; } }
+            ];
+            if (sel === "td") return [{ className: "", textContent: "Break" }];
+            return [];
+        }
+    };
+}
+const tracked = api.readFunctionSegment(trackRow(), "indirect", 25, "Break", daysScale);
+assert.equal(tracked.startMin, 6 * 60 + 170);
+assert.equal(tracked.endMin, 6 * 60 + 195);
