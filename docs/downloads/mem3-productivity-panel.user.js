@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.9
+// @version      1.12.10
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.9';
+    const SCRIPT_VERSION = '1.12.10';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -10968,28 +10968,36 @@
     function extendedListPhoto(login, empId) {
         const ringPx = 4;
         const wrap = document.createElement('div');
-        wrap.style.cssText = 'flex:0 0 auto; align-self:stretch; display:flex; align-items:stretch; ' +
-            'box-sizing:border-box; padding:' + ringPx + 'px 0; line-height:0;';
+        wrap.style.cssText = 'flex:0 0 auto; align-self:center; display:flex; align-items:center; line-height:0;';
         const photo = document.createElement('div');
         photo.setAttribute('data-mem3-extended-photo', '1');
         const url = photoForLogin(login) || (empId ? photoForEmp(empId) : '');
-        photo.style.cssText = 'position:relative; align-self:stretch; aspect-ratio:1; width:auto; height:auto; ' +
-            'min-width:42px; min-height:42px; box-sizing:border-box; border-radius:50%; ' +
-            'background:#21262d center/cover no-repeat;';
-        if (url) photo.style.backgroundImage = 'url("' + String(url).replace(/"/g, '') + '")';
         const person = empId ? personForEmp(empId) : null;
         const ident = IDENTITY.byLogin[String(login || '').trim().toLowerCase()] || null;
         const clock = clockLabel((person && person.clockStatus) || clockFor(ident, empId));
-        if (clock) {
-            photo.title = clock.text;
-            const ring = document.createElement('span');
-            ring.className = 'mem3-popup-clock-ring';
-            ring.style.cssText = 'position:absolute; inset:0; width:100%; height:100%; box-sizing:border-box; ' +
-                'border-radius:50%; pointer-events:none; box-shadow:0 0 0 ' + ringPx + 'px ' + clock.color + ';';
-            photo.appendChild(ring);
-        }
+        const ring = clock ? clock.color : '#8b949e';
+        photo.title = clock ? clock.text : '';
+        photo.style.cssText = 'width:42px; height:42px; flex:0 0 auto; box-sizing:border-box; border-radius:50%; ' +
+            'border:' + ringPx + 'px solid ' + ring + '; background-clip:padding-box; ' +
+            'background-color:#21262d; background-position:center; background-size:cover; background-repeat:no-repeat;';
+        if (url) photo.style.backgroundImage = 'url("' + String(url).replace(/"/g, '') + '")';
         wrap.appendChild(photo);
         return wrap;
+    }
+
+    function fitExtendedListPhotos(list) {
+        if (!list) return;
+        const photos = list.querySelectorAll('[data-mem3-extended-photo]');
+        for (let i = 0; i < photos.length; i++) {
+            const photo = photos[i];
+            const line = photo.parentElement && photo.parentElement.parentElement;
+            const label = line && line.querySelector('[data-mem3-extended-copy]');
+            if (!label) continue;
+            const h = Math.round(label.getBoundingClientRect().height);
+            if (!(h >= 42)) continue;
+            photo.style.width = h + 'px';
+            photo.style.height = h + 'px';
+        }
     }
 
     function paintPopupBreak(box, empId, login) {
@@ -11097,10 +11105,11 @@
         for (let i = 0; i < rows.length; i++) {
             const copy = rows[i];
             const line = document.createElement('div');
-            line.style.cssText = 'display:flex; gap:8px; align-items:stretch; padding:6px 0; border-top:1px solid #30363d;';
+            line.style.cssText = 'display:flex; gap:10px; align-items:center; padding:6px 0; border-top:1px solid #30363d;';
             const empId = breakRowEmpId(copy);
             line.appendChild(extendedListPhoto(copy.login || '', empId));
             const label = document.createElement('div');
+            label.setAttribute('data-mem3-extended-copy', '1');
             label.style.cssText = 'flex:1 1 auto; min-width:0; font-size:12px; font-weight:650;';
             const who = document.createElement('div');
             who.textContent = copy.login || 'associate';
@@ -11134,6 +11143,8 @@
         card.appendChild(header);
         card.appendChild(list);
         document.body.appendChild(card);
+        fitExtendedListPhotos(list);
+        requestAnimationFrame(function () { fitExtendedListPhotos(list); });
     }
 
     function openEngagePanel(login, empId) {
