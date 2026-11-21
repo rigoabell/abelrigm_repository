@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dropzone Batch (abelrigm)
 // @namespace    https://github.com/rigoabell/abelrigm_repository
-// @version      0.2.0
+// @version      0.2.3
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/dropzone-batch.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/dropzone-batch.user.js
 // @description  Paste containers and one dropzone. Sends each container, then that dropzone, as a scan-gun burst.
@@ -21,7 +21,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.2.0';
+  const VERSION = '0.2.3';
   const PANEL_ID = 'dz-batch-panel';
   const SCAN_STRATEGY = 'focus';
   const SCAN_SUFFIX = 'Enter';
@@ -39,9 +39,12 @@
 
   let generation = 0;
   let running = false;
+  let skipRequested = false;
+  let currentContainer = '';
   let realBuffer = [];
   let realTimer = 0;
   const doneIds = new Set();
+  const skippedIds = new Set();
 
   function noteListener(type, target) {
     const name = describe(target);
@@ -148,6 +151,17 @@
       .filter(Boolean);
   }
 
+  function remainingContainers(text, doneList, skippedList, dropzone) {
+    const done = new Set(doneList || []);
+    const skipped = new Set(skippedList || []);
+    const zone = cleanToken(dropzone).toLowerCase();
+    return parseContainers(text).filter((id) => {
+      if (done.has(id) || skipped.has(id)) return false;
+      if (zone && id.toLowerCase() === zone) return false;
+      return true;
+    });
+  }
+
   function stableText(text) {
     return String(text || '')
       .replace(/\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?/gi, '#')
@@ -156,13 +170,36 @@
   }
 
   function newBadPhrase(before, after) {
-    const re = /\b(invalid|not found|unknown barcode|unknown|error|failed|cannot|can't|does not|doesn't|unrecognized|no such|try again)\b/gi;
-    const phrases = (text) => new Set((String(text).match(re) || []).map((item) => item.toLowerCase()));
-    const prev = phrases(before);
-    for (const phrase of phrases(after)) {
-      if (!prev.has(phrase)) return phrase;
+    const needles = [
+      'invalid',
+      'not found',
+      'unknown barcode',
+      'unsuccessful',
+      'not be moved',
+      'can not',
+      'cannot',
+      "can't",
+      'does not',
+      "doesn't",
+      'unrecognized',
+      'no such',
+      'already scanned',
+      'try a different',
+      'try again',
+      'failed',
+      'error',
+      'unknown',
+    ];
+    const prev = String(before || '').toLowerCase();
+    const next = String(after || '').toLowerCase();
+    for (const phrase of needles) {
+      if (next.includes(phrase) && !prev.includes(phrase)) return phrase;
     }
     return '';
+  }
+
+  function dropzoneAccepted(text) {
+    return String(text || '').toLowerCase().includes('move successful');
   }
 
   function loadStore() {
@@ -506,8 +543,15 @@
     let last = beforeSig;
     let stableAt = 0;
     while (Date.now() - start < timeout) {
-      if (generationStopped()) {
-        return { changed: sawChange, bad: '', excerpt: clip(bodyText(), 400), stopped: true };
+      if (generationStopped() || skipRequested) {
+        return {
+          changed: sawChange,
+          bad: '',
+          excerpt: clip(bodyText(), 400),
+          accepted: false,
+          stopped: generationStopped(),
+          skipped: skipRequested,
+        };
       }
       const raw = bodyText();
       const sig = stableText(raw);
@@ -527,7 +571,9 @@
       changed: sawChange,
       bad: newBadPhrase(beforeRaw, afterRaw),
       excerpt: clip(afterRaw, 400),
+      accepted: dropzoneAccepted(afterRaw),
       stopped: generationStopped(),
+      skipped: skipRequested,
     };
   }
 
@@ -537,6 +583,17 @@
   }
 
   async function sendScan(value, kind) {
+    if (skipRequested) {
+      return {
+        changed: false,
+        bad: '',
+        excerpt: '',
+        accepted: false,
+        stopped: false,
+        skipped: true,
+        sent: false,
+      };
+    }
     releasePanelFocus();
     const strategy = SCAN_STRATEGY;
     const beforeRaw = bodyText();
@@ -573,7 +630,15 @@
     attempt.after = settled.excerpt;
     attempts.push(attempt);
     if (attempts.length > 20) attempts.shift();
-    return settled;
+    return {
+      changed: settled.changed,
+      bad: settled.bad,
+      excerpt: settled.excerpt,
+      accepted: settled.accepted,
+      stopped: settled.stopped,
+      skipped: !!settled.skipped || skipRequested,
+      sent: true,
+    };
   }
 
   function pushResult(row) {
@@ -588,11 +653,84 @@
     updateCount();
   }
 
+  function rememberSkip(container) {
+    if (!container) return;
+    skippedIds.add(container);
+    saveStore({ doneDay: todayKey(), skippedIds: Array.from(skippedIds) });
+    updateCount();
+  }
+
+  function noteSkip(container, detail) {
+    rememberSkip(container);
+    pushResult({
+      container: container,
+      status: 'skip',
+      detail: detail,
+    });
+  }
+
+  function requestSkip() {
+    if (running) {
+      if (skipRequested) return;
+      skipRequested = true;
+      setStatus('Skipping ' + (currentContainer || 'the next container') + '.');
+      return;
+    }
+    const next = remainingContainers(valueOf('dz-containers'), doneIds, skippedIds, valueOf('dz-dropzone'))[0];
+    if (!next) {
+      setStatus('Nothing left to skip.');
+      return;
+    }
+    noteSkip(next, 'Skipped. It will not be scanned again today.');
+    setStatus('Skipped ' + next + '. It will not be scanned again today.');
+  }
+
+  function clickPageContinue() {
+    const dialog = document.getElementById('exception-wrapper') || document.getElementById('exception-info');
+    const scopes = dialog ? [dialog, document.body] : [document.body];
+    for (const scope of scopes) {
+      const nodes = scope.querySelectorAll('button, [role="button"], a, div, span');
+      for (const el of nodes) {
+        if (!el || el.closest('#' + PANEL_ID)) continue;
+        if (!isVisible(el)) continue;
+        const text = String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (text.length > 24) continue;
+        if (text !== 'continue' && text !== 'continue c') continue;
+        try { el.click(); } catch (err) { /* the page can ignore it */ }
+        return true;
+      }
+    }
+    const exception = document.getElementById('exception-body');
+    if (!exception || !isVisible(exception)) return false;
+    const target = document.body || document.documentElement;
+    fireChar(viewOf(target), target, 'c');
+    return true;
+  }
+
+  async function dismissRejection(alive) {
+    const before = stableText(bodyText());
+    clickPageContinue();
+    const start = Date.now();
+    while (alive() && Date.now() - start < 2000) {
+      if (stableText(bodyText()) !== before) return true;
+      await sleep(80);
+    }
+    return false;
+  }
+
+  async function pause(ms, alive) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (!alive() || skipRequested) return;
+      await sleep(40);
+    }
+  }
+
   async function runBatch() {
     if (running) return;
     const dropzone = cleanToken(valueOf('dz-dropzone'));
     const all = parseContainers(valueOf('dz-containers'));
-    const todo = all.filter((id) => !doneIds.has(id));
+    const todo = remainingContainers(valueOf('dz-containers'), doneIds, skippedIds, dropzone);
     if (!dropzone) {
       setStatus('Enter the dropzone first.');
       return;
@@ -602,65 +740,99 @@
       return;
     }
     if (!todo.length) {
-      setStatus('Those containers are already marked done today. Reset done to run them again.');
+      const onlyZone = all.every((id) => id.toLowerCase() === dropzone.toLowerCase());
+      setStatus(onlyZone
+        ? 'Every pasted line is the dropzone. Paste container barcodes.'
+        : 'Those containers are already done or skipped today. Reset done to run them again.');
       return;
     }
 
     running = true;
+    skipRequested = false;
     generation += 1;
     activeGeneration = generation;
     const token = activeGeneration;
     const resultsAtStart = results.length;
     const alive = () => token === generation;
     setRunning(true);
-    setStatus('Running ' + todo.length + ' container' + (todo.length === 1 ? '' : 's') + ' to ' + dropzone + '.');
+    const zoneLines = all.filter((id) => id.toLowerCase() === dropzone.toLowerCase()).length;
+    let startText = 'Running ' + todo.length + ' container' + (todo.length === 1 ? '' : 's') + ' to ' + dropzone + '.';
+    if (zoneLines) {
+      startText += ' Left out ' + zoneLines + ' line' + (zoneLines === 1 ? '' : 's') + ' that match the dropzone.';
+    }
+    setStatus(startText);
 
     try {
       for (let index = 0; index < todo.length; index += 1) {
         if (!alive()) break;
         const container = todo[index];
+        currentContainer = container;
+        if (skippedIds.has(container)) continue;
+        if (skipRequested) {
+          skipRequested = false;
+          noteSkip(container, 'Skipped before the scan.');
+          continue;
+        }
         const step = (index + 1) + '/' + todo.length;
         setStatus(step + ' scan container ' + container);
         const containerScan = await sendScan(container, 'container');
         if (!alive() || containerScan.stopped) break;
+        if (containerScan.skipped) {
+          skipRequested = false;
+          if (!containerScan.sent) {
+            noteSkip(container, 'Skipped before the scan.');
+            continue;
+          }
+          noteSkip(container, 'Skipped after the container scan. Dropzone was not sent.');
+          setStatus('Skipped ' + container + '. Clear the page back to Scan container, then press Start.');
+          break;
+        }
         if (!containerScan.changed) {
           pushResult({
             container: container,
             status: 'stuck',
             detail: 'Page did not change after the container scan.',
           });
-          setStatus('Stopped on ' + container + '. The page did not take the container. Copy debug.');
+          setStatus('Stopped on ' + container + '. Tap Continue if the page is waiting, then press Start.');
           break;
         }
         if (containerScan.bad) {
-          pushResult({
-            container: container,
-            status: 'error',
-            detail: 'Container scan showed “' + containerScan.bad + '”. Dropzone was not sent.',
-          });
+          noteSkip(container, 'Skipped. Container scan showed “' + containerScan.bad + '”. It will not be scanned again today.');
+          await dismissRejection(alive);
           continue;
         }
 
-        await sleep(SCAN_PAUSE_MS);
+        await pause(SCAN_PAUSE_MS, alive);
         if (!alive()) break;
+        if (skipRequested) {
+          skipRequested = false;
+          noteSkip(container, 'Skipped before the dropzone scan.');
+          setStatus('Skipped ' + container + '. Clear the page back to Scan container, then press Start.');
+          break;
+        }
         setStatus(step + ' scan dropzone ' + dropzone);
         const dropScan = await sendScan(dropzone, 'dropzone');
         if (!alive() || dropScan.stopped) break;
+        if (dropScan.skipped) {
+          skipRequested = false;
+          noteSkip(container, 'Skipped. It will not be scanned again today.');
+          await dismissRejection(alive);
+          continue;
+        }
         if (!dropScan.changed) {
           pushResult({
             container: container,
             status: 'stuck',
             detail: 'Container was sent. Page did not change after the dropzone.',
           });
-          setStatus('Stopped on ' + container + '. The page did not take the dropzone. Copy debug.');
+          setStatus('Stopped on ' + container + '. Tap Continue if the page is waiting, then press Start.');
           break;
         }
-        if (dropScan.bad) {
-          pushResult({
-            container: container,
-            status: 'error',
-            detail: 'Dropzone scan showed “' + dropScan.bad + '”.',
-          });
+        if (dropScan.bad || !dropScan.accepted) {
+          noteSkip(container, dropScan.bad
+            ? 'Skipped. Dropzone scan showed “' + dropScan.bad + '”. It will not be scanned again today.'
+            : 'Skipped. The page did not say Move Successful. It will not be scanned again today.');
+          await dismissRejection(alive);
           continue;
         }
         rememberDone(container);
@@ -669,22 +841,25 @@
           status: 'ok',
           detail: 'Sent to ' + dropzone + '.',
         });
-        await sleep(SCAN_PAUSE_MS);
+        currentContainer = '';
+        await pause(SCAN_PAUSE_MS, alive);
       }
     } catch (err) {
       log('run error ' + (err && err.message ? err.message : err));
       setStatus('Stopped on an error. Copy debug.');
     }
 
+    currentContainer = '';
     running = false;
     setRunning(false);
     if (alive()) {
       const mine = results.slice(resultsAtStart);
       const ok = mine.filter((row) => row.status === 'ok').length;
-      const bad = mine.filter((row) => row.status !== 'ok').length;
+      const skipped = mine.filter((row) => row.status === 'skip').length;
+      const bad = mine.filter((row) => row.status !== 'ok' && row.status !== 'skip').length;
       const status = document.getElementById('dz-status');
-      if (status && /Stopped/.test(status.textContent)) return;
-      setStatus('Finished. ' + ok + ' sent, ' + bad + ' not sent.');
+      if (status && /^(Stopped|Skipped)/.test(status.textContent)) return;
+      setStatus('Finished. ' + ok + ' sent, ' + skipped + ' skipped, ' + bad + ' not sent.');
     }
   }
 
@@ -717,11 +892,12 @@
     const el = document.getElementById('dz-count');
     if (!el) return;
     const all = parseContainers(valueOf('dz-containers'));
-    const todo = all.filter((id) => !doneIds.has(id)).length;
+    const todo = remainingContainers(valueOf('dz-containers'), doneIds, skippedIds, valueOf('dz-dropzone')).length;
     el.replaceChildren();
     [
       [String(todo), 'to run'],
       [String(doneIds.size), 'done today'],
+      [String(skippedIds.size), 'skipped'],
       [String(all.length), 'pasted'],
     ].forEach(([num, label]) => {
       const chip = document.createElement('span');
@@ -844,6 +1020,7 @@
       buttons: buttonSnapshot(),
       running: running,
       doneIds: Array.from(doneIds).slice(0, 300),
+      skippedIds: Array.from(skippedIds).slice(0, 300),
       results: results.slice(-100),
       attempts: attempts,
       realScans: realScans,
@@ -924,9 +1101,10 @@
 
   function resetDone() {
     doneIds.clear();
-    saveStore({ doneDay: todayKey(), doneIds: [] });
+    skippedIds.clear();
+    saveStore({ doneDay: todayKey(), doneIds: [], skippedIds: [] });
     updateCount();
-    setStatus('Done list cleared.');
+    setStatus('Done and skipped lists cleared.');
   }
 
   function recordRealKey(event) {
@@ -992,8 +1170,10 @@
     const store = loadStore();
     const today = todayKey();
     doneIds.clear();
-    if (store.doneDay === today && Array.isArray(store.doneIds)) {
-      store.doneIds.forEach((id) => doneIds.add(id));
+    skippedIds.clear();
+    if (store.doneDay === today) {
+      if (Array.isArray(store.doneIds)) store.doneIds.forEach((id) => doneIds.add(id));
+      if (Array.isArray(store.skippedIds)) store.skippedIds.forEach((id) => skippedIds.add(id));
     }
 
     addStyle(`
@@ -1067,6 +1247,7 @@
       #${PANEL_ID} .dz-ok .dz-dot { background: #4ade80; }
       #${PANEL_ID} .dz-error .dz-dot { background: #f87171; }
       #${PANEL_ID} .dz-stuck .dz-dot { background: #fbbf24; }
+      #${PANEL_ID} .dz-skip .dz-dot { background: #38bdf8; }
       #${PANEL_ID} .dz-empty { color: #8b97a8; padding: 8px 2px; }
       #${PANEL_ID} .dz-meta-line { margin-top: auto; }
       #${PANEL_ID} .dz-foot { justify-content: flex-end; }
@@ -1105,6 +1286,7 @@
           <div class="dz-actions">
             <button type="button" id="dz-start" class="dz-primary">Start</button>
             <button type="button" id="dz-stop" disabled>Stop</button>
+            <button type="button" id="dz-skip">Skip</button>
             <button type="button" id="dz-debug" class="dz-debug">Copy debug</button>
           </div>
         </section>
@@ -1136,6 +1318,7 @@
 
     document.getElementById('dz-start').addEventListener('click', () => runBatch());
     document.getElementById('dz-stop').addEventListener('click', () => stopBatch());
+    document.getElementById('dz-skip').addEventListener('click', () => requestSkip());
     document.getElementById('dz-debug').addEventListener('click', (event) => copyDebug(event.currentTarget));
     document.getElementById('dz-remove').addEventListener('click', removeFinished);
     document.getElementById('dz-reset').addEventListener('click', resetDone);
