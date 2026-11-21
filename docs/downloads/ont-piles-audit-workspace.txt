@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ONT Base Piles Audit Workspace (abelrigm)
 // @namespace    https://github.com/rigoabell/abelrigm_repository
-// @version      1.2.0
+// @version      1.3.0
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/ont-piles-audit-workspace.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/ont-piles-audit-workspace.user.js
 // @description  Count BIGS and sortable piles on the audit page and show the EOS total.
@@ -27,7 +27,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.2.0';
+  const VERSION = '1.3.0';
   const HOST = 'ont-base.corp.amazon.com';
   const CELL_ID = 'ont-piles-workspace-col';
   const CARD_ID = 'ont-piles-workspace';
@@ -99,25 +99,52 @@
     '  text-align: center;',
     '}',
     '#' + BODY_ID + ' { background: #fff; padding: 16px 18px 20px; }',
-    '#' + EOS_ID + ' { color: #222; font-size: 14px; }',
-    '#' + EOS_ID + ' h3 { font-size: 15px; font-weight: 700; margin: 18px 0 6px; }',
-    '#' + EOS_ID + ' .ont-piles-note { color: #555; margin: 0 0 10px; }',
-    '#' + EOS_ID + ' table { border-collapse: collapse; margin: 0; width: auto; }',
+    '#' + EOS_ID + ', #' + EOS_ID + ' * { box-sizing: border-box; }',
+    '#' + EOS_ID + ' { color: #1c2430; font-size: 14px; }',
+    '#' + EOS_ID + ' h3 { font-size: 15px; font-weight: 700; margin: 18px 0 8px; }',
+    '#' + EOS_ID + ' .ont-piles-note { color: #66707c; margin: 8px 2px 0; }',
+    '#' + EOS_ID + ' .ont-piles-frame {',
+    '  border: 1px solid #e1e5ea; border-radius: 12px; overflow: hidden;',
+    '}',
+    '#' + EOS_ID + ' table { border-collapse: collapse; margin: 0; width: 100%; }',
     '#' + EOS_ID + ' th, #' + EOS_ID + ' td {',
-    '  background: transparent; border: 0; font-weight: 400; padding: 3px 10px 3px 0;',
-    '  text-align: left; vertical-align: bottom; white-space: nowrap;',
+    '  background: #fff; border: 0; border-bottom: 1px solid #e6eaee; border-right: 1px solid #e6eaee;',
+    '  font-weight: 400; padding: 8px 10px; text-align: center; vertical-align: middle;',
     '}',
-    '#' + EOS_ID + ' .ont-piles-group th { color: #222; font-size: 13px; font-weight: 700; padding-bottom: 2px; text-align: center; }',
-    '#' + EOS_ID + ' .ont-piles-head th { color: #555; font-size: 12px; font-weight: 700; }',
-    '#' + EOS_ID + ' .ont-piles-bigs { margin-top: 0; }',
-    '#' + EOS_ID + ' .ont-piles-split { border-left: 1px solid #e5e5e5; padding-left: 14px; }',
+    '#' + EOS_ID + ' tr > :last-child { border-right: 0; }',
+    '#' + EOS_ID + ' tbody tr:last-child > * { border-bottom: 0; }',
+    '#' + EOS_ID + ' .ont-piles-group th {',
+    '  background: #f3f5f8; color: #3c4654; font-size: 11px; font-weight: 700;',
+    '  letter-spacing: 0.08em; padding: 8px 10px; text-align: center; text-transform: uppercase;',
+    '}',
+    '#' + EOS_ID + ' .ont-piles-head th {',
+    '  background: #f8f9fb; color: #5c6772; font-size: 12px; font-weight: 700; line-height: 1.25;',
+    '}',
+    '#' + EOS_ID + ' .ont-piles-col { display: block; }',
+    '#' + EOS_ID + ' .ont-piles-rate { color: #8b95a1; display: block; font-size: 11px; font-weight: 600; }',
+    '#' + EOS_ID + ' tbody td:first-child, #' + EOS_ID + ' .ont-piles-head th:first-child {',
+    '  background: #fbfcfd; font-weight: 600; text-align: left; white-space: nowrap; width: 8.5rem;',
+    '}',
+    '#' + EOS_ID + ' .ont-piles-other tr:last-child > * { border-bottom: 0; }',
+    '#' + EOS_ID + ' .ont-piles-bigs { margin: 0; }',
+    '#' + EOS_ID + ' .ont-piles-split { box-shadow: inset 2px 0 0 #d7dde6; }',
     '#' + EOS_ID + ' input {',
-    '  border: 1px solid #ccc; border-radius: 3px; box-sizing: border-box;',
-    '  font: inherit; padding: 4px 6px; width: 5.25rem;',
+    '  -moz-appearance: textfield; appearance: textfield; background: #f4f6f8;',
+    '  border: 1px solid transparent; border-radius: 6px; box-sizing: border-box;',
+    '  font: inherit; font-variant-numeric: tabular-nums; padding: 6px 4px; text-align: center; width: 100%;',
     '}',
-    '#' + EOS_ID + ' .ont-piles-out { font-variant-numeric: tabular-nums; font-weight: 700; }',
-    '#' + EOS_ID + ' .ont-piles-eos { min-width: 3.5rem; }',
-    '#' + EOS_ID + ' .ont-piles-total td { border-top: 1px solid #ccc; font-weight: 700; padding-top: 8px; }'
+    '#' + EOS_ID + ' input::-webkit-outer-spin-button, #' + EOS_ID + ' input::-webkit-inner-spin-button {',
+    '  -webkit-appearance: none; margin: 0;',
+    '}',
+    '#' + EOS_ID + ' input::placeholder { color: #b7c0ca; }',
+    '#' + EOS_ID + ' input:hover { background: #eef1f5; }',
+    '#' + EOS_ID + ' input:focus {',
+    '  background: #fff; border-color: #2f6fed; outline: 2px solid rgba(47, 111, 237, 0.18); outline-offset: 0;',
+    '}',
+    '#' + EOS_ID + ' .ont-piles-out { display: block; font-variant-numeric: tabular-nums; font-weight: 700; text-align: right; }',
+    '#' + EOS_ID + ' .ont-piles-eos { background: #f3f6fb; }',
+    '#' + EOS_ID + ' .ont-piles-total td { background: #f6f8fb; font-weight: 700; }',
+    '#' + EOS_ID + ' .ont-piles-total .ont-piles-eos { background: #e7eef9; }'
   ].join('\n');
 
   function isAuditPage(href) {
@@ -249,6 +276,7 @@
     input.min = '0';
     input.step = '1';
     input.value = '';
+    input.placeholder = '0';
     input.id = fieldId('in', path);
     input.setAttribute('data-ont-input', path);
     input.setAttribute('aria-label', rowLabel + ' ' + fieldLabel);
@@ -296,7 +324,7 @@
       ''
     ].forEach(function (label, index) {
       const split = index === 5 || index === 8 ? 'ont-piles-split' : '';
-      columns.appendChild(el(doc, 'th', split, label));
+      columns.appendChild(columnHead(doc, label, split));
     });
     head.appendChild(columns);
     sheet.appendChild(head);
@@ -335,7 +363,9 @@
     total.appendChild(totalEos);
     body.appendChild(total);
     sheet.appendChild(body);
-    root.appendChild(sheet);
+    const frame = el(doc, 'div', 'ont-piles-frame');
+    frame.appendChild(sheet);
+    root.appendChild(frame);
     root.appendChild(el(doc, 'p', 'ont-piles-note', 'Shuttles count on Add Ins only.'));
 
     root.appendChild(el(doc, 'h3', '', 'Other BIGS'));
@@ -343,7 +373,7 @@
     const other = el(doc, 'table', 'ont-piles-other');
     const otherHead = el(doc, 'tr', 'ont-piles-head');
     ['Work', 'Pallets × 20', 'Cages × 15', 'Shuttles × 100', 'Units'].forEach(function (label) {
-      otherHead.appendChild(el(doc, 'th', '', label));
+      otherHead.appendChild(columnHead(doc, label, ''));
     });
     other.appendChild(otherHead);
     OTHER_ROWS.forEach(function (row) {
@@ -359,8 +389,18 @@
       line.appendChild(units);
       other.appendChild(line);
     });
-    root.appendChild(other);
+    const otherFrame = el(doc, 'div', 'ont-piles-frame');
+    otherFrame.appendChild(other);
+    root.appendChild(otherFrame);
     return root;
+  }
+
+  function columnHead(doc, label, className) {
+    const th = el(doc, 'th', className || '');
+    const parts = String(label).split(' × ');
+    th.appendChild(el(doc, 'span', 'ont-piles-col', parts[0]));
+    if (parts[1]) th.appendChild(el(doc, 'span', 'ont-piles-rate', ' × ' + parts[1]));
+    return th;
   }
 
   function setPath(target, path, value) {
