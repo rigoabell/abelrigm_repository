@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.11\.13/);
+assert.match(src, /@version\s+1\.12\.0/);
 assert.match(src, /if \(shown >= 19\) return '#2ea043'/);
 assert.match(src, /if \(shown >= 16\) return '#d29922'/);
 assert.match(src, /data-mem3-enter-notes/);
@@ -32,11 +32,13 @@ assert.match(src, /function customerReturnsLines/);
 assert.match(src, /function layoutCustomerReturns/);
 assert.match(src, /mem3-cr-station/);
 assert.match(src, /max-content max-content/);
-assert.match(src, /placeBadgeCell\(spacer, col, 1\)/);
-assert.match(src, /placeBadgeCell\(rate, col, 2\)/);
-assert.match(src, /placeBadgeCell\(idle, col, 3\)/);
+assert.match(src, /placeBadgeCell\(spacer, 2, 1\)/);
+assert.match(src, /placeBadgeCell\(rate, 2, 2\)/);
+assert.match(src, /placeBadgeCell\(idle, 2, 3\)/);
+assert.match(src, /placeBadgeCell\(marks\.top, 1, 2\)/);
+assert.match(src, /placeBadgeCell\(marks\.bottom, 1, 3\)/);
 assert.equal(src.includes("idle.style.top"), false);
-assert.match(src, /function rowIdleYield/);
+assert.match(src, /function rowYieldSlots/);
 assert.equal(src.includes("placeBadgeCell(pill, 2, 1)"), false);
 assert.equal(src.includes("makePill('IDLE NOW'"), false);
 assert.match(src, /querySelectorAll\('\.mem3-clock-pill'\)/);
@@ -160,7 +162,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.11.13");
+assert.equal(entry.version, "1.12.0");
 assert.match(entry.detail, /stays on the board the same as unassigning by hand/);
 assert.match(entry.detail, /Customer returns 1st Half: Station 1-04 \| 2nd Half: Station 1-76/);
 assert.match(entry.detail, /no longer at the station they were marked from/);

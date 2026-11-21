@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.11.13
+// @version      1.12.0
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.11.13';
+    const SCRIPT_VERSION = '1.12.0';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -1223,6 +1223,7 @@
         }
         const fns = doc.querySelectorAll('tr.function-seg');
         let lastFunction = null;
+        const segments = [];
         for (let i = 0; i < fns.length; i++) {
             const cls = (fns[i].getAttribute('class') || '').toLowerCase();
             const title = ((fns[i].querySelector('td') || {}).textContent || '').trim();
@@ -1232,6 +1233,7 @@
             else if (bucket === 'indirect') idleMin += minutes;
             else if (bucket === 'direct') activeMin += minutes;
             lastFunction = { title: title.slice(0, 120), bucket: bucket, minutes: minutes };
+            segments.push(readFunctionSegment(fns[i], bucket, minutes, title));
         }
         const titleEl = doc.querySelector('title');
         return {
@@ -1252,8 +1254,484 @@
             error: null,
             noData: clocks.length === 0 && /time details/i.test(titleEl ? titleEl.textContent || '' : ''),
             lastFunction: lastFunction,
+            segments: segments,
             currentlyIdle: showsIdleNow({ lastFunction: lastFunction })
         };
+    }
+
+    // Breaks are 9:00–9:15 and 2:30–2:45. The watched window is 10 minutes
+    // before through 10 minutes after, 35 minutes. 15 minutes of idle is 42.8%.
+    // 19.6 minutes is 56%, and that is an extended break. Days use AM then PM.
+    // Nights use PM then AM. Idle here is indirect time plus Time Off Task.
+    const BREAK_SPAN_MIN = 35;
+    const BREAK_FLAG_MIN = 19.6;
+    const BREAK_WINDOWS = {
+        days: [
+            { id: 'first', label: '8:50–9:25 AM', startMin: 8 * 60 + 50, endMin: 9 * 60 + 25 },
+            { id: 'second', label: '2:20–2:55 PM', startMin: 14 * 60 + 20, endMin: 14 * 60 + 55 }
+        ],
+        nights: [
+            { id: 'first', label: '8:50–9:25 PM', startMin: 20 * 60 + 50, endMin: 21 * 60 + 25 },
+            { id: 'second', label: '2:20–2:55 AM', startMin: 2 * 60 + 20, endMin: 2 * 60 + 55 }
+        ]
+    };
+    const ENGAGE_KEY = 'mem3-extended-v1';
+    const ENGAGE_URL = 'https://extendsclass.com/api/json-storage/bin/eacddae';
+    let engageChain = Promise.resolve();
+
+    function parseClockMin(text) {
+        const match = /(\d{1,2}):(\d{2})(?::\d{2})?\s*([AP]M)/i.exec(String(text || ''));
+        if (!match) return null;
+        let hour = parseInt(match[1], 10);
+        const minute = parseInt(match[2], 10);
+        if (hour < 1 || hour > 12 || minute > 59) return null;
+        const ap = match[3].toUpperCase();
+        if (ap === 'PM' && hour < 12) hour += 12;
+        if (ap === 'AM' && hour === 12) hour = 0;
+        return hour * 60 + minute;
+    }
+
+    function parseClockRange(text) {
+        const found = [];
+        const re = /(\d{1,2}:\d{2}(?::\d{2})?\s*[AP]M)/gi;
+        const raw = String(text || '');
+        let match;
+        while ((match = re.exec(raw))) {
+            found.push(match[1]);
+            if (found.length === 2) break;
+        }
+        if (found.length < 2) return null;
+        const start = parseClockMin(found[0]);
+        let end = parseClockMin(found[1]);
+        if (start == null || end == null) return null;
+        if (end <= start) end += 1440;
+        return { startMin: start, endMin: end };
+    }
+
+    function readFunctionSegment(row, bucket, minutes, title) {
+        const blobs = [];
+        if (row && row.getAttribute && row.getAttribute('title')) blobs.push(row.getAttribute('title'));
+        if (row && row.querySelectorAll) {
+            const titled = row.querySelectorAll('[title]');
+            for (let i = 0; i < titled.length; i++) blobs.push(titled[i].getAttribute('title') || '');
+            const cells = row.querySelectorAll('td');
+            for (let i = 0; i < cells.length; i++) {
+                const cls = String(cells[i].className || '');
+                if (cls.indexOf('rightAlign') !== -1) continue;
+                blobs.push(cells[i].textContent || '');
+            }
+        }
+        let range = null;
+        for (let i = 0; i < blobs.length; i++) {
+            range = parseClockRange(blobs[i]);
+            if (range) break;
+        }
+        if (!range && row && row.querySelectorAll) {
+            const cells = row.querySelectorAll('td');
+            for (let i = 0; i < cells.length && !range; i++) {
+                const cls = String(cells[i].className || '');
+                if (cls.indexOf('rightAlign') !== -1) continue;
+                const start = parseClockMin(cells[i].textContent || '');
+                if (start == null || !(minutes > 0)) continue;
+                range = { startMin: start, endMin: start + minutes };
+            }
+        }
+        return {
+            bucket: bucket,
+            minutes: minutes,
+            startMin: range ? range.startMin : null,
+            endMin: range ? range.endMin : null,
+            title: String(title || '').slice(0, 120)
+        };
+    }
+
+    function breakShiftName(date) {
+        const hour = date.getHours();
+        return (hour >= DAY_SHIFT_HOUR && hour < NIGHT_SHIFT_HOUR) ? 'days' : 'nights';
+    }
+
+    function breakWindows(date) {
+        return BREAK_WINDOWS[breakShiftName(date || new Date())];
+    }
+
+    function overlapMinutes(start, end, w0, w1) {
+        if (start == null || end == null) return 0;
+        return Math.max(0, Math.min(end, w1) - Math.max(start, w0));
+    }
+
+    function idleInWindow(segments, window) {
+        let sum = 0;
+        const list = segments || [];
+        for (let i = 0; i < list.length; i++) {
+            const seg = list[i];
+            if (!seg || (seg.bucket !== 'indirect' && seg.bucket !== 'tot')) continue;
+            sum += overlapMinutes(seg.startMin, seg.endMin, window.startMin, window.endMin);
+        }
+        return sum;
+    }
+
+    function windowIdlePct(idleMin) {
+        return ((Number(idleMin) || 0) / BREAK_SPAN_MIN) * 100;
+    }
+
+    function isExtendedIdle(idleMin) {
+        return (Number(idleMin) || 0) + 1e-6 >= BREAK_FLAG_MIN;
+    }
+
+    function extendedHits(segments, date) {
+        const windows = breakWindows(date || new Date());
+        const hits = [];
+        for (let i = 0; i < windows.length; i++) {
+            const idleMin = idleInWindow(segments, windows[i]);
+            if (!isExtendedIdle(idleMin)) continue;
+            hits.push({
+                id: windows[i].id,
+                label: windows[i].label,
+                idleMin: idleMin,
+                pct: windowIdlePct(idleMin)
+            });
+        }
+        return hits;
+    }
+
+    function engagedColor(pct) {
+        const shown = Math.round(Number(pct) || 0);
+        if (shown >= 100) return '#3fb950';
+        if (shown >= 96) return '#d29922';
+        return '#f85149';
+    }
+
+    function formatBreakMinutes(min) {
+        const n = Math.round((Number(min) || 0) * 10) / 10;
+        if (Math.abs(n - Math.round(n)) < 0.05) return String(Math.round(n));
+        return n.toFixed(1);
+    }
+
+    function emptyEngage() {
+        return { flags: [], rev: 0 };
+    }
+
+    function loadEngage() {
+        let raw = '';
+        try {
+            if (typeof GM_getValue === 'function') raw = GM_getValue(ENGAGE_KEY, '') || '';
+        } catch (e) { raw = ''; }
+        if (!raw) {
+            try { raw = localStorage.getItem(ENGAGE_KEY) || ''; } catch (e2) { raw = ''; }
+        }
+        if (!raw) return emptyEngage();
+        try {
+            const doc = JSON.parse(raw);
+            if (!doc || !Array.isArray(doc.flags)) return emptyEngage();
+            return doc;
+        } catch (e3) {
+            return emptyEngage();
+        }
+    }
+
+    function saveEngageLocal(doc) {
+        const text = JSON.stringify(doc);
+        try {
+            if (typeof GM_setValue === 'function') GM_setValue(ENGAGE_KEY, text);
+        } catch (e) { /* the page copy below still records it */ }
+        try { localStorage.setItem(ENGAGE_KEY, text); } catch (e2) { /* storage can be blocked */ }
+    }
+
+    function pruneEngage(doc, now) {
+        const cutoff = now.getTime() - (18 * 60 * 60 * 1000);
+        const current = shiftId(now);
+        const keep = [];
+        const flags = doc.flags || [];
+        for (let i = 0; i < flags.length; i++) {
+            const row = flags[i];
+            if (!row || !row.id) continue;
+            if (row.shiftId === current || (row.flaggedAtMs || 0) >= cutoff) keep.push(row);
+        }
+        doc.flags = keep;
+        return doc;
+    }
+
+    function engageSnapshot(doc) {
+        const flags = ((doc && doc.flags) || []).map(function (row) {
+            const windows = (row.windows || []).map(function (item) {
+                return { id: item.id || '', idleMin: Math.round((item.idleMin || 0) * 10) / 10 };
+            }).sort(function (a, b) { return String(a.id).localeCompare(String(b.id)); });
+            return {
+                id: row.id || '',
+                login: row.login || '',
+                empId: row.empId || '',
+                shiftId: row.shiftId || '',
+                windows: windows,
+                engagedBy: row.engagedBy || '',
+                engagedAtMs: row.engagedAtMs || 0,
+                detail: row.detail || ''
+            };
+        }).sort(function (a, b) { return String(a.id).localeCompare(String(b.id)); });
+        return JSON.stringify(flags);
+    }
+
+    function engageOn() {
+        return !!(ENGAGE_URL && typeof GM_xmlhttpRequest === 'function');
+    }
+
+    function engageRequest(method, extra) {
+        const headers = {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-cache',
+            Pragma: 'no-cache'
+        };
+        if (extra && extra.baseRev != null) headers['X-Engage-Base'] = String(extra.baseRev);
+        let url = ENGAGE_URL;
+        if (method === 'GET') url += '?t=' + Date.now();
+        return new Promise(function (resolve, reject) {
+            GM_xmlhttpRequest({
+                method: method,
+                url: url,
+                headers: headers,
+                data: extra && extra.doc ? JSON.stringify(extra.doc) : undefined,
+                timeout: 20000,
+                onload: function (res) { resolve(res || {}); },
+                onerror: function () { reject(new Error('extended breaks')); },
+                ontimeout: function () { reject(new Error('extended breaks timeout')); }
+            });
+        });
+    }
+
+    function readSharedEngage() {
+        return engageRequest('GET').then(function (res) {
+            if (!res || res.status < 200 || res.status >= 300) throw new Error('extended breaks read');
+            const doc = parseSharedBody(res.responseText || '');
+            if (!doc || !Array.isArray(doc.flags)) return emptyEngage();
+            if (typeof doc.rev !== 'number') doc.rev = 0;
+            return doc;
+        });
+    }
+
+    function writeSharedEngage(doc, baseRev) {
+        return engageRequest('PUT', { doc: doc, baseRev: baseRev }).then(function (res) {
+            if (res && res.status === 409) return { conflict: true };
+            if (!res || res.status < 200 || res.status >= 300) throw new Error('extended breaks write');
+            return { conflict: false };
+        });
+    }
+
+    function mergeEngage(local, remote) {
+        const byId = Object.create(null);
+        function take(row) {
+            if (!row || !row.id) return;
+            const prev = byId[row.id];
+            const copy = JSON.parse(JSON.stringify(row));
+            if (!prev) {
+                byId[row.id] = copy;
+                return;
+            }
+            const windows = {};
+            const lists = [prev.windows || [], copy.windows || []];
+            for (let n = 0; n < lists.length; n++) {
+                for (let i = 0; i < lists[n].length; i++) {
+                    const item = lists[n][i];
+                    if (!item || !item.id) continue;
+                    const had = windows[item.id];
+                    if (!had || (item.idleMin || 0) > (had.idleMin || 0)) windows[item.id] = item;
+                }
+            }
+            const ids = Object.keys(windows);
+            copy.windows = [];
+            for (let i = 0; i < ids.length; i++) copy.windows.push(windows[ids[i]]);
+            if (prev.engagedAtMs && (!copy.engagedAtMs || prev.engagedAtMs < copy.engagedAtMs)) {
+                copy.engagedBy = prev.engagedBy;
+                copy.engagedAt = prev.engagedAt;
+                copy.engagedAtMs = prev.engagedAtMs;
+                copy.detail = prev.detail;
+            }
+            if ((prev.flaggedAtMs || 0) && (!copy.flaggedAtMs || prev.flaggedAtMs < copy.flaggedAtMs)) {
+                copy.flaggedAtMs = prev.flaggedAtMs;
+            }
+            byId[row.id] = copy;
+        }
+        const lists = [(local && local.flags) || [], (remote && remote.flags) || []];
+        for (let n = 0; n < lists.length; n++) {
+            for (let i = 0; i < lists[n].length; i++) take(lists[n][i]);
+        }
+        const out = emptyEngage();
+        const ids = Object.keys(byId);
+        for (let i = 0; i < ids.length; i++) out.flags.push(byId[ids[i]]);
+        out.rev = Math.max((local && local.rev) || 0, (remote && remote.rev) || 0);
+        return out;
+    }
+
+    function publishEngageOnce(localDoc, attempt) {
+        return readSharedEngage().then(function (remote) {
+            const merged = pruneEngage(mergeEngage(localDoc, remote), new Date());
+            const base = remote.rev || 0;
+            if (engageSnapshot(merged) === engageSnapshot(remote)) {
+                merged.rev = base;
+                saveEngageLocal(merged);
+                return merged;
+            }
+            merged.rev = base + 1;
+            return writeSharedEngage(merged, base).then(function (result) {
+                if (result.conflict) {
+                    if (attempt >= 4) throw new Error('extended breaks conflict');
+                    return publishEngageOnce(localDoc, attempt + 1);
+                }
+                return readSharedEngage().then(function (after) {
+                    const checked = pruneEngage(mergeEngage(localDoc, after), new Date());
+                    if (engageSnapshot(checked) !== engageSnapshot(after)) {
+                        if (attempt >= 4) throw new Error('extended breaks write');
+                        return publishEngageOnce(localDoc, attempt + 1);
+                    }
+                    checked.rev = after.rev || merged.rev;
+                    saveEngageLocal(checked);
+                    return checked;
+                });
+            });
+        });
+    }
+
+    function publishEngage(doc) {
+        if (!engageOn()) return Promise.resolve(doc);
+        const job = engageChain.then(function () {
+            return publishEngageOnce(doc, 0);
+        });
+        engageChain = job.then(function (next) { return next; }, function () { return null; });
+        return job;
+    }
+
+    function saveEngage(doc) {
+        pruneEngage(doc, new Date());
+        saveEngageLocal(doc);
+        if (engageOn()) return publishEngage(doc);
+        return Promise.resolve(doc);
+    }
+
+    function pullEngage() {
+        if (!engageOn()) return Promise.resolve(loadEngage());
+        return publishEngage(loadEngage());
+    }
+
+    function flagFor(empId, login, now) {
+        const doc = loadEngage();
+        const shift = shiftId(now || new Date());
+        const name = String(login || '').trim().toLowerCase();
+        const flags = doc.flags || [];
+        for (let i = 0; i < flags.length; i++) {
+            const row = flags[i];
+            if (!row || row.shiftId !== shift) continue;
+            if (empId && row.empId === empId) return row;
+            if (name && row.login === name) return row;
+        }
+        return null;
+    }
+
+    function extendedBreakOpen(empId, login, now) {
+        const row = flagFor(empId, login, now || new Date());
+        if (!row || row.engagedAtMs) return null;
+        return row;
+    }
+
+    function rememberExtendedBreak(empId, record, now) {
+        if (!record || !record.segments) return;
+        const when = now || new Date();
+        const hits = extendedHits(record.segments, when);
+        if (!hits.length) return;
+        const person = personForEmp(empId);
+        const login = String((person && person.login) || '').trim().toLowerCase();
+        const doc = loadEngage();
+        const shift = shiftId(when);
+        const id = shift + '|' + (login || empId);
+        let row = null;
+        for (let i = 0; i < doc.flags.length; i++) {
+            if (doc.flags[i] && doc.flags[i].id === id) row = doc.flags[i];
+        }
+        let changed = false;
+        if (!row) {
+            row = {
+                id: id,
+                login: login,
+                empId: empId,
+                shiftId: shift,
+                windows: [],
+                flaggedAtMs: when.getTime()
+            };
+            doc.flags.push(row);
+            changed = true;
+        }
+        if (!row.windows) row.windows = [];
+        for (let i = 0; i < hits.length; i++) {
+            let had = null;
+            for (let w = 0; w < row.windows.length; w++) {
+                if (row.windows[w] && row.windows[w].id === hits[i].id) had = row.windows[w];
+            }
+            if (!had) {
+                row.windows.push(hits[i]);
+                changed = true;
+            } else if ((hits[i].idleMin || 0) > (had.idleMin || 0) + 0.05) {
+                had.idleMin = hits[i].idleMin;
+                had.pct = hits[i].pct;
+                had.label = hits[i].label;
+                changed = true;
+            }
+        }
+        if (changed) saveEngage(doc);
+    }
+
+    function engageExtended(empId, login, by, text, now) {
+        const when = now || new Date();
+        const actor = String(by || '').trim().toLowerCase();
+        const detail = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+        if (!looksLikeLogin(actor) || !detail) return null;
+        const doc = loadEngage();
+        const shift = shiftId(when);
+        const name = String(login || '').trim().toLowerCase();
+        let row = null;
+        const flags = doc.flags || [];
+        for (let i = 0; i < flags.length; i++) {
+            const item = flags[i];
+            if (!item || item.shiftId !== shift) continue;
+            if ((empId && item.empId === empId) || (name && item.login === name)) row = item;
+        }
+        if (!row || row.engagedAtMs) return null;
+        row.engagedBy = actor;
+        row.engagedAt = clockText(when);
+        row.engagedAtMs = when.getTime();
+        row.detail = detail;
+        saveEngage(doc);
+        return row;
+    }
+
+    function extendedRows(empIds, now) {
+        const when = now || new Date();
+        const shift = shiftId(when);
+        const doc = loadEngage();
+        const flags = doc.flags || [];
+        if (!empIds) {
+            const all = [];
+            for (let i = 0; i < flags.length; i++) {
+                if (flags[i] && flags[i].shiftId === shift) all.push(flags[i]);
+            }
+            return all;
+        }
+        const out = [];
+        const seen = Object.create(null);
+        for (let i = 0; i < empIds.length; i++) {
+            const row = flagFor(empIds[i], '', when);
+            if (!row || seen[row.id]) continue;
+            seen[row.id] = true;
+            out.push(row);
+        }
+        return out;
+    }
+
+    function extendedBreakStats(empIds, now) {
+        const rows = extendedRows(empIds, now);
+        let engaged = 0;
+        for (let i = 0; i < rows.length; i++) {
+            if (rows[i].engagedAtMs) engaged++;
+        }
+        const count = rows.length;
+        return { count: count, engaged: engaged, pct: count ? (engaged / count) * 100 : 100, rows: rows };
     }
 
     // Latest attendance punch says whether someone is clocked in right now.
@@ -1803,6 +2281,7 @@
         record.gaveUp = !incomingGood;
         record.refreshing = false;
         LAST_TIME[empId] = record;
+        try { rememberExtendedBreak(empId, record); } catch (e) { /* the time row still paints */ }
         recordTimeIssue(empId, record);
         if (!DEBUG.timeSample) {
             DEBUG.timeSample = {
@@ -2512,8 +2991,12 @@
             ' animation: mem3PulseRed 1.4s ease-in-out infinite; }' +
             '@keyframes mem3YieldPulse { 0%, 100% { transform: scale(1); opacity: 1; }' +
             ' 50% { transform: scale(1.22); opacity: 0.55; } }' +
-            '.mem3-yield-mark { display:inline-flex; transform-origin:center;' +
-            ' animation: mem3YieldPulse 1.05s ease-in-out infinite; }' +
+            '.mem3-yield-mark { display:inline-flex; transform-origin:center; }' +
+            '.mem3-idle-now { animation: mem3YieldPulse 1.05s ease-in-out infinite; }' +
+            '.mem3-extended-break { animation: none; }' +
+            '@keyframes mem3EngagePulse { 0%, 100% { background:#f85149; color:#ffffff; }' +
+            ' 50% { background:#ffa198; color:#3d0c0c; } }' +
+            '.mem3-engage-pulse { animation: mem3EngagePulse 1.05s ease-in-out infinite; }' +
             '.mem3-yield { position:relative; display:inline-flex; flex:0 0 auto; cursor:default; }' +
             '.mem3-yield-tip { display:none; position:absolute; left:50%; bottom:calc(100% + 8px);' +
             ' transform:translateX(-50%); z-index:30; padding:8px 12px; text-align:left;' +
@@ -2894,17 +3377,64 @@
             'vertical-align:middle; flex:0 0 auto; align-self:center; align-items:center;';
     }
 
-    function rowIdleYield(time, empId) {
-        const mark = idleNowYield();
-        mark.classList.add('mem3-idle-now');
-        mark.title = idleNowTitle(time, empId) || 'Idle now';
+    function yieldTriangle(color, title, pulse) {
+        const mark = document.createElement('span');
+        mark.className = 'mem3-yield-mark ' + (pulse ? 'mem3-idle-now' : 'mem3-extended-break');
+        mark.title = title || '';
         mark.style.marginLeft = '0';
-        const svg = mark.firstChild;
-        if (svg && svg.setAttribute) {
-            svg.setAttribute('width', '28');
-            svg.setAttribute('height', '26');
-        }
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('viewBox', '0 0 24 22');
+        svg.setAttribute('width', '20');
+        svg.setAttribute('height', '18');
+        svg.setAttribute('aria-hidden', 'true');
+        const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+        poly.setAttribute('points', '12,1.2 22.6,20.8 1.4,20.8');
+        poly.setAttribute('fill', color);
+        const bar = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        bar.setAttribute('x', '10.7');
+        bar.setAttribute('y', '7');
+        bar.setAttribute('width', '2.6');
+        bar.setAttribute('height', '7');
+        bar.setAttribute('rx', '0.6');
+        bar.setAttribute('fill', '#0d1117');
+        const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        dot.setAttribute('cx', '12');
+        dot.setAttribute('cy', '17.2');
+        dot.setAttribute('r', '1.35');
+        dot.setAttribute('fill', '#0d1117');
+        svg.appendChild(poly);
+        svg.appendChild(bar);
+        svg.appendChild(dot);
+        mark.appendChild(svg);
         return mark;
+    }
+
+    function yieldSlot() {
+        const slot = document.createElement('span');
+        slot.style.cssText = 'display:inline-flex; align-items:center; justify-content:center; ' +
+            'width:22px; height:20px; flex:0 0 auto;';
+        return slot;
+    }
+
+    function rowYieldSlots(time, empId) {
+        const top = yieldSlot();
+        const bottom = yieldSlot();
+        const person = personForEmp(empId);
+        const extended = extendedBreakOpen(empId, person && person.login);
+        const idleNow = showsIdleNow(time, empId);
+        const sig = yieldSig(time, empId);
+        if (extended) {
+            const labels = (extended.windows || []).map(function (item) {
+                return (item.label || '') + ' ' + formatBreakMinutes(item.idleMin) + ' min idle';
+            }).join('. ');
+            top.appendChild(yieldTriangle('#f85149', 'Extended break. ' + labels, false));
+            if (idleNow) {
+                bottom.appendChild(yieldTriangle('#d29922', idleNowTitle(time, empId) || 'Idle now', true));
+            }
+        } else if (idleNow) {
+            top.appendChild(yieldTriangle('#d29922', idleNowTitle(time, empId) || 'Idle now', true));
+        }
+        return { top: top, bottom: bottom, sig: sig };
     }
 
     function loosenBadgeHost(host) {
@@ -2997,8 +3527,8 @@
     function makeBadge(stats, known, time, empId) {
         const wrap = document.createElement('span');
         wrap.className = DECOR_CLASS;
-        const idleNow = showsIdleNow(time, empId);
-        wrap.style.cssText = badgeGridStyle(idleNow);
+        const marks = rowYieldSlots(time, empId);
+        wrap.style.cssText = badgeGridStyle(true);
         const noTime = !!(time && time.noData);
         const color = (known && stats.hasData) ? uphColor(stats.uph, personUsesBigsRate(empId)) : '#8b949e';
         const rateText = !known ? '?' : (stats.hasData ? ((stats.uph > 0 ? stats.uph.toFixed(1) : '0') + ' UPH') : uphGapText());
@@ -3011,20 +3541,17 @@
         const spacer = idle.cloneNode(true);
         spacer.style.visibility = 'hidden';
         spacer.setAttribute('aria-hidden', 'true');
-        const col = idleNow ? 2 : 1;
-        if (idleNow) {
-            const mark = rowIdleYield(time, empId);
-            placeBadgeCell(mark, 1, 2);
-            mark.style.alignSelf = 'center';
-            wrap.appendChild(mark);
-        }
-        placeBadgeCell(spacer, col, 1);
-        placeBadgeCell(rate, col, 2);
-        placeBadgeCell(idle, col, 3);
+        placeBadgeCell(marks.top, 1, 2);
+        placeBadgeCell(marks.bottom, 1, 3);
+        placeBadgeCell(spacer, 2, 1);
+        placeBadgeCell(rate, 2, 2);
+        placeBadgeCell(idle, 2, 3);
+        wrap.appendChild(marks.top);
+        wrap.appendChild(marks.bottom);
         wrap.appendChild(spacer);
         wrap.appendChild(rate);
         wrap.appendChild(idle);
-        wrap.setAttribute('data-sig', (known ? '1' : '0') + '|' + rateText + '|' + idleText + '|' + idleNowSig(time, empId));
+        wrap.setAttribute('data-sig', (known ? '1' : '0') + '|' + rateText + '|' + idleText + '|' + marks.sig);
         return wrap;
     }
 
@@ -3054,15 +3581,22 @@
     function makeBigsIdleBadge(time, empId) {
         const wrap = document.createElement('span');
         wrap.className = BIGS_IDLE_CLASS;
-        wrap.style.cssText = 'display:inline-flex; align-items:center; gap:6px; margin-left:8px; vertical-align:middle;';
+        wrap.style.cssText = 'display:inline-grid; grid-template-columns:22px auto; grid-template-rows:20px 20px; ' +
+            'column-gap:6px; align-items:center; margin-left:8px; vertical-align:middle;';
         const noTime = !!(time && time.noData);
         const pct = idlePercent(time);
         const idleText = noTime ? windowGapText() : (idleLabel(pct) + ' IDLE');
         const nowTitle = idleNowTitle(time, empId);
         wrap.title = (noTime ? windowGapText() : timeText(time)) + (nowTitle ? ' \u00b7 ' + nowTitle : '');
-        if (showsIdleNow(time, empId)) wrap.appendChild(rowIdleYield(time, empId));
-        wrap.appendChild(makePill(idleText, noTime ? '#8b949e' : idleColor(pct), 16.5));
-        wrap.setAttribute('data-sig', idleText + '|' + idleNowSig(time, empId));
+        const marks = rowYieldSlots(time, empId);
+        placeBadgeCell(marks.top, 1, 1);
+        placeBadgeCell(marks.bottom, 1, 2);
+        const idlePill = makePill(idleText, noTime ? '#8b949e' : idleColor(pct), 16.5);
+        placeBadgeCell(idlePill, 2, 1);
+        wrap.appendChild(marks.top);
+        wrap.appendChild(marks.bottom);
+        wrap.appendChild(idlePill);
+        wrap.setAttribute('data-sig', idleText + '|' + marks.sig);
         return wrap;
     }
 
@@ -5000,6 +5534,30 @@
             viewTitle: 'View associates idle for 11 minutes',
             onView: function () { openRosterPopup(scopeLabel, idleScope, 'idleNow'); }
         });
+        const breakStats = extendedBreakStats(scopeIds);
+        const breakColor = engagedColor(breakStats.pct);
+        const breakGroup = document.createElement('span');
+        breakGroup.style.cssText = 'display:inline-flex; align-items:center; gap:4px;';
+        breakGroup.appendChild(viewButton('View extended breaks', function () {
+            openExtendedList(scopeLabel, scopeIds);
+        }));
+        const breakCount = document.createElement('span');
+        breakCount.setAttribute('data-metric', 'extended');
+        breakCount.textContent = String(breakStats.count);
+        breakCount.style.cssText = 'font-size:' + size + 'px; font-weight:700; color:' + breakColor +
+            '; font-variant-numeric:tabular-nums;';
+        const breakPct = document.createElement('span');
+        breakPct.setAttribute('data-metric', 'extendedPct');
+        breakPct.textContent = Math.round(breakStats.pct) + '%';
+        breakPct.style.cssText = 'font-size:' + size + 'px; font-weight:700; color:' + breakColor +
+            '; font-variant-numeric:tabular-nums;';
+        const breakLabel = document.createElement('span');
+        breakLabel.textContent = 'EXTENDED BREAKS';
+        breakLabel.style.cssText = 'font-size:10px; font-weight:600; color:#8b949e;';
+        breakGroup.appendChild(breakCount);
+        breakGroup.appendChild(breakPct);
+        breakGroup.appendChild(breakLabel);
+        valueRow.appendChild(breakGroup);
         addMetric(formatUnits(opts.units || 0), 'units', '#8b949e', '', opts.lead ? 16 : 13, { key: 'units' });
         addMetric(formatDuration(opts.idleMin || 0), 'hrs idle', '#8b949e', '', opts.lead ? 16 : 13, { key: 'idleHours' });
 
@@ -5012,11 +5570,11 @@
 
     function ensureSummaryActions() {
         let actions = document.getElementById('mem3-summary-actions');
-        if (actions && actions.getAttribute('data-mem3-probe') !== 'actions-v1944') actions.remove();
-        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'actions-v1944') return actions;
+        if (actions && actions.getAttribute('data-mem3-probe') !== 'actions-v1945') actions.remove();
+        if (actions && actions.isConnected && actions.getAttribute('data-mem3-probe') === 'actions-v1945') return actions;
         actions = document.createElement('div');
         actions.id = 'mem3-summary-actions';
-        actions.setAttribute('data-mem3-probe', 'actions-v1944');
+        actions.setAttribute('data-mem3-probe', 'actions-v1945');
         actions.style.cssText = 'display:grid; grid-template-columns:188px 188px; gap:6px; ' +
             'align-self:flex-start; margin-left:auto;';
         const copyBtn = panelChipButton('Copy debug', function () {
@@ -5031,6 +5589,7 @@
         actions.appendChild(makeShowLeavingButton());
         actions.appendChild(makeEarlyUnassignButton());
         actions.appendChild(makeViewNotesButton());
+        actions.appendChild(makeExtendedBreaksButton());
         actions.appendChild(copyBtn);
         return actions;
     }
@@ -5295,7 +5854,7 @@
 
     function idleNowYield() {
         const mark = document.createElement('span');
-        mark.className = 'mem3-yield-mark';
+        mark.className = 'mem3-yield-mark mem3-idle-now';
         mark.title = 'Idle now';
         mark.style.marginLeft = '6px';
         const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -5305,7 +5864,7 @@
         svg.setAttribute('aria-hidden', 'true');
         const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
         poly.setAttribute('points', '12,1.2 22.6,20.8 1.4,20.8');
-        poly.setAttribute('fill', '#f85149');
+        poly.setAttribute('fill', '#d29922');
         const bar = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
         bar.setAttribute('x', '10.7');
         bar.setAttribute('y', '7');
@@ -5482,7 +6041,7 @@
     }
 
     function summaryStructureSig(data) {
-        return 'v47|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
+        return 'v48|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
             (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
             (data.floorOpen || []).join(';') + '|' +
             (data.floorDisabled || []).join(';') + '|' +
@@ -5528,6 +6087,10 @@
             num('idle', idleLabel(spec.idlePct), idleColor(spec.idlePct));
             rank('idle', spec.idleRank || '');
             num('idleCount', String(spec.idleCount), spec.idleCount > 0 ? '#f85149' : '#c9d1d9');
+            const breaks = extendedBreakStats(spec.empIds);
+            const breakColor = engagedColor(breaks.pct);
+            num('extended', String(breaks.count), breakColor);
+            num('extendedPct', Math.round(breaks.pct) + '%', breakColor);
             num('idleHours', formatDuration(spec.idleMin || 0), '#8b949e');
             return true;
         }
@@ -5538,6 +6101,7 @@
             uph: data.floorAvg,
             idlePct: sideIdlePct(data.floorIdleMin || 0, data.floorClockedMin || 0),
             idleCount: idleIdsIn(totalIdleIds).idle.length,
+            empIds: totalIds,
             units: data.floorUnits || 0,
             idleMin: data.floorIdleMin || 0
         })) return false;
@@ -5550,6 +6114,7 @@
                 idlePct: sideIdlePct(line.idleMin || 0, line.clockedMin || 0),
                 idleRank: metricRank(shownIdle(line), ranks.bestIdle, ranks.worstIdle),
                 idleCount: idleIdsIn(line.idleIds || line.empIds || []).idle.length,
+                empIds: line.empIds || [],
                 units: line.totalUnits || 0,
                 idleMin: line.idleMin || 0
             })) return false;
@@ -6040,6 +6605,7 @@
         }
         box.appendChild(makePopupLeavingButton(person));
         box.appendChild(makePopupNotesButton(person));
+        syncPopupEngage(box, person, empId);
         paintPopupLeaving(box, person);
         return box;
     }
@@ -6104,6 +6670,7 @@
                         existing.insertBefore(notesBtn, leaveBtn.nextSibling);
                     } else existing.appendChild(notesBtn);
                 }
+                syncPopupEngage(existing, popupPerson, existing.dataset.empId || '');
                 paintPopupLeaving(existing, popupPerson);
                 placeNameLeaving(host, popupPerson);
                 continue;
@@ -6408,6 +6975,16 @@
         }
     }
 
+    function yieldSig(time, empId) {
+        const person = personForEmp(empId);
+        const extended = extendedBreakOpen(empId, person && person.login);
+        const idleNow = showsIdleNow(time, empId);
+        if (extended && idleNow) return 'extended+idle';
+        if (extended) return 'extended';
+        if (idleNow) return 'idle';
+        return 'none';
+    }
+
     function expectedIdleText(time) {
         const noTime = !!(time && time.noData);
         const pct = idlePercent(time);
@@ -6444,7 +7021,7 @@
                         const rowTime = empId ? LAST_TIME[empId] : null;
                         if (sig.indexOf(expectedRateText(empId)) === -1) return true;
                         if (sig.indexOf(expectedIdleText(rowTime)) === -1) return true;
-                        if (sig.slice(sig.lastIndexOf('|') + 1) !== idleNowSig(rowTime, empId)) return true;
+                        if (sig.slice(sig.lastIndexOf('|') + 1) !== yieldSig(rowTime, empId)) return true;
                     }
                 }
             }
@@ -6462,7 +7039,7 @@
                     if (!badge) return true;
                     const empId = resolveEmpId(IDENTITY.byLogin[found.login]);
                     const bigsTime = empId ? LAST_TIME[empId] : null;
-                    if ((badge.getAttribute('data-sig') || '') !== expectedIdleText(bigsTime) + '|' + idleNowSig(bigsTime, empId)) return true;
+                    if ((badge.getAttribute('data-sig') || '') !== expectedIdleText(bigsTime) + '|' + yieldSig(bigsTime, empId)) return true;
                 }
             }
         } catch (e) {
@@ -9198,7 +9775,8 @@
         paintEarlyLog();
         refreshLeaving();
         refreshNotes();
-        setInterval(function () { refreshLeaving(); refreshNotes(); }, LEAVING_POLL_MS);
+        refreshEngage();
+        setInterval(function () { refreshLeaving(); refreshNotes(); refreshEngage(); }, LEAVING_POLL_MS);
     }
 
     const NOTES_ID = 'mem3-notes-panel';
@@ -9722,6 +10300,231 @@
             openNotesPanel(login);
         });
         return btn;
+    }
+
+    function refreshEngage() {
+        if (!isAssignmentsPage()) return;
+        pullEngage().then(function () {
+            try { scheduleLivePaint(); } catch (e) { /* the next row paint retries */ }
+            const node = document.getElementById(FLOOR_SUMMARY_ID);
+            if (node && LAST_SUMMARY) paintSummaryMetrics(node, LAST_SUMMARY);
+        }).catch(function () { /* the next pass tries again */ });
+    }
+
+    function breakLines(row) {
+        const windows = (row && row.windows) || [];
+        const lines = [];
+        for (let i = 0; i < windows.length; i++) {
+            const item = windows[i];
+            lines.push((item.label || 'Window') + ': ' + formatBreakMinutes(item.idleMin) +
+                ' min idle, ' + windowIdlePct(item.idleMin).toFixed(1) + '%');
+        }
+        return lines;
+    }
+
+    function openEngagementDetail(row) {
+        closeLeavingOverlay('mem3-engage-detail');
+        const card = document.createElement('div');
+        card.id = 'mem3-engage-detail';
+        card.style.cssText = 'position:fixed; left:50%; top:50%; transform:translate(-50%, -50%); z-index:2147483647; ' +
+            'width:min(440px, calc(100vw - 24px)); padding:12px; border-radius:10px; background:#161b22; color:#fff; ' +
+            'border:1px solid #30363d; box-shadow:0 8px 24px rgba(0,0,0,.45); font-family:Segoe UI,system-ui,sans-serif;';
+        const title = document.createElement('div');
+        title.textContent = personLabel(row && row.login) + ' engagement';
+        title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif; margin-bottom:8px;';
+        const who = document.createElement('div');
+        who.textContent = row && row.engagedBy
+            ? (personLabel(row.engagedBy) + ' engaged at ' + (row.engagedAt || ''))
+            : 'Not engaged.';
+        who.style.cssText = 'font-size:13px; font-weight:700; margin-bottom:8px;';
+        const detail = document.createElement('div');
+        detail.textContent = (row && row.detail) || '';
+        detail.style.cssText = 'font-size:13px; white-space:pre-wrap;';
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = 'Close';
+        close.style.cssText = 'margin-top:10px; padding:7px 10px; border-radius:6px; border:1px solid #8b949e; ' +
+            'background:#0d1117; color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        close.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            closeLeavingOverlay('mem3-engage-detail');
+        });
+        card.appendChild(title);
+        card.appendChild(who);
+        card.appendChild(detail);
+        card.appendChild(close);
+        document.body.appendChild(card);
+    }
+
+    function openExtendedList(scopeLabel, empIds) {
+        closeLeavingOverlay('mem3-extended-list');
+        const rows = empIds ? extendedRows(empIds, new Date()) : extendedRows(null, new Date());
+        const card = document.createElement('div');
+        card.id = 'mem3-extended-list';
+        card.style.cssText = 'position:fixed; left:50%; top:50%; transform:translate(-50%, -50%); z-index:2147483647; ' +
+            'width:min(560px, calc(100vw - 24px)); max-height:min(70vh, 560px); overflow:hidden; padding:12px; ' +
+            'display:flex; flex-direction:column; border-radius:10px; background:#161b22; color:#fff; border:1px solid #30363d; ' +
+            'box-shadow:0 8px 24px rgba(0,0,0,.45); font-family:Segoe UI,system-ui,sans-serif;';
+        const header = document.createElement('div');
+        header.style.cssText = 'display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px;';
+        const title = document.createElement('div');
+        title.textContent = (scopeLabel || 'Extended Breaks') + ' \u00b7 Extended Breaks';
+        title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif;';
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = 'Close';
+        close.style.cssText = 'padding:7px 10px; border-radius:6px; border:1px solid #8b949e; background:#0d1117; ' +
+            'color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        close.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            closeLeavingOverlay('mem3-extended-list');
+        });
+        header.appendChild(title);
+        header.appendChild(close);
+        const list = document.createElement('div');
+        list.style.cssText = 'overflow:auto; min-height:0; flex:1 1 auto;';
+        if (!rows.length) {
+            const empty = document.createElement('div');
+            empty.textContent = 'Nobody has an extended break.';
+            empty.style.cssText = 'color:#8b949e; font-size:12px;';
+            list.appendChild(empty);
+        }
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            const line = document.createElement('div');
+            line.style.cssText = 'display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-top:1px solid #30363d;';
+            const copy = row;
+            if (copy.engagedAtMs) {
+                const view = document.createElement('button');
+                view.type = 'button';
+                view.textContent = 'Engagement';
+                view.style.cssText = 'flex:0 0 auto; padding:4px 8px; border-radius:6px; border:1px solid #8b949e; ' +
+                    'background:#0d1117; color:#fff; font:800 11px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+                view.addEventListener('click', function (event) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    openEngagementDetail(copy);
+                });
+                line.appendChild(view);
+            }
+            const label = document.createElement('div');
+            const bits = breakLines(copy);
+            label.textContent = (copy.login || 'associate') + (copy.engagedAtMs ? ' \u00b7 engaged' : ' \u00b7 not engaged') +
+                (bits.length ? '\n' + bits.join('\n') : '');
+            label.style.cssText = 'font-size:12px; font-weight:650; white-space:pre-wrap;';
+            line.appendChild(label);
+            list.appendChild(line);
+        }
+        card.appendChild(header);
+        card.appendChild(list);
+        document.body.appendChild(card);
+    }
+
+    function openEngagePanel(login, empId) {
+        const name = String(login || '').trim().toLowerCase();
+        closeLeavingOverlay('mem3-engage-panel');
+        const card = document.createElement('div');
+        card.id = 'mem3-engage-panel';
+        card.style.cssText = 'position:fixed; left:50%; top:50%; transform:translate(-50%, -50%); z-index:2147483647; width:min(440px, calc(100vw - 24px)); ' +
+            'padding:12px; border-radius:10px; background:#161b22; color:#fff; border:1px solid #30363d; ' +
+            'box-shadow:0 8px 24px rgba(0,0,0,.45); font-family:Segoe UI,system-ui,sans-serif;';
+        const title = document.createElement('div');
+        title.textContent = 'Engage for Extended Break';
+        title.style.cssText = 'font:800 14px Segoe UI,system-ui,sans-serif; margin-bottom:4px;';
+        const ask = document.createElement('div');
+        ask.textContent = 'Write what you did with ' + personLabel(name) + '. The extended-break sign stays until this is saved.';
+        ask.style.cssText = 'font-size:12px; color:#8b949e; margin-bottom:8px;';
+        const area = document.createElement('textarea');
+        area.setAttribute('maxlength', '240');
+        area.placeholder = 'Engagement';
+        area.style.cssText = 'display:block; width:100%; box-sizing:border-box; min-height:88px; resize:vertical; ' +
+            'padding:7px 8px; border-radius:6px; border:1px solid #30363d; background:#0d1117; color:#fff; ' +
+            'font:600 13px Segoe UI,system-ui,sans-serif;';
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; gap:6px; margin-top:8px;';
+        const save = document.createElement('button');
+        save.type = 'button';
+        save.textContent = 'Save';
+        save.style.cssText = 'flex:1 1 auto; padding:7px 10px; border-radius:6px; border:1px solid #f85149; ' +
+            'background:#f85149; color:#ffffff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = 'Close';
+        close.style.cssText = 'flex:0 0 auto; padding:7px 10px; border-radius:6px; border:1px solid #8b949e; ' +
+            'background:#0d1117; color:#fff; font:800 12px Segoe UI,system-ui,sans-serif; cursor:pointer;';
+        const status = document.createElement('div');
+        status.style.cssText = 'min-height:16px; margin-top:8px; font-size:12px; color:#c9d1d9;';
+        save.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            const actor = signedInLogin();
+            if (!looksLikeLogin(actor)) {
+                status.textContent = 'Control Tower has not shown who is signed in.';
+                return;
+            }
+            const saved = engageExtended(empId, name, actor, area.value, new Date());
+            if (!saved) {
+                status.textContent = 'Write the engagement first.';
+                return;
+            }
+            closeLeavingOverlay('mem3-engage-panel');
+            try { scheduleLivePaint(); } catch (e) { /* the row updates on the next pass */ }
+            const node = document.getElementById(FLOOR_SUMMARY_ID);
+            if (node && LAST_SUMMARY) paintSummaryMetrics(node, LAST_SUMMARY);
+        });
+        close.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            closeLeavingOverlay('mem3-engage-panel');
+        });
+        row.appendChild(save);
+        row.appendChild(close);
+        card.appendChild(title);
+        card.appendChild(ask);
+        card.appendChild(area);
+        card.appendChild(row);
+        card.appendChild(status);
+        document.body.appendChild(card);
+        area.focus();
+    }
+
+    function makePopupEngageButton(person, empId) {
+        const login = person && person.login;
+        if (!extendedBreakOpen(empId, login)) return null;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = 'Engage for Extended Break';
+        btn.setAttribute('data-mem3-engage', '');
+        btn.className = 'mem3-engage-pulse';
+        btn.style.cssText = 'display:block; width:100%; box-sizing:border-box; margin-top:8px; padding:6px 8px; ' +
+            'border-radius:6px; border:1px solid #f85149; background:#f85149; color:#ffffff; cursor:pointer; ' +
+            'font:800 12px Segoe UI,system-ui,sans-serif; text-transform:none; letter-spacing:0;';
+        btn.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            const host = btn.closest('.' + POPUP_CLASS);
+            const who = login || (host && host.dataset.login) || '';
+            const id = empId || (host && host.dataset.empId) || '';
+            openEngagePanel(who, id);
+        });
+        return btn;
+    }
+
+    function syncPopupEngage(box, person, empId) {
+        installPulseStyles();
+        if (!box) return;
+        const existing = box.querySelector('[data-mem3-engage]');
+        const open = extendedBreakOpen(empId, person && person.login);
+        if (open && !existing) {
+            const btn = makePopupEngageButton(person, empId);
+            if (btn) box.appendChild(btn);
+        } else if (!open && existing) existing.remove();
+    }
+
+    function makeExtendedBreaksButton() {
+        return panelChipButton('Extended Breaks', function () { openExtendedList('All', null); });
     }
 
     function makeViewNotesButton() {
