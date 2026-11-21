@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.10.7
+// @version      2.10.8
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -55,7 +55,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.10.7";
+  const VERSION = "2.10.8";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -5255,13 +5255,8 @@
           if (!dropWaitingClose || dropPhase === "failed" || dropPhase === "") return;
           showMoveCheck();
         }, 3000);
-        const failDrop = () => {
+        dropFailTimer = setTimeout(() => {
           if (!dropWaitingClose || dropPhase === "failed" || dropPhase === "" || !dzPrompt.classList.contains("open")) return;
-          const drive = Number(GM_getValue("plf.menuDrive", 0)) || 0;
-          if (moveTabOpen() || (drive && Date.now() - drive < 20000)) {
-            dropFailTimer = setTimeout(failDrop, 10000);
-            return;
-          }
           const container = cellText(dropHold?.container);
           const dropzone = cellText(dropHold?.dropzone);
           const reason = "The drop did not finish";
@@ -5272,8 +5267,7 @@
           rememberDropzone({ container, dropzone, step: "not sent", error: reason });
           forgetQueuedContainer(container);
           hideMoveCheck();
-        };
-        dropFailTimer = setTimeout(failDrop, 10000);
+        }, 6000);
         beginDropScan();
       }
       dropWaitingClose = true;
@@ -5914,6 +5908,10 @@
     [400, 1200, 3000].forEach((ms) => setTimeout(bootMove, ms));
   }
 
+  function launcherField() {
+    return document.getElementById("qlInput");
+  }
+
   function calmCodeField() {
     return document.getElementById("calmCode") || document.querySelector("[name='calmCode']");
   }
@@ -6014,60 +6012,45 @@
     const started = Number(GM_getValue("plf.menuDrive", 0)) || 0;
     if (!started || Date.now() - started > 20000 || typeMenuCode.armed) return;
     typeMenuCode.armed = true;
-    const deadline = started + 8000;
-    let calm = null;
-    while (!calm && Date.now() < deadline) {
+    const deadline = started + 4000;
+    let launcher = null;
+    while (!launcher && Date.now() < deadline) {
       GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
-      calm = calmCodeField();
-      if (!document.body) {
-        await sleep(200);
-        continue;
-      }
-      if (!calm && Date.now() - started < 1500) {
-        await sleep(200);
-        continue;
-      }
-      break;
+      launcher = launcherField() || visibleMenuField();
+      if (!launcher) await sleep(150);
     }
-    const field = calm || visibleMenuField();
+    const field = launcher || calmCodeField() || document.body;
     const before = menuSnapshot(field, { step: "seen", keys: "" });
     saveMenuShot(before);
     rememberDropzone({
       step: "menu-field",
       dropzone: location.href,
-      detail: `${before.field?.id || before.visible?.id || "none"} hidden=${Boolean(before.field?.hidden)} value=${before.field?.value || "empty"} screen147=${before.screenHas147}`,
+      detail: `${field?.id || field?.getAttribute?.("name") || "none"} value=${before.field?.value || "empty"}`,
     });
-    const keyTarget = visibleMenuField() || field || document.body;
-    if (!keyTarget) return;
-    try { (document.body || keyTarget).focus(); } catch { /* The menu kept focus. */ }
-    try { keyTarget.focus(); } catch { /* The field cannot take focus. */ }
+    if (!field) return;
+    try { field.focus(); } catch { /* The QuickLauncher kept focus. */ }
     let built = "";
     for (const ch of ["1", "4", "7"]) {
       built += ch;
-      fireMoveKey(keyTarget, ch);
-      if (document.body && document.body !== keyTarget) fireMoveKey(document.body, ch);
-      if (calm && calm !== keyTarget) fireMoveKey(calm, ch);
-      if (calm) moveSetField(calm, built);
-      if (keyTarget !== calm && "value" in keyTarget) moveSetField(keyTarget, built);
+      if ("value" in field) moveSetField(field, built);
+      fireMoveKey(field, ch);
       GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
-      await sleep(90);
+      await sleep(70);
     }
-    const typed = menuSnapshot(calm || keyTarget, { step: "typed", keys: "147" });
-    saveMenuShot(typed);
-    fireMoveKey(keyTarget, "Enter");
-    if (document.body && document.body !== keyTarget) fireMoveKey(document.body, "Enter");
-    const form = menuFormFor(calm || keyTarget);
-    const submit = form ? "form.submit" : "none";
-    const after = menuSnapshot(calm || keyTarget, { step: "submit", keys: "147 Enter", submit });
+    if ("value" in field && cellText(field.value) !== "147") moveSetField(field, "147");
+    fireMoveKey(field, "Enter");
+    const form = field.form || menuFormFor(field);
+    const submit = form ? "form.submit" : "enter";
+    const after = menuSnapshot(field, { step: "submit", keys: "147 Enter", submit, typedInto: field.id || field.getAttribute?.("name") || field.tagName });
     saveMenuShot(after);
     rememberDropzone({
       step: "menu-147",
       dropzone: location.href,
-      detail: `${after.field?.id || "none"} hidden=${Boolean(after.field?.hidden)} value=${after.field?.value || "empty"} screen147=${after.screenHas147} ${submit}`,
-      error: after.screenHas147 ? "" : "Screen did not show 147",
+      detail: `${after.typedInto} value=${after.field?.value || "empty"} screen147=${after.screenHas147} ${submit}`,
+      error: cellText(field.value) === "147" || after.screenHas147 ? "" : "147 was not in the QuickLauncher",
     });
-    if (!form) return;
-    try { form.submit(); } catch { /* The menu form stayed on this page. */ }
+    if (!form || form === calmCodeField()?.form) return;
+    try { form.submit(); } catch { /* Enter already submitted the QuickLauncher. */ }
   }
 
   if (isAftMenu || isFcMenu) typeMenuCode();
