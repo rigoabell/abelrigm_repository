@@ -145,6 +145,12 @@ assert.match(src, /Calculating Extended Breaks/);
 assert.match(src, /Recalculate Extended Breaks/);
 assert.match(src, /background:#d29922;/);
 assert.match(src, /BREAK_RUNNING && !idleGoing/);
+assert.match(src, /Took Extended Break/);
+assert.match(src, /Currently Idle/);
+assert.match(src, /id = 'mem3-cursor-tip'/);
+assert.match(src, /data-mem3-name-tip/);
+assert.match(src, /poly\.style\.pointerEvents = 'fill'/);
+assert.match(src, /pointer-events:none;/);
 
 const daysScale = { shiftName: "days", originMin: 6 * 60, pxPerMin: 1 };
 const nightScale = { shiftName: "nights", originMin: 18 * 60, pxPerMin: 1 };

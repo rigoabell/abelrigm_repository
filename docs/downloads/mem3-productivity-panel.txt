@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.13
+// @version      1.12.14
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.13';
+    const SCRIPT_VERSION = '1.12.14';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -3916,19 +3916,123 @@
             'vertical-align:middle; flex:0 0 auto; align-self:center; align-items:center;';
     }
 
-    function yieldTriangle(color, title, pulse) {
+    let cursorTipNode = null;
+    let cursorTipHold = null;
+
+    function cursorTipEl() {
+        if (cursorTipNode && cursorTipNode.parentNode) return cursorTipNode;
+        cursorTipNode = document.createElement('div');
+        cursorTipNode.id = 'mem3-cursor-tip';
+        cursorTipNode.style.cssText = 'position:fixed; z-index:2147483647; display:none; pointer-events:none; ' +
+            'padding:3px 7px; border-radius:4px; background:#161b22; color:#ffffff; ' +
+            'border:1px solid #8b949e; font:600 12px Segoe UI,system-ui,sans-serif; ' +
+            'line-height:1.25; white-space:nowrap;';
+        (document.body || document.documentElement).appendChild(cursorTipNode);
+        return cursorTipNode;
+    }
+
+    function moveCursorTip(x, y) {
+        const tip = cursorTipEl();
+        tip.style.display = 'block';
+        let left = x + 12;
+        let top = y + 18;
+        const rect = tip.getBoundingClientRect();
+        if (left + rect.width > window.innerWidth - 4) left = Math.max(4, x - rect.width - 12);
+        if (top + rect.height > window.innerHeight - 4) top = Math.max(4, y - rect.height - 12);
+        tip.style.left = Math.round(left) + 'px';
+        tip.style.top = Math.round(top) + 'px';
+    }
+
+    function holdNativeTitles(from) {
+        const saved = [];
+        let node = from;
+        while (node && node !== document.body && node !== document.documentElement) {
+            if (node.getAttribute && node.hasAttribute('title')) {
+                saved.push({ el: node, title: node.getAttribute('title') });
+                node.removeAttribute('title');
+            }
+            node = node.parentElement;
+        }
+        return saved;
+    }
+
+    function releaseNativeTitles(saved) {
+        if (!saved) return;
+        for (let i = 0; i < saved.length; i++) {
+            const item = saved[i];
+            if (item.el && item.el.setAttribute) item.el.setAttribute('title', item.title);
+        }
+    }
+
+    function showCursorTip(text, x, y, from) {
+        const tip = cursorTipEl();
+        if (tip.textContent !== text) tip.textContent = text;
+        if (!cursorTipHold) cursorTipHold = holdNativeTitles(from);
+        moveCursorTip(x, y);
+    }
+
+    function hideCursorTip() {
+        if (cursorTipNode) cursorTipNode.style.display = 'none';
+        releaseNativeTitles(cursorTipHold);
+        cursorTipHold = null;
+    }
+
+    function bindCursorTip(el, text) {
+        if (!el || !text) return;
+        el.addEventListener('mouseenter', function (e) {
+            showCursorTip(text, e.clientX, e.clientY, el);
+        });
+        el.addEventListener('mousemove', function (e) {
+            showCursorTip(text, e.clientX, e.clientY, el);
+        });
+        el.addEventListener('mouseleave', hideCursorTip);
+    }
+
+    function fullNameForLogin(login) {
+        const key = String(login || '').trim().toLowerCase();
+        if (!key) return '';
+        const ident = IDENTITY.byLogin[key];
+        const raw = ident && ident.name ? String(ident.name).trim() : '';
+        if (!raw) return '';
+        const pretty = swapPersonName(raw) || raw;
+        if (!pretty || pretty.toLowerCase() === key) return '';
+        return pretty;
+    }
+
+    function bindLoginNameTip(el, login) {
+        if (!el) return;
+        const name = fullNameForLogin(login);
+        if (!name) return;
+        el.setAttribute('data-mem3-name-tip', name);
+        if (el.getAttribute('data-mem3-name-bound') === '1') return;
+        el.setAttribute('data-mem3-name-bound', '1');
+        el.addEventListener('mouseenter', function (e) {
+            const label = el.getAttribute('data-mem3-name-tip') || '';
+            if (label) showCursorTip(label, e.clientX, e.clientY, el);
+        });
+        el.addEventListener('mousemove', function (e) {
+            const label = el.getAttribute('data-mem3-name-tip') || '';
+            if (label) showCursorTip(label, e.clientX, e.clientY, el);
+        });
+        el.addEventListener('mouseleave', hideCursorTip);
+    }
+
+    function yieldTriangle(color, label, pulse) {
         const mark = document.createElement('span');
         mark.className = 'mem3-yield-mark ' + (pulse ? 'mem3-idle-now' : 'mem3-extended-break');
-        mark.title = title || '';
         mark.style.marginLeft = '0';
+        mark.style.pointerEvents = 'none';
         const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
         svg.setAttribute('viewBox', '0 0 24 22');
         svg.setAttribute('width', '20');
         svg.setAttribute('height', '18');
         svg.setAttribute('aria-hidden', 'true');
+        svg.style.pointerEvents = 'none';
         const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
         poly.setAttribute('points', '12,1.2 22.6,20.8 1.4,20.8');
         poly.setAttribute('fill', color);
+        poly.style.pointerEvents = 'fill';
+        poly.style.cursor = 'default';
         const bar = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
         bar.setAttribute('x', '10.7');
         bar.setAttribute('y', '7');
@@ -3936,22 +4040,25 @@
         bar.setAttribute('height', '7');
         bar.setAttribute('rx', '0.6');
         bar.setAttribute('fill', '#0d1117');
+        bar.style.pointerEvents = 'none';
         const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
         dot.setAttribute('cx', '12');
         dot.setAttribute('cy', '17.2');
         dot.setAttribute('r', '1.35');
         dot.setAttribute('fill', '#0d1117');
+        dot.style.pointerEvents = 'none';
         svg.appendChild(poly);
         svg.appendChild(bar);
         svg.appendChild(dot);
         mark.appendChild(svg);
+        if (label) bindCursorTip(poly, label);
         return mark;
     }
 
     function yieldSlot() {
         const slot = document.createElement('span');
         slot.style.cssText = 'display:inline-flex; align-items:center; justify-content:center; ' +
-            'width:22px; height:20px; flex:0 0 auto;';
+            'width:22px; height:20px; flex:0 0 auto; pointer-events:none;';
         return slot;
     }
 
@@ -3963,12 +4070,12 @@
         const idleNow = showsIdleNow(time, empId);
         const sig = yieldSig(time, empId);
         if (extended) {
-            top.appendChild(yieldTriangle('#f85149', 'Extended break: ' + breakWhich(extended) + '. ' + breakLines(extended).join('. '), false));
+            top.appendChild(yieldTriangle('#f85149', 'Took Extended Break', false));
             if (idleNow) {
-                bottom.appendChild(yieldTriangle('#d29922', idleNowTitle(time, empId) || 'Idle now', true));
+                bottom.appendChild(yieldTriangle('#d29922', 'Currently Idle', true));
             }
         } else if (idleNow) {
-            top.appendChild(yieldTriangle('#d29922', idleNowTitle(time, empId) || 'Idle now', true));
+            top.appendChild(yieldTriangle('#d29922', 'Currently Idle', true));
         }
         return { top: top, bottom: bottom, sig: sig };
     }
@@ -4101,7 +4208,10 @@
         } else if (existing && existing.parentNode) {
             existing.parentNode.replaceChild(preview, existing);
         }
-        if (found && found.el) placeBesideLogin(tr, found.el, badge);
+        if (found && found.el) {
+            placeBesideLogin(tr, found.el, badge);
+            bindLoginNameTip(found.el, found.login);
+        }
         else {
             const host = badgeHost(null, tr);
             keepBadgeBesideLogin(host);
@@ -4137,6 +4247,7 @@
     }
 
     function placeBigsIdle(tr, found, time, empId) {
+        if (found && found.el) bindLoginNameTip(found.el, found.login);
         const badge = makeBigsIdleBadge(time, empId);
         const sig = badge.getAttribute('data-sig');
         const existing = tr.querySelector('.' + BIGS_IDLE_CLASS);
@@ -6409,34 +6520,13 @@
     }
 
     function idleNowYield() {
-        const mark = document.createElement('span');
-        mark.className = 'mem3-yield-mark mem3-idle-now';
-        mark.title = 'Idle now';
+        const mark = yieldTriangle('#d29922', 'Currently Idle', true);
         mark.style.marginLeft = '6px';
-        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-        svg.setAttribute('viewBox', '0 0 24 22');
-        svg.setAttribute('width', '16');
-        svg.setAttribute('height', '15');
-        svg.setAttribute('aria-hidden', 'true');
-        const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-        poly.setAttribute('points', '12,1.2 22.6,20.8 1.4,20.8');
-        poly.setAttribute('fill', '#d29922');
-        const bar = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-        bar.setAttribute('x', '10.7');
-        bar.setAttribute('y', '7');
-        bar.setAttribute('width', '2.6');
-        bar.setAttribute('height', '7');
-        bar.setAttribute('rx', '0.6');
-        bar.setAttribute('fill', '#0d1117');
-        const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-        dot.setAttribute('cx', '12');
-        dot.setAttribute('cy', '17.2');
-        dot.setAttribute('r', '1.35');
-        dot.setAttribute('fill', '#0d1117');
-        svg.appendChild(poly);
-        svg.appendChild(bar);
-        svg.appendChild(dot);
-        mark.appendChild(svg);
+        const svg = mark.querySelector('svg');
+        if (svg) {
+            svg.setAttribute('width', '16');
+            svg.setAttribute('height', '15');
+        }
         return mark;
     }
 
