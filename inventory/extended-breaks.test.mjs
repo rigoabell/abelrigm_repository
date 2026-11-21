@@ -8,7 +8,7 @@ const patched = src.replace(
     `globalThis.__mem3 = {
         breakWindows, idleInWindow, isExtendedIdle, extendedHits, engagedColor,
         readFunctionSegment, rememberExtendedBreak, engageExtended,
-        extendedBreakStats, extendedBreakOpen, shiftId
+        extendedBreakStats, extendedBreakOpen, breakWhich, shiftId
     };
 })();`
 );
@@ -104,3 +104,14 @@ assert.equal(after.count, 1);
 assert.equal(after.pct, 100);
 assert.equal(after.rows[0].detail, "Walked them back from break");
 assert.equal(api.engageExtended("99", "", "abelrigm", "again", when), null);
+
+const bothSegments = [
+    { bucket: "indirect", startMin: live[0].startMin, endMin: live[0].startMin + 20 },
+    { bucket: "indirect", startMin: live[1].startMin, endMin: live[1].startMin + 22 }
+];
+api.rememberExtendedBreak("77", { segments: bothSegments }, when);
+const both = api.extendedBreakStats(["77", "77"], when);
+assert.equal(both.count, 1);
+assert.equal(both.rows[0].windows.length, 2);
+assert.equal(api.breakWhich(both.rows[0]), "1st and 2nd break");
+assert.equal(api.breakWhich(after.rows[0]), "1st break");
