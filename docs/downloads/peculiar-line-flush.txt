@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.10.11
+// @version      2.10.12
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -56,7 +56,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.10.11";
+  const VERSION = "2.10.12";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2533,6 +2533,16 @@
     return /move successful/i.test(after) && moved(after) && !moved(before);
   }
 
+  function moveTabStillOpen(heartbeat, hidden, now, staleMs) {
+    const beat = Number(heartbeat) || 0;
+    const closed = Number(hidden) || 0;
+    const clock = Number(now) || 0;
+    const stale = Number(staleMs) || 0;
+    if (!beat || !clock || clock - beat >= stale) return false;
+    if (closed >= beat) return false;
+    return true;
+  }
+
   function moveCheckDue(at, now) {
     const stamp = Number(at) || 0;
     const clock = Number(now) || 0;
@@ -2741,7 +2751,8 @@
     const checking = !moveCheckDone(GM_getValue(KEYS.moveChecks, null), now);
     const href = checking ? MENU_URL : MOVE_URL;
     const heartbeat = Number(GM_getValue(KEYS.dropzoneHeartbeat, 0)) || 0;
-    if (Date.now() - heartbeat < HEARTBEAT_STALE_MS) return;
+    const hidden = Number(GM_getValue("plf.moveTabHidden", 0)) || 0;
+    if (moveTabStillOpen(heartbeat, hidden, Date.now(), HEARTBEAT_STALE_MS)) return;
     if (Date.now() - moveTabOpenedAt < 4000) return;
     moveTabOpenedAt = Date.now();
     if (checking) {
@@ -5213,7 +5224,8 @@
     }
     function moveTabOpen() {
       const heartbeat = Number(GM_getValue(KEYS.dropzoneHeartbeat, 0)) || 0;
-      return Date.now() - heartbeat < HEARTBEAT_STALE_MS;
+      const hidden = Number(GM_getValue("plf.moveTabHidden", 0)) || 0;
+      return moveTabStillOpen(heartbeat, hidden, Date.now(), HEARTBEAT_STALE_MS);
     }
     function hideMoveCheck() {
       dzCheck?.classList.remove("show");
@@ -5370,18 +5382,26 @@
     shadow.getElementById("dzYes").addEventListener("click", () => finishDropPrompt(true));
     shadow.getElementById("dzNo").addEventListener("click", () => finishDropPrompt(false));
     function armMoveCheck(e) {
+      if (e) e.preventDefault();
       if (moveTabOpen()) {
-        e.preventDefault();
+        rememberDropzone({ step: "check-blocked", detail: "A Move App tab is still open" });
         paintDropzoneStatus("There cannot be another tab open with the move tool. Close it, then click Check.");
         if (dzCheckText && dzCheck?.classList.contains("show")) {
           dzCheckText.textContent = "There cannot be another tab open with the move tool. Close it, then click Check.";
         }
         return;
       }
-      GM_setValue(KEYS.moveCheckAt, Date.now());
-      GM_setValue("plf.menuDrive", Date.now());
+      const now = Date.now();
+      GM_setValue(KEYS.moveCheckAt, now);
+      GM_setValue("plf.menuDrive", now);
       GM_setValue("plf.menu147Done", 0);
-      GM_setValue("plf.moveCheckHold", Date.now());
+      GM_setValue("plf.moveCheckHold", now);
+      rememberDropzone({ step: "check-click", dropzone: MENU_URL });
+      try {
+        GM_openInTab(MENU_URL, { active: true, insert: true, setParent: true });
+      } catch {
+        /* The menu tab could not be opened. */
+      }
       paintDropzoneStatus("Move App is open. Close that tab. There cannot be another tab open with the move tool.");
       if (!dropHold || dropPhase === "dropping" || dropPhase === "failed") return;
       dropPhase = "check-open";
@@ -6079,8 +6099,8 @@
 
   async function typeMenuCode() {
     const started = Number(GM_getValue("plf.menuDrive", 0)) || 0;
-    if (!started || Date.now() - started > 20000 || typeMenuCode.armed) return;
-    typeMenuCode.armed = true;
+    if (!started || Date.now() - started > 20000 || typeMenuCode.drive === started) return;
+    typeMenuCode.drive = started;
     const deadline = started + 4000;
     let launcher = null;
     while (!launcher && Date.now() < deadline) {
@@ -6122,7 +6142,16 @@
     try { form.submit(); } catch { /* Enter already submitted the QuickLauncher. */ }
   }
 
-  if (isAftMenu || isFcMenu) typeMenuCode();
+  if ((isMoveApp || isAftMenu || isFcMenu) && isTop) {
+    window.addEventListener("pagehide", () => {
+      GM_setValue("plf.moveTabHidden", Date.now());
+    });
+  }
+
+  if (isAftMenu || isFcMenu) {
+    typeMenuCode();
+    setInterval(() => typeMenuCode(), 700);
+  }
 
   if (isFcMenu && isTop) {
     const showFcMenu = (text) => {
