@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.11.13
+// @version      1.11.14
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.11.13';
+    const SCRIPT_VERSION = '1.11.14';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -8376,10 +8376,50 @@
         return out;
     }
 
-    function leavingBody(doc) {
-        const copy = JSON.parse(JSON.stringify(doc || emptyLeaving()));
-        delete copy.rev;
-        return JSON.stringify(copy);
+    function leavingSnapshot(doc) {
+        const shifts = {};
+        const shiftIds = Object.keys((doc && doc.shifts) || {}).sort();
+        for (let s = 0; s < shiftIds.length; s++) {
+            const id = shiftIds[s];
+            const rows = ((doc.shifts && doc.shifts[id]) || []).map(function (row) {
+                if (!row) return null;
+                return {
+                    id: row.id || '',
+                    login: row.login || '',
+                    said: row.said || '',
+                    status: row.status || '',
+                    station: row.station || '',
+                    back: row.back || '',
+                    clearedBy: row.clearedBy || '',
+                    history: (row.history || []).length
+                };
+            }).filter(function (row) { return !!row; });
+            rows.sort(function (a, b) {
+                return String(a.id).localeCompare(String(b.id)) || String(a.login).localeCompare(String(b.login));
+            });
+            if (rows.length) shifts[id] = rows;
+        }
+        function events(bucket) {
+            const out = {};
+            const ids = Object.keys(bucket || {}).sort();
+            for (let n = 0; n < ids.length; n++) {
+                const id = ids[n];
+                const list = (bucket[id] || []).map(function (item) {
+                    if (!item) return '';
+                    return [
+                        item.at || '', item.by || '', item.text || '', item.summary || '',
+                        item.kind || '', item.login || '', item.action || '', item.who || '', item.said || ''
+                    ].join('|');
+                }).filter(function (item) { return !!item; }).sort();
+                if (list.length) out[id] = list;
+            }
+            return out;
+        }
+        return JSON.stringify({
+            shifts: shifts,
+            activity: events(doc && doc.activity),
+            runs: events(doc && doc.runs)
+        });
     }
 
     function shareRequest(method, extra) {
@@ -8427,7 +8467,7 @@
         return readSharedLeaving().then(function (remote) {
             const merged = mergeLeaving(localDoc, remote);
             const base = remote.rev || 0;
-            if (leavingBody(merged) === leavingBody(remote)) {
+            if (leavingSnapshot(merged) === leavingSnapshot(remote)) {
                 merged.rev = base;
                 saveLeavingLocal(merged);
                 return merged;
@@ -8438,8 +8478,16 @@
                     if (attempt >= 4) throw new Error('gist conflict');
                     return publishLeavingOnce(localDoc, attempt + 1);
                 }
-                saveLeavingLocal(merged);
-                return merged;
+                return readSharedLeaving().then(function (after) {
+                    const checked = mergeLeaving(localDoc, after);
+                    if (leavingSnapshot(checked) !== leavingSnapshot(after)) {
+                        if (attempt >= 4) throw new Error('shared list write');
+                        return publishLeavingOnce(localDoc, attempt + 1);
+                    }
+                    checked.rev = after.rev || merged.rev;
+                    saveLeavingLocal(checked);
+                    return checked;
+                });
             });
         });
     }
@@ -9354,10 +9402,20 @@
         return !!(NOTES_SHARE_URL && typeof GM_xmlhttpRequest === 'function');
     }
 
-    function notesBody(doc) {
-        const copy = JSON.parse(JSON.stringify(doc || emptyNotes()));
-        delete copy.rev;
-        return JSON.stringify(copy);
+    function notesSnapshot(doc) {
+        const notes = ((doc && doc.notes) || []).map(function (note) {
+            if (!note) return null;
+            return {
+                id: note.id || '',
+                about: note.about || '',
+                by: note.by || '',
+                kind: note.kind || '',
+                text: note.text || '',
+                status: note.status || ''
+            };
+        }).filter(function (note) { return !!note; });
+        notes.sort(function (a, b) { return String(a.id).localeCompare(String(b.id)); });
+        return JSON.stringify(notes);
     }
 
     function notesRequest(method, extra) {
@@ -9406,7 +9464,7 @@
         return readSharedNotes().then(function (remote) {
             const merged = pruneNotes(mergeNotes(localDoc, remote), new Date());
             const base = remote.rev || 0;
-            if (notesBody(merged) === notesBody(remote)) {
+            if (notesSnapshot(merged) === notesSnapshot(remote)) {
                 merged.rev = base;
                 saveNotesLocal(merged);
                 return merged;
@@ -9417,8 +9475,16 @@
                     if (attempt >= 4) throw new Error('notes conflict');
                     return publishNotesOnce(localDoc, attempt + 1);
                 }
-                saveNotesLocal(merged);
-                return merged;
+                return readSharedNotes().then(function (after) {
+                    const checked = pruneNotes(mergeNotes(localDoc, after), new Date());
+                    if (notesSnapshot(checked) !== notesSnapshot(after)) {
+                        if (attempt >= 4) throw new Error('shared notes write');
+                        return publishNotesOnce(localDoc, attempt + 1);
+                    }
+                    checked.rev = after.rev || merged.rev;
+                    saveNotesLocal(checked);
+                    return checked;
+                });
             });
         });
     }
@@ -9771,12 +9837,20 @@
 
     function currentLeaving(doc, now) {
         const cutoff = now.getTime() - LEAVING_KEEP_MS;
-        const rows = shiftRows(doc, now).slice().filter(function (row) {
-            if (!row || !row.login) return false;
-            if (row.status !== 'said' && row.status !== 'stuck') return false;
-            const when = rowTime(row, now);
-            return !when || when >= cutoff;
-        });
+        const shifts = (doc && doc.shifts) || {};
+        const ids = Object.keys(shifts);
+        const rows = [];
+        for (let s = 0; s < ids.length; s++) {
+            const list = shifts[ids[s]] || [];
+            for (let i = 0; i < list.length; i++) {
+                const row = list[i];
+                if (!row || !row.login) continue;
+                if (row.status !== 'said' && row.status !== 'stuck') continue;
+                const when = rowTime(row, now);
+                if (when && when < cutoff) continue;
+                rows.push(row);
+            }
+        }
         const best = Object.create(null);
         for (let i = 0; i < rows.length; i++) {
             const prev = best[rows[i].login];
