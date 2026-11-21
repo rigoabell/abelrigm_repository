@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ONT Base Piles Audit Workspace (abelrigm)
 // @namespace    https://github.com/rigoabell/abelrigm_repository
-// @version      1.1.0
+// @version      1.2.0
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/ont-piles-audit-workspace.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/ont-piles-audit-workspace.user.js
 // @description  Count BIGS and sortable piles on the audit page and show the EOS total.
@@ -17,9 +17,9 @@
   one cell between them.
 
   The cell is the EOS piles count from the workbook, without the color blocks.
+  Problem Solve, Exceptions, and Add Ins sit on one sheet: BIGS, then sortable, then EOS.
   BIGS: a pallet is 20, a cage is 15, a shuttle is 100.
   Sortable: a pallet is 150, a tote is 5.
-  EOS adds Problem Solve, Exceptions, and Add Ins.
   Add Ins includes shuttles. Problem Solve and Exceptions do not.
   Misships, AR BIGS, Refurb, Audit, and ADS stay out of that total.
 */
@@ -27,7 +27,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.1.0';
+  const VERSION = '1.2.0';
   const HOST = 'ont-base.corp.amazon.com';
   const CELL_ID = 'ont-piles-workspace-col';
   const CARD_ID = 'ont-piles-workspace';
@@ -66,11 +66,17 @@
     { key: 'pallets', label: 'Pallets' },
     { key: 'totes', label: 'Totes' }
   ];
-  const EOS_LINES = [
-    { key: 'addIns', label: 'Add Ins' },
-    { key: 'ps', label: 'PS' },
-    { key: 'exceptions', label: 'Exceptions' },
-    { key: 'total', label: 'Total' }
+  const SHEET_ROWS = [
+    { id: 'problemSolve', label: 'Problem Solve', eos: 'ps' },
+    { id: 'exceptions', label: 'Exceptions', eos: 'exceptions' },
+    { id: 'addIns', label: 'Add Ins', eos: 'addIns' }
+  ];
+  const OTHER_ROWS = [
+    { id: 'misships', label: 'Misships' },
+    { id: 'arBigs', label: 'AR BIGS' },
+    { id: 'refurb', label: 'Refurb' },
+    { id: 'audit', label: 'Audit' },
+    { id: 'ads', label: 'ADS' }
   ];
   const CSS = [
     '#' + CELL_ID + ' { clear: both; }',
@@ -94,30 +100,24 @@
     '}',
     '#' + BODY_ID + ' { background: #fff; padding: 16px 18px 20px; }',
     '#' + EOS_ID + ' { color: #222; font-size: 14px; }',
-    '#' + EOS_ID + ' h3 {',
-    '  font-size: 15px; font-weight: 700; margin: 16px 0 4px;',
+    '#' + EOS_ID + ' h3 { font-size: 15px; font-weight: 700; margin: 18px 0 6px; }',
+    '#' + EOS_ID + ' .ont-piles-note { color: #555; margin: 0 0 10px; }',
+    '#' + EOS_ID + ' table { border-collapse: collapse; margin: 0; width: auto; }',
+    '#' + EOS_ID + ' th, #' + EOS_ID + ' td {',
+    '  background: transparent; border: 0; font-weight: 400; padding: 3px 10px 3px 0;',
+    '  text-align: left; vertical-align: bottom; white-space: nowrap;',
     '}',
-    '#' + EOS_ID + ' h3:first-child { margin-top: 0; }',
-    '#' + EOS_ID + ' .ont-piles-note { color: #555; margin: 0 0 8px; }',
-    '#' + EOS_ID + ' .ont-piles-line {',
-    '  align-items: center; column-gap: 8px; display: grid; margin: 4px 0;',
-    '}',
-    '#' + EOS_ID + ' .ont-piles-bigs {',
-    '  grid-template-columns: minmax(8.5rem, 1.5fr) repeat(3, minmax(4.2rem, 0.7fr)) minmax(4rem, 0.55fr);',
-    '}',
-    '#' + EOS_ID + ' .ont-piles-sort {',
-    '  grid-template-columns: minmax(8.5rem, 1.5fr) repeat(2, minmax(4.2rem, 0.7fr)) minmax(4rem, 0.55fr);',
-    '}',
-    '#' + EOS_ID + ' .ont-piles-sum {',
-    '  grid-template-columns: 8.5rem minmax(4rem, 6rem);',
-    '}',
-    '#' + EOS_ID + ' .ont-piles-head { color: #444; font-size: 12px; font-weight: 700; }',
+    '#' + EOS_ID + ' .ont-piles-group th { color: #222; font-size: 13px; font-weight: 700; padding-bottom: 2px; text-align: center; }',
+    '#' + EOS_ID + ' .ont-piles-head th { color: #555; font-size: 12px; font-weight: 700; }',
+    '#' + EOS_ID + ' .ont-piles-bigs { margin-top: 0; }',
+    '#' + EOS_ID + ' .ont-piles-split { border-left: 1px solid #e5e5e5; padding-left: 14px; }',
     '#' + EOS_ID + ' input {',
     '  border: 1px solid #ccc; border-radius: 3px; box-sizing: border-box;',
-    '  font: inherit; padding: 4px 6px; width: 100%;',
+    '  font: inherit; padding: 4px 6px; width: 5.25rem;',
     '}',
     '#' + EOS_ID + ' .ont-piles-out { font-variant-numeric: tabular-nums; font-weight: 700; }',
-    '#' + EOS_ID + ' .ont-piles-total { border-top: 1px solid #ccc; font-size: 16px; margin-top: 6px; padding-top: 6px; }'
+    '#' + EOS_ID + ' .ont-piles-eos { min-width: 3.5rem; }',
+    '#' + EOS_ID + ' .ont-piles-total td { border-top: 1px solid #ccc; font-weight: 700; padding-top: 8px; }'
   ].join('\n');
 
   function isAuditPage(href) {
@@ -243,68 +243,123 @@
     return node;
   }
 
-  function buildLines(doc, parent, className, rows, fields, group) {
-    const head = el(doc, 'div', 'ont-piles-line ont-piles-head ' + className);
-    head.appendChild(el(doc, 'span', '', 'Work'));
-    fields.forEach(function (field) {
-      head.appendChild(el(doc, 'span', '', field.label));
-    });
-    head.appendChild(el(doc, 'span', '', 'Units'));
-    parent.appendChild(head);
+  function countInput(doc, rowLabel, path, fieldLabel) {
+    const input = doc.createElement('input');
+    input.type = 'number';
+    input.min = '0';
+    input.step = '1';
+    input.value = '';
+    input.id = fieldId('in', path);
+    input.setAttribute('data-ont-input', path);
+    input.setAttribute('aria-label', rowLabel + ' ' + fieldLabel);
+    return input;
+  }
 
-    rows.forEach(function (row) {
-      const line = el(doc, 'div', 'ont-piles-line ' + className);
-      line.appendChild(el(doc, 'span', '', row.label));
-      fields.forEach(function (field) {
-        const path = group + '.' + row.id + '.' + field.key;
-        const input = doc.createElement('input');
-        input.type = 'number';
-        input.min = '0';
-        input.step = '1';
-        input.value = '';
-        input.id = fieldId('in', path);
-        input.setAttribute('data-ont-input', path);
-        input.setAttribute('aria-label', row.label + ' ' + field.label);
-        line.appendChild(input);
-      });
-      const unitsPath = group + '.' + row.id + '.units';
-      const units = el(doc, 'span', 'ont-piles-out', '0');
-      units.id = fieldId('out', unitsPath);
-      units.setAttribute('data-ont-out', unitsPath);
-      line.appendChild(units);
-      parent.appendChild(line);
-    });
+  function unitsOut(doc, path) {
+    const units = el(doc, 'span', 'ont-piles-out', '0');
+    units.id = fieldId('out', path);
+    units.setAttribute('data-ont-out', path);
+    return units;
+  }
+
+  function cell(doc, className) {
+    return el(doc, 'td', className || '');
   }
 
   function buildCalculator(doc) {
     const root = el(doc, 'div', '');
     root.id = EOS_ID;
 
-    const bigsTitle = el(doc, 'h3', '', 'BIGS');
-    root.appendChild(bigsTitle);
-    root.appendChild(el(doc, 'p', 'ont-piles-note', 'Pallet × 20. Cage × 15. Shuttle × 100.'));
-    buildLines(doc, root, 'ont-piles-bigs', BIGS_ROWS, BIGS_FIELDS, 'bigs');
+    const sheet = el(doc, 'table', 'ont-piles-bigs');
+    const head = el(doc, 'thead', '');
+    const groups = el(doc, 'tr', 'ont-piles-group');
+    groups.appendChild(el(doc, 'th', ''));
+    const bigsHead = el(doc, 'th', '', 'BIGS');
+    bigsHead.colSpan = 4;
+    groups.appendChild(bigsHead);
+    const sortHead = el(doc, 'th', 'ont-piles-split', 'Sortable');
+    sortHead.colSpan = 3;
+    groups.appendChild(sortHead);
+    groups.appendChild(el(doc, 'th', 'ont-piles-split', 'EOS'));
+    head.appendChild(groups);
 
-    root.appendChild(el(doc, 'h3', '', 'Sortable'));
-    root.appendChild(el(doc, 'p', 'ont-piles-note', 'Pallet × 150. Tote × 5.'));
-    buildLines(doc, root, 'ont-piles-sort', SORT_ROWS, SORT_FIELDS, 'sortable');
-
-    root.appendChild(el(doc, 'h3', '', 'EOS'));
-    root.appendChild(el(
-      doc,
-      'p',
-      'ont-piles-note',
-      'Add Ins, PS, and Exceptions. Add Ins includes shuttles. PS and Exceptions do not.'
-    ));
-    EOS_LINES.forEach(function (line) {
-      const row = el(doc, 'div', 'ont-piles-line ont-piles-sum' + (line.key === 'total' ? ' ont-piles-total' : ''));
-      row.appendChild(el(doc, 'span', '', line.label));
-      const value = el(doc, 'span', 'ont-piles-out', '0');
-      value.id = fieldId('out', 'eos.' + line.key);
-      value.setAttribute('data-ont-out', 'eos.' + line.key);
-      row.appendChild(value);
-      root.appendChild(row);
+    const columns = el(doc, 'tr', 'ont-piles-head');
+    [
+      'Work',
+      'Pallets × 20',
+      'Cages × 15',
+      'Shuttles × 100',
+      'Units',
+      'Pallets × 150',
+      'Totes × 5',
+      'Units',
+      ''
+    ].forEach(function (label, index) {
+      const split = index === 5 || index === 8 ? 'ont-piles-split' : '';
+      columns.appendChild(el(doc, 'th', split, label));
     });
+    head.appendChild(columns);
+    sheet.appendChild(head);
+
+    const body = el(doc, 'tbody', '');
+    SHEET_ROWS.forEach(function (row) {
+      const line = el(doc, 'tr', '');
+      line.appendChild(el(doc, 'td', '', row.label));
+      BIGS_FIELDS.forEach(function (field) {
+        const holder = cell(doc);
+        holder.appendChild(countInput(doc, row.label, 'bigs.' + row.id + '.' + field.key, field.label));
+        line.appendChild(holder);
+      });
+      const bigsUnitsCell = cell(doc);
+      bigsUnitsCell.appendChild(unitsOut(doc, 'bigs.' + row.id + '.units'));
+      line.appendChild(bigsUnitsCell);
+      SORT_FIELDS.forEach(function (field, index) {
+        const holder = cell(doc, index === 0 ? 'ont-piles-split' : '');
+        holder.appendChild(countInput(doc, row.label, 'sortable.' + row.id + '.' + field.key, field.label));
+        line.appendChild(holder);
+      });
+      const sortUnitsCell = cell(doc);
+      sortUnitsCell.appendChild(unitsOut(doc, 'sortable.' + row.id + '.units'));
+      line.appendChild(sortUnitsCell);
+      const eosCell = cell(doc, 'ont-piles-split ont-piles-eos');
+      eosCell.appendChild(unitsOut(doc, 'eos.' + row.eos));
+      line.appendChild(eosCell);
+      body.appendChild(line);
+    });
+
+    const total = el(doc, 'tr', 'ont-piles-total');
+    total.appendChild(el(doc, 'td', '', 'Total'));
+    for (let i = 0; i < 7; i++) total.appendChild(cell(doc, i === 4 ? 'ont-piles-split' : ''));
+    const totalEos = cell(doc, 'ont-piles-split ont-piles-eos');
+    totalEos.appendChild(unitsOut(doc, 'eos.total'));
+    total.appendChild(totalEos);
+    body.appendChild(total);
+    sheet.appendChild(body);
+    root.appendChild(sheet);
+    root.appendChild(el(doc, 'p', 'ont-piles-note', 'Shuttles count on Add Ins only.'));
+
+    root.appendChild(el(doc, 'h3', '', 'Other BIGS'));
+    root.appendChild(el(doc, 'p', 'ont-piles-note', 'These stay out of the total.'));
+    const other = el(doc, 'table', 'ont-piles-other');
+    const otherHead = el(doc, 'tr', 'ont-piles-head');
+    ['Work', 'Pallets × 20', 'Cages × 15', 'Shuttles × 100', 'Units'].forEach(function (label) {
+      otherHead.appendChild(el(doc, 'th', '', label));
+    });
+    other.appendChild(otherHead);
+    OTHER_ROWS.forEach(function (row) {
+      const line = el(doc, 'tr', '');
+      line.appendChild(el(doc, 'td', '', row.label));
+      BIGS_FIELDS.forEach(function (field) {
+        const holder = cell(doc);
+        holder.appendChild(countInput(doc, row.label, 'bigs.' + row.id + '.' + field.key, field.label));
+        line.appendChild(holder);
+      });
+      const units = cell(doc);
+      units.appendChild(unitsOut(doc, 'bigs.' + row.id + '.units'));
+      line.appendChild(units);
+      other.appendChild(line);
+    });
+    root.appendChild(other);
     return root;
   }
 
