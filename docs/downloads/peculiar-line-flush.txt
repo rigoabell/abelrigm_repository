@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.10.5
+// @version      2.10.6
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -55,7 +55,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.10.5";
+  const VERSION = "2.10.6";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2706,6 +2706,7 @@
     if (Date.now() - moveTabOpenedAt < 4000) return;
     moveTabOpenedAt = Date.now();
     GM_setValue("plf.menuDrive", Date.now());
+    GM_setValue("plf.menu147Done", 0);
     GM_setValue(KEYS.dropzoneTried, { href: MENU_URL, t: Date.now() });
     GM_setValue(KEYS.dropzoneNudge, Date.now());
     rememberDropzone({ step: "opening", dropzone: MENU_URL });
@@ -5253,8 +5254,13 @@
           if (!dropWaitingClose || dropPhase === "failed" || dropPhase === "") return;
           showMoveCheck();
         }, 3000);
-        dropFailTimer = setTimeout(() => {
+        const failDrop = () => {
           if (!dropWaitingClose || dropPhase === "failed" || dropPhase === "" || !dzPrompt.classList.contains("open")) return;
+          const drive = Number(GM_getValue("plf.menuDrive", 0)) || 0;
+          if (moveTabOpen() || (drive && Date.now() - drive < 20000)) {
+            dropFailTimer = setTimeout(failDrop, 10000);
+            return;
+          }
           const container = cellText(dropHold?.container);
           const dropzone = cellText(dropHold?.dropzone);
           const reason = "The drop did not finish";
@@ -5265,7 +5271,8 @@
           rememberDropzone({ container, dropzone, step: "not sent", error: reason });
           forgetQueuedContainer(container);
           hideMoveCheck();
-        }, 10000);
+        };
+        dropFailTimer = setTimeout(failDrop, 10000);
         beginDropScan();
       }
       dropWaitingClose = true;
@@ -5309,6 +5316,7 @@
       }
       GM_setValue(KEYS.moveCheckAt, Date.now());
       GM_setValue("plf.menuDrive", Date.now());
+      GM_setValue("plf.menu147Done", 0);
       GM_setValue("plf.moveCheckHold", Date.now());
       paintDropzoneStatus("Move App is open. Close that tab. There cannot be another tab open with the move tool.");
       if (!dropHold || dropPhase === "dropping" || dropPhase === "failed") return;
@@ -5905,34 +5913,131 @@
     [400, 1200, 3000].forEach((ms) => setTimeout(bootMove, ms));
   }
 
-  if (isAftMenu && isTop) {
-    const driveMenu = () => {
-      if (driveMenu.sent) return;
-      const started = Number(GM_getValue("plf.menuDrive", 0)) || 0;
-      if (!started || Date.now() - started > 2 * 60 * 1000) return;
-      if (!document.body) return;
-      const input = Array.from(document.querySelectorAll("input, textarea")).find((el) => {
-        if (el.disabled || el.readOnly) return false;
-        const type = String(el.getAttribute("type") || "text").toLowerCase();
-        if (["hidden", "password", "checkbox", "radio", "submit", "button", "file"].includes(type)) return false;
-        const rect = el.getBoundingClientRect?.();
-        return !rect || (rect.width > 0 && rect.height > 0);
-      });
-      if (!input && Date.now() - started < 1500) return;
-      driveMenu.sent = true;
-      GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
-      rememberDropzone({ step: "menu-147", dropzone: MENU_URL });
-      const target = input || document.body;
-      try { target.focus(); } catch { /* The menu kept focus. */ }
-      if (input) moveSetField(input, "");
-      for (const ch of ["1", "4", "7"]) fireMoveKey(target, ch);
-      if (input && cellText(input.value) !== "147") moveSetField(input, "147");
-      fireMoveKey(target, "Enter");
-    };
-    if (document.body) driveMenu();
-    else document.addEventListener("DOMContentLoaded", driveMenu, { once: true });
-    [400, 1200, 2500].forEach((ms) => setTimeout(driveMenu, ms));
+  function menuCodeDocs() {
+    const docs = [document];
+    document.querySelectorAll("iframe, frame").forEach((frame) => {
+      try {
+        if (frame.contentDocument) docs.push(frame.contentDocument);
+      } catch {
+        /* The menu frame is on another site. That frame types for itself. */
+      }
+    });
+    return docs;
   }
+
+  function menuCodeFields(root, out) {
+    if (!root?.querySelectorAll) return;
+    root.querySelectorAll("input, textarea, [contenteditable='true'], [contenteditable='']").forEach((el) => out.push(el));
+    root.querySelectorAll("*").forEach((el) => {
+      if (el.shadowRoot) menuCodeFields(el.shadowRoot, out);
+    });
+  }
+
+  function menuFieldRank(el) {
+    if (!el || el.disabled || el.closest?.("[id^='plf-'], #dz-batch-panel")) return -1;
+    const type = String(el.getAttribute?.("type") || "text").toLowerCase();
+    if (["hidden", "password", "checkbox", "radio", "submit", "button", "file", "image"].includes(type)) return -1;
+    const hint = [el.id, el.getAttribute?.("name"), el.getAttribute?.("placeholder"), el.getAttribute?.("aria-label"), el.className].join(" ").toLowerCase();
+    let score = 1;
+    if (el === el.ownerDocument?.activeElement) score += 50;
+    if (el.hasAttribute?.("autofocus")) score += 40;
+    if (/screen|menu|option|command|code|transaction|entry/.test(hint)) score += 30;
+    const rect = el.getBoundingClientRect?.();
+    if (rect && rect.width >= 40 && rect.height >= 12) score += 20;
+    return score;
+  }
+
+  function writeMenuCode(el) {
+    const doc = el.ownerDocument;
+    const view = doc.defaultView || pageWindow;
+    try { view.focus(); } catch { /* The menu kept focus. */ }
+    try { el.focus(); el.click(); } catch { /* The field cannot take focus. */ }
+    if (el.isContentEditable) {
+      el.textContent = "147";
+      try { el.dispatchEvent(new view.InputEvent("input", { bubbles: true, data: "147", inputType: "insertText" })); } catch { /* The field has the text. */ }
+      return cellText(el.textContent).includes("147");
+    }
+    if (!("value" in el)) return false;
+    try {
+      el.select();
+      doc.execCommand("selectAll", false, null);
+      doc.execCommand("insertText", false, "147");
+    } catch { /* The field did not take typed text. The value is set next. */ }
+    if (!cellText(el.value).includes("147")) {
+      const proto = el.tagName === "TEXTAREA" ? view.HTMLTextAreaElement?.prototype : view.HTMLInputElement?.prototype;
+      const setter = proto && Object.getOwnPropertyDescriptor(proto, "value")?.set;
+      if (setter) setter.call(el, "147");
+      else el.value = "147";
+      try {
+        el.dispatchEvent(new view.InputEvent("input", { bubbles: true, data: "147", inputType: "insertText" }));
+        el.dispatchEvent(new view.Event("change", { bubbles: true }));
+      } catch { /* The field already has 147. */ }
+    }
+    return cellText(el.value).includes("147");
+  }
+
+  function submitMenuCode(el) {
+    const target = el || document.body;
+    if (!target) return;
+    fireMoveKey(target, "Enter");
+    const form = target.form;
+    if (!form) return;
+    try {
+      if (typeof form.requestSubmit === "function") form.requestSubmit();
+      else form.submit();
+    } catch { /* Enter already submitted the menu code. */ }
+  }
+
+  function watchMenuCode() {
+    const started = Number(GM_getValue("plf.menuDrive", 0)) || 0;
+    if (!started || Date.now() - started > 20000 || watchMenuCode.armed) return;
+    watchMenuCode.armed = true;
+    const deadline = started + 12000;
+    const tick = () => {
+      if (watchMenuCode.done) return;
+      GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
+      if (!document.body) return;
+      if (watchMenuCode.base == null) watchMenuCode.base = document.body.innerText || "";
+      const fields = [];
+      menuCodeDocs().forEach((doc) => menuCodeFields(doc, fields));
+      const best = fields
+        .map((el) => ({ el, score: menuFieldRank(el) }))
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score)[0]?.el || null;
+      const label = best ? (best.id || best.getAttribute?.("name") || best.tagName) : "none";
+      if (best && !cellText(best.value ?? best.textContent).includes("147")) writeMenuCode(best);
+      const value = best ? cellText(best.value ?? best.textContent) : "";
+      const onScreen = (document.body.innerText || "").includes("147") && !String(watchMenuCode.base).includes("147");
+      if (!watchMenuCode.noted) {
+        watchMenuCode.noted = true;
+        rememberDropzone({ step: "menu-field", dropzone: location.href, detail: `${label}:${value || "empty"}` });
+      }
+      if (value.includes("147") || onScreen) {
+        if (!watchMenuCode.sent) {
+          watchMenuCode.sent = true;
+          GM_setValue("plf.menu147Done", Date.now());
+          submitMenuCode(best || document.body);
+          rememberDropzone({ step: "menu-147", dropzone: location.href, detail: `${label}:${value || "screen"}` });
+        }
+        return;
+      }
+      if (watchMenuCode.sent) watchMenuCode.sent = false;
+      if (!watchMenuCode.keys && document.body && Date.now() - started > 1000) {
+        watchMenuCode.keys = true;
+        const target = best || document.body;
+        for (const ch of ["1", "4", "7"]) fireMoveKey(target, ch);
+      }
+      if (Date.now() > deadline) {
+        watchMenuCode.done = true;
+        rememberDropzone({ step: "menu-147", dropzone: location.href, error: "147 did not appear", detail: `${label}:${value || "empty"}` });
+      }
+    };
+    tick();
+    const timer = setInterval(tick, 250);
+    setTimeout(() => clearInterval(timer), 13000);
+  }
+
+  if (isAftMenu || isFcMenu) watchMenuCode();
 
   if (isFcMenu && isTop) {
     const showFcMenu = (text) => {
