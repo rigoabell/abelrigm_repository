@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.10.8
+// @version      2.10.9
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -31,6 +31,7 @@
 // @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
+// @grant        window.close
 // ==/UserScript==
 
 /*
@@ -55,7 +56,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.10.8";
+  const VERSION = "2.10.9";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -3318,20 +3319,37 @@
   let moveWorkerStarted = false;
   let moveWorkerAt = 0;
   let moveSawJob = false;
+  let moveBeatTimer = 0;
+  let moveDrainTimer = 0;
   const moveTabId = Math.random().toString(36).slice(2);
+  function moveSuccessOnScreen() {
+    const nodes = document.querySelectorAll("span.success-step-value");
+    for (const node of nodes) {
+      if (/move successful/i.test(node.textContent || "")) return true;
+    }
+    return false;
+  }
   async function closeMoveTabWhenDone() {
-    if (Number(GM_getValue("plf.moveCheckHold", 0)) > 0) return;
+    const succeeded = moveSuccessOnScreen();
+    if (Number(GM_getValue("plf.moveCheckHold", 0)) > 0 && !succeeded) return;
     const pack = GM_getValue(KEYS.dropzoneQueue, null);
     const cursor = Number(GM_getValue(KEYS.dropzoneCursor, 0)) || 0;
     const pending = (Array.isArray(pack?.jobs) ? pack.jobs : []).filter((job) => job && Number(job.n) > cursor);
-    if (pending.length) return;
-    if (!moveSawJob && Date.now() - moveWorkerAt < 8000) return;
+    if (pending.length && !succeeded) return;
+    if (!moveSawJob && !succeeded && Date.now() - moveWorkerAt < 8000) return;
     if (closeMoveTabWhenDone.closing) return;
     closeMoveTabWhenDone.closing = true;
+    clearInterval(moveBeatTimer);
+    clearInterval(moveDrainTimer);
     paintMoveBadge("Done. Closing this tab.");
+    rememberDropzone({ step: "closing", detail: succeeded ? "Move Successful" : "" });
     GM_setValue(KEYS.dropzoneHeartbeat, 0);
-    await sleep(400);
+    await sleep(300);
     try { window.close(); } catch { /* The browser kept this tab open. */ }
+    try { pageWindow.close(); } catch { /* The page window stayed open. */ }
+    setTimeout(() => {
+      try { window.close(); } catch { /* The browser kept this tab open. */ }
+    }, 400);
   }
 
   async function drainDropzones() {
@@ -3397,6 +3415,11 @@
       moveWorkerAt = Date.now();
       blockFcMenuOpen();
       const beat = () => {
+        if (closeMoveTabWhenDone.closing) return;
+        if (moveSuccessOnScreen() && !drainDropzones.working) {
+          closeMoveTabWhenDone();
+          return;
+        }
         disarmFcMenuControls();
         noteMoveLanded();
         GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
@@ -3409,8 +3432,8 @@
         paintMoveBadge(movePageReady(location.href, document.title, text, document.readyState) ? "Ready to scan a container" : "Move App is open");
       };
       beat();
-      setInterval(beat, HEARTBEAT_MS);
-      setInterval(() => drainDropzones(), 1000);
+      moveBeatTimer = setInterval(beat, HEARTBEAT_MS);
+      moveDrainTimer = setInterval(() => drainDropzones(), 1000);
       GM_addValueChangeListener(KEYS.dropzoneQueue, () => {
         drainDropzones();
       });
