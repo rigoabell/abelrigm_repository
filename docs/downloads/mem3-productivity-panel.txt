@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.14
+// @version      1.12.15
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.14';
+    const SCRIPT_VERSION = '1.12.15';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -1136,7 +1136,7 @@
         link.rel = 'noopener';
         link.textContent = 'Open FCLM details';
         link.setAttribute('data-mem3-shift-details', '1');
-        link.style.cssText = 'display:inline-block; margin-top:6px; font-size:12px; color:#58a6ff; text-decoration:underline;';
+        link.style.cssText = 'display:block; width:max-content; margin-top:6px; font-size:12px; color:#58a6ff; text-decoration:underline;';
         link.addEventListener('click', function (e) { e.stopPropagation(); });
         return link;
     }
@@ -11102,7 +11102,7 @@
             const view = document.createElement('button');
             view.type = 'button';
             view.textContent = 'Engagement';
-            view.style.cssText = 'display:inline-block; margin-top:6px; padding:4px 8px; border-radius:6px; ' +
+            view.style.cssText = 'display:block; width:max-content; margin-top:6px; padding:4px 8px; border-radius:6px; ' +
                 'border:1px solid #8b949e; background:#0d1117; color:#fff; cursor:pointer; ' +
                 'font:800 11px Segoe UI,system-ui,sans-serif;';
             view.addEventListener('click', function (event) {
