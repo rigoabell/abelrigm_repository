@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.17
+// @version      1.12.18
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.17';
+    const SCRIPT_VERSION = '1.12.18';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -4888,6 +4888,10 @@
         return visibleActionButton(/^unassign$/i);
     }
 
+    function findDisableButton() {
+        return visibleActionButton(/^disable$/i);
+    }
+
     function findCancelButton() {
         return visibleActionButton(/^cancel$/i);
     }
@@ -4987,14 +4991,14 @@
         return ids;
     }
 
-    function findUnassignInNewTooltip(known, login) {
+    function findActionInNewTooltip(known, pattern, login) {
         let best = null;
         let bestRank = -1;
         const want = String(login || '').trim().toLowerCase();
         const buttons = document.querySelectorAll('button');
         for (let i = 0; i < buttons.length; i++) {
             const btn = buttons[i];
-            if (!/^unassign$/i.test((btn.textContent || '').trim())) continue;
+            if (!pattern.test((btn.textContent || '').trim())) continue;
             if (btn.closest('#' + FLOOR_SUMMARY_ID) || btn.closest('#mem3-unassign-panel') ||
                 btn.closest('#mem3-run-panel') || btn.closest('#' + CORNER_DEBUG_ID) ||
                 btn.closest('#' + PHOTO_DEBUG_ID) || btn.closest('#' + LEAVING_ID) ||
@@ -5015,6 +5019,10 @@
             }
         }
         return best;
+    }
+
+    function findUnassignInNewTooltip(known, login) {
+        return findActionInNewTooltip(known, /^unassign$/i, login);
     }
 
     function waitFor(read, ms) {
@@ -5053,7 +5061,7 @@
     async function closeMenuWithoutUnassign() {
         let closedBy = '';
         for (let i = 0; i < 6; i++) {
-            if (!findUnassignButton() && !findCancelButton()) {
+            if (!findUnassignButton() && !findCancelButton() && !findDisableButton()) {
                 return { closedBy: closedBy || 'already', closed: true };
             }
             const cancel = findCancelButton();
@@ -5065,7 +5073,7 @@
                 closedBy = closedBy || 'escape';
             }
             const closed = await waitFor(function () {
-                return (findUnassignButton() || findCancelButton()) ? null : true;
+                return (findUnassignButton() || findCancelButton() || findDisableButton()) ? null : true;
             }, 600);
             if (closed) return { closedBy: closedBy, closed: true };
         }
@@ -5082,7 +5090,7 @@
         const attempts = [];
         const want = String(login || (anchor && anchor.textContent) || '').replace(/\s+/g, ' ').trim();
         for (let round = 0; round < 3; round++) {
-            if (findUnassignButton() || findCancelButton()) {
+            if (findUnassignButton() || findCancelButton() || findDisableButton()) {
                 attempts.push({ method: 'close-stale', round: round });
                 await closeAllAssociateMenus();
             }
@@ -7234,41 +7242,6 @@
 
         if (empId) box.appendChild(timeDetailsLink(empId));
 
-        if (!unassigning) {
-            const dbg = document.createElement('button');
-            dbg.type = 'button';
-            dbg.textContent = 'Copy debug';
-            dbg.style.cssText = 'display:inline-block; margin-top:6px; margin-left:12px; padding:0; border:0; ' +
-                'background:transparent; font-size:12px; color:#58a6ff; text-decoration:underline; cursor:pointer; ' +
-                'font-family:Segoe UI,system-ui,sans-serif;';
-            dbg.addEventListener('click', function (e) {
-                e.preventDefault();
-                e.stopPropagation();
-                const entry = empId ? LAST_ROLLUP[empId] : null;
-                const payload = {
-                    login: person && person.login,
-                    name: person && person.name,
-                    empId: empId,
-                    functions: entry ? entry.functions : null,
-                    lineBadge: statsFor(empId),
-                    popup: statsFor(empId),
-                    time: timeFor(empId),
-                    rollupSize: DEBUG.rollupSize,
-                    rollupParse: DEBUG.rollupParse,
-                    timeLoad: DEBUG.timeLoad || null,
-                    timeSample: DEBUG.timeSample || null,
-                    boardIds: BOARD_IDS.length
-                };
-                copyText(JSON.stringify(payload, null, 2)).then(function () {
-                    dbg.textContent = 'Copied';
-                    setTimeout(function () { dbg.textContent = 'Copy debug'; }, 1500);
-                }).catch(function () {
-                    dbg.textContent = 'Copy failed';
-                    setTimeout(function () { dbg.textContent = 'Copy debug'; }, 2000);
-                });
-            });
-            box.appendChild(dbg);
-        }
         box.appendChild(makePopupLeavingButton(person));
         box.appendChild(makePopupNotesButton(person));
         syncPopupEngage(box, person, empId);
@@ -7935,9 +7908,212 @@
         );
     }
 
+    function emptyStationAnchors(root) {
+        if (!root || !root.querySelectorAll) return [];
+        const tables = root.querySelectorAll('table');
+        const out = [];
+        for (let t = 0; t < tables.length; t++) {
+            if (tables[t].closest && tables[t].closest('#' + FLOOR_SUMMARY_ID)) continue;
+            const anchors = tables[t].querySelectorAll('tbody a[role="button"], tbody a[mdn-link]');
+            for (let a = 0; a < anchors.length; a++) {
+                const anchor = anchors[a];
+                if (anchor.getAttribute('data-mem3-disable-skip') === '1') continue;
+                const text = (anchor.textContent || '').replace(/\s+/g, ' ').trim();
+                if (!/^none$/i.test(text)) continue;
+                if (out.indexOf(anchor) !== -1) continue;
+                out.push(anchor);
+            }
+        }
+        return out;
+    }
+
+    function emptyStationLabel(anchor) {
+        const tr = anchor && anchor.closest ? anchor.closest('tr') : null;
+        let station = tr ? String(tr.innerText || tr.textContent || '') : '';
+        station = cleanStationText(station).replace(/\bnone\b/ig, '').replace(/\s+/g, ' ').trim();
+        return station || 'Empty station';
+    }
+
+    async function openEmptyStationMenu(anchor) {
+        const attempts = [];
+        for (let round = 0; round < 3; round++) {
+            if (findUnassignButton() || findCancelButton() || findDisableButton()) {
+                attempts.push({ method: 'close-stale', round: round });
+                await closeAllAssociateMenus();
+            }
+            if (!anchor || !anchor.isConnected) {
+                attempts.push({ method: 'detached', round: round });
+                break;
+            }
+            const known = Object.create(null);
+            const existing = visibleTooltipIds();
+            for (let i = 0; i < existing.length; i++) known[existing[i]] = true;
+            const readNew = function () { return findActionInNewTooltip(known, /^disable$/i, ''); };
+            try { anchor.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e) { /* ignore */ }
+            await sleep(round ? 160 : 60);
+            pageClick(anchor);
+            attempts.push({ method: 'pointer', round: round });
+            let button = await waitFor(readNew, 1100);
+            if (!button) {
+                pageClick(anchor);
+                attempts.push({ method: 'pointer-retry', round: round });
+                button = await waitFor(readNew, 1600);
+            }
+            if (button) return { button: button, attempts: attempts, anchor: anchor };
+            await closeAllAssociateMenus();
+        }
+        return { button: null, attempts: attempts, anchor: anchor };
+    }
+
+    async function disableEmptyAnchor(anchor) {
+        const opened = await openEmptyStationMenu(anchor);
+        if (opened.anchor) anchor = opened.anchor;
+        if (!opened.button) return false;
+        const target = opened.button;
+        await sleep(250);
+        clickUnassignButton(target, 'inner');
+        const buttonGone = await waitFor(function () {
+            if (!target.isConnected) return true;
+            const rect = target.getBoundingClientRect();
+            return (rect.width < 1 || rect.height < 1) ? true : null;
+        }, 2500);
+        if (!buttonGone) await closeAllAssociateMenus();
+        const text = anchor && anchor.isConnected
+            ? (anchor.textContent || '').replace(/\s+/g, ' ').trim()
+            : '';
+        if (text && !/^none$/i.test(text)) return true;
+        return !!buttonGone;
+    }
+
+    function headingBefore(button) {
+        let node = button ? button.previousElementSibling : null;
+        while (node) {
+            if (/^H[1-6]$/.test(node.tagName || '')) return node;
+            node = node.previousElementSibling;
+        }
+        return null;
+    }
+
+    async function disableGroup(button, root) {
+        if (unassigning) return;
+        const headingNode = headingBefore(button);
+        if (headingNode) root = liveRootFor(headingNode, root);
+        const stations = emptyStationAnchors(root).map(emptyStationLabel);
+        unassigning = true;
+        RUN_STOP = false;
+        holdLeaving(true);
+        const original = button.textContent;
+        const batch = { mode: 'disable-group', stations: stations };
+        let done = 0;
+        try {
+            if (!stations.length) {
+                batch.error = 'no empty station';
+                pushUnassignLog(batch);
+                button.textContent = 'No empty stations';
+                return;
+            }
+            paintRunPanel({
+                title: 'Disabling empty stations',
+                done: 0,
+                total: stations.length,
+                detail: stations.join('\n')
+            });
+            let guard = 0;
+            while (!RUN_STOP && guard < stations.length + 4) {
+                guard++;
+                const live = headingNode ? liveRootFor(headingNode, root) : root;
+                const left = emptyStationAnchors(live);
+                if (!left.length) break;
+                const anchor = left[0];
+                const label = emptyStationLabel(anchor);
+                button.textContent = 'Disabling ' + (done + 1) + '/' + stations.length;
+                paintRunPanel({
+                    title: 'Disabling empty stations',
+                    done: done,
+                    total: stations.length,
+                    current: label,
+                    detail: 'Opening None'
+                });
+                let ok = false;
+                for (let tries = 0; tries < 2 && !ok && !RUN_STOP; tries++) {
+                    await closeAllAssociateMenus();
+                    await sleep(80);
+                    ok = await disableEmptyAnchor(anchor);
+                    if (!ok) await sleep(300);
+                }
+                if (ok) done++;
+                if (anchor && anchor.setAttribute) anchor.setAttribute('data-mem3-disable-skip', '1');
+                await sleep(400);
+            }
+            batch.done = done;
+            batch.stopped = !!RUN_STOP;
+            pushUnassignLog(batch);
+            button.textContent = 'Disabled ' + done + '/' + stations.length;
+            paintRunPanel({
+                title: batch.stopped ? 'Disable stopped' : 'Disable finished',
+                done: done,
+                total: stations.length,
+                detail: stations.join('\n'),
+                barColor: done === stations.length ? '#2ea043' : '#d29922',
+                finished: true
+            });
+        } catch (e) {
+            batch.error = (e && e.message) ? e.message : String(e);
+            pushUnassignLog(batch);
+            button.textContent = 'Disable failed';
+            paintRunPanel({
+                title: 'Disable failed',
+                done: done,
+                total: stations.length,
+                detail: batch.error,
+                barColor: '#f85149',
+                finished: true
+            });
+        } finally {
+            holdLeaving(false);
+            unassigning = false;
+            setTimeout(function () {
+                if (button.isConnected) button.textContent = original;
+            }, 4000);
+        }
+    }
+
+    function askDisableGroup(button, heading) {
+        const live = heading && heading.isConnected ? heading : null;
+        const root = live ? groupRoot(live) : null;
+        if (!root) return;
+        const stations = emptyStationAnchors(root);
+        const name = headingLabel(live) || 'this group';
+        if (!stations.length) {
+            const previous = button.textContent;
+            button.textContent = 'No empty stations';
+            setTimeout(function () {
+                if (button.isConnected && button.textContent === 'No empty stations') button.textContent = previous;
+            }, 2000);
+            return;
+        }
+        askPassword(
+            'Disable empty stations in ' + name + '?',
+            stations.length + (stations.length === 1 ? ' empty station is' : ' empty stations are') +
+                ' in this group. Enter the password to continue.',
+            function () { disableGroup(button, root); }
+        );
+    }
+
+    function groupActionButton(label, attr, border) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.setAttribute(attr, '1');
+        btn.textContent = label;
+        btn.style.cssText = 'display:inline-block; margin:4px 0 8px 8px; padding:4px 8px; border-radius:6px; ' +
+            'border:1px solid ' + border + '; background:#0d1117; color:#fff; cursor:pointer; ' +
+            'font:800 11px Segoe UI,system-ui,sans-serif; vertical-align:middle;';
+        return btn;
+    }
+
     function placeGroupUnassignButtons() {
         if (!isAssignmentsPage() || unassigning) return;
-        const stray = document.querySelectorAll('[data-mem3-unassign-group]');
+        const stray = document.querySelectorAll('[data-mem3-unassign-group], [data-mem3-disable-group]');
         for (let s = 0; s < stray.length; s++) {
             if (inPageChrome(stray[s])) stray[s].remove();
         }
@@ -7951,20 +8127,25 @@
             if (!root || !root.querySelector || !root.querySelector('table')) continue;
             if (seen.indexOf(root) !== -1) continue;
             seen.push(root);
-            if (root.querySelector('[data-mem3-unassign-group]')) continue;
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.setAttribute('data-mem3-unassign-group', '1');
-            btn.textContent = 'Unassign Group';
-            btn.style.cssText = 'display:inline-block; margin:4px 0 8px 8px; padding:4px 8px; border-radius:6px; ' +
-                'border:1px solid #f85149; background:#0d1117; color:#fff; cursor:pointer; ' +
-                'font:800 11px Segoe UI,system-ui,sans-serif; vertical-align:middle;';
-            btn.addEventListener('click', function (event) {
-                event.preventDefault();
-                event.stopPropagation();
-                askUnassignGroup(btn, heading);
-            });
-            if (heading.parentNode) heading.parentNode.insertBefore(btn, heading.nextSibling);
+            let unassignBtn = root.querySelector('[data-mem3-unassign-group]');
+            if (!unassignBtn) {
+                unassignBtn = groupActionButton('Unassign Group', 'data-mem3-unassign-group', '#f85149');
+                unassignBtn.addEventListener('click', function (event) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    askUnassignGroup(unassignBtn, heading);
+                });
+                if (heading.parentNode) heading.parentNode.insertBefore(unassignBtn, heading.nextSibling);
+            }
+            if (!root.querySelector('[data-mem3-disable-group]')) {
+                const disableBtn = groupActionButton('Disable Group', 'data-mem3-disable-group', '#d29922');
+                disableBtn.addEventListener('click', function (event) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    askDisableGroup(disableBtn, heading);
+                });
+                if (unassignBtn.parentNode) unassignBtn.parentNode.insertBefore(disableBtn, unassignBtn.nextSibling);
+            }
         }
     }
 
