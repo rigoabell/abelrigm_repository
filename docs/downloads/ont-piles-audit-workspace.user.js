@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ONT Base Piles Audit Workspace (abelrigm)
 // @namespace    https://github.com/rigoabell/abelrigm_repository
-// @version      1.4.0
+// @version      1.5.0
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/ont-piles-audit-workspace.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/ont-piles-audit-workspace.user.js
 // @description  Count BIGS and sortable piles on the audit page and show the EOS total.
@@ -27,7 +27,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.4.0';
+  const VERSION = '1.5.0';
   const HOST = 'ont-base.corp.amazon.com';
   const CELL_ID = 'ont-piles-workspace-col';
   const CARD_ID = 'ont-piles-workspace';
@@ -104,17 +104,17 @@
     '#' + EOS_ID + ' h3 { font-size: 15px; font-weight: 700; margin: 18px 0 8px; }',
     '#' + EOS_ID + ' .ont-piles-note { color: #66707c; margin: 8px 2px 0; }',
     '#' + EOS_ID + ' .ont-piles-frame {',
-    '  border: 1px solid #e1e5ea; border-radius: 12px; max-width: 100%; overflow: hidden; width: max-content;',
+    '  border: 1px solid #e1e5ea; border-radius: 12px; max-width: 100%; overflow: auto; width: max-content;',
     '}',
     '#' + EOS_ID + ' table { border-collapse: collapse; margin: 0; table-layout: fixed; }',
-    '#' + EOS_ID + ' .ont-piles-bigs { width: 43.05rem; }',
-    '#' + EOS_ID + ' .ont-piles-other { width: 26.15rem; }',
-    '#' + EOS_ID + ' .ont-piles-w-work { width: 8rem; }',
-    '#' + EOS_ID + ' .ont-piles-w-count { width: 4.85rem; }',
-    '#' + EOS_ID + ' .ont-piles-w-units { width: 3.6rem; }',
+    '#' + EOS_ID + ' .ont-piles-bigs { width: calc(71ch + 300px); min-width: calc(71ch + 300px); }',
+    '#' + EOS_ID + ' .ont-piles-other { width: calc(43ch + 172px); min-width: calc(43ch + 172px); }',
+    '#' + EOS_ID + ' .ont-piles-w-work { width: calc(13ch + 36px); min-width: calc(13ch + 36px); }',
+    '#' + EOS_ID + ' .ont-piles-w-count { width: calc(8ch + 36px); min-width: calc(8ch + 36px); }',
+    '#' + EOS_ID + ' .ont-piles-w-units { width: calc(6ch + 28px); min-width: calc(6ch + 28px); }',
     '#' + EOS_ID + ' th, #' + EOS_ID + ' td {',
     '  background: #fff; border: 0; border-bottom: 1px solid #e6eaee; border-right: 1px solid #e6eaee;',
-    '  font-weight: 400; padding: 7px 8px; text-align: center; vertical-align: middle;',
+    '  font-weight: 400; padding: 7px 10px; text-align: center; vertical-align: middle; white-space: nowrap;',
     '}',
     '#' + EOS_ID + ' tr > :last-child { border-right: 0; }',
     '#' + EOS_ID + ' tbody tr:last-child > * { border-bottom: 0; }',
