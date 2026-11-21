@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ONT Base Piles Audit Workspace (abelrigm)
 // @namespace    https://github.com/rigoabell/abelrigm_repository
-// @version      1.5.0
+// @version      1.6.0
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/ont-piles-audit-workspace.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/ont-piles-audit-workspace.user.js
 // @description  Count BIGS and sortable piles on the audit page and show the EOS total.
@@ -20,14 +20,14 @@
   Problem Solve, Exceptions, and Add Ins sit on one sheet: BIGS, then sortable, then EOS.
   BIGS: a pallet is 20, a cage is 15, a shuttle is 100.
   Sortable: a pallet is 150, a tote is 5.
-  Add Ins includes shuttles. Problem Solve and Exceptions do not.
+  Each EOS number is that row's BIGS units plus its sortable units.
   Misships, AR BIGS, Refurb, Audit, and ADS stay out of that total.
 */
 
 (function () {
   'use strict';
 
-  const VERSION = '1.5.0';
+  const VERSION = '1.6.0';
   const HOST = 'ont-base.corp.amazon.com';
   const CELL_ID = 'ont-piles-workspace-col';
   const CARD_ID = 'ont-piles-workspace';
@@ -252,18 +252,18 @@
     SORT_ROWS.forEach(function (row) {
       sortable[row.id] = sortUnits(source.sortable && source.sortable[row.id]);
     });
-    const addIns = bigs.addIns.units + sortable.addIns.units;
-    const ps = bigs.problemSolve.palletUnits + bigs.problemSolve.cageUnits + sortable.problemSolve.units;
-    const exceptions = bigs.exceptions.palletUnits + bigs.exceptions.cageUnits + sortable.exceptions.units;
+    const eos = {};
+    let total = 0;
+    SHEET_ROWS.forEach(function (row) {
+      const value = bigs[row.id].units + sortable[row.id].units;
+      eos[row.eos] = value;
+      total += value;
+    });
+    eos.total = total;
     return {
       bigs: bigs,
       sortable: sortable,
-      eos: {
-        addIns: addIns,
-        ps: ps,
-        exceptions: exceptions,
-        total: addIns + ps + exceptions
-      }
+      eos: eos
     };
   }
 
@@ -377,8 +377,6 @@
     const frame = el(doc, 'div', 'ont-piles-frame');
     frame.appendChild(sheet);
     root.appendChild(frame);
-    root.appendChild(el(doc, 'p', 'ont-piles-note', 'Shuttles count on Add Ins only.'));
-
     root.appendChild(el(doc, 'h3', '', 'Other BIGS'));
     root.appendChild(el(doc, 'p', 'ont-piles-note', 'These stay out of the total.'));
     const other = el(doc, 'table', 'ont-piles-other');

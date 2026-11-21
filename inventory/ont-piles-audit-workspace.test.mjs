@@ -148,13 +148,13 @@ function auditPage() {
 test("catalog entry matches the script", () => {
   assert.equal(src, pasted);
   assert.equal(src.includes("innerHTML"), false);
-  assert.match(src, /@version\s+1\.5\.0/);
+  assert.match(src, /@version\s+1\.6\.0/);
   assert.match(src, /@match\s+https:\/\/ont-base\.corp\.amazon\.com\/\*/);
   assert.match(src, /ont-piles-audit-workspace\.user\.js/);
 
   const entry = catalog.find((item) => item.id === "ont-piles-audit-workspace");
   assert.ok(entry);
-  assert.equal(entry.version, "1.5.0");
+  assert.equal(entry.version, "1.6.0");
   assert.equal(entry.category, "ONT Base");
   assert.equal(entry.file, "downloads/ont-piles-audit-workspace.txt");
   assert.equal(entry.downloadName, "ONT Base Piles Audit Workspace (abelrigm).txt");
@@ -165,7 +165,7 @@ test("catalog entry matches the script", () => {
   assert.match(entry.detail, /pallet 20/);
   assert.match(entry.detail, /tote 5/);
   assert.equal(fs.existsSync(new URL("docs/" + entry.file, root)), true);
-  assert.equal(piles.VERSION, "1.5.0");
+  assert.equal(piles.VERSION, "1.6.0");
 
   const projects = catalog.length + 1;
   assert.match(index, new RegExp(projects + "</span><span class=\"qn-label\">Portfolio projects"));
@@ -284,7 +284,7 @@ test("the screenshot counts become the EOS total", () => {
   assert.equal(result.eos.total, 90);
 });
 
-test("shuttles count for Add Ins only, and the other BIGS rows stay out", () => {
+test("each EOS number is that row's BIGS units plus its sortable units", () => {
   const state = piles.blankState();
   state.bigs.problemSolve.shuttles = 1;
   state.bigs.exceptions.shuttles = 2;
@@ -297,16 +297,22 @@ test("shuttles count for Add Ins only, and the other BIGS rows stay out", () => 
   state.sortable.addIns.pallets = 1;
   const result = piles.compute(state);
   assert.equal(result.bigs.problemSolve.units, 100);
-  assert.equal(result.eos.ps, 150);
+  assert.equal(result.sortable.problemSolve.units, 150);
+  assert.equal(result.eos.ps, 100 + 150);
   assert.equal(result.bigs.exceptions.units, 200);
-  assert.equal(result.eos.exceptions, 10);
+  assert.equal(result.sortable.exceptions.units, 10);
+  assert.equal(result.eos.exceptions, 200 + 10);
   assert.equal(result.bigs.addIns.units, 40 + 100);
   assert.equal(result.sortable.addIns.units, 150);
   assert.equal(result.eos.addIns, 140 + 150);
+  assert.equal(result.eos.total, 250 + 210 + 290);
   assert.equal(result.bigs.misships.units, 80);
   assert.equal(result.bigs.arBigs.units, 90);
-  assert.equal(result.eos.total, 150 + 10 + 290);
   assert.equal(piles.compute({ bigs: { problemSolve: { pallets: "2", cages: -4, shuttles: "x" } } }).eos.ps, 40);
+  assert.equal(piles.compute({
+    bigs: { problemSolve: { pallets: "2", shuttles: "1" } },
+    sortable: { problemSolve: { totes: "2" } }
+  }).eos.ps, 40 + 100 + 10);
 });
 
 function memoryStorage() {
