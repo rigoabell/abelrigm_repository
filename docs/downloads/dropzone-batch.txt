@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dropzone Batch (abelrigm)
 // @namespace    https://github.com/rigoabell/abelrigm_repository
-// @version      0.2.2
+// @version      0.2.3
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/dropzone-batch.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/dropzone-batch.user.js
 // @description  Paste containers and one dropzone. Sends each container, then that dropzone, as a scan-gun burst.
@@ -21,7 +21,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.2.2';
+  const VERSION = '0.2.3';
   const PANEL_ID = 'dz-batch-panel';
   const SCAN_STRATEGY = 'focus';
   const SCAN_SUFFIX = 'Enter';
@@ -151,10 +151,15 @@
       .filter(Boolean);
   }
 
-  function remainingContainers(text, doneList, skippedList) {
+  function remainingContainers(text, doneList, skippedList, dropzone) {
     const done = new Set(doneList || []);
     const skipped = new Set(skippedList || []);
-    return parseContainers(text).filter((id) => !done.has(id) && !skipped.has(id));
+    const zone = cleanToken(dropzone).toLowerCase();
+    return parseContainers(text).filter((id) => {
+      if (done.has(id) || skipped.has(id)) return false;
+      if (zone && id.toLowerCase() === zone) return false;
+      return true;
+    });
   }
 
   function stableText(text) {
@@ -178,6 +183,8 @@
       "doesn't",
       'unrecognized',
       'no such',
+      'already scanned',
+      'try a different',
       'try again',
       'failed',
       'error',
@@ -669,7 +676,7 @@
       setStatus('Skipping ' + (currentContainer || 'the next container') + '.');
       return;
     }
-    const next = remainingContainers(valueOf('dz-containers'), doneIds, skippedIds)[0];
+    const next = remainingContainers(valueOf('dz-containers'), doneIds, skippedIds, valueOf('dz-dropzone'))[0];
     if (!next) {
       setStatus('Nothing left to skip.');
       return;
@@ -679,17 +686,25 @@
   }
 
   function clickPageContinue() {
-    const nodes = document.querySelectorAll('button, [role="button"], a');
-    for (const el of nodes) {
-      if (el.closest('#' + PANEL_ID)) continue;
-      if (!isVisible(el)) continue;
-      const text = String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-      if (text === 'continue' || text === 'continue c' || text.indexOf('continue') === 0) {
+    const dialog = document.getElementById('exception-wrapper') || document.getElementById('exception-info');
+    const scopes = dialog ? [dialog, document.body] : [document.body];
+    for (const scope of scopes) {
+      const nodes = scope.querySelectorAll('button, [role="button"], a, div, span');
+      for (const el of nodes) {
+        if (!el || el.closest('#' + PANEL_ID)) continue;
+        if (!isVisible(el)) continue;
+        const text = String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (text.length > 24) continue;
+        if (text !== 'continue' && text !== 'continue c') continue;
         try { el.click(); } catch (err) { /* the page can ignore it */ }
         return true;
       }
     }
-    return false;
+    const exception = document.getElementById('exception-body');
+    if (!exception || !isVisible(exception)) return false;
+    const target = document.body || document.documentElement;
+    fireChar(viewOf(target), target, 'c');
+    return true;
   }
 
   async function dismissRejection(alive) {
@@ -715,7 +730,7 @@
     if (running) return;
     const dropzone = cleanToken(valueOf('dz-dropzone'));
     const all = parseContainers(valueOf('dz-containers'));
-    const todo = remainingContainers(valueOf('dz-containers'), doneIds, skippedIds);
+    const todo = remainingContainers(valueOf('dz-containers'), doneIds, skippedIds, dropzone);
     if (!dropzone) {
       setStatus('Enter the dropzone first.');
       return;
@@ -725,7 +740,10 @@
       return;
     }
     if (!todo.length) {
-      setStatus('Those containers are already done or skipped today. Reset done to run them again.');
+      const onlyZone = all.every((id) => id.toLowerCase() === dropzone.toLowerCase());
+      setStatus(onlyZone
+        ? 'Every pasted line is the dropzone. Paste container barcodes.'
+        : 'Those containers are already done or skipped today. Reset done to run them again.');
       return;
     }
 
@@ -737,7 +755,12 @@
     const resultsAtStart = results.length;
     const alive = () => token === generation;
     setRunning(true);
-    setStatus('Running ' + todo.length + ' container' + (todo.length === 1 ? '' : 's') + ' to ' + dropzone + '.');
+    const zoneLines = all.filter((id) => id.toLowerCase() === dropzone.toLowerCase()).length;
+    let startText = 'Running ' + todo.length + ' container' + (todo.length === 1 ? '' : 's') + ' to ' + dropzone + '.';
+    if (zoneLines) {
+      startText += ' Left out ' + zoneLines + ' line' + (zoneLines === 1 ? '' : 's') + ' that match the dropzone.';
+    }
+    setStatus(startText);
 
     try {
       for (let index = 0; index < todo.length; index += 1) {
@@ -869,7 +892,7 @@
     const el = document.getElementById('dz-count');
     if (!el) return;
     const all = parseContainers(valueOf('dz-containers'));
-    const todo = remainingContainers(valueOf('dz-containers'), doneIds, skippedIds).length;
+    const todo = remainingContainers(valueOf('dz-containers'), doneIds, skippedIds, valueOf('dz-dropzone')).length;
     el.replaceChildren();
     [
       [String(todo), 'to run'],

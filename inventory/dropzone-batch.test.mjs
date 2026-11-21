@@ -9,7 +9,7 @@ const catalog = JSON.parse(fs.readFileSync(new URL("docs/data/tampermonkey.json"
 
 assert.equal(src, pasted);
 assert.match(src, /@name\s+Dropzone Batch \(abelrigm\)/);
-assert.match(src, /@version\s+0\.2\.2/);
+assert.match(src, /@version\s+0\.2\.3/);
 assert.match(src, /@updateURL\s+https:\/\/raw\.githubusercontent\.com\/rigoabell\/abelrigm_repository\/main\/docs\/downloads\/dropzone-batch\.user\.js/);
 assert.match(src, /@downloadURL\s+https:\/\/raw\.githubusercontent\.com\/rigoabell\/abelrigm_repository\/main\/docs\/downloads\/dropzone-batch\.user\.js/);
 assert.match(src, /top:\s*50vh/);
@@ -27,7 +27,7 @@ const entry = catalog.find((item) => item.id === "dropzone-batch");
 assert.ok(entry);
 assert.equal(entry.name, "Dropzone Batch (abelrigm)");
 assert.equal(entry.category, "AFT");
-assert.equal(entry.version, "0.2.2");
+assert.equal(entry.version, "0.2.3");
 assert.equal(entry.file, "downloads/dropzone-batch.txt");
 assert.equal(entry.downloadName, "Dropzone Batch (abelrigm).txt");
 assert.match(entry.summary, /dropzone/);
@@ -62,9 +62,10 @@ assert.equal(cleanToken("'DZ-01'"), "DZ-01");
 assert.deepEqual(list("csX1\ncsX2\r\n\n\"csX3\""), ["csX1", "csX2", "csX3"]);
 assert.deepEqual(list("csX1,csX2\tcsX3;csX4"), ["csX1", "csX2", "csX3", "csX4"]);
 assert.deepEqual(list(""), []);
-const left = (lines, done, skipped) => Array.from(remainingContainers(lines, done, skipped));
+const left = (lines, done, skipped, dropzone) => Array.from(remainingContainers(lines, done, skipped, dropzone));
 assert.deepEqual(left("csX1\ncsX2\ncsX1\ncsX3", ["csX1"], ["csX3"]), ["csX2"]);
 assert.deepEqual(left("csX2", [], []), ["csX2"]);
+assert.deepEqual(left("dz-P-CR-EOL\ncsX2\nDZ-P-CR-EOL", [], [], "dz-P-CR-EOL"), ["csX2"]);
 
 assert.equal(stableText("Scan container  12:05:09 PM"), "Scan container #");
 assert.equal(stableText("Scan container 12:05 PM"), "Scan container #");
@@ -87,3 +88,10 @@ assert.equal(
 );
 assert.equal(dropzoneAccepted("tsLIQ945365 movedMove Successful: Scan another container"), true);
 assert.equal(dropzoneAccepted("dz-P-CR-EOLInvalid MoveScanned container can not be moved."), false);
+assert.equal(
+  newBadPhrase(
+    "Scan destination container",
+    "Try a different containerThis container was already scanned as the container to move."
+  ),
+  "already scanned"
+);
