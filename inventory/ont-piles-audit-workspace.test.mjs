@@ -15,17 +15,48 @@ sandbox.globalThis = sandbox;
 vm.runInNewContext(src, sandbox, { filename: "ont-piles-audit-workspace.user.js" });
 const piles = sandbox.__piles;
 
+function matches(node, selector) {
+  if (selector === "[data-ont-input]") return node.attrs["data-ont-input"] != null;
+  if (selector === "[data-ont-out]") return node.attrs["data-ont-out"] != null;
+  if (selector === 'a[href*="audit_date="]') {
+    return node.tag === "a" && typeof node.attrs.href === "string" && node.attrs.href.includes("audit_date=");
+  }
+  return false;
+}
+
 function makeEl(tag) {
   const node = {
     tag: tag,
     id: "",
     className: "",
     textContent: "",
+    value: "",
     children: [],
     parentElement: null,
     attrs: {},
+    listeners: {},
     setAttribute(name, value) {
       this.attrs[name] = String(value);
+    },
+    getAttribute(name) {
+      return Object.prototype.hasOwnProperty.call(this.attrs, name) ? this.attrs[name] : null;
+    },
+    addEventListener(type, fn) {
+      (this.listeners[type] = this.listeners[type] || []).push(fn);
+    },
+    dispatch(type) {
+      (this.listeners[type] || []).forEach((fn) => fn({ target: this }));
+    },
+    querySelectorAll(selector) {
+      const found = [];
+      this.children.forEach(function walk(child) {
+        if (matches(child, selector)) found.push(child);
+        child.children.forEach(walk);
+      });
+      return found;
+    },
+    querySelector(selector) {
+      return this.querySelectorAll(selector)[0] || null;
     },
     appendChild(child) {
       child.parentElement = this;
@@ -117,22 +148,24 @@ function auditPage() {
 test("catalog entry matches the script", () => {
   assert.equal(src, pasted);
   assert.equal(src.includes("innerHTML"), false);
-  assert.match(src, /@version\s+1\.0\.0/);
+  assert.match(src, /@version\s+1\.1\.0/);
   assert.match(src, /@match\s+https:\/\/ont-base\.corp\.amazon\.com\/\*/);
   assert.match(src, /ont-piles-audit-workspace\.user\.js/);
 
   const entry = catalog.find((item) => item.id === "ont-piles-audit-workspace");
   assert.ok(entry);
-  assert.equal(entry.version, "1.0.0");
+  assert.equal(entry.version, "1.1.0");
   assert.equal(entry.category, "ONT Base");
   assert.equal(entry.file, "downloads/ont-piles-audit-workspace.txt");
   assert.equal(entry.downloadName, "ONT Base Piles Audit Workspace (abelrigm).txt");
   assert.equal(entry.runsOn, "ont-base.corp.amazon.com");
-  assert.match(entry.summary, /workspace cell/);
+  assert.match(entry.summary, /EOS total/);
   assert.match(entry.detail, /Audit Is Complete/);
   assert.match(entry.detail, /Problem Solve/);
+  assert.match(entry.detail, /pallet 20/);
+  assert.match(entry.detail, /tote 5/);
   assert.equal(fs.existsSync(new URL("docs/" + entry.file, root)), true);
-  assert.equal(piles.VERSION, "1.0.0");
+  assert.equal(piles.VERSION, "1.1.0");
 
   const projects = catalog.length + 1;
   assert.match(index, new RegExp(projects + "</span><span class=\"qn-label\">Portfolio projects"));
@@ -168,12 +201,18 @@ test("workspace sits between the header cell and the two pile cards", () => {
   const card = cell.children[0];
   assert.equal(card.id, "ont-piles-workspace");
   assert.equal(card.attrs["data-ont-piles-workspace"], "1");
-  assert.equal(card.children[0].textContent, "Workspace");
+  assert.equal(card.children[0].textContent, "EOS piles");
   const surface = page.doc.getElementById(piles.BODY_ID);
-  assert.equal(surface.textContent, "");
+  const flat = (function walk(node) {
+    return node.textContent + node.children.map(walk).join("");
+  })(surface);
+  assert.match(flat, /Pallet × 20/);
+  assert.match(flat, /Pallet × 150/);
+  assert.match(flat, /Add Ins/);
   assert.equal(surface.attrs["data-work-surface"], "1");
   assert.equal(surface.parentElement, card);
-  assert.match(page.doc.getElementById("ont-piles-workspace-style").textContent, /min-height: 180px/);
+  assert.equal(page.doc.getElementById("ont-piles-eos").parentElement, surface);
+  assert.match(page.doc.getElementById("ont-piles-workspace-style").textContent, /ont-piles-bigs/);
 });
 
 test("a second pass does not add another cell", () => {
@@ -184,6 +223,7 @@ test("a second pass does not add another cell", () => {
   assert.equal(page.row.children.filter((node) => node.id === piles.CELL_ID).length, 1);
   assert.equal(page.row.children[2].id, "problem-solve");
   assert.equal(page.row.children[3].id, "exceptions");
+  assert.equal(page.doc.getElementById(piles.BODY_ID).children.filter((node) => node.id === "ont-piles-eos").length, 1);
 });
 
 test("the header column is the nearest full-width column", () => {
@@ -205,4 +245,95 @@ test("no header means no cell", () => {
   assert.equal(piles.headerColumn(doc), null);
   assert.equal(piles.placeWorkspace(doc), null);
   assert.equal(doc.getElementById(piles.CELL_ID), null);
+});
+
+test("the screenshot counts become the EOS total", () => {
+  assert.equal(piles.RATES.pallet, 20);
+  assert.equal(piles.RATES.cage, 15);
+  assert.equal(piles.RATES.shuttle, 100);
+  assert.equal(piles.RATES.sortablePallet, 150);
+  assert.equal(piles.RATES.tote, 5);
+  const state = piles.blankState();
+  state.bigs.problemSolve.cages = 1;
+  state.sortable.addIns.totes = 15;
+  const result = piles.compute(state);
+  assert.equal(result.bigs.problemSolve.cageUnits, 15);
+  assert.equal(result.bigs.problemSolve.units, 15);
+  assert.equal(result.sortable.addIns.toteUnits, 75);
+  assert.equal(result.sortable.addIns.units, 75);
+  assert.equal(result.eos.addIns, 75);
+  assert.equal(result.eos.ps, 15);
+  assert.equal(result.eos.exceptions, 0);
+  assert.equal(result.eos.total, 90);
+});
+
+test("shuttles count for Add Ins only, and the other BIGS rows stay out", () => {
+  const state = piles.blankState();
+  state.bigs.problemSolve.shuttles = 1;
+  state.bigs.exceptions.shuttles = 2;
+  state.bigs.addIns.shuttles = 1;
+  state.bigs.addIns.pallets = 2;
+  state.bigs.misships.pallets = 4;
+  state.bigs.arBigs.cages = 6;
+  state.sortable.problemSolve.pallets = 1;
+  state.sortable.exceptions.totes = 2;
+  state.sortable.addIns.pallets = 1;
+  const result = piles.compute(state);
+  assert.equal(result.bigs.problemSolve.units, 100);
+  assert.equal(result.eos.ps, 150);
+  assert.equal(result.bigs.exceptions.units, 200);
+  assert.equal(result.eos.exceptions, 10);
+  assert.equal(result.bigs.addIns.units, 40 + 100);
+  assert.equal(result.sortable.addIns.units, 150);
+  assert.equal(result.eos.addIns, 140 + 150);
+  assert.equal(result.bigs.misships.units, 80);
+  assert.equal(result.bigs.arBigs.units, 90);
+  assert.equal(result.eos.total, 150 + 10 + 290);
+  assert.equal(piles.compute({ bigs: { problemSolve: { pallets: "2", cages: -4, shuttles: "x" } } }).eos.ps, 40);
+});
+
+function memoryStorage() {
+  const data = {};
+  return {
+    data,
+    getItem(key) {
+      return Object.prototype.hasOwnProperty.call(data, key) ? data[key] : null;
+    },
+    setItem(key, value) {
+      data[key] = String(value);
+    }
+  };
+}
+
+test("typing the screenshot counts updates the outputs and keeps them", () => {
+  const storage = memoryStorage();
+  const href = "https://ont-base.corp.amazon.com/en/MEM3/icqa/piles/audit?audit_shift=Days&audit_number=1";
+  const page = auditPage();
+  const report = makeEl("a");
+  report.setAttribute("href", "/en/MEM3/icqa/piles/report?audit_date=2026-11-21&audit_number=1&audit_shift=Days");
+  page.doc.body.appendChild(report);
+  page.doc.querySelector = (selector) => page.doc.body.querySelector(selector);
+
+  piles.placeWorkspace(page.doc, { href, storage });
+  assert.equal(piles.auditKey(page.doc, href), "ont-piles-eos:2026-11-21:Days:1");
+  page.doc.getElementById("ont-piles-in-bigs-problemSolve-cages").value = "1";
+  page.doc.getElementById("ont-piles-in-sortable-addIns-totes").value = "15";
+  page.doc.getElementById("ont-piles-in-sortable-addIns-totes").dispatch("input");
+
+  assert.equal(page.doc.getElementById("ont-piles-out-bigs-problemSolve-units").textContent, "15");
+  assert.equal(page.doc.getElementById("ont-piles-out-sortable-addIns-units").textContent, "75");
+  assert.equal(page.doc.getElementById("ont-piles-out-eos-addIns").textContent, "75");
+  assert.equal(page.doc.getElementById("ont-piles-out-eos-ps").textContent, "15");
+  assert.equal(page.doc.getElementById("ont-piles-out-eos-exceptions").textContent, "0");
+  assert.equal(page.doc.getElementById("ont-piles-out-eos-total").textContent, "90");
+
+  const again = auditPage();
+  const reportAgain = makeEl("a");
+  reportAgain.setAttribute("href", report.getAttribute("href"));
+  again.doc.body.appendChild(reportAgain);
+  again.doc.querySelector = (selector) => again.doc.body.querySelector(selector);
+  piles.placeWorkspace(again.doc, { href, storage });
+  assert.equal(again.doc.getElementById("ont-piles-in-bigs-problemSolve-cages").value, "1");
+  assert.equal(again.doc.getElementById("ont-piles-in-sortable-addIns-totes").value, "15");
+  assert.equal(again.doc.getElementById("ont-piles-out-eos-total").textContent, "90");
 });
