@@ -500,7 +500,7 @@
     "category": "ONT Base",
     "summary": "Counts BIGS and sortable piles in the audit workspace and shows the EOS total.",
     "detail": "On an ICQA piles audit, inserts a cell under the Home, date, and Audit Is Complete header and above the pile cards. BIGS counts convert at pallet 20, cage 15, and shuttle 100. Sortable counts convert at pallet 150 and tote 5. EOS reports Add Ins, PS, Exceptions, and the total. Add Ins includes shuttles. Problem Solve and Exceptions do not. Misships, AR BIGS, Refurb, Audit, and ADS stay out of that total. The counts stay on that audit.",
-    "version": "1.3.0",
+    "version": "1.4.0",
     "runsOn": "ont-base.corp.amazon.com",
     "file": "downloads/ont-piles-audit-workspace.txt",
     "downloadName": "ONT Base Piles Audit Workspace (abelrigm).txt"
