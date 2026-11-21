@@ -495,6 +495,17 @@
     "downloadName": "Liquidation Sort Helper (abelrigm).txt"
   },
   {
+    "id": "ont-piles-audit-workspace",
+    "name": "ONT Base Piles Audit Workspace (abelrigm)",
+    "category": "ONT Base",
+    "summary": "Adds a workspace cell between the piles audit header and the pile cards.",
+    "detail": "On an ICQA piles audit, inserts a full-width cell under the Home, date, and Audit Is Complete header and above the pile cards such as Problem Solve and Exceptions. The empty body of that cell is the work surface.",
+    "version": "1.0.0",
+    "runsOn": "ont-base.corp.amazon.com",
+    "file": "downloads/ont-piles-audit-workspace.txt",
+    "downloadName": "ONT Base Piles Audit Workspace (abelrigm).txt"
+  },
+  {
     "id": "peculiar-inventory-scan-panel",
     "name": "Peculiar Inventory Scan Panel (abelrigm)",
     "category": "Peculiar",
