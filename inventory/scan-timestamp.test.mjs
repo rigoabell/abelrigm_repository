@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, priorOuterLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveDropAccepted, moveBatchContainerAccepted, moveCheckDue, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView, dropOpenHref };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, priorOuterLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveDropAccepted, moveBatchContainerAccepted, moveCheckDue, halfHourSlot, moveCheckDone, markMoveCheck, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -193,10 +193,22 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.10\.10/);
-assert.equal(api.dropOpenHref("direct"), "https://aft-moveapp.na.aftx.amazonoperations.app/move-container?jobId=200");
-assert.equal(api.dropOpenHref("menu"), "https://menu.na.aft.amazonoperations.app/MEM3");
-assert.match(src, /id="dropOpen"/);
+assert.match(src, /@version\s+2\.10\.11/);
+assert.equal(src.includes('id="dropOpen"'), false);
+const tenFourteen = new Date(2026, 10, 21, 10, 14, 0).getTime();
+const tenThirty = new Date(2026, 10, 21, 10, 30, 0).getTime();
+assert.equal(api.halfHourSlot(tenFourteen), "2026-11-21T10:00");
+assert.equal(api.halfHourSlot(tenThirty), "2026-11-21T10:30");
+assert.equal(api.halfHourSlot(new Date(2026, 10, 21, 0, 0, 0).getTime()), "2026-11-21T00:00");
+assert.equal(api.halfHourSlot(new Date(2026, 10, 21, 23, 59, 0).getTime()), "2026-11-21T23:30");
+assert.equal(api.moveCheckDone({}, tenFourteen), false);
+assert.equal(api.moveCheckDone({ "2026-11-21T10:00": 1 }, tenFourteen), true);
+assert.equal(api.moveCheckDone({ "2026-11-21T10:00": 1 }, tenThirty), false);
+const checkedSlots = api.markMoveCheck({ "2026-11-20T10:00": 5, "2026-11-21T09:30": 6 }, "2026-11-21T10:00", tenFourteen);
+assert.equal(checkedSlots["2026-11-21T10:00"], tenFourteen);
+assert.equal(checkedSlots["2026-11-21T09:30"], 6);
+assert.equal(checkedSlots["2026-11-20T10:00"], undefined);
+assert.match(src, /plf\.checkSlot/);
 assert.match(src, /@grant\s+window\.close/);
 assert.match(src, /span\.success-step-value/);
 assert.match(src, /\}, 6000\);/);

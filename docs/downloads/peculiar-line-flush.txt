@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.10.10
+// @version      2.10.11
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -56,7 +56,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.10.10";
+  const VERSION = "2.10.11";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -98,7 +98,7 @@
     dropzoneNudge: "plf.dropzoneNudge",
     dropzoneTrace: "plf.dropzoneTrace",
     moveCheckAt: "plf.moveCheckAt",
-    dropOpen: "plf.dropOpen",
+    moveChecks: "plf.moveChecks",
   };
   const MOVE_CHECK_MS = 60 * 60 * 1000;
   const IDLE_LOCATION_MS = 10 * 60 * 1000;
@@ -2540,6 +2540,32 @@
     return clock - stamp >= MOVE_CHECK_MS;
   }
 
+  function halfHourSlot(now) {
+    const clock = new Date(Number(now) || 0);
+    if (Number.isNaN(clock.getTime())) return "";
+    const pad = (n) => String(n).padStart(2, "0");
+    const minutes = clock.getMinutes() < 30 ? "00" : "30";
+    return `${clock.getFullYear()}-${pad(clock.getMonth() + 1)}-${pad(clock.getDate())}T${pad(clock.getHours())}:${minutes}`;
+  }
+
+  function moveCheckDone(record, now) {
+    const slot = halfHourSlot(now);
+    if (!slot || !record || typeof record !== "object") return false;
+    return Number(record[slot]) > 0;
+  }
+
+  function markMoveCheck(record, slot, now) {
+    const key = cellText(slot);
+    const book = record && typeof record === "object" ? record : {};
+    const next = {};
+    const day = key.slice(0, 10);
+    Object.keys(book).forEach((name) => {
+      if (day && String(name).startsWith(day) && Number(book[name]) > 0) next[name] = Number(book[name]);
+    });
+    if (key) next[key] = Number(now) || Date.now();
+    return next;
+  }
+
   function moveBatchBadPhrase(before, after) {
     const needles = [
       "invalid",
@@ -2700,20 +2726,28 @@
     GM_setValue(KEYS.dropzoneQueue, { ...pack, jobs });
   }
 
-  function dropOpenHref(mode) {
-    return mode === "direct" ? MOVE_URL : MENU_URL;
+  function noteMoveCheckAttempt() {
+    const slot = cellText(GM_getValue("plf.checkSlot", ""));
+    if (!slot) return;
+    const now = Date.now();
+    GM_setValue(KEYS.moveChecks, markMoveCheck(GM_getValue(KEYS.moveChecks, null), slot, now));
+    GM_setValue("plf.checkSlot", "");
+    rememberDropzone({ step: "check-slot", dropzone: slot });
   }
 
   let moveTabOpenedAt = 0;
   function ensureMoveTab() {
-    const href = dropOpenHref(GM_getValue(KEYS.dropOpen, "menu"));
+    const now = Date.now();
+    const checking = !moveCheckDone(GM_getValue(KEYS.moveChecks, null), now);
+    const href = checking ? MENU_URL : MOVE_URL;
     const heartbeat = Number(GM_getValue(KEYS.dropzoneHeartbeat, 0)) || 0;
     if (Date.now() - heartbeat < HEARTBEAT_STALE_MS) return;
     if (Date.now() - moveTabOpenedAt < 4000) return;
     moveTabOpenedAt = Date.now();
-    if (href === MENU_URL) {
-      GM_setValue("plf.menuDrive", Date.now());
+    if (checking) {
+      GM_setValue("plf.menuDrive", now);
       GM_setValue("plf.menu147Done", 0);
+      GM_setValue("plf.checkSlot", halfHourSlot(now));
     } else {
       GM_setValue("plf.menuDrive", 0);
     }
@@ -3294,6 +3328,7 @@
     rememberDropzone({ container, dropzone, step: "waiting" });
     const ready = await waitForMoveReady();
     if (!ready.ok) return ready;
+    noteMoveCheckAttempt();
     paintMoveBadge("1/1 scan container " + container);
     rememberDropzone({ container, dropzone, step: "tote" });
     const beforeRaw = moveScreenText();
@@ -3593,7 +3628,11 @@
         sheets: (sosCache.book?.sheets || []).map((sheet) => ({ name: sheet.name, rows: sheet.rows.length })),
       },
       menu: GM_getValue("plf.menuShot", null),
-      dropOpen: GM_getValue(KEYS.dropOpen, "menu") === "direct" ? "direct" : "menu",
+      moveCheck: {
+        slot: halfHourSlot(Date.now()),
+        done: moveCheckDone(GM_getValue(KEYS.moveChecks, null), Date.now()),
+        slots: GM_getValue(KEYS.moveChecks, null),
+      },
       queued: scanQueueLen,
       recent: recent.slice(0, 8).map((r) => ({ t: r.t, id: r.id, age: r.age, sku: r.sku, status: r.status })),
       dropzone: dropzoneDebugView({
@@ -3763,13 +3802,6 @@
           text-decoration: none;
         }
         .move-check:hover { background: #ffd000; color: #111111; }
-        .drop-open {
-          flex: 0 0 auto; height: 28px; padding: 0 8px;
-          border: 2px solid #111111; border-radius: 7px;
-          background: #ffffff; color: #111111; font-size: 12px; font-weight: 800;
-        }
-        .drop-open.direct { background: #111111; color: #ffffff; }
-        .drop-open.direct:hover { background: #333333; color: #ffffff; }
         .scanrow {
           display: flex; align-items: center; gap: 8px;
           padding: 8px 10px; background: #ffffff;
@@ -4062,7 +4094,6 @@
             </div>
             <div class="counts" id="counts"></div>
                 <div class="clock" id="clock">00:00:00</div>
-            <button id="dropOpen" class="drop-open" type="button" title="Every dropzone opens the MEM3 menu, types 147, then chooses 2.">Menu</button>
             <a id="moveCheck" class="move-check" href="${MENU_URL}" target="_blank" rel="noopener" title="Open the MEM3 menu. There cannot be another tab open with the move tool.">Check</a>
             <button id="share" type="button" title="Share the Tampermonkey install link">Share</button>
             <button id="debug" title="Copy debug JSON">Debug</button>
@@ -5197,16 +5228,6 @@
         ? "Open Move App. There cannot be another tab open with the move tool. Close that tab, then click Check."
         : "Open Move App. There cannot be another tab open with the move tool.";
     }
-    function paintDropOpen() {
-      const btn = shadow.getElementById("dropOpen");
-      if (!btn) return;
-      const direct = GM_getValue(KEYS.dropOpen, "menu") === "direct";
-      btn.textContent = direct ? "Direct" : "Menu";
-      btn.classList.toggle("direct", direct);
-      btn.title = direct
-        ? "Every dropzone opens job 200 directly."
-        : "Every dropzone opens the MEM3 menu, types 147, then chooses 2.";
-    }
     function beginDropScan() {
       if (dropPhase === "dropping" || !dropHold) return;
       if (moveTabOpen()) {
@@ -5218,7 +5239,8 @@
       GM_setValue("plf.moveCheckHold", 0);
       const dropped = enqueueBackgroundDropzone(offer.container, offer.dropzone);
       if (dropped) {
-        paintDropzoneStatus(`Opening Move App for ${dropped.container}`);
+        const checking = !moveCheckDone(GM_getValue(KEYS.moveChecks, null), Date.now());
+        paintDropzoneStatus(checking ? `Check, then drop ${dropped.container}` : `Opening job 200 for ${dropped.container}`);
         ensureMoveTab();
       }
     }
@@ -5345,12 +5367,6 @@
       }
       paintAskState();
     });
-    shadow.getElementById("dropOpen")?.addEventListener("click", () => {
-      const next = GM_getValue(KEYS.dropOpen, "menu") === "direct" ? "menu" : "direct";
-      GM_setValue(KEYS.dropOpen, next);
-      paintDropOpen();
-      paintDropzoneStatus(next === "direct" ? "Dropzone opens job 200 directly." : "Dropzone opens the MEM3 menu.");
-    });
     shadow.getElementById("dzYes").addEventListener("click", () => finishDropPrompt(true));
     shadow.getElementById("dzNo").addEventListener("click", () => finishDropPrompt(false));
     function armMoveCheck(e) {
@@ -5414,7 +5430,6 @@
       enqueueSave(() => markContainerDropped(res.container)).catch(() => {});
     });
     paintAskState();
-    paintDropOpen();
 
     renderStats();
     tick();
