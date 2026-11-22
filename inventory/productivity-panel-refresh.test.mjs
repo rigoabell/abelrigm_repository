@@ -7,7 +7,7 @@ const published = fs.readFileSync(new URL("../docs/downloads/mem3-productivity-p
 assert.equal(published, src);
 
 assert.match(src, /const REFRESH_MS = 5 \* 60 \* 1000;/);
-assert.match(src, /@version\s+1\.12\.19/);
+assert.match(src, /@version\s+1\.12\.20/);
 assert.match(src, /if \(shown >= 19\) return '#2ea043'/);
 assert.match(src, /if \(shown >= 16\) return '#d29922'/);
 assert.match(src, /data-mem3-enter-notes/);
@@ -172,7 +172,7 @@ assert.match(src, /html = '';/);
 
 const catalog = JSON.parse(fs.readFileSync(new URL("../docs/data/tampermonkey.json", import.meta.url), "utf8"));
 const entry = catalog.find((item) => item.id === "mem3-productivity-panel");
-assert.equal(entry.version, "1.12.19");
+assert.equal(entry.version, "1.12.20");
 assert.match(entry.detail, /stays on the board the same as unassigning by hand/);
 assert.match(entry.detail, /Customer returns 1st Half: Station 1-04 \| 2nd Half: Station 1-76/);
 assert.match(entry.detail, /no longer at the station they were marked from/);
@@ -182,6 +182,12 @@ assert.match(entry.detail, /cleared only by the person who wrote it/);
 assert.match(entry.detail, /lists those stations under Disabled/);
 assert.match(entry.detail, /red yield sign/);
 assert.match(entry.detail, /Disable Group sits next to Unassign Group/);
+assert.match(entry.detail, /Share Tampermonkey/);
+assert.match(src, /function openShareTampermonkey/);
+assert.match(src, /function lineScopeSelect/);
+assert.match(src, /function leavingLineCounts/);
+assert.match(src, /data-mem3-line-scope/);
+assert.match(src, /return 'v55\|'/);
 const leavingList = src.slice(src.indexOf("function openLeavingList"), src.indexOf("function closeLeavingOverlay"));
 assert.ok(leavingList.indexOf("header.appendChild(close)") !== -1);
 assert.ok(leavingList.indexOf("card.appendChild(header)") < leavingList.indexOf("card.appendChild(scroller)"));

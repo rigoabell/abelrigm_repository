@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.19
+// @version      1.12.20
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -39,7 +39,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.19';
+    const SCRIPT_VERSION = '1.12.20';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -6092,6 +6092,57 @@
         return name;
     }
 
+    const SCOPE_LINE_ORDER = [
+        'LINE 1 ODD', 'LINE 1 EVEN',
+        'LINE 2 ODD', 'LINE 2 EVEN',
+        'LINE 3 ODD', 'LINE 3 EVEN',
+        'LINE 4 ODD', 'LINE 4 EVEN',
+        'BIGS'
+    ];
+
+    function scopeLineOptions() {
+        const out = [{ id: 'total', label: 'Total' }];
+        for (let i = 0; i < SCOPE_LINE_ORDER.length; i++) {
+            out.push({ id: SCOPE_LINE_ORDER[i], label: panelTitle(SCOPE_LINE_ORDER[i]) });
+        }
+        return out;
+    }
+
+    function scopeLabelFor(scopeId) {
+        if (!scopeId || scopeId === 'total') return 'Total';
+        return panelTitle(scopeId);
+    }
+
+    function lineKeyForLogin(login) {
+        const key = String(login || '').trim().toLowerCase();
+        if (!key) return '';
+        const ids = Object.keys(BOARD_PEOPLE);
+        for (let i = 0; i < ids.length; i++) {
+            const person = BOARD_PEOPLE[ids[i]];
+            if (!person) continue;
+            if (String(person.login || '').trim().toLowerCase() === key) return person.line || '';
+        }
+        return '';
+    }
+
+    function lineScopeSelect(current, onChange) {
+        const select = document.createElement('select');
+        select.setAttribute('data-mem3-line-scope', '');
+        select.style.cssText = 'padding:4px 8px; border-radius:6px; border:1px solid #30363d; background:#0d1117; ' +
+            'color:#fff; font:700 13px Segoe UI,system-ui,sans-serif;';
+        const options = scopeLineOptions();
+        for (let i = 0; i < options.length; i++) {
+            const opt = document.createElement('option');
+            opt.value = options[i].id;
+            opt.textContent = options[i].label;
+            select.appendChild(opt);
+        }
+        select.value = current && current !== 'All' ? current : 'total';
+        select.addEventListener('click', function (event) { event.stopPropagation(); });
+        select.addEventListener('change', function () { onChange(select.value); });
+        return select;
+    }
+
     function summaryColumn(name) {
         const columns = {
             'LINE 1 ODD': '2',
@@ -6213,7 +6264,7 @@
         const breakNums = document.createElement('span');
         breakNums.style.cssText = 'display:inline-flex; align-items:center; gap:6px;';
         breakNums.appendChild(viewButton('View extended breaks', function () {
-            openExtendedList(scopeLabel, scopeIds);
+            openExtendedList(opts.summaryKey || 'total');
         }));
         const breakCount = document.createElement('span');
         breakCount.setAttribute('data-metric', 'extended');
@@ -6706,7 +6757,7 @@
     }
 
     function summaryStructureSig(data) {
-        return 'v54|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
+        return 'v55|' + ACTIVE_WINDOW + '|' + (LAST_ROLLUP_AT ? '1' : '0') + '|' +
             (data.floorSigned || 0) + '/' + (data.floorStations || 0) + '|' +
             (data.floorOpen || []).join(';') + '|' +
             (data.floorDisabled || []).join(';') + '|' +
@@ -6855,6 +6906,7 @@
         nameRow.appendChild(nameEl);
         nameRow.appendChild(versionEl);
         nameRow.appendChild(makeInfoButton());
+        nameRow.appendChild(makeShareLink());
         titleWrap.appendChild(nameRow);
         titleWrap.appendChild(byline);
         const refreshRow = document.createElement('div');
@@ -8667,6 +8719,99 @@
         return btn;
     }
 
+    function makeShareLink() {
+        const link = document.createElement('button');
+        link.type = 'button';
+        link.textContent = 'Share Tampermonkey';
+        link.style.cssText = 'margin-left:8px; padding:0; border:0; background:transparent; color:#f5c518; ' +
+            'font:800 13px Segoe UI,system-ui,sans-serif; text-decoration:underline; cursor:pointer; white-space:nowrap;';
+        link.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            openShareTampermonkey();
+        });
+        return link;
+    }
+
+    function shareStep(text) {
+        const item = document.createElement('li');
+        item.textContent = text;
+        item.style.cssText = 'margin:0 0 8px;';
+        return item;
+    }
+
+    function openShareTampermonkey() {
+        closeLeavingOverlay('mem3-share-tampermonkey');
+        const overlay = document.createElement('div');
+        overlay.id = 'mem3-share-tampermonkey';
+        overlay.style.cssText = 'position:fixed; inset:0; z-index:2147483646; background:rgba(0,0,0,0.55); ' +
+            'display:flex; align-items:center; justify-content:center; ' +
+            'font-family:Segoe UI,system-ui,sans-serif; color:#ffffff;';
+        overlay.addEventListener('click', function (event) {
+            if (event.target === overlay) overlay.remove();
+        });
+        const card = document.createElement('div');
+        card.style.cssText = 'width:min(560px, calc(100% - 24px)); background:#161b22; ' +
+            'border:1px solid #f5c518; border-radius:12px; padding:18px;';
+        const title = document.createElement('div');
+        title.textContent = 'Share Tampermonkey';
+        title.style.cssText = 'font-size:20px; font-weight:800; color:#f5c518;';
+        const lead = document.createElement('div');
+        lead.textContent = 'Send this install link to someone who needs the Productivity Panel.';
+        lead.style.cssText = 'font-size:14px; font-weight:650; margin-top:8px;';
+        const url = document.createElement('div');
+        url.textContent = SCRIPT_UPDATE_URL;
+        url.style.cssText = 'margin-top:10px; padding:8px 10px; border-radius:8px; background:#0d1117; ' +
+            'border:1px solid #30363d; font:600 12px Segoe UI,system-ui,sans-serif; word-break:break-all;';
+        const steps = document.createElement('ol');
+        steps.style.cssText = 'margin:14px 0 0; padding-left:22px; font-size:14px;';
+        steps.appendChild(shareStep('They need Tampermonkey on Chrome.'));
+        steps.appendChild(shareStep('They open the link above.'));
+        steps.appendChild(shareStep('Tampermonkey shows Install. They click Install.'));
+        steps.appendChild(shareStep('They open MEM3 assignments. The panel is at the top.'));
+        const already = document.createElement('div');
+        already.textContent = 'Someone who already has the panel gets a newer version from this same link. Their screen tells them to install it, then refresh assignments.';
+        already.style.cssText = 'margin-top:8px; font-size:13px; font-weight:650; color:#c9d1d9;';
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; justify-content:flex-end; gap:8px; margin-top:16px;';
+        const copy = document.createElement('button');
+        copy.type = 'button';
+        copy.textContent = 'Copy link';
+        copy.style.cssText = 'padding:8px 12px; border-radius:8px; cursor:pointer; color:#000000; ' +
+            'background:#f5c518; border:1px solid #f5c518; font:800 13px Segoe UI,system-ui,sans-serif;';
+        copy.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            copyText(SCRIPT_UPDATE_URL).then(function () {
+                copy.textContent = 'Copied';
+                setTimeout(function () { copy.textContent = 'Copy link'; }, 1500);
+            }).catch(function () {
+                copy.textContent = 'Copy failed';
+                setTimeout(function () { copy.textContent = 'Copy link'; }, 2000);
+            });
+        });
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = 'Close';
+        close.style.cssText = 'padding:8px 12px; border-radius:8px; cursor:pointer; color:#ffffff; ' +
+            'background:#0d1117; border:1px solid #8b949e; font:800 13px Segoe UI,system-ui,sans-serif;';
+        close.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            overlay.remove();
+        });
+        row.appendChild(copy);
+        row.appendChild(close);
+        card.appendChild(title);
+        card.appendChild(lead);
+        card.appendChild(url);
+        card.appendChild(steps);
+        card.appendChild(already);
+        card.appendChild(row);
+        overlay.appendChild(card);
+        document.body.appendChild(overlay);
+    }
+
     function makeInfoButton() {
         const btn = document.createElement('button');
         btn.type = 'button';
@@ -9934,6 +10079,8 @@
         }
         if (open) {
             if (!open.history) open.history = [{ said: open.said, at: open.markedAt }];
+            const keptLine = lineKeyForLogin(name);
+            if (keptLine) open.line = keptLine;
             if (open.said === said) return { doc: doc, row: open, added: false, updated: false };
             const previous = open.said;
             open.history.push({ said: said, at: at });
@@ -9943,6 +10090,8 @@
             open.markedAtMs = now.getTime();
             open.id = name + '-' + said;
             if (station) open.station = station;
+            const movedLine = lineKeyForLogin(name);
+            if (movedLine) open.line = movedLine;
             return { doc: doc, row: open, added: false, updated: true, previous: previous };
         }
         let closed = null;
@@ -9963,6 +10112,8 @@
             closed.takenHow = '';
             closed.back = '';
             if (station) closed.station = station;
+            const closedLine = lineKeyForLogin(name);
+            if (closedLine) closed.line = closedLine;
             if (!closed.history) closed.history = [];
             closed.history.push({ said: said, at: at });
             return { doc: doc, row: closed, added: true, updated: false };
@@ -9973,6 +10124,7 @@
             said: said,
             saidMin: saidMin,
             station: station || '',
+            line: lineKeyForLogin(name) || '',
             markedAt: at,
             markedAtMs: now.getTime(),
             status: 'said',
@@ -10203,6 +10355,33 @@
         if (min == null || !isFinite(min)) return null;
         min = ((min % 1440) + 1440) % 1440;
         return Math.floor(min / 15) * 15;
+    }
+
+    function leavingLineKey(row) {
+        if (row && row.line && SCOPE_LINE_ORDER.indexOf(row.line) !== -1) return row.line;
+        const fromLogin = lineKeyForLogin(row && row.login);
+        if (fromLogin && SCOPE_LINE_ORDER.indexOf(fromLogin) !== -1) return fromLogin;
+        const station = String((row && row.station) || '');
+        const keys = Object.keys(TARGET_SECTIONS);
+        for (let i = 0; i < keys.length; i++) {
+            const labels = TARGET_SECTIONS[keys[i]] || [];
+            for (let j = 0; j < labels.length; j++) {
+                if (labels[j] && station.indexOf(labels[j]) !== -1) return keys[i];
+            }
+        }
+        if (station.indexOf(BIGS_GROUP) !== -1 || /\bbigs\b/i.test(station)) return 'BIGS';
+        return '';
+    }
+
+    function leavingLineCounts(rows) {
+        const counts = Object.create(null);
+        for (let i = 0; i < SCOPE_LINE_ORDER.length; i++) counts[SCOPE_LINE_ORDER[i]] = 0;
+        const list = rows || [];
+        for (let n = 0; n < list.length; n++) {
+            const key = leavingLineKey(list[n]);
+            if (counts[key] != null) counts[key] += 1;
+        }
+        return counts;
     }
 
     function leavingQuarterCounts(rows) {
@@ -10938,6 +11117,33 @@
         return note.by + ' noted ' + note.about + ': ' + note.text;
     }
 
+    function noteLineKey(note) {
+        if (!note) return '';
+        if (note.kind === 'line') {
+            const about = String(note.about || '').trim();
+            for (let i = 0; i < SCOPE_LINE_ORDER.length; i++) {
+                const id = SCOPE_LINE_ORDER[i];
+                if (about === id || about === panelTitle(id)) return id;
+                const labels = id === 'BIGS' ? [BIGS_GROUP] : (TARGET_SECTIONS[id] || []);
+                for (let j = 0; j < labels.length; j++) {
+                    if (about === labels[j]) return id;
+                }
+            }
+            return '';
+        }
+        return lineKeyForLogin(note.about);
+    }
+
+    function notesForScope(rows, scope) {
+        if (!scope || scope === 'total') return rows || [];
+        const out = [];
+        const list = rows || [];
+        for (let i = 0; i < list.length; i++) {
+            if (noteLineKey(list[i]) === scope) out.push(list[i]);
+        }
+        return out;
+    }
+
     function paintNotesList() {
         const card = document.getElementById(NOTES_LIST_ID);
         if (!card) return;
@@ -10945,10 +11151,11 @@
         if (!list) return;
         while (list.firstChild) list.removeChild(list.firstChild);
         const actor = signedInLogin();
-        const rows = openNotes(loadNotes());
+        const scope = card.dataset.lineScope || 'total';
+        const rows = notesForScope(openNotes(loadNotes()), scope);
         if (!rows.length) {
             const empty = document.createElement('div');
-            empty.textContent = 'No notes.';
+            empty.textContent = scope === 'total' ? 'No notes.' : ('No notes on ' + scopeLabelFor(scope) + '.');
             empty.style.cssText = 'color:#8b949e; font-size:12px;';
             list.appendChild(empty);
             return;
@@ -11026,7 +11233,8 @@
         copy.addEventListener('click', function (event) {
             event.preventDefault();
             event.stopPropagation();
-            copyText(notesCopyText(openNotes(loadNotes()))).then(function () {
+            const scope = card.dataset.lineScope || 'total';
+            copyText(notesCopyText(notesForScope(openNotes(loadNotes()), scope))).then(function () {
                 copy.textContent = 'Copied';
                 setTimeout(function () { copy.textContent = 'Copy'; }, 1500);
             }).catch(function () {
@@ -11050,9 +11258,21 @@
         headerActions.appendChild(close);
         header.appendChild(title);
         header.appendChild(headerActions);
+        const scopeRow = document.createElement('div');
+        scopeRow.style.cssText = 'display:flex; align-items:center; gap:8px; margin:6px 0 8px;';
+        const scopeName = document.createElement('div');
+        scopeName.textContent = 'Line';
+        scopeName.style.cssText = 'font:800 12px Segoe UI,system-ui,sans-serif;';
+        card.dataset.lineScope = 'total';
+        scopeRow.appendChild(scopeName);
+        scopeRow.appendChild(lineScopeSelect('total', function (next) {
+            card.dataset.lineScope = next;
+            paintNotesList();
+        }));
         scroller.appendChild(list);
         scroller.appendChild(status);
         card.appendChild(header);
+        card.appendChild(scopeRow);
         card.appendChild(ask);
         card.appendChild(signedInNote());
         card.appendChild(scroller);
@@ -11367,12 +11587,56 @@
         document.body.appendChild(card);
     }
 
-    function openExtendedList(scopeLabel, empIds) {
+    function extendedRowLine(row) {
+        if (row && row.empId && BOARD_PEOPLE[row.empId] && BOARD_PEOPLE[row.empId].line) {
+            return BOARD_PEOPLE[row.empId].line;
+        }
+        return lineKeyForLogin(row && row.login);
+    }
+
+    function extendedRowsForScope(scope) {
+        const rows = extendedRows(null, new Date());
+        if (!scope || scope === 'total') return rows;
+        const out = [];
+        for (let i = 0; i < rows.length; i++) {
+            if (extendedRowLine(rows[i]) === scope) out.push(rows[i]);
+        }
+        return out;
+    }
+
+    function paintExtendedScope(overlay) {
+        if (!overlay) return;
+        const scope = overlay.dataset.lineScope || 'total';
+        const rows = extendedRowsForScope(scope);
+        const heading = overlay.querySelector('[data-extended-heading]');
+        if (heading) heading.textContent = scopeLabelFor(scope) + ' \u00b7 Extended Breaks';
+        const sub = overlay.querySelector('[data-extended-count]');
+        if (sub) sub.textContent = rows.length + (rows.length === 1 ? ' associate' : ' associates');
+        const list = overlay.querySelector('[data-extended-list]');
+        if (!list) return;
+        while (list.firstChild) list.removeChild(list.firstChild);
+        if (!rows.length) {
+            const empty = document.createElement('div');
+            empty.textContent = scope === 'total'
+                ? 'Nobody has an extended break.'
+                : ('Nobody on ' + scopeLabelFor(scope) + ' has an extended break.');
+            empty.style.cssText = 'font-size:13px; font-weight:650; margin-bottom:12px;';
+            list.appendChild(empty);
+            return;
+        }
+        const stack = document.createElement('div');
+        stack.style.cssText = 'display:flex; flex-direction:column; gap:8px; margin-bottom:12px;';
+        for (let i = 0; i < rows.length; i++) stack.appendChild(extendedBreakCard(rows[i]));
+        list.appendChild(stack);
+    }
+
+    function openExtendedList(scopeId) {
         closeLeavingOverlay('mem3-extended-list');
-        const rows = empIds ? extendedRows(empIds, new Date()) : extendedRows(null, new Date());
+        const picked = scopeId && scopeId !== 'All' && scopeId !== 'total' ? scopeId : 'total';
         installPulseStyles();
         const overlay = document.createElement('div');
         overlay.id = 'mem3-extended-list';
+        overlay.dataset.lineScope = picked;
         overlay.style.cssText = 'position:fixed; inset:0; z-index:2147483646; background:rgba(0,0,0,0.55); ' +
             'display:flex; align-items:flex-start; justify-content:center; padding:32px 16px; ' +
             'font-family:Segoe UI,system-ui,sans-serif; color:#ffffff;';
@@ -11386,13 +11650,24 @@
         top.style.cssText = 'display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:8px;';
         const headingWrap = document.createElement('div');
         const heading = document.createElement('div');
-        heading.textContent = (scopeLabel || 'Extended Breaks') + ' \u00b7 Extended Breaks';
+        heading.setAttribute('data-extended-heading', '');
         heading.style.cssText = 'font-size:18px; font-weight:800;';
         const sub = document.createElement('div');
-        sub.textContent = rows.length + (rows.length === 1 ? ' associate' : ' associates');
+        sub.setAttribute('data-extended-count', '');
         sub.style.cssText = 'font-size:13px; font-weight:500; color:#c9d1d9; margin-top:4px;';
+        const scopeRow = document.createElement('div');
+        scopeRow.style.cssText = 'display:flex; align-items:center; gap:8px; margin-top:8px;';
+        const scopeName = document.createElement('div');
+        scopeName.textContent = 'Line';
+        scopeName.style.cssText = 'font:800 12px Segoe UI,system-ui,sans-serif;';
+        scopeRow.appendChild(scopeName);
+        scopeRow.appendChild(lineScopeSelect(picked, function (next) {
+            overlay.dataset.lineScope = next;
+            paintExtendedScope(overlay);
+        }));
         headingWrap.appendChild(heading);
         headingWrap.appendChild(sub);
+        headingWrap.appendChild(scopeRow);
         const actions = document.createElement('div');
         actions.style.cssText = 'display:flex; gap:8px; flex:0 0 auto;';
         const close = document.createElement('button');
@@ -11404,20 +11679,13 @@
         actions.appendChild(close);
         top.appendChild(headingWrap);
         top.appendChild(actions);
+        const list = document.createElement('div');
+        list.setAttribute('data-extended-list', '');
         card.appendChild(top);
-        if (!rows.length) {
-            const empty = document.createElement('div');
-            empty.textContent = 'Nobody has an extended break.';
-            empty.style.cssText = 'font-size:13px; font-weight:650; margin-bottom:12px;';
-            card.appendChild(empty);
-        } else {
-            const list = document.createElement('div');
-            list.style.cssText = 'display:flex; flex-direction:column; gap:8px; margin-bottom:12px;';
-            for (let i = 0; i < rows.length; i++) list.appendChild(extendedBreakCard(rows[i]));
-            card.appendChild(list);
-        }
+        card.appendChild(list);
         overlay.appendChild(card);
         document.body.appendChild(overlay);
+        paintExtendedScope(overlay);
     }
 
     function openEngagePanel(login, empId) {
@@ -11522,7 +11790,7 @@
     }
 
     function makeExtendedBreaksButton() {
-        return panelChipButton('Extended Breaks', function () { openExtendedList('All', null); });
+        return panelChipButton('Extended Breaks', function () { openExtendedList('total'); });
     }
 
     function makeRecalcBreaksButton() {
@@ -11633,6 +11901,18 @@
                 bucket.textContent = quarters[q].label + '  ' + quarters[q].count;
                 bucket.style.cssText = 'font-weight:650; color:#c9d1d9;';
                 summary.appendChild(bucket);
+            }
+            const byLine = leavingLineCounts(rows);
+            const lineHead = document.createElement('div');
+            lineHead.textContent = 'By line';
+            lineHead.style.cssText = 'margin-top:6px; font-weight:800;';
+            summary.appendChild(lineHead);
+            for (let n = 0; n < SCOPE_LINE_ORDER.length; n++) {
+                const lineId = SCOPE_LINE_ORDER[n];
+                const lineCount = document.createElement('div');
+                lineCount.textContent = panelTitle(lineId) + '  ' + (byLine[lineId] || 0);
+                lineCount.style.cssText = 'font-weight:650; color:#c9d1d9;';
+                summary.appendChild(lineCount);
             }
             list.appendChild(summary);
             if (!rows.length) {
