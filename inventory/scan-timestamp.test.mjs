@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, priorOuterLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveDropAccepted, moveBatchContainerAccepted, moveCheckDue, moveTabStillOpen, halfHourSlot, moveCheckDone, markMoveCheck, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, priorOuterLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveDropAccepted, moveBatchContainerAccepted, moveCheckDue, moveTabStillOpen, halfHourSlot, moveCheckDone, markMoveCheck, continueSessionPrompt, continueSessionYes, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -193,7 +193,17 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.10\.13/);
+assert.match(src, /@version\s+2\.10\.14/);
+assert.equal(api.continueSessionPrompt("Do you want to continue your Lead/PA - QA session while using this app?"), true);
+assert.equal(api.continueSessionPrompt("Do you want to continue your Outbound session while using this app?"), true);
+assert.equal(api.continueSessionPrompt("What are you working on today at MEM3?"), false);
+assert.equal(api.continueSessionYes([
+  { text: "No", href: "/end/MEM3/entry/200" },
+  { text: "Yes", href: "/continue/MEM3/entry/200" },
+]).href, "/continue/MEM3/entry/200");
+assert.equal(api.continueSessionYes([{ text: "Yes", href: "/somewhere-else" }]), null);
+assert.match(src, /confirmSessionKill/);
+assert.match(src, /continue-session/);
 assert.match(src, /placeholder="Scan Container - Do Not Type Here"/);
 assert.equal(api.moveTabStillOpen(1_000, 0, 5_000, 12_000), true);
 assert.equal(api.moveTabStillOpen(1_000, 1_000, 5_000, 12_000), false);

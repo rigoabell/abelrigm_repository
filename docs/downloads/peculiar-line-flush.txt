@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.10.13
+// @version      2.10.14
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -56,7 +56,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.10.13";
+  const VERSION = "2.10.14";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -6097,7 +6097,45 @@
     GM_setValue("plf.menuShot", shot);
   }
 
+  function continueSessionPrompt(text) {
+    const line = cellText(text).replace(/\s+/g, " ");
+    return /do you want to continue your .+ session while using this app\?/i.test(line);
+  }
+
+  function continueSessionYes(links) {
+    const rows = Array.isArray(links) ? links : [];
+    return rows.find((link) => /^yes$/i.test(cellText(link?.text)) && /\/continue\//i.test(cellText(link?.href))) || null;
+  }
+
+  function onContinueSessionPage() {
+    if (/confirmSessionKill/i.test(location.pathname)) return true;
+    const message = document.querySelector("#endSessionMessage");
+    return continueSessionPrompt(message?.textContent || "");
+  }
+
+  function clickContinueSession() {
+    if (!onContinueSessionPage() || clickContinueSession.done) return false;
+    const message = document.querySelector("#endSessionMessage p") || document.querySelector("#endSessionMessage");
+    const links = Array.from(document.querySelectorAll("a")).map((el) => ({
+      text: el.textContent,
+      href: el.getAttribute("href") || "",
+      el,
+    }));
+    const yes = continueSessionYes(links);
+    if (!yes?.el) return false;
+    clickContinueSession.done = true;
+    rememberDropzone({
+      step: "continue-session",
+      dropzone: yes.href,
+      detail: cellText(message?.textContent).slice(0, 180),
+    });
+    GM_setValue(KEYS.dropzoneHeartbeat, Date.now());
+    movePress(yes.el);
+    return true;
+  }
+
   async function typeMenuCode() {
+    if (onContinueSessionPage()) return;
     const started = Number(GM_getValue("plf.menuDrive", 0)) || 0;
     if (!started || Date.now() - started > 20000 || typeMenuCode.drive === started) return;
     typeMenuCode.drive = started;
@@ -6151,6 +6189,12 @@
   if (isAftMenu || isFcMenu) {
     typeMenuCode();
     setInterval(() => typeMenuCode(), 700);
+  }
+
+  if (isAftMenu && isTop) {
+    const watchContinue = () => clickContinueSession();
+    watchContinue();
+    [200, 600, 1200, 2500].forEach((ms) => setTimeout(watchContinue, ms));
   }
 
   if (isFcMenu && isTop) {
