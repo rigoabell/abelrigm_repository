@@ -9,7 +9,7 @@ const catalog = JSON.parse(fs.readFileSync(new URL("docs/data/tampermonkey.json"
 
 assert.equal(src, pasted);
 assert.match(src, /@name\s+Dropzone Batch \(abelrigm\)/);
-assert.match(src, /@version\s+0\.2\.3/);
+assert.match(src, /@version\s+0\.2\.5/);
 assert.match(src, /@updateURL\s+https:\/\/raw\.githubusercontent\.com\/rigoabell\/abelrigm_repository\/main\/docs\/downloads\/dropzone-batch\.user\.js/);
 assert.match(src, /@downloadURL\s+https:\/\/raw\.githubusercontent\.com\/rigoabell\/abelrigm_repository\/main\/docs\/downloads\/dropzone-batch\.user\.js/);
 assert.match(src, /top:\s*50vh/);
@@ -22,12 +22,15 @@ assert.match(src, /@match\s+https:\/\/aft-moveapp\.na\.aftx\.amazonoperations\.a
 assert.match(src, /Copy debug/);
 assert.match(src, /id="dz-debug"/);
 assert.match(src, /id="dz-skip"/);
+assert.match(src, /id="dz-clear"/);
+assert.match(src, /Clear list/);
+assert.match(src, /Container list cleared\./);
 
 const entry = catalog.find((item) => item.id === "dropzone-batch");
 assert.ok(entry);
 assert.equal(entry.name, "Dropzone Batch (abelrigm)");
 assert.equal(entry.category, "AFT");
-assert.equal(entry.version, "0.2.3");
+assert.equal(entry.version, "0.2.5");
 assert.equal(entry.file, "downloads/dropzone-batch.txt");
 assert.equal(entry.downloadName, "Dropzone Batch (abelrigm).txt");
 assert.match(entry.summary, /dropzone/);
@@ -66,6 +69,14 @@ const left = (lines, done, skipped, dropzone) => Array.from(remainingContainers(
 assert.deepEqual(left("csX1\ncsX2\ncsX1\ncsX3", ["csX1"], ["csX3"]), ["csX2"]);
 assert.deepEqual(left("csX2", [], []), ["csX2"]);
 assert.deepEqual(left("dz-P-CR-EOL\ncsX2\nDZ-P-CR-EOL", [], [], "dz-P-CR-EOL"), ["csX2"]);
+assert.deepEqual(
+  left("rcCRetStations\nrcCRetStations\n(no parent)\nrcCRetStations", [], ["rcCRetStations"]),
+  ["rcCRetStations", "(no parent)", "rcCRetStations"]
+);
+assert.deepEqual(left("rcCRetStations\nrcCRetStations", [], ["rcCRetStations", "rcCRetStations"]), []);
+assert.deepEqual(left("csX1\ncsX1\ncsX2", ["csX1"], []), ["csX2"]);
+assert.doesNotMatch(src, /skippedIds\.has\(container\)/);
+assert.match(src, /if \(doneIds\.has\(container\)\) continue;/);
 
 assert.equal(stableText("Scan container  12:05:09 PM"), "Scan container #");
 assert.equal(stableText("Scan container 12:05 PM"), "Scan container #");

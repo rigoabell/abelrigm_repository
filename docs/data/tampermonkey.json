@@ -37,8 +37,8 @@
     "name": "Dropzone Batch (abelrigm)",
     "category": "AFT",
     "summary": "Paste containers and one dropzone, then send each as a scan-gun burst.",
-    "detail": "On AFT Move Individual Container, a panel docks to the bottom half of the page. Paste a container list and one dropzone. Start sends each container, then that dropzone, as a fast scan. The page has to change before the next scan. Skip leaves a container out for the rest of the Chicago day so it is not scanned to a dropzone again. A rejected move is skipped the same way. Containers that land are also left out until Reset done. Status sits on the right. Copy debug copies a dump when a scan does not land.",
-    "version": "0.2.3",
+    "detail": "On AFT Move Individual Container, a panel docks to the bottom half of the page. Paste a container list and one dropzone. Start sends each container, then that dropzone, as a fast scan. The page has to change before the next scan. Skip leaves that one pasted line out for the rest of the Chicago day. Later lines with the same text still run. A rejected move skips that one line the same way. A container that lands is left out, including later copies of that barcode, until Reset done. Clear list empties the container box and leaves the dropzone and today's done and skipped lists. Status sits on the right. Copy debug copies a dump when a scan does not land.",
+    "version": "0.2.5",
     "runsOn": "aft-moveapp.na.aftx.amazonoperations.app, aft-moveapp.eu.aftx.amazonoperations.app, aft-moveapp.fe.aftx.amazonoperations.app",
     "file": "downloads/dropzone-batch.txt",
     "downloadName": "Dropzone Batch (abelrigm).txt"

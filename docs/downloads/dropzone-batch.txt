@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dropzone Batch (abelrigm)
 // @namespace    https://github.com/rigoabell/abelrigm_repository
-// @version      0.2.3
+// @version      0.2.5
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/dropzone-batch.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/dropzone-batch.user.js
 // @description  Paste containers and one dropzone. Sends each container, then that dropzone, as a scan-gun burst.
@@ -21,7 +21,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '0.2.3';
+  const VERSION = '0.2.5';
   const PANEL_ID = 'dz-batch-panel';
   const SCAN_STRATEGY = 'focus';
   const SCAN_SUFFIX = 'Enter';
@@ -44,7 +44,7 @@
   let realBuffer = [];
   let realTimer = 0;
   const doneIds = new Set();
-  const skippedIds = new Set();
+  const skippedIds = [];
 
   function noteListener(type, target) {
     const name = describe(target);
@@ -153,11 +153,19 @@
 
   function remainingContainers(text, doneList, skippedList, dropzone) {
     const done = new Set(doneList || []);
-    const skipped = new Set(skippedList || []);
+    const skips = new Map();
+    (skippedList || []).forEach((id) => {
+      skips.set(id, (skips.get(id) || 0) + 1);
+    });
     const zone = cleanToken(dropzone).toLowerCase();
     return parseContainers(text).filter((id) => {
-      if (done.has(id) || skipped.has(id)) return false;
+      if (done.has(id)) return false;
       if (zone && id.toLowerCase() === zone) return false;
+      const leftSkips = skips.get(id) || 0;
+      if (leftSkips > 0) {
+        skips.set(id, leftSkips - 1);
+        return false;
+      }
       return true;
     });
   }
@@ -655,8 +663,8 @@
 
   function rememberSkip(container) {
     if (!container) return;
-    skippedIds.add(container);
-    saveStore({ doneDay: todayKey(), skippedIds: Array.from(skippedIds) });
+    skippedIds.push(container);
+    saveStore({ doneDay: todayKey(), skippedIds: skippedIds.slice() });
     updateCount();
   }
 
@@ -681,8 +689,8 @@
       setStatus('Nothing left to skip.');
       return;
     }
-    noteSkip(next, 'Skipped. It will not be scanned again today.');
-    setStatus('Skipped ' + next + '. It will not be scanned again today.');
+    noteSkip(next, 'Skipped that line. Other copies of this text still run.');
+    setStatus('Skipped one ' + next + '. Other copies still run.');
   }
 
   function clickPageContinue() {
@@ -767,7 +775,7 @@
         if (!alive()) break;
         const container = todo[index];
         currentContainer = container;
-        if (skippedIds.has(container)) continue;
+        if (doneIds.has(container)) continue;
         if (skipRequested) {
           skipRequested = false;
           noteSkip(container, 'Skipped before the scan.');
@@ -797,7 +805,7 @@
           break;
         }
         if (containerScan.bad) {
-          noteSkip(container, 'Skipped. Container scan showed “' + containerScan.bad + '”. It will not be scanned again today.');
+          noteSkip(container, 'Skipped that line. Container scan showed “' + containerScan.bad + '”. Other copies still run.');
           await dismissRejection(alive);
           continue;
         }
@@ -815,7 +823,7 @@
         if (!alive() || dropScan.stopped) break;
         if (dropScan.skipped) {
           skipRequested = false;
-          noteSkip(container, 'Skipped. It will not be scanned again today.');
+          noteSkip(container, 'Skipped that line. Other copies of this text still run.');
           await dismissRejection(alive);
           continue;
         }
@@ -830,8 +838,8 @@
         }
         if (dropScan.bad || !dropScan.accepted) {
           noteSkip(container, dropScan.bad
-            ? 'Skipped. Dropzone scan showed “' + dropScan.bad + '”. It will not be scanned again today.'
-            : 'Skipped. The page did not say Move Successful. It will not be scanned again today.');
+            ? 'Skipped that line. Dropzone scan showed “' + dropScan.bad + '”. Other copies still run.'
+            : 'Skipped that line. The page did not say Move Successful. Other copies still run.');
           await dismissRejection(alive);
           continue;
         }
@@ -897,7 +905,7 @@
     [
       [String(todo), 'to run'],
       [String(doneIds.size), 'done today'],
-      [String(skippedIds.size), 'skipped'],
+      [String(skippedIds.length), 'skipped'],
       [String(all.length), 'pasted'],
     ].forEach(([num, label]) => {
       const chip = document.createElement('span');
@@ -1020,7 +1028,7 @@
       buttons: buttonSnapshot(),
       running: running,
       doneIds: Array.from(doneIds).slice(0, 300),
-      skippedIds: Array.from(skippedIds).slice(0, 300),
+      skippedIds: skippedIds.slice(0, 300),
       results: results.slice(-100),
       attempts: attempts,
       realScans: realScans,
@@ -1099,9 +1107,23 @@
     updateCount();
   }
 
+  function clearContainers() {
+    const box = document.getElementById('dz-containers');
+    if (!box) return;
+    if (running) {
+      generation += 1;
+      running = false;
+      setRunning(false);
+    }
+    box.value = '';
+    persistForm();
+    updateCount();
+    setStatus('Container list cleared.');
+  }
+
   function resetDone() {
     doneIds.clear();
-    skippedIds.clear();
+    skippedIds.length = 0;
     saveStore({ doneDay: todayKey(), doneIds: [], skippedIds: [] });
     updateCount();
     setStatus('Done and skipped lists cleared.');
@@ -1170,10 +1192,14 @@
     const store = loadStore();
     const today = todayKey();
     doneIds.clear();
-    skippedIds.clear();
+    skippedIds.length = 0;
     if (store.doneDay === today) {
       if (Array.isArray(store.doneIds)) store.doneIds.forEach((id) => doneIds.add(id));
-      if (Array.isArray(store.skippedIds)) store.skippedIds.forEach((id) => skippedIds.add(id));
+      if (Array.isArray(store.skippedIds)) {
+        store.skippedIds.forEach((id) => {
+          if (id) skippedIds.push(id);
+        });
+      }
     }
 
     addStyle(`
@@ -1302,6 +1328,7 @@
             <span class="dz-real" id="dz-real">No gun scan yet</span>
           </div>
           <div class="dz-foot">
+            <button type="button" class="dz-linkish" id="dz-clear">Clear list</button>
             <button type="button" class="dz-linkish" id="dz-remove">Remove finished</button>
             <button type="button" class="dz-linkish" id="dz-reset">Reset done</button>
           </div>
@@ -1320,6 +1347,7 @@
     document.getElementById('dz-stop').addEventListener('click', () => stopBatch());
     document.getElementById('dz-skip').addEventListener('click', () => requestSkip());
     document.getElementById('dz-debug').addEventListener('click', (event) => copyDebug(event.currentTarget));
+    document.getElementById('dz-clear').addEventListener('click', clearContainers);
     document.getElementById('dz-remove').addEventListener('click', removeFinished);
     document.getElementById('dz-reset').addEventListener('click', resetDone);
     document.getElementById('dz-min').addEventListener('click', () => {
