@@ -1,0 +1,12 @@
+---
+description: When a Tampermonkey userscript version changes, end the reply with the raw script link, the GitHub blob link, and the paste-in links.
+alwaysApply: true
+---
+
+When a Tampermonkey userscript version changes, end the reply with all of these:
+
+1. The new script link: the raw `.user.js` URL on `main`.
+2. The blob link: the GitHub blob URL for that same file on `main`. Use `https://github.com/<owner>/<repo>/blob/main/<path>` for the file the raw link points at. Example: raw `https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js` and blob `https://github.com/rigoabell/abelrigm_repository/blob/main/docs/downloads/mem3-productivity-panel.user.js`.
+3. The paste-in links, the pages where copies people already have still check. Productivity Panel is the gist https://gist.github.com/rigoabell/60993861e496361e9d79fd5465de2973, file MEM3-Productivity-Panel.user.js. Peculiar Line Flush is https://github.com/rigoabell/peculiar-line-flush, file peculiar-line-flush.user.js on main. For any other script, use the `@updateURL` the older installed copy still checks.
+
+Say that people on the older install do not get the update until that paste-in file is replaced.
