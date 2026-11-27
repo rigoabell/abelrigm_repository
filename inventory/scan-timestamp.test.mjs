@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, priorOuterLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveDropAccepted, moveBatchContainerAccepted, moveCheckDue, moveTabStillOpen, halfHourSlot, moveCheckDone, markMoveCheck, continueSessionPrompt, continueSessionYes, continueSessionTarget, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, priorOuterLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveDropAccepted, moveBatchContainerAccepted, moveCheckDue, moveTabStillOpen, halfHourSlot, moveCheckDone, markMoveCheck, continueSessionPrompt, continueSessionYes, continueSessionTarget, itServiceLoginLabel, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -193,7 +193,13 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.10\.15/);
+assert.match(src, /@version\s+2\.10\.16/);
+assert.equal(api.itServiceLoginLabel("IT Service Login"), true);
+assert.equal(api.itServiceLoginLabel("  IT Service Login  "), true);
+assert.equal(api.itServiceLoginLabel("Login with MAASK"), false);
+assert.match(src, /d34wrqb3xn2znf\.cloudfront\.net\/idp-selection/);
+assert.match(src, /plf\.menuReached/);
+assert.match(src, /step: "it-service"/);
 assert.equal(api.continueSessionPrompt("Do you want to continue your Lead/PA - QA session while using this app?"), true);
 assert.equal(api.continueSessionPrompt("Do you want to continue your Outbound session while using this app?"), true);
 assert.equal(api.continueSessionPrompt("What are you working on today at MEM3?"), false);
