@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Productivity Panel
 // @namespace    https://mem3.amazon.local/
-// @version      1.12.20
+// @version      1.12.21
 // @updateURL    https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js
 // @description  Shows each associate's Primary Grading rate, plus total work time and idle time from FCLM Time Details, for each side and the total.
@@ -25,6 +25,7 @@
 // @connect      api.github.com
 // @connect      raw.githubusercontent.com
 // @connect      extendsclass.com
+// @connect      hooks.slack.com
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setClipboard
 // @grant        GM_openInTab
@@ -39,7 +40,7 @@
 
     const WAREHOUSE = 'MEM3';
     const SCRIPT_LABEL = 'Productivity Panel';
-    const SCRIPT_VERSION = '1.12.20';
+    const SCRIPT_VERSION = '1.12.21';
     const SCRIPT_UPDATE_URL = 'https://raw.githubusercontent.com/rigoabell/abelrigm_repository/main/docs/downloads/mem3-productivity-panel.user.js';
     const SCRIPT_UPDATE_MS = 5 * 60 * 1000;
     const UPDATE_PROMPT_ID = 'mem3-update-prompt';
@@ -1293,6 +1294,8 @@
     };
     const ENGAGE_KEY = 'mem3-extended-v1';
     const ENGAGE_URL = 'https://extendsclass.com/api/json-storage/bin/eacddae';
+    // Slack incoming webhook. A saved engagement posts here. A recorded break with no engagement does not.
+    const SLACK_ENGAGE_URL = '';
     let engageChain = Promise.resolve();
 
     function parseClockMin(text) {
@@ -2028,12 +2031,55 @@
             if ((empId && item.empId === empId) || (name && item.login === name)) row = item;
         }
         if (!row || row.engagedAtMs) return null;
+        if (name && !row.login) row.login = name;
         row.engagedBy = actor;
         row.engagedAt = clockText(when);
         row.engagedAtMs = when.getTime();
         row.detail = detail;
         saveEngage(doc);
+        postEngageSlack(row);
         return row;
+    }
+
+    function engageSlackWho(login, fallback) {
+        const key = String(login || '').trim().toLowerCase();
+        if (!key) return fallback || '';
+        const named = personLabel(key);
+        if (named && named !== key && named !== 'The board') return named + ' (' + key + ')';
+        return key;
+    }
+
+    function engageSlackText(row) {
+        const who = engageSlackWho(row && row.login, (row && row.empId) ? ('employee ' + row.empId) : 'an associate');
+        const lineId = extendedRowLine(row);
+        const line = lineId && lineId !== 'total' ? scopeLabelFor(lineId) : '';
+        const which = breakWhich(row);
+        const minutes = breakLines(row);
+        const by = engageSlackWho(row && row.engagedBy, 'someone');
+        const at = (row && row.engagedAt) || '';
+        const detail = String((row && row.detail) || '').trim();
+        const parts = [who + (line ? (' — ' + line) : '') + ' — ' + which];
+        for (let i = 0; i < minutes.length; i++) parts.push(minutes[i]);
+        parts.push(by + ' engaged at ' + at);
+        if (detail) parts.push(detail);
+        return parts.join('\n');
+    }
+
+    function postEngageSlack(row) {
+        const url = String(SLACK_ENGAGE_URL || '').trim();
+        if (!url || !row || typeof GM_xmlhttpRequest !== 'function') return;
+        try {
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: url,
+                headers: { 'Content-Type': 'application/json' },
+                data: JSON.stringify({ text: engageSlackText(row) }),
+                timeout: 15000,
+                onload: function () {},
+                onerror: function () {},
+                ontimeout: function () {}
+            });
+        } catch (e) { /* the engagement is already saved */ }
     }
 
     function extendedPersonKey(row) {

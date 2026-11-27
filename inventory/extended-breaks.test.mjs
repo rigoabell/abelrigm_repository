@@ -107,6 +107,75 @@ assert.equal(after.pct, 100);
 assert.equal(after.rows[0].detail, "Walked them back from break");
 assert.equal(api.engageExtended("99", "", "abelrigm", "again", when), null);
 
+function bootSlack(url) {
+    const body = patched.replace(
+        "const SLACK_ENGAGE_URL = '';",
+        "const SLACK_ENGAGE_URL = " + JSON.stringify(url || "") + ";"
+    );
+    const posts = [];
+    const store = {};
+    const sandbox = {
+        console,
+        document: { readyState: "complete", getElementById() { return null; }, querySelector() { return null; }, querySelectorAll() { return []; } },
+        location: { href: "http://local/MEM3/assignments", pathname: "/MEM3/assignments" },
+        localStorage: {
+            getItem(key) { return Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null; },
+            setItem(key, value) { store[key] = String(value); }
+        },
+        GM_getValue(key, fallback) {
+            return Object.prototype.hasOwnProperty.call(store, key) ? store[key] : fallback;
+        },
+        GM_setValue(key, value) { store[key] = String(value); },
+        GM_xmlhttpRequest(opts) { posts.push(opts); },
+        setTimeout,
+        clearTimeout,
+        setInterval,
+        clearInterval,
+        Promise
+    };
+    sandbox.window = sandbox;
+    sandbox.globalThis = sandbox;
+    sandbox.unsafeWindow = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(body, sandbox, { filename: "mem3-productivity-panel.user.js" });
+    return { api: sandbox.__mem3, posts };
+}
+
+const slack = bootSlack("https://hooks.slack.com/services/T/B/x");
+const slackWhen = new Date();
+const slackLive = slack.api.breakWindows(slackWhen);
+slack.api.rememberExtendedBreak("55", {
+    segments: [{ bucket: "indirect", startMin: slackLive[0].startMin, endMin: slackLive[0].startMin + 21 }]
+}, slackWhen);
+assert.equal(slack.posts.length, 0);
+const posted = slack.api.engageExtended("55", "sheewash", "abelrigm", "Walked them back from break", slackWhen);
+assert.ok(posted);
+assert.equal(slack.posts.length, 1);
+assert.equal(slack.posts[0].method, "POST");
+assert.equal(slack.posts[0].url, "https://hooks.slack.com/services/T/B/x");
+const payload = JSON.parse(slack.posts[0].data);
+assert.match(payload.text, /sheewash/);
+assert.match(payload.text, /abelrigm/);
+assert.match(payload.text, /Walked them back from break/);
+assert.match(payload.text, /1st break/);
+assert.equal(slack.api.engageExtended("55", "sheewash", "abelrigm", "again", slackWhen), null);
+assert.equal(slack.posts.length, 1);
+
+const quiet = bootSlack("");
+const quietWhen = new Date();
+const quietLive = quiet.api.breakWindows(quietWhen);
+quiet.api.rememberExtendedBreak("56", {
+    segments: [{ bucket: "indirect", startMin: quietLive[0].startMin, endMin: quietLive[0].startMin + 21 }]
+}, quietWhen);
+assert.ok(quiet.api.engageExtended("56", "sheewash", "abelrigm", "Noted", quietWhen));
+assert.equal(quiet.posts.length, 0);
+
+const engageFn = src.slice(src.indexOf("function engageExtended"), src.indexOf("function extendedPersonKey"));
+assert.match(engageFn, /postEngageSlack\(row\)/);
+const rememberFn = src.slice(src.indexOf("function rememberExtendedBreak"), src.indexOf("const BREAK_CHECKED_KEY"));
+assert.equal(rememberFn.includes("postEngageSlack"), false);
+assert.match(src, /@connect\s+hooks\.slack\.com/);
+
 const bothSegments = [
     { bucket: "indirect", startMin: live[0].startMin, endMin: live[0].startMin + 20 },
     { bucket: "indirect", startMin: live[1].startMin, endMin: live[1].startMin + 22 }
