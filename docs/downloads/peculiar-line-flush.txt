@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.10.16
+// @version      2.10.17
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -56,7 +56,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.10.16";
+  const VERSION = "2.10.17";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -2760,6 +2760,7 @@
       GM_setValue("plf.menuDrive", now);
       GM_setValue("plf.menu147Done", 0);
       GM_setValue("plf.menuReached", 0);
+      GM_setValue("plf.menuHostAt", 0);
       GM_setValue("plf.itServiceAt", 0);
       GM_setValue("plf.checkSlot", halfHourSlot(now));
     } else {
@@ -5399,6 +5400,7 @@
       GM_setValue("plf.menuDrive", now);
       GM_setValue("plf.menu147Done", 0);
       GM_setValue("plf.menuReached", 0);
+      GM_setValue("plf.menuHostAt", 0);
       GM_setValue("plf.itServiceAt", 0);
       GM_setValue("plf.moveCheckHold", now);
       rememberDropzone({ step: "check-click", dropzone: LOGIN_URL });
@@ -5892,6 +5894,16 @@
     return cellText(text).replace(/\s+/g, " ").trim() === "IT Service Login";
   }
 
+  function isMenuLauncherHref(href) {
+    try {
+      const parsed = new URL(String(href || ""));
+      return /menu\.na\.aft\.amazonoperations\.app/i.test(parsed.hostname)
+        && /^\/MEM3\/?$/i.test(parsed.pathname);
+    } catch {
+      return false;
+    }
+  }
+
   function followLoginToMenu() {
     if (followLoginToMenu.armed) return;
     const drive = Number(GM_getValue("plf.menuDrive", 0)) || 0;
@@ -5937,7 +5949,9 @@
       }
       button.dataset.plfItLogin = "1";
       const inner = button.shadowRoot && button.shadowRoot.querySelector("button, a, [role='button']");
-      try { (inner || button).click(); } catch { /* The login button kept its click. */ }
+      movePress(el);
+      movePress(button);
+      if (inner) movePress(inner);
       GM_setValue("plf.itServiceAt", Date.now());
       rememberDropzone({ step: "it-service", dropzone: location.href, detail: "IT Service Login" });
       followLoginToMenu();
@@ -6257,13 +6271,35 @@
     });
   }
 
-  if (isAftMenu || isFcMenu) {
-    if (isAftMenu && isTop) {
-      const started = Number(GM_getValue("plf.menuDrive", 0)) || 0;
-      if (started && Date.now() - started < 90000) GM_setValue("plf.menuReached", Date.now());
+  function noteMenuLauncher() {
+    const started = Number(GM_getValue("plf.menuDrive", 0)) || 0;
+    if (!started || Date.now() - started > 90000) return;
+    if (Number(GM_getValue("plf.menu147Done", 0)) === started) return;
+    if (onContinueSessionPage()) return;
+    const launcher = Boolean(document.getElementById("qlInput")) || isMenuLauncherHref(location.href);
+    if (launcher) {
+      GM_setValue("plf.menuReached", Date.now());
+      return;
     }
+    if (!/menu\.na\.aft\.amazonoperations\.app/i.test(location.hostname)) return;
+    const landed = Number(GM_getValue("plf.menuHostAt", 0)) || 0;
+    if (!landed) {
+      GM_setValue("plf.menuHostAt", Date.now());
+      return;
+    }
+    if (Date.now() - landed < 4000 || noteMenuLauncher.opened) return;
+    noteMenuLauncher.opened = true;
+    rememberDropzone({ step: "menu-open", dropzone: MENU_URL, detail: "Login did not open MEM3" });
+    try { location.assign(MENU_URL); } catch { /* The menu page stayed where it was. */ }
+  }
+
+  if (isAftMenu || isFcMenu) {
+    if (isAftMenu && isTop) noteMenuLauncher();
     typeMenuCode();
-    setInterval(() => typeMenuCode(), 700);
+    setInterval(() => {
+      if (isAftMenu && isTop) noteMenuLauncher();
+      typeMenuCode();
+    }, 700);
   }
 
   if (isAftMenu && isTop) {

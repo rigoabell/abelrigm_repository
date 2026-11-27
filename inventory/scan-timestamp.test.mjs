@@ -5,7 +5,7 @@ import vm from "node:vm";
 const src = fs.readFileSync(new URL("../docs/downloads/peculiar-line-flush.txt", import.meta.url), "utf8");
 const patched = src.replace(
   /\n\}\)\(\);\s*$/,
-  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, priorOuterLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveDropAccepted, moveBatchContainerAccepted, moveCheckDue, moveTabStillOpen, halfHourSlot, moveCheckDone, markMoveCheck, continueSessionPrompt, continueSessionYes, continueSessionTarget, itServiceLoginLabel, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
+  "\n  globalThis.__plf = { scanRecord, historyRecord, dashboardSheetRows, dashboardBook, recordsFromBook, recordsFromLegacy, mergeRecords, fileRecordsWithScanTimes, workbookBytes, workbookFromXlsx, eolWorkbook, shiftKey, parseDetailsText, outerLocationLabel, priorOuterLabel, fileDate, mergeShiftRecords, backgroundDropzone, scanBurstKeys, moveBadPhrase, moveScanAccepted, moveDropAccepted, moveBatchContainerAccepted, moveCheckDue, moveTabStillOpen, halfHourSlot, moveCheckDone, markMoveCheck, continueSessionPrompt, continueSessionYes, continueSessionTarget, itServiceLoginLabel, isMenuLauncherHref, moveIsScanPage, movePageReady, moveWorkflowScore, moveWorkflowPick, stationsDropPrompt, normalizeSavedDropzones, dropzoneDebugView };\n})();\n"
 );
 
 const window = { addEventListener() {}, top: null, self: null };
@@ -193,10 +193,14 @@ assert.equal(locationOnly.length, 3);
 assert.match(src, /OUTER LOCATION/);
 assert.equal(src.includes('id="dashboard"'), false);
 assert.equal(src.includes("function dashboardHtml"), false);
-assert.match(src, /@version\s+2\.10\.16/);
+assert.match(src, /@version\s+2\.10\.17/);
 assert.equal(api.itServiceLoginLabel("IT Service Login"), true);
 assert.equal(api.itServiceLoginLabel("  IT Service Login  "), true);
 assert.equal(api.itServiceLoginLabel("Login with MAASK"), false);
+assert.equal(api.isMenuLauncherHref("https://menu.na.aft.amazonoperations.app/MEM3"), true);
+assert.equal(api.isMenuLauncherHref("https://menu.na.aft.amazonoperations.app/MEM3/"), true);
+assert.equal(api.isMenuLauncherHref("https://menu.na.aft.amazonoperations.app/do/mfa/login"), false);
+assert.equal(api.isMenuLauncherHref("https://menu.na.aft.amazonoperations.app/midway/login"), false);
 assert.match(src, /d34wrqb3xn2znf\.cloudfront\.net\/idp-selection/);
 assert.match(src, /plf\.menuReached/);
 assert.match(src, /step: "it-service"/);
