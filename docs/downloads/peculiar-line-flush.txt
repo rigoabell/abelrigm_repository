@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Peculiar Line Flush
 // @namespace    peculiar-line-flush
-// @version      2.10.18
+// @version      2.10.19
 // @updateURL    https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @downloadURL  https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js
 // @description  Scan containers in Tampermonkey. Looks up Peculiar Inventory and saves each operator’s daily dashboard to the Line Flush Records folder. Each container row includes the time it was scanned, and each location has its own sheet. EOL scans also update a day-shift workbook and a night-shift workbook. Status is Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over. Ask to dropzone can prompt before sending an rcCRetStations tote to dz-P-CR-EOL.
@@ -41,7 +41,7 @@
     Documents / IOL Assignments / Line Flush Records
   Example: LineFlush_2026-08-28_abelrigm.xlsx
   A night that runs past midnight keeps that same file until 6:00 AM. At 6:00 AM the next file starts.
-  Ask to dropzone is off until it is turned on. The panel remembers that switch and the saved dropzones. When a tote's outer location is rcCRetStations, the panel asks before sending it to dz-P-CR-EOL. A check first opens IT Service Login and keeps selecting it until that page changes, then the MEM3 menu, types 147, and the site opens the Move App. If the menu asks to continue the current path session, the script opens Yes. Move containers individually then opens job 200.
+  Ask to dropzone is off until it is turned on. The panel remembers that switch and the saved dropzones. When a tote's outer location is rcCRetStations, the panel asks before sending it to dz-P-CR-EOL. A check first opens IT Service Login and selects it. If that page does not open the menu, the script opens the MEM3 menu about a second later, types 147, and the site opens the Move App. If the menu asks to continue the current path session, the script opens Yes. Move containers individually then opens job 200.
   The Dashboard sheet matches the Dashboard screen: totals, each location, then each container with its parent, age, status, and scan time. Each location that was scanned also has its own sheet. Status uses the oldest-units age: Good under 3 days, Caution from 3 days until 5, and Alert at 5 days and over.
   EOL scans (EOL 1–6, AR EOL, BIGs EOL) also update a shift workbook. Day is 6:00 AM–5:59 PM in LineFlush_EOL_YYYY-MM-DD_Day.xlsx. Night is 6:00 PM–5:59 AM in LineFlush_EOL_YYYY-MM-DD_Night.xlsx, named for the evening the shift starts. The Summary sheet reads left to right: the whole shift, the halves, the quarters, then the hour windows. Each window shows the EOL and dropzone mix.
 
@@ -56,7 +56,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "2.10.18";
+  const VERSION = "2.10.19";
   const UPDATE_URL =
     "https://raw.githubusercontent.com/rigoabell/peculiar-line-flush/main/peculiar-line-flush.user.js";
   const SCRIPT_NAME = "Peculiar Line Flush";
@@ -5909,8 +5909,8 @@
     return /idp-selection/i.test(String(href || ""));
   }
 
-  function itServiceMenuWait(foundInner) {
-    return foundInner ? 2500 : 4000;
+  function itServiceMenuWait() {
+    return 1000;
   }
 
   function dropFailWait(checking, elapsedMs) {
@@ -6018,7 +6018,7 @@
       rememberDropzone({ step: "it-service", dropzone: location.href, detail: "IT Service Login" });
     }
     if (ready) pressItServiceLogin.innerAt = now;
-    followLoginToMenu(itServiceMenuWait(ready));
+    followLoginToMenu(itServiceMenuWait());
     return ready;
   }
 
@@ -6026,7 +6026,7 @@
     if (!isLoginChooser) return;
     const onChooser = itServiceStillOnChooser(location.href);
     if (!onChooser) {
-      if (Number(GM_getValue("plf.itServiceAt", 0)) > 0) followLoginToMenu(12000);
+      if (Number(GM_getValue("plf.itServiceAt", 0)) > 0) followLoginToMenu(itServiceMenuWait());
       return;
     }
     const seen = new Set();
@@ -6105,7 +6105,7 @@
       const menu = onMoveMenu() || Boolean(document.getElementById("menu-entry-text-2") || document.getElementById("menu-entry-move-2"));
       if ((!driving && !holding && !pending) || !menu) return;
       if (clickIndividualMove()) return;
-      if (driving && !bootMove.typed && document.body && Date.now() - started > 2000) {
+      if (driving && !bootMove.typed && document.body && Date.now() - started > 400) {
         bootMove.typed = true;
         const target = document.body;
         try { target.focus(); } catch { /* The menu kept focus. */ }
@@ -6351,7 +6351,7 @@
       GM_setValue("plf.menuHostAt", Date.now());
       return;
     }
-    if (Date.now() - landed < 4000 || noteMenuLauncher.opened) return;
+    if (Date.now() - landed < 800 || noteMenuLauncher.opened) return;
     noteMenuLauncher.opened = true;
     rememberDropzone({ step: "menu-open", dropzone: MENU_URL, detail: "Login did not open MEM3" });
     try { location.assign(MENU_URL); } catch { /* The menu page stayed where it was. */ }
